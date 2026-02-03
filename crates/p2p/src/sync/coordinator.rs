@@ -911,11 +911,9 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             }
             HostEvent::BranchableSyncRequest { peer_id, request } => {
                 // Handle BranchableSync request - respond with collection head CIDs
-                tracing::debug!(
-                    peer_id = %peer_id,
-                    collection_id = %request.collection_id,
-                    message_id = %request.metadata.message_id,
-                    "Received BranchableSync request"
+                eprintln!(
+                    "[BRANCHABLE] Received BranchableSyncRequest from peer={} collection={}",
+                    peer_id, request.collection_id
                 );
 
                 // Query collection heads from the headstore
@@ -925,18 +923,19 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     .await
                 {
                     Ok(heads) => {
-                        tracing::debug!(
-                            collection_id = %request.collection_id,
-                            head_count = heads.len(),
-                            "Found collection heads for BranchableSync response"
+                        eprintln!(
+                            "[BRANCHABLE] Found {} collection heads for {}",
+                            heads.len(), request.collection_id
                         );
+                        for h in &heads {
+                            eprintln!("[BRANCHABLE]   head CID: {}", h);
+                        }
                         heads.iter().map(|cid| cid.to_bytes()).collect()
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            collection_id = %request.collection_id,
-                            error = %e,
-                            "Failed to get collection heads for BranchableSync"
+                        eprintln!(
+                            "[BRANCHABLE] Failed to get collection heads: {}",
+                            e
                         );
                         Vec::new()
                     }
@@ -972,20 +971,13 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             }
             HostEvent::BranchableSyncReply { peer_id, reply } => {
                 // Handle incoming BranchableSync reply - fetch missing blocks via Bitswap
-                tracing::info!(
-                    peer_id = %peer_id,
-                    message_id = %reply.message_id,
-                    collection_id = %reply.collection_id,
-                    heads_count = reply.heads.len(),
-                    "Processing BranchableSync reply"
+                eprintln!(
+                    "[BRANCHABLE] Received BranchableSyncReply from peer={} collection={} heads={}",
+                    peer_id, reply.collection_id, reply.heads.len()
                 );
 
                 if reply.heads.is_empty() {
-                    tracing::debug!(
-                        peer_id = %peer_id,
-                        collection_id = %reply.collection_id,
-                        "Peer has no heads for collection"
-                    );
+                    eprintln!("[BRANCHABLE] Peer has no heads for collection {}", reply.collection_id);
                     return Ok(());
                 }
 
@@ -994,69 +986,55 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 for head_bytes in &reply.heads {
                     match Cid::try_from(head_bytes.as_slice()) {
                         Ok(cid) => {
+                            eprintln!("[BRANCHABLE] Parsed collection head CID: {}", cid);
                             match self.manager.blockstore().has(&cid).await {
                                 Ok(true) => {
-                                    tracing::debug!(
-                                        cid = %cid,
-                                        "Already have collection head block, skipping"
-                                    );
+                                    eprintln!("[BRANCHABLE] Already have block {}", cid);
                                 }
                                 Ok(false) => {
-                                    tracing::debug!(
-                                        cid = %cid,
-                                        "Need to fetch collection head block via Bitswap"
-                                    );
+                                    eprintln!("[BRANCHABLE] Need to fetch block {}", cid);
                                     cids_to_fetch.push(cid);
                                 }
                                 Err(e) => {
-                                    tracing::warn!(
-                                        cid = %cid,
-                                        error = %e,
-                                        "Failed to check if block exists"
-                                    );
+                                    eprintln!("[BRANCHABLE] Error checking block {}: {}", cid, e);
                                     cids_to_fetch.push(cid);
                                 }
                             }
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "Failed to parse CID from BranchableSync reply"
-                            );
+                            eprintln!("[BRANCHABLE] Failed to parse CID from reply: {}", e);
                         }
                     }
                 }
 
                 if !cids_to_fetch.is_empty() {
-                    tracing::info!(
-                        cid_count = cids_to_fetch.len(),
-                        collection_id = %reply.collection_id,
-                        "Initiating Bitswap fetch for branchable collection blocks"
+                    eprintln!(
+                        "[BRANCHABLE] Initiating Bitswap fetch for {} collection blocks",
+                        cids_to_fetch.len()
                     );
 
                     for root_cid in &cids_to_fetch {
-                        // Register as pending DAG with the collection_id as the "doc_id"
-                        // The merge handler will recognize collection blocks by their CrdtDelta type
+                        // Register as pending DAG with collection_id set properly
+                        // so the merge handler can fall back to the local collection
+                        // for cross-schema-version merges.
                         self.manager
-                            .register_docsync_dag(*root_cid, reply.collection_id.clone());
+                            .register_branchable_dag(*root_cid, reply.collection_id.clone());
 
                         if let Err(e) = self
                             .host
                             .bitswap_sync(*root_cid, vec![peer_id], vec![*root_cid])
                             .await
                         {
-                            tracing::warn!(
-                                error = %e,
-                                cid = %root_cid,
-                                collection_id = %reply.collection_id,
-                                "Failed to initiate Bitswap sync for collection head"
+                            eprintln!(
+                                "[BRANCHABLE] Failed to start Bitswap for {}: {}",
+                                root_cid, e
                             );
                         }
                     }
                 } else {
-                    tracing::debug!(
-                        collection_id = %reply.collection_id,
-                        "No blocks to fetch from BranchableSync reply (all local)"
+                    eprintln!(
+                        "[BRANCHABLE] All blocks already local for collection {}",
+                        reply.collection_id
                     );
                 }
             }

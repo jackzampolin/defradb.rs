@@ -14,7 +14,7 @@ use datastore::NamespaceView;
 use defra_core::block::{Block, CrdtDelta};
 use defra_core::types::DocId;
 use document::{DocID, Document, NormalValue};
-use events::{Message, Update};
+use events::{MergeCompleteData, Message, Update};
 use p2p::sync::{BlockMetadata, MergeHandler, MergeOutcome};
 use schema;
 use storage::corekv::Store;
@@ -1100,13 +1100,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         payload: &defra_core::block::CollectionDeltaPayload,
         metadata: &BlockMetadata<'_>,
     ) -> std::result::Result<MergeOutcome, MergeError> {
-        tracing::info!(
-            cid = %cid,
-            schema_version_id = %payload.schema_version_id,
-            priority = payload.priority,
-            links = block.links.as_ref().map(|l| l.len()).unwrap_or(0),
-            heads = block.heads.as_ref().map(|h| h.len()).unwrap_or(0),
-            "Processing Collection delta"
+        eprintln!(
+            "[MERGE-COL] Processing Collection delta cid={} schema_version={} priority={} links={} heads={}",
+            cid,
+            payload.schema_version_id,
+            payload.priority,
+            block.links.as_ref().map(|l| l.len()).unwrap_or(0),
+            block.heads.as_ref().map(|h| h.len()).unwrap_or(0),
         );
 
         // Recursively process parent collection blocks from `heads` before
@@ -1196,30 +1196,55 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     }
                 };
 
+                eprintln!(
+                    "[MERGE-COL] Linked block {} delta_type={:?}",
+                    link_cid,
+                    std::mem::discriminant(&linked_block.delta)
+                );
+
                 match &linked_block.delta {
                     CrdtDelta::Composite(composite_payload) => {
+                        let doc_id_str = String::from_utf8_lossy(&composite_payload.doc_id).to_string();
+                        eprintln!(
+                            "[MERGE-COL] Processing linked composite {} doc_id={}",
+                            link_cid, doc_id_str
+                        );
                         match self
                             .process_composite_delta(link_cid, &linked_block, composite_payload, metadata)
                             .await
                         {
                             Ok(MergeOutcome::Merged) => {
+                                eprintln!("[MERGE-COL] Composite {} merged OK", link_cid);
                                 any_merged = true;
+
+                                // Publish per-document MergeComplete so the Go test
+                                // framework's WaitForSync can track each document.
+                                if let Some(bus) = self.db.event_bus() {
+                                    let col_id = metadata
+                                        .collection_id
+                                        .unwrap_or(&payload.schema_version_id)
+                                        .to_string();
+                                    bus.publish(Message::merge_complete(MergeCompleteData {
+                                        doc_id: doc_id_str,
+                                        cid: *link_cid,
+                                        collection_id: col_id,
+                                        by_peer: String::new(),
+                                    }));
+                                }
                             }
-                            Ok(_) => {}
+                            Ok(outcome) => {
+                                eprintln!("[MERGE-COL] Composite {} skipped: {:?}", link_cid, outcome);
+                            }
                             Err(e) => {
-                                tracing::warn!(
-                                    link_cid = %link_cid,
-                                    error = %e,
-                                    "Failed to merge linked composite from collection block"
-                                );
+                                eprintln!("[MERGE-COL] Composite {} FAILED: {}", link_cid, e);
                             }
                         }
                     }
                     other => {
-                        tracing::debug!(
-                            link_cid = %link_cid,
-                            delta_type = ?std::mem::discriminant(other),
-                            "Skipping non-composite linked block in collection delta"
+                        eprintln!(
+                            "[MERGE-COL] Skipping non-composite link {} type={:?}",
+                            link_cid,
+                            std::mem::discriminant(other)
                         );
                     }
                 }
