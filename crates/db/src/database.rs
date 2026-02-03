@@ -2088,19 +2088,32 @@ impl<S: Store> DB<S> {
             }
         }
 
-        // Handle in-place updates (deactivation or IsActive-only changes).
+        // Handle in-place updates (deactivation, IsActive-only, or PreviousVersion/Transform-only).
         // These don't create a new schema version - they update the existing one.
         let is_isactive_only_change = is_active_explicitly_set
             && new_schema.fields == old_schema.fields
             && new_schema.name == old_schema.name;
 
-        if is_deactivation || is_isactive_only_change {
+        // Check if only PreviousVersion/Transform changed (lens migration linking).
+        // This is an in-place update that adds a migration transform to an existing version.
+        let is_transform_only_change = !is_deactivation
+            && !is_active_explicitly_set
+            && new_schema.fields == old_schema.fields
+            && new_schema.name == old_schema.name
+            && new_schema.is_active == old_schema.is_active
+            && new_schema.previous_version != old_schema.previous_version;
+
+        if is_deactivation || is_isactive_only_change || is_transform_only_change {
             if is_deactivation {
                 new_schema.is_active = false;
             }
-            // Keep original version_id and previous_version
+            // Keep original version_id
             new_schema.version_id = old_version_id.clone();
-            new_schema.previous_version = old_schema.previous_version.clone();
+            // For IsActive-only or deactivation, restore original previous_version.
+            // For Transform-only changes, keep the new previous_version (contains the transform).
+            if !is_transform_only_change {
+                new_schema.previous_version = old_schema.previous_version.clone();
+            }
 
             // Validate: can't remove a version that is a dependency of another version
             // This check runs always for deactivation (even if already inactive),
