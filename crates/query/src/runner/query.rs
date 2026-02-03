@@ -1092,6 +1092,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         select: &Select,
         explain_type: ExplainType,
     ) -> Result<JsonValue> {
+        // Handle encrypted search queries - return a simple seScanNode explanation
+        if select.is_encrypted {
+            return Ok(serde_json::json!({
+                "selectNode": {
+                    "seScanNode": {
+                        "collection": select.collection_name,
+                        "filter": select.filter.as_ref().map(|f| f.conditions())
+                    }
+                }
+            }));
+        }
+
         // Handle _commits system collection specially
         if select.collection_name == "_commits" {
             return self.explain_commits_select(select, explain_type);
@@ -1643,6 +1655,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         fetcher: &dyn DocFetcher,
         caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
+        // Handle encrypted search queries (encrypted_<Collection>)
+        if select.is_encrypted {
+            return self.execute_encrypted_select(select, fetcher).await;
+        }
+
         // Handle _commits system collection specially
         if select.collection_name == "_commits" {
             return self.execute_commits_query(select).await;
@@ -1876,6 +1893,44 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             self.execute_simple_select(select, fetcher, &collection, caller_identity)
                 .await
         }
+    }
+
+    /// Execute an encrypted search query (`encrypted_<Collection>`).
+    ///
+    /// Fetches all documents, applies _eq filter conditions, and returns
+    /// Go-compatible `[{"docIDs": [...]}]` format.
+    async fn execute_encrypted_select(
+        &self,
+        select: &Select,
+        fetcher: &dyn DocFetcher,
+    ) -> Result<JsonValue> {
+        let docs = fetcher.get_all(&select.collection_name).await?;
+
+        let matching_ids: Vec<String> = if let Some(ref filter) = select.filter {
+            let mut ids = Vec::new();
+            for doc in &docs {
+                let json_map = doc
+                    .to_map()
+                    .map_err(|e| QueryError::internal(e.to_string()))?;
+                let json_obj = JsonValue::Object(
+                    json_map
+                        .into_iter()
+                        .collect::<Map<String, JsonValue>>(),
+                );
+                if filter.matches_json_object(&json_obj)? {
+                    if let Some(id) = doc.id() {
+                        ids.push(id.to_string());
+                    }
+                }
+            }
+            ids
+        } else {
+            docs.iter()
+                .filter_map(|doc| doc.id().map(|id| id.to_string()))
+                .collect()
+        };
+
+        Ok(serde_json::json!([{"docIDs": matching_ids}]))
     }
 
     /// Execute a query with nested selections using the Planner.
