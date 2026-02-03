@@ -20,6 +20,12 @@ pub enum JsonScalarValue {
     Number(f64),
     /// JSON string
     String(String),
+    /// Sentinel value for path lower bound (comes before all values for a path)
+    /// Used for constraining range scans to a specific JSON path.
+    PathMin,
+    /// Sentinel value for path upper bound (comes after all values for a path)
+    /// Used for constraining range scans to a specific JSON path.
+    PathMax,
 }
 
 impl JsonScalarValue {

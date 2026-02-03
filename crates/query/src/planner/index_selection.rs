@@ -495,13 +495,19 @@ pub fn filter_to_index_scan(
                     range_json_path = cond.json_path.clone();
                 }
             }
-            // _ne/_like use full index scan with post-filtering (matches Go behavior)
+            // _ne/_nin/_like/_nlike use full index scan with post-filtering (matches Go behavior)
+            // For JSON fields, we still need to track the path to constrain the scan
             FilterOp::Ne
+            | FilterOp::Nin
             | FilterOp::Like
             | FilterOp::Nlike
             | FilterOp::Ilike
             | FilterOp::Nilike => {
                 has_scan_all = true;
+                // Track JSON path for scan_all so we can constrain to the path
+                if cond.json_path.is_some() {
+                    range_json_path = cond.json_path.clone();
+                }
             }
             _ => {}
         }
@@ -521,12 +527,53 @@ pub fn filter_to_index_scan(
         std::mem::swap(&mut lower_bound, &mut upper_bound);
     }
 
+    // For composite indexes, check if subsequent fields also have eq conditions.
+    // If all fields are matched exactly, use ExactMatch; otherwise use PrefixScan.
+    let is_composite = index.fields.len() > 1;
+    let mut subsequent_eq_values: Vec<NormalValue> = Vec::new();
+    if is_composite && has_eq {
+        for field_desc in index.fields.iter().skip(1) {
+            let field_cond = conditions.iter().find(|c| {
+                c.field_name == field_desc.name && c.op == FilterOp::Eq
+            });
+            if let Some(cond) = field_cond {
+                if let ConditionValue::Single(v) = &cond.value {
+                    subsequent_eq_values
+                        .push(wrap_value_for_json_path(v.clone(), cond.json_path.as_ref()));
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+    let all_fields_matched =
+        is_composite && has_eq && subsequent_eq_values.len() == index.fields.len() - 1;
+
     // Determine scan type (narrowing scans take priority over full scans)
     // Wrap values in JsonLeafValue when JSON path is present
+    //
+    // For composite indexes where we only match the first field, we use PrefixScan
+    // instead of ExactMatch because ExactMatchIterator expects the doc_id right
+    // after the encoded values, but composite index keys have additional fields.
     let scan_type = if has_eq {
         let wrapped_value = wrap_value_for_json_path(eq_value.unwrap(), eq_json_path.as_ref());
-        IndexScanType::ExactMatch {
-            values: vec![wrapped_value],
+        if all_fields_matched {
+            // All fields of composite index have eq conditions - use ExactMatch
+            let mut values = vec![wrapped_value];
+            values.extend(subsequent_eq_values);
+            IndexScanType::ExactMatch { values }
+        } else if is_composite {
+            // Only first field matched - use PrefixScan
+            IndexScanType::PrefixScan {
+                prefix_values: vec![wrapped_value],
+                reverse,
+            }
+        } else {
+            IndexScanType::ExactMatch {
+                values: vec![wrapped_value],
+            }
         }
     } else if has_in {
         let wrapped_values = wrap_values_for_json_path(in_values.unwrap(), in_json_path.as_ref());
@@ -535,6 +582,8 @@ pub fn filter_to_index_scan(
         }
     } else if !lower_bound.is_unbounded() || !upper_bound.is_unbounded() {
         // Wrap range bounds for JSON paths
+        // When we have a JSON path and one bound is unbounded, we need to constrain
+        // the scan to entries with the same path using PathMin/PathMax sentinels
         let lower = match lower_bound {
             Bound::Inclusive(v) => {
                 Bound::Inclusive(wrap_value_for_json_path(v, range_json_path.as_ref()))
@@ -542,7 +591,17 @@ pub fn filter_to_index_scan(
             Bound::Exclusive(v) => {
                 Bound::Exclusive(wrap_value_for_json_path(v, range_json_path.as_ref()))
             }
-            Bound::Unbounded => Bound::Unbounded,
+            Bound::Unbounded => {
+                // For JSON paths, use PathMin to constrain lower bound
+                if let Some(path) = &range_json_path {
+                    Bound::Inclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
+                        path.clone(),
+                        JsonScalarValue::PathMin,
+                    )))
+                } else {
+                    Bound::Unbounded
+                }
+            }
         };
         let upper = match upper_bound {
             Bound::Inclusive(v) => {
@@ -551,7 +610,17 @@ pub fn filter_to_index_scan(
             Bound::Exclusive(v) => {
                 Bound::Exclusive(wrap_value_for_json_path(v, range_json_path.as_ref()))
             }
-            Bound::Unbounded => Bound::Unbounded,
+            Bound::Unbounded => {
+                // For JSON paths, use PathMax to constrain upper bound
+                if let Some(path) = &range_json_path {
+                    Bound::Exclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
+                        path.clone(),
+                        JsonScalarValue::PathMax,
+                    )))
+                } else {
+                    Bound::Unbounded
+                }
+            }
         };
         IndexScanType::RangeScan {
             prefix_values: vec![],
@@ -561,9 +630,25 @@ pub fn filter_to_index_scan(
         }
     } else if has_scan_all {
         // Full index scan with residual filter (for _ne, _like, etc.)
-        IndexScanType::PrefixScan {
-            prefix_values: vec![],
-            reverse,
+        // For JSON fields, constrain the scan to the specific path
+        if let Some(path) = &range_json_path {
+            IndexScanType::RangeScan {
+                prefix_values: vec![],
+                lower: Bound::Inclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
+                    path.clone(),
+                    JsonScalarValue::PathMin,
+                ))),
+                upper: Bound::Exclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
+                    path.clone(),
+                    JsonScalarValue::PathMax,
+                ))),
+                reverse,
+            }
+        } else {
+            IndexScanType::PrefixScan {
+                prefix_values: vec![],
+                reverse,
+            }
         }
     } else {
         return None;
