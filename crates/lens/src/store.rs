@@ -95,10 +95,12 @@ impl TransformStore for MemoryTransformStore {
         use sha2::{Digest, Sha256};
 
         // Compute content-based ID for deduplication (matches Go's IPLD CID approach)
-        let config_json = serde_json::to_vec(&config)
-            .map_err(|e| Error::Pipeline(format!("failed to serialize config: {}", e)))?;
+        // Hash only the lens modules, not the version IDs, so identical lens content
+        // produces the same ID regardless of which versions it's associated with.
+        let lenses_json = serde_json::to_vec(&config.lenses)
+            .map_err(|e| Error::Pipeline(format!("failed to serialize lenses: {}", e)))?;
         let mut hasher = Sha256::new();
-        hasher.update(&config_json);
+        hasher.update(&lenses_json);
         let hash = hasher.finalize();
         // Use "baf" prefix to mimic CID format, then 16 bytes of hash for uniqueness
         let id = TransformId::new(format!("baf{}", hex::encode(&hash[..16])));
