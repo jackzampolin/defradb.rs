@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 
-use document::NormalValue;
+use document::{JsonLeafValue, JsonPath, JsonScalarValue, NormalValue};
+#[cfg(test)]
+use document::JsonPathPart;
 use schema::IndexDescription;
 use serde_json::Value as JsonValue;
 use storage::index::Bound;
@@ -54,6 +56,9 @@ pub struct FieldCondition {
     /// Array operator wrapper (if this is an array field condition)
     /// e.g., for `numbers: {_any: {_eq: 30}}`, this would be Some(Any)
     pub array_op: Option<FilterOp>,
+    /// JSON path for JSON field conditions
+    /// e.g., for `custom: {height: {_gt: 170}}`, this would be Some(["height"])
+    pub json_path: Option<JsonPath>,
 }
 
 /// Value in a filter condition.
@@ -70,16 +75,29 @@ pub enum ConditionValue {
 impl FieldCondition {
     /// Parse a field condition from JSON value.
     pub fn parse(field_name: &str, ops: &serde_json::Map<String, JsonValue>) -> Vec<Self> {
+        Self::parse_with_path(field_name, ops, None, None)
+    }
+
+    /// Parse a field condition with optional JSON path and array operator.
+    fn parse_with_path(
+        field_name: &str,
+        ops: &serde_json::Map<String, JsonValue>,
+        json_path: Option<JsonPath>,
+        array_op: Option<FilterOp>,
+    ) -> Vec<Self> {
         let mut conditions = Vec::new();
 
         for (op_str, value) in ops {
+            // First check if this is a recognized operator
             if let Some(op) = FilterOp::parse(op_str) {
                 // Handle array element operators (_any, _all, _none)
                 // These wrap inner conditions: {_any: {_eq: 30}}
                 if op.is_array_element_op() {
                     if let Some(inner_ops) = value.as_object() {
-                        // Parse the inner conditions with the array operator wrapper
-                        let inner_conditions = Self::parse_inner(field_name, inner_ops, Some(op));
+                        // For JSON fields with _any, add Index to path
+                        let new_path = json_path.as_ref().map(|p| p.append_index());
+                        let inner_conditions =
+                            Self::parse_with_path(field_name, inner_ops, new_path, Some(op));
                         conditions.extend(inner_conditions);
                     }
                     continue;
@@ -134,61 +152,27 @@ impl FieldCondition {
                     field_name: field_name.to_string(),
                     op,
                     value: condition_value,
-                    array_op: None,
-                });
-            }
-        }
-
-        conditions
-    }
-
-    /// Parse inner conditions with an array operator wrapper.
-    fn parse_inner(
-        field_name: &str,
-        ops: &serde_json::Map<String, JsonValue>,
-        array_op: Option<FilterOp>,
-    ) -> Vec<Self> {
-        let mut conditions = Vec::new();
-
-        for (op_str, value) in ops {
-            if let Some(op) = FilterOp::parse(op_str) {
-                let condition_value = match op {
-                    FilterOp::In | FilterOp::Nin => {
-                        if let Some(arr) = value.as_array() {
-                            ConditionValue::Multiple(
-                                arr.iter().filter_map(json_to_normal_value).collect(),
-                            )
-                        } else {
-                            continue;
-                        }
-                    }
-                    FilterOp::Like | FilterOp::Nlike | FilterOp::Ilike | FilterOp::Nilike => {
-                        if let Some(s) = value.as_str() {
-                            ConditionValue::Pattern(s.to_string())
-                        } else {
-                            continue;
-                        }
-                    }
-                    _ => {
-                        if let Some(nv) = json_to_normal_value(value) {
-                            ConditionValue::Single(nv)
-                        } else {
-                            continue;
-                        }
-                    }
-                };
-
-                conditions.push(FieldCondition {
-                    field_name: field_name.to_string(),
-                    op,
-                    value: condition_value,
                     array_op,
+                    json_path: json_path.clone(),
                 });
+            } else {
+                // Not an operator - this is a JSON path property
+                // e.g., for {custom: {height: {_gt: 170}}}, "height" is a JSON path part
+                if let Some(inner_ops) = value.as_object() {
+                    let new_path = match &json_path {
+                        Some(p) => p.append_property(op_str),
+                        None => JsonPath::default().append_property(op_str),
+                    };
+                    let inner_conditions =
+                        Self::parse_with_path(field_name, inner_ops, Some(new_path), array_op);
+                    conditions.extend(inner_conditions);
+                }
             }
         }
 
         conditions
     }
+
 }
 
 /// Convert JSON value to NormalValue.
@@ -202,6 +186,54 @@ fn json_to_normal_value(value: &JsonValue) -> Option<NormalValue> {
             .or_else(|| n.as_f64().map(NormalValue::Float64)),
         JsonValue::String(s) => Some(NormalValue::String(s.clone())),
         _ => None,
+    }
+}
+
+/// Convert NormalValue to JsonScalarValue for use in JsonLeafValue.
+fn normal_value_to_json_scalar(value: &NormalValue) -> Option<JsonScalarValue> {
+    match value {
+        NormalValue::Null => Some(JsonScalarValue::Null),
+        NormalValue::Bool(b) => Some(JsonScalarValue::Bool(*b)),
+        NormalValue::Int(i) => Some(JsonScalarValue::Number(*i as f64)),
+        NormalValue::Float64(f) => Some(JsonScalarValue::Number(*f)),
+        NormalValue::Float32(f) => Some(JsonScalarValue::Number(*f as f64)),
+        NormalValue::String(s) => Some(JsonScalarValue::String(s.clone())),
+        _ => None,
+    }
+}
+
+/// Wrap a NormalValue in JsonLeafValue if a JSON path is present.
+fn wrap_value_for_json_path(value: NormalValue, json_path: Option<&JsonPath>) -> NormalValue {
+    match json_path {
+        Some(path) if !path.0.is_empty() => {
+            if let Some(scalar) = normal_value_to_json_scalar(&value) {
+                NormalValue::JsonLeaf(JsonLeafValue {
+                    path: path.clone(),
+                    value: scalar,
+                })
+            } else {
+                value
+            }
+        }
+        _ => value,
+    }
+}
+
+/// Wrap multiple values for JSON path (for _in operator).
+fn wrap_values_for_json_path(values: Vec<NormalValue>, json_path: Option<&JsonPath>) -> Vec<NormalValue> {
+    match json_path {
+        Some(path) if !path.0.is_empty() => values
+            .into_iter()
+            .filter_map(|v| {
+                normal_value_to_json_scalar(&v).map(|scalar| {
+                    NormalValue::JsonLeaf(JsonLeafValue {
+                        path: path.clone(),
+                        value: scalar,
+                    })
+                })
+            })
+            .collect(),
+        _ => values,
     }
 }
 
@@ -406,15 +438,19 @@ pub fn filter_to_index_scan(
 
     // Analyze conditions to determine scan type
     // For array operators, we look at the inner operator
+    // Track JSON path for wrapping values when needed
     let mut has_eq = false;
     let mut eq_value = None;
+    let mut eq_json_path: Option<JsonPath> = None;
     let mut has_in = false;
     let mut in_values = None;
+    let mut in_json_path: Option<JsonPath> = None;
     let mut has_scan_all = false;
     let mut lower_bound = Bound::Unbounded;
     let mut upper_bound = Bound::Unbounded;
+    let mut range_json_path: Option<JsonPath> = None;
 
-    for cond in first_field_conditions {
+    for cond in &first_field_conditions {
         // Skip _none operators (they don't use index)
         if cond.array_op == Some(FilterOp::None) {
             continue;
@@ -425,32 +461,38 @@ pub fn filter_to_index_scan(
                 if let ConditionValue::Single(v) = &cond.value {
                     has_eq = true;
                     eq_value = Some(v.clone());
+                    eq_json_path = cond.json_path.clone();
                 }
             }
             FilterOp::In => {
                 if let ConditionValue::Multiple(vs) = &cond.value {
                     has_in = true;
                     in_values = Some(vs.clone());
+                    in_json_path = cond.json_path.clone();
                 }
             }
             FilterOp::Gt => {
                 if let ConditionValue::Single(v) = &cond.value {
                     lower_bound = Bound::Exclusive(v.clone());
+                    range_json_path = cond.json_path.clone();
                 }
             }
             FilterOp::Gte => {
                 if let ConditionValue::Single(v) = &cond.value {
                     lower_bound = Bound::Inclusive(v.clone());
+                    range_json_path = cond.json_path.clone();
                 }
             }
             FilterOp::Lt => {
                 if let ConditionValue::Single(v) = &cond.value {
                     upper_bound = Bound::Exclusive(v.clone());
+                    range_json_path = cond.json_path.clone();
                 }
             }
             FilterOp::Lte => {
                 if let ConditionValue::Single(v) = &cond.value {
                     upper_bound = Bound::Inclusive(v.clone());
+                    range_json_path = cond.json_path.clone();
                 }
             }
             // _ne/_like use full index scan with post-filtering (matches Go behavior)
@@ -480,19 +522,41 @@ pub fn filter_to_index_scan(
     }
 
     // Determine scan type (narrowing scans take priority over full scans)
+    // Wrap values in JsonLeafValue when JSON path is present
     let scan_type = if has_eq {
+        let wrapped_value = wrap_value_for_json_path(eq_value.unwrap(), eq_json_path.as_ref());
         IndexScanType::ExactMatch {
-            values: vec![eq_value.unwrap()],
+            values: vec![wrapped_value],
         }
     } else if has_in {
+        let wrapped_values = wrap_values_for_json_path(in_values.unwrap(), in_json_path.as_ref());
         IndexScanType::InScan {
-            values: in_values.unwrap(),
+            values: wrapped_values,
         }
     } else if !lower_bound.is_unbounded() || !upper_bound.is_unbounded() {
+        // Wrap range bounds for JSON paths
+        let lower = match lower_bound {
+            Bound::Inclusive(v) => {
+                Bound::Inclusive(wrap_value_for_json_path(v, range_json_path.as_ref()))
+            }
+            Bound::Exclusive(v) => {
+                Bound::Exclusive(wrap_value_for_json_path(v, range_json_path.as_ref()))
+            }
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let upper = match upper_bound {
+            Bound::Inclusive(v) => {
+                Bound::Inclusive(wrap_value_for_json_path(v, range_json_path.as_ref()))
+            }
+            Bound::Exclusive(v) => {
+                Bound::Exclusive(wrap_value_for_json_path(v, range_json_path.as_ref()))
+            }
+            Bound::Unbounded => Bound::Unbounded,
+        };
         IndexScanType::RangeScan {
             prefix_values: vec![],
-            lower: lower_bound,
-            upper: upper_bound,
+            lower,
+            upper,
             reverse,
         }
     } else if has_scan_all {
@@ -953,6 +1017,161 @@ mod tests {
         match &cond.value {
             ConditionValue::Single(v) => assert_eq!(*v, NormalValue::Int(30)),
             _ => panic!("expected single value"),
+        }
+    }
+
+    #[test]
+    fn test_extract_json_path_simple() {
+        // Parse: {height: {_gt: 170}} - JSON field filter
+        let ops = serde_json::from_str::<serde_json::Map<String, JsonValue>>(
+            r#"{"height": {"_gt": 170}}"#,
+        )
+        .unwrap();
+
+        let conditions = FieldCondition::parse("custom", &ops);
+        assert_eq!(conditions.len(), 1);
+
+        let cond = &conditions[0];
+        assert_eq!(cond.field_name, "custom");
+        assert_eq!(cond.op, FilterOp::Gt);
+        assert!(cond.json_path.is_some());
+
+        let path = cond.json_path.as_ref().unwrap();
+        assert_eq!(path.0.len(), 1);
+        assert_eq!(path.0[0], JsonPathPart::Property("height".to_string()));
+    }
+
+    #[test]
+    fn test_extract_json_path_nested() {
+        // Parse: {profile: {address: {city: {_eq: "NYC"}}}}
+        let ops = serde_json::from_str::<serde_json::Map<String, JsonValue>>(
+            r#"{"profile": {"address": {"city": {"_eq": "NYC"}}}}"#,
+        )
+        .unwrap();
+
+        let conditions = FieldCondition::parse("custom", &ops);
+        assert_eq!(conditions.len(), 1);
+
+        let cond = &conditions[0];
+        assert_eq!(cond.field_name, "custom");
+        assert_eq!(cond.op, FilterOp::Eq);
+        assert!(cond.json_path.is_some());
+
+        let path = cond.json_path.as_ref().unwrap();
+        assert_eq!(path.0.len(), 3);
+        assert_eq!(path.0[0], JsonPathPart::Property("profile".to_string()));
+        assert_eq!(path.0[1], JsonPathPart::Property("address".to_string()));
+        assert_eq!(path.0[2], JsonPathPart::Property("city".to_string()));
+    }
+
+    #[test]
+    fn test_can_use_index_json_path() {
+        // Filter: {custom: {height: {_gt: 170}}}
+        let filter = make_filter(HashMap::from([(
+            "custom".to_string(),
+            json!({"height": {"_gt": 170}}),
+        )]));
+        let index = single_field_index("custom");
+
+        assert!(can_use_index(&filter, &index));
+    }
+
+    #[test]
+    fn test_filter_to_scan_json_path_eq() {
+        // Filter: {custom: {height: {_eq: 168}}}
+        let filter = make_filter(HashMap::from([(
+            "custom".to_string(),
+            json!({"height": {"_eq": 168}}),
+        )]));
+        let index = single_field_index("custom");
+
+        let params = filter_to_index_scan(&filter, &index, None).unwrap();
+        assert_eq!(params.index_name, "custom_idx");
+
+        match params.scan_type {
+            IndexScanType::ExactMatch { values } => {
+                assert_eq!(values.len(), 1);
+                // The value should be wrapped in JsonLeaf with the path
+                match &values[0] {
+                    NormalValue::JsonLeaf(leaf) => {
+                        assert_eq!(leaf.path.0.len(), 1);
+                        assert_eq!(
+                            leaf.path.0[0],
+                            JsonPathPart::Property("height".to_string())
+                        );
+                        assert_eq!(leaf.value, JsonScalarValue::Number(168.0));
+                    }
+                    _ => panic!("expected JsonLeaf value, got {:?}", values[0]),
+                }
+            }
+            _ => panic!("expected ExactMatch scan type"),
+        }
+    }
+
+    #[test]
+    fn test_filter_to_scan_json_path_range() {
+        // Filter: {custom: {height: {_gt: 170}}}
+        let filter = make_filter(HashMap::from([(
+            "custom".to_string(),
+            json!({"height": {"_gt": 170}}),
+        )]));
+        let index = single_field_index("custom");
+
+        let params = filter_to_index_scan(&filter, &index, None).unwrap();
+        assert_eq!(params.index_name, "custom_idx");
+
+        match params.scan_type {
+            IndexScanType::RangeScan { lower, upper, .. } => {
+                // Lower bound should be wrapped in JsonLeaf
+                match lower {
+                    Bound::Exclusive(v) => match v {
+                        NormalValue::JsonLeaf(leaf) => {
+                            assert_eq!(
+                                leaf.path.0[0],
+                                JsonPathPart::Property("height".to_string())
+                            );
+                            assert_eq!(leaf.value, JsonScalarValue::Number(170.0));
+                        }
+                        _ => panic!("expected JsonLeaf value, got {:?}", v),
+                    },
+                    _ => panic!("expected Exclusive lower bound"),
+                }
+                assert!(upper.is_unbounded());
+            }
+            _ => panic!("expected RangeScan scan type"),
+        }
+    }
+
+    #[test]
+    fn test_filter_to_scan_json_path_in() {
+        // Filter: {custom: {status: {_in: ["active", "pending"]}}}
+        let filter = make_filter(HashMap::from([(
+            "custom".to_string(),
+            json!({"status": {"_in": ["active", "pending"]}}),
+        )]));
+        let index = single_field_index("custom");
+
+        let params = filter_to_index_scan(&filter, &index, None).unwrap();
+        assert_eq!(params.index_name, "custom_idx");
+
+        match params.scan_type {
+            IndexScanType::InScan { values } => {
+                assert_eq!(values.len(), 2);
+                // All values should be wrapped in JsonLeaf with the path
+                for value in &values {
+                    match value {
+                        NormalValue::JsonLeaf(leaf) => {
+                            assert_eq!(leaf.path.0.len(), 1);
+                            assert_eq!(
+                                leaf.path.0[0],
+                                JsonPathPart::Property("status".to_string())
+                            );
+                        }
+                        _ => panic!("expected JsonLeaf value"),
+                    }
+                }
+            }
+            _ => panic!("expected InScan scan type"),
         }
     }
 }
