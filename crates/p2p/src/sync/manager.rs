@@ -651,6 +651,47 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         self.pending_dags.read().keys().copied().collect()
     }
 
+    /// Get missing CIDs for a pending DAG.
+    pub fn pending_dag_missing(&self, root_cid: &Cid) -> Vec<Cid> {
+        self.pending_dags
+            .read()
+            .get(root_cid)
+            .map(|dag| dag.missing.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Register a pending DAG for DocSync.
+    ///
+    /// This is called when a DocSyncReply contains head CIDs that need to be
+    /// fetched via Bitswap. Unlike PushLog-initiated syncs, DocSync doesn't
+    /// have collection_id or creator in the message, so we use empty strings.
+    /// The merge handler will extract the actual metadata from the block data.
+    ///
+    /// # Arguments
+    ///
+    /// * `root_cid` - The head CID to fetch
+    /// * `doc_id` - Document ID from the DocSyncItem
+    pub fn register_docsync_dag(&self, root_cid: Cid, doc_id: String) {
+        tracing::debug!(
+            cid = %root_cid,
+            doc_id = %doc_id,
+            "Registering DocSync pending DAG"
+        );
+
+        let mut pending = self.pending_dags.write();
+        pending.insert(
+            root_cid,
+            PendingDag {
+                doc_id,
+                // DocSync protocol doesn't include collection_id or creator.
+                // The merge handler will extract these from the block data.
+                collection_id: String::new(),
+                creator: String::new(),
+                missing: std::iter::once(root_cid).collect(),
+            },
+        );
+    }
+
     /// Check if a block exists and is merged.
     pub async fn is_merged(&self, cid: &Cid) -> Result<bool> {
         self.blockstore

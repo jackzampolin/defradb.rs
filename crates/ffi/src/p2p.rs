@@ -1536,6 +1536,8 @@ pub unsafe extern "C" fn p2p_sync_documents(
         Err(e) => return FfiResult::error(e),
     };
 
+    eprintln!("[DOCSYNC] p2p_sync_documents called: collection={} doc_ids={:?}", collection_name_str, doc_ids);
+
     let result = NODES
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
@@ -1558,17 +1560,14 @@ pub unsafe extern "C" fn p2p_sync_documents(
                     .await
                     .map_err(|e| format!("failed to get connected peers: {}", e))?;
 
+                eprintln!("[DOCSYNC] connected_peers count={}", connected_peers.len());
+
                 if connected_peers.is_empty() {
-                    tracing::debug!("No connected peers for DocSync");
+                    eprintln!("[DOCSYNC] No connected peers for DocSync");
                     return Ok(());
                 }
 
-                tracing::info!(
-                    collection = %collection_name_str,
-                    doc_ids = ?doc_ids,
-                    peer_count = connected_peers.len(),
-                    "Starting DocSync for documents"
-                );
+                eprintln!("[DOCSYNC] Starting DocSync for {} documents to {} peers", doc_ids.len(), connected_peers.len());
 
                 // Create DocSync request
                 let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
@@ -1584,21 +1583,17 @@ pub unsafe extern "C" fn p2p_sync_documents(
                 // 2. Peer responds with DocSyncReply containing head CIDs
                 // 3. Coordinator receives DocSyncReply and initiates Bitswap fetch
                 // 4. Blocks are stored and merged via the replication loop
-                for peer_id in connected_peers {
+                for peer_id in &connected_peers {
+                    eprintln!("[DOCSYNC] Sending DocSync request to peer={}", peer_id);
                     let request_clone = request.clone();
                     let handle = p2p.handle.clone();
+                    let peer_id = *peer_id;
 
                     tokio::spawn(async move {
-                        tracing::info!(
-                            peer_id = %peer_id,
-                            "Sending DocSync request to peer"
-                        );
-                        if let Err(e) = handle.send_doc_sync_request(peer_id, request_clone).await {
-                            tracing::warn!(
-                                peer_id = %peer_id,
-                                error = %e,
-                                "Failed to send DocSync request"
-                            );
+                        eprintln!("[DOCSYNC] Spawned task sending to peer={}", peer_id);
+                        match handle.send_doc_sync_request(peer_id, request_clone).await {
+                            Ok(()) => eprintln!("[DOCSYNC] Sent DocSync request to peer={}", peer_id),
+                            Err(e) => eprintln!("[DOCSYNC] Failed to send DocSync request to peer={}: {}", peer_id, e),
                         }
                     });
                 }

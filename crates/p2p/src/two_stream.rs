@@ -139,6 +139,10 @@ impl TwoStreamHandler {
     /// Reads the response and routes it to the appropriate handler.
     /// Returns an optional TwoStreamEvent for DocSyncReply (to be forwarded to coordinator).
     /// PushLogReply is routed directly to pending channels.
+    ///
+    /// DocSyncReply is a superset of PushLogReply (same fields plus Results),
+    /// so we deserialize as DocSyncReply first. We then check if there's a
+    /// pending PushLog channel for the message_id to determine the routing.
     pub async fn handle_response_stream(
         &self,
         peer_id: PeerId,
@@ -153,24 +157,65 @@ impl TwoStreamHandler {
             .await
             .map_err(|e| Error::CborDeserialization(format!("failed to read response: {}", e)))?;
 
-        // Try to deserialize as PushLogReply first (most common case)
+        // Deserialize as DocSyncReply first since it's a superset of PushLogReply.
+        // PushLogReply deserialization would also succeed on DocSyncReply data
+        // (serde_cbor ignores unknown fields), which would silently drop the
+        // Results field and misroute the message.
+        if let Ok(reply) = serde_cbor::from_slice::<DocSyncReply>(&buf) {
+            let message_id = reply.message_id.clone();
+
+            // Check if there's a pending PushLog channel for this message_id.
+            // If yes, this is actually a PushLogReply being routed.
+            let pending_sender = {
+                let mut pending = self.pending.lock();
+                pending.channels.remove(&message_id)
+            };
+
+            if let Some(sender) = pending_sender {
+                // Route as PushLogReply to the pending channel
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    message_id = %message_id,
+                    "Received PushLog response on two-stream protocol"
+                );
+                let pushlog_reply = PushLogReply {
+                    version: reply.version,
+                    message_id: reply.message_id,
+                    sender_id: reply.sender_id,
+                    pubkey: reply.pubkey,
+                    signature: reply.signature,
+                    err_message: reply.err_message,
+                };
+                let _ = sender.send(pushlog_reply);
+                return Ok(None);
+            }
+
+            // No pending channel - this is a DocSyncReply for the coordinator
+            tracing::debug!(
+                peer_id = %peer_id,
+                message_id = %message_id,
+                results_count = reply.results.len(),
+                "Received DocSync response on two-stream protocol"
+            );
+            return Ok(Some(TwoStreamEvent::DocSyncReply { peer_id, reply }));
+        }
+
+        // Fallback: try PushLogReply in case the message doesn't parse as DocSyncReply
         if let Ok(response) = serde_cbor::from_slice::<PushLogReply>(&buf) {
             let message_id = response.message_id.clone();
 
             tracing::debug!(
                 peer_id = %peer_id,
                 message_id = %message_id,
-                "Received PushLog response on two-stream protocol"
+                "Received PushLog response on two-stream protocol (fallback)"
             );
 
-            // Find and send to the pending channel
             let sender = {
                 let mut pending = self.pending.lock();
                 pending.channels.remove(&message_id)
             };
 
             if let Some(sender) = sender {
-                // Ignore send error if receiver dropped
                 let _ = sender.send(response);
             } else {
                 tracing::warn!(
@@ -183,22 +228,9 @@ impl TwoStreamHandler {
             return Ok(None);
         }
 
-        // Try to deserialize as DocSyncReply
-        if let Ok(reply) = serde_cbor::from_slice::<DocSyncReply>(&buf) {
-            tracing::debug!(
-                peer_id = %peer_id,
-                message_id = %reply.message_id,
-                results_count = reply.results.len(),
-                "Received DocSync response on two-stream protocol"
-            );
-
-            // Return as event for the coordinator to process
-            return Ok(Some(TwoStreamEvent::DocSyncReply { peer_id, reply }));
-        }
-
         // Neither worked - log and return error
         Err(Error::CborDeserialization(
-            "failed to deserialize as PushLog or DocSync response".to_string(),
+            "failed to deserialize as DocSync or PushLog response".to_string(),
         ))
     }
 
@@ -529,6 +561,7 @@ impl TwoStreamRunner {
                 }
                 // Handle incoming response streams
                 Some((peer_id, stream)) = self.response_streams.next() => {
+                    eprintln!("[DOCSYNC] TwoStreamRunner received incoming response stream from peer={}", peer_id);
                     tracing::info!(
                         peer_id = %peer_id,
                         "Received incoming stream on response protocol"
@@ -540,18 +573,24 @@ impl TwoStreamRunner {
                         match h.handle_response_stream(peer_id, stream).await {
                             Ok(Some(event)) => {
                                 // DocSyncReply events should be forwarded to the coordinator
+                                eprintln!("[DOCSYNC] TwoStreamRunner got DocSyncReply event, sending to host channel");
                                 tracing::info!(peer_id = %peer_id, "Sending DocSyncReply event to host channel");
                                 if event_tx.send(event).await.is_err() {
+                                    eprintln!("[DOCSYNC] TwoStreamRunner failed to send DocSyncReply event - receiver dropped");
                                     tracing::warn!(
                                         peer_id = %peer_id,
                                         "Failed to send DocSyncReply event - receiver dropped"
                                     );
+                                } else {
+                                    eprintln!("[DOCSYNC] TwoStreamRunner sent DocSyncReply event to host channel");
                                 }
                             }
                             Ok(None) => {
+                                eprintln!("[DOCSYNC] TwoStreamRunner got PushLogReply (handled internally)");
                                 // PushLogReply was handled internally via pending channels
                             }
                             Err(e) => {
+                                eprintln!("[DOCSYNC] TwoStreamRunner failed to handle response stream: {}", e);
                                 tracing::warn!(
                                     peer_id = %peer_id,
                                     error = %e,
