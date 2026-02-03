@@ -20,7 +20,10 @@ use tokio::time::timeout;
 
 use crate::codec::write_message;
 use crate::error::{Error, Result};
-use crate::message::{DocSyncReply, DocSyncRequest, PushLogReply, PushLogRequest};
+use crate::message::{
+    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogReply,
+    PushLogRequest,
+};
 use crate::protocol::{REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL};
 
 /// Timeout for waiting for a response.
@@ -43,6 +46,16 @@ pub enum TwoStreamEvent {
     DocSyncReply {
         peer_id: PeerId,
         reply: DocSyncReply,
+    },
+    /// Received a BranchableSync request from a peer.
+    BranchableSyncRequest {
+        peer_id: PeerId,
+        request: BranchableSyncRequest,
+    },
+    /// Received a BranchableSync reply from a peer.
+    BranchableSyncReply {
+        peer_id: PeerId,
+        reply: BranchableSyncReply,
     },
     /// Failed to decode an incoming message.
     DecodeError { peer_id: PeerId, error: String },
@@ -128,9 +141,20 @@ impl TwoStreamHandler {
             return Ok(TwoStreamEvent::DocSyncRequest { peer_id, request });
         }
 
-        // Neither worked - return error
+        // Try to deserialize as BranchableSyncRequest
+        if let Ok(request) = serde_cbor::from_slice::<BranchableSyncRequest>(&buf) {
+            tracing::info!(
+                peer_id = %peer_id,
+                message_id = %request.metadata.message_id,
+                collection_id = %request.collection_id,
+                "Successfully read BranchableSync request on two-stream protocol"
+            );
+            return Ok(TwoStreamEvent::BranchableSyncRequest { peer_id, request });
+        }
+
+        // None worked - return error
         Err(Error::CborDeserialization(
-            "failed to deserialize as PushLog or DocSync request".to_string(),
+            "failed to deserialize as PushLog, DocSync, or BranchableSync request".to_string(),
         ))
     }
 
@@ -157,7 +181,24 @@ impl TwoStreamHandler {
             .await
             .map_err(|e| Error::CborDeserialization(format!("failed to read response: {}", e)))?;
 
-        // Deserialize as DocSyncReply first since it's a superset of PushLogReply.
+        // Try BranchableSyncReply first (has CollectionID + Heads fields).
+        // Must come before DocSyncReply since serde_cbor ignores unknown fields.
+        if let Ok(reply) = serde_cbor::from_slice::<BranchableSyncReply>(&buf) {
+            // Only treat as BranchableSync if it has a non-empty collection_id
+            // (DocSyncReply wouldn't have this field, so it would be empty)
+            if !reply.collection_id.is_empty() {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    message_id = %reply.message_id,
+                    collection_id = %reply.collection_id,
+                    heads_count = reply.heads.len(),
+                    "Received BranchableSync response on two-stream protocol"
+                );
+                return Ok(Some(TwoStreamEvent::BranchableSyncReply { peer_id, reply }));
+            }
+        }
+
+        // Deserialize as DocSyncReply since it's a superset of PushLogReply.
         // PushLogReply deserialization would also succeed on DocSyncReply data
         // (serde_cbor ignores unknown fields), which would silently drop the
         // Results field and misroute the message.
@@ -228,9 +269,9 @@ impl TwoStreamHandler {
             return Ok(None);
         }
 
-        // Neither worked - log and return error
+        // None worked - log and return error
         Err(Error::CborDeserialization(
-            "failed to deserialize as DocSync or PushLog response".to_string(),
+            "failed to deserialize as BranchableSync, DocSync, or PushLog response".to_string(),
         ))
     }
 
@@ -442,6 +483,73 @@ impl TwoStreamHandler {
             message_id = %message_id,
             doc_ids = ?request.doc_ids,
             "Sent DocSync request on two-stream protocol (fire-and-forget)"
+        );
+
+        Ok(())
+    }
+
+    /// Send a BranchableSync request to a peer without waiting for response.
+    ///
+    /// The response will arrive asynchronously via TwoStreamEvent::BranchableSyncReply.
+    pub async fn send_branchable_sync_request_fire_and_forget(
+        &mut self,
+        peer_id: PeerId,
+        request: BranchableSyncRequest,
+    ) -> Result<()> {
+        let message_id = request.metadata.message_id.clone();
+
+        let mut stream = self
+            .control
+            .open_stream(peer_id, Self::request_protocol())
+            .await
+            .map_err(|e| Error::Transport(format!("failed to open stream: {}", e)))?;
+
+        write_message(&mut stream, &request).await.map_err(|e| {
+            Error::CborSerialization(format!("failed to write request: {}", e))
+        })?;
+
+        tracing::info!(
+            peer_id = %peer_id,
+            message_id = %message_id,
+            collection_id = %request.collection_id,
+            "Sent BranchableSync request on two-stream protocol (fire-and-forget)"
+        );
+
+        Ok(())
+    }
+
+    /// Send a BranchableSync response to a peer.
+    ///
+    /// This opens a new stream on the response protocol and sends the reply.
+    pub async fn send_branchable_sync_response(
+        &mut self,
+        peer_id: PeerId,
+        response: BranchableSyncReply,
+    ) -> Result<()> {
+        let message_id = response.message_id.clone();
+
+        tracing::info!(
+            peer_id = %peer_id,
+            message_id = %message_id,
+            collection_id = %response.collection_id,
+            heads_count = response.heads.len(),
+            "Opening response stream for BranchableSync reply"
+        );
+
+        let mut stream = self
+            .control
+            .open_stream(peer_id, Self::response_protocol())
+            .await
+            .map_err(|e| Error::Transport(format!("failed to open response stream: {}", e)))?;
+
+        write_message(&mut stream, &response)
+            .await
+            .map_err(|e| Error::CborSerialization(format!("failed to write response: {}", e)))?;
+
+        tracing::info!(
+            peer_id = %peer_id,
+            message_id = %message_id,
+            "Sent BranchableSync response on two-stream protocol"
         );
 
         Ok(())
