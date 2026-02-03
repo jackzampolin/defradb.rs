@@ -435,7 +435,11 @@ impl<'a> SdlParser<'a> {
                         result.size_constraint = Some(size as usize);
                     }
                 }
-                "embedding" | "encryptedIndex" | "policy" => {
+                "encryptedIndex" => {
+                    // Searchable encryption index
+                    result.encrypted_index = true;
+                }
+                "embedding" | "policy" => {
                     // Known but not yet implemented - emit warning so users know
                     self.warnings.push(ParseWarning::UnimplementedDirective {
                         directive_name: directive.name.clone(),
@@ -1720,9 +1724,18 @@ impl<'a> SdlParser<'a> {
         // Version ID equals collection ID for new schemas (Go behavior)
         let version_id = collection_id.clone();
 
+        // Build encrypted indexes from @encryptedIndex directives
+        let encrypted_indexes: Vec<schema::EncryptedIndexDescription> = type_def
+            .fields
+            .iter()
+            .filter(|f| f.directives.encrypted_index)
+            .map(|f| schema::EncryptedIndexDescription::new(&f.name))
+            .collect();
+
         let mut collection =
             CollectionVersion::new(&type_def.name, &version_id, &collection_id, fields);
         collection.indexes = indexes;
+        collection.encrypted_indexes = encrypted_indexes;
         collection.is_materialized = type_def.directives.is_materialized;
         collection.is_branchable = type_def.directives.is_branchable;
         if let Some(ref policy_config) = type_def.directives.policy {

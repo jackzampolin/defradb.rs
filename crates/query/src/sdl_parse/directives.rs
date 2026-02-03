@@ -114,6 +114,8 @@ pub struct ParsedDirectives {
     pub default_arg_name: Option<String>,
     /// Array size constraint from @constraints directive
     pub size_constraint: Option<usize>,
+    /// Whether this field has an encrypted index for searchable encryption
+    pub encrypted_index: bool,
 }
 
 /// Index configuration from @index directive
