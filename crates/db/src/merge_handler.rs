@@ -426,6 +426,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let mut field_values: HashMap<String, NormalValue> = HashMap::new();
         let mut any_field_applied = false;
         let mut process_error: Option<MergeError> = None;
+        let mut is_branchable = false;
 
         // Process linked blocks within the transaction scope
         // Use a scoped block to ensure datastore is dropped before commit/discard
@@ -577,6 +578,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
                 match collection_lookup {
                     Some(collection) => {
+                        is_branchable = collection.schema().is_branchable;
                         if is_delete {
                             // Handle delete: write the deletion marker so queries
                             // exclude this document (or show _deleted:true).
@@ -777,6 +779,26 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         true,   // is_relay (P2P update)
                     );
                     bus.publish(Message::update(update));
+
+                    // For branchable collections, emit a collection-level merge_complete
+                    // event so the test framework (and Go event system) can track
+                    // collection DAG heads separately from document DAG heads.
+                    if is_branchable {
+                        let by_peer = metadata
+                            .creator
+                            .unwrap_or("")
+                            .to_string();
+                        let mc = MergeCompleteData {
+                            doc_id: String::new(), // empty → keyed by collection_id
+                            cid: *cid,
+                            collection_id: metadata
+                                .collection_id
+                                .unwrap_or(&payload.schema_version_id)
+                                .to_string(),
+                            by_peer,
+                        };
+                        bus.publish(Message::merge_complete(mc));
+                    }
                 }
 
                 Ok(MergeOutcome::Merged)

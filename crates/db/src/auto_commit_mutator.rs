@@ -215,11 +215,26 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         doc_id.to_string(),
                         cid,
                         collection.collection_id().to_string(),
-                        block,
+                        block.clone(),
                         false, // is_retry
                         false, // is_relay (local mutation)
                     );
                     bus.publish(Message::update(update));
+
+                    // For branchable collections, emit a second Update event for the
+                    // collection-level DAG. The test framework uses this to track
+                    // collection heads separately from document heads.
+                    if collection.schema().is_branchable {
+                        let col_update = Update::new(
+                            String::new(), // empty doc_id → keyed by collection_id
+                            cid,
+                            collection.collection_id().to_string(),
+                            block,
+                            false, // is_retry
+                            false, // is_relay
+                        );
+                        bus.publish(Message::update(col_update));
+                    }
                 }
 
                 // Return result with commit CID if available
@@ -401,11 +416,25 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                             doc_id.to_string(),
                             cid,
                             collection.collection_id().to_string(),
-                            block,
+                            block.clone(),
                             false, // is_retry
                             false, // is_relay (local mutation)
                         );
                         bus.publish(Message::update(update));
+
+                        // For branchable collections, emit a second Update event for the
+                        // collection-level DAG.
+                        if collection.schema().is_branchable {
+                            let col_update = Update::new(
+                                String::new(), // empty doc_id → keyed by collection_id
+                                cid,
+                                collection.collection_id().to_string(),
+                                block,
+                                false,
+                                false,
+                            );
+                            bus.publish(Message::update(col_update));
+                        }
                     }
                 }
 
@@ -560,11 +589,25 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         doc_id.to_string(),
                         cid,
                         collection.collection_id().to_string(),
-                        block,
+                        block.clone(),
                         false, // is_retry
                         false, // is_relay (local mutation)
                     );
                     bus.publish(Message::update(update));
+
+                    // For branchable collections, emit a second Update event for the
+                    // collection-level DAG.
+                    if collection.schema().is_branchable {
+                        let col_update = Update::new(
+                            String::new(), // empty doc_id → keyed by collection_id
+                            cid,
+                            collection.collection_id().to_string(),
+                            block,
+                            false,
+                            false,
+                        );
+                        bus.publish(Message::update(col_update));
+                    }
                 }
 
                 Ok(DeleteResult::new(doc_id.clone(), existed))
