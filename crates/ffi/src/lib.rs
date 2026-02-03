@@ -118,22 +118,6 @@ pub extern "C" fn defra_init() {
         .store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Verify a block signature.
-///
-/// # Safety
-///
-/// All string pointers must be either null or valid null-terminated UTF-8 strings.
-#[no_mangle]
-pub extern "C" fn block_verify_signature(
-    _node_ptr: usize,
-    _key_type: *const c_char,
-    _public_key: *const c_char,
-    _block_cid: *const c_char,
-    _identity_did: *const c_char,
-) -> FfiResult {
-    FfiResult::error("block_verify_signature not yet implemented")
-}
-
 /// Get the library version.
 ///
 /// Returns a null-terminated string that must be freed with `defra_free_string`.

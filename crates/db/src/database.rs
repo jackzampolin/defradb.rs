@@ -395,6 +395,18 @@ impl<S: Store> DB<S> {
                             ))
                         })?;
 
+                    // Validate version adjacency: if destination already has a previous_version,
+                    // the source must match it (can't skip versions in migration chain)
+                    if let Some(ref prev) = schema.previous_version {
+                        if prev.source_collection_id != source_version_id {
+                            return Err(Error::InvalidPatch(format!(
+                                "cannot configure migration between non-adjacent collection versions. \
+                                 Destination '{}' already has previous version '{}', but migration source is '{}'",
+                                dest_version_id, prev.source_collection_id, source_version_id
+                            )));
+                        }
+                    }
+
                     // Ensure previous_version exists and set transform
                     let prev = schema
                         .previous_version
