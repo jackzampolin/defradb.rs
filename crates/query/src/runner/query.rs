@@ -2747,7 +2747,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 if fetcher.supports_index_queries() && !collection.indexes.is_empty() {
                     if let Some(best_index) = select_best_index(filter, &collection.indexes) {
                         if let Some(params) =
-                            filter_to_index_scan(filter, best_index, select.order_by.as_ref())
+                            filter_to_index_scan(filter, best_index, select.order_by.as_ref(), &collection.fields)
                         {
                             debug!(
                                 collection = %select.collection_name,

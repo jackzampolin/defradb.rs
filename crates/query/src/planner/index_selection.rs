@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use document::{JsonLeafValue, JsonPath, JsonScalarValue, NormalValue};
 #[cfg(test)]
 use document::JsonPathPart;
-use schema::IndexDescription;
+use schema::{FieldKind, IndexDescription, ScalarKind};
 use serde_json::Value as JsonValue;
 use storage::index::Bound;
 
@@ -418,6 +418,7 @@ pub fn filter_to_index_scan(
     filter: &Filter,
     index: &IndexDescription,
     order_by: Option<&OrderBy>,
+    collection_fields: &[schema::FieldDescription],
 ) -> Option<IndexScanParams> {
     if !can_use_index(filter, index) {
         return None;
@@ -426,9 +427,25 @@ pub fn filter_to_index_scan(
     let conditions = extract_field_conditions(filter);
     let first_field = &index.fields[0].name;
 
+    // Check if the first index field is JSON-typed
+    let first_field_is_json = collection_fields.iter().any(|f| {
+        &f.name == first_field && matches!(f.kind, FieldKind::Scalar(ScalarKind::Json))
+    });
+
     // Find conditions on the first index field
+    // For JSON fields, ensure top-level conditions get an empty json_path
     let first_field_conditions: Vec<_> = conditions
         .iter()
+        .map(|c| {
+            if &c.field_name == first_field && first_field_is_json && c.json_path.is_none() {
+                // Top-level JSON filter (e.g., custom: {_gt: 20}) needs an empty path
+                let mut c = c.clone();
+                c.json_path = Some(JsonPath::new());
+                c
+            } else {
+                c.clone()
+            }
+        })
         .filter(|c| &c.field_name == first_field)
         .collect();
 
@@ -848,7 +865,7 @@ mod tests {
         )]));
         let index = single_field_index("name");
 
-        let params = filter_to_index_scan(&filter, &index, None).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None, &[]).unwrap();
         assert_eq!(params.index_name, "name_idx");
 
         match params.scan_type {
@@ -868,7 +885,7 @@ mod tests {
         )]));
         let index = single_field_index("status");
 
-        let params = filter_to_index_scan(&filter, &index, None).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None, &[]).unwrap();
 
         match params.scan_type {
             IndexScanType::InScan { values } => {
@@ -886,7 +903,7 @@ mod tests {
         )]));
         let index = single_field_index("age");
 
-        let params = filter_to_index_scan(&filter, &index, None).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None, &[]).unwrap();
 
         match params.scan_type {
             IndexScanType::RangeScan {
@@ -1073,7 +1090,7 @@ mod tests {
         )]));
         let index = single_field_index("numbers");
 
-        let params = filter_to_index_scan(&filter, &index, None).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None, &[]).unwrap();
         assert_eq!(params.index_name, "numbers_idx");
 
         match params.scan_type {
@@ -1170,7 +1187,7 @@ mod tests {
         )]));
         let index = single_field_index("custom");
 
-        let params = filter_to_index_scan(&filter, &index, None).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None, &[]).unwrap();
         assert_eq!(params.index_name, "custom_idx");
 
         match params.scan_type {
@@ -1202,7 +1219,7 @@ mod tests {
         )]));
         let index = single_field_index("custom");
 
-        let params = filter_to_index_scan(&filter, &index, None).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None, &[]).unwrap();
         assert_eq!(params.index_name, "custom_idx");
 
         match params.scan_type {
@@ -1236,7 +1253,7 @@ mod tests {
         )]));
         let index = single_field_index("custom");
 
-        let params = filter_to_index_scan(&filter, &index, None).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None, &[]).unwrap();
         assert_eq!(params.index_name, "custom_idx");
 
         match params.scan_type {

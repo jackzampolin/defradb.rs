@@ -1576,7 +1576,7 @@ impl Planner {
         if let Some(filter) = select.filter.as_ref() {
             if let Some(best_index) = select_best_index(filter, &collection.indexes) {
                 if let Some(params) =
-                    filter_to_index_scan(filter, best_index, select.order_by.as_ref())
+                    filter_to_index_scan(filter, best_index, select.order_by.as_ref(), &collection.fields)
                 {
                     // Check if this index also provides ordering
                     let provides_ordering = select
