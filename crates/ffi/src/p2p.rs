@@ -10,6 +10,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use acp::nac::NodePermission;
+use identity::Identity;
 
 use crate::get_runtime;
 use crate::nac_check::check_nac_for_node;
@@ -110,6 +111,8 @@ pub unsafe extern "C" fn new_node_with_p2p(
         None => return NewNodeResult::error("listen_addr is null"),
     };
 
+    let enable_signing = options.enable_signing != 0;
+
     let result = rt.block_on(async {
         // Create storage backend based on options
         let store: Arc<FfiStore> = if options.in_memory == 0 && !options.db_path.is_null() {
@@ -125,8 +128,79 @@ pub unsafe extern "C" fn new_node_with_p2p(
         // Create event bus for subscriptions
         let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::default());
 
-        // Open database and load collections
-        let mut database = db::DB::open_from_arc(store.clone())
+        // Generate or load node identity for signing (matches new_node behavior)
+        let (raw_identity_opt, node_identity_did) = if enable_signing {
+            let raw_identity = if !options.signing_private_key.is_null()
+                && options.signing_private_key_len > 0
+            {
+                let key_bytes = std::slice::from_raw_parts(
+                    options.signing_private_key,
+                    options.signing_private_key_len,
+                );
+                let key_type = crate::types::c_str_to_string(options.signing_key_type)
+                    .unwrap_or_else(|| "secp256k1".to_string());
+
+                match key_type.as_str() {
+                    "secp256k1" => {
+                        let private_key =
+                            crypto::Secp256k1PrivateKey::from_bytes(key_bytes)
+                                .map_err(|e| format!("failed to load secp256k1 key: {}", e))?;
+                        identity::RawIdentity::from_secp256k1(private_key)
+                            .map_err(|e| format!("failed to create node identity: {}", e))?
+                    }
+                    "ed25519" => {
+                        let private_key =
+                            crypto::Ed25519PrivateKey::from_bytes(key_bytes)
+                                .map_err(|e| format!("failed to load ed25519 key: {}", e))?;
+                        identity::RawIdentity::from_ed25519(private_key)
+                            .map_err(|e| format!("failed to create node identity: {}", e))?
+                    }
+                    other => {
+                        return Err(format!("unsupported signing key type: {}", other));
+                    }
+                }
+            } else {
+                let private_key = crypto::generate_secp256k1()
+                    .map_err(|e| format!("failed to generate node signing key: {}", e))?;
+                identity::RawIdentity::from_secp256k1(private_key)
+                    .map_err(|e| format!("failed to create node identity: {}", e))?
+            };
+
+            let did = raw_identity
+                .did()
+                .map_err(|e| format!("failed to derive node DID: {}", e))?;
+            let did_str = did.to_string();
+
+            let key_type = if !options.signing_private_key.is_null() {
+                crate::types::c_str_to_string(options.signing_key_type)
+                    .unwrap_or_else(|| "secp256k1".to_string())
+            } else {
+                "secp256k1".to_string()
+            };
+
+            defra_core::signing::store_identity(
+                &did_str,
+                defra_core::signing::SigningConfig {
+                    key_type,
+                    private_key_bytes: raw_identity.private_key_bytes().to_vec(),
+                    public_key_bytes: raw_identity.public_key_bytes().to_vec(),
+                    public_key_hex: hex::encode(raw_identity.public_key_bytes()),
+                },
+            );
+
+            eprintln!("[SIGN-DEBUG] new_node_with_p2p: node identity DID={}", did_str);
+            (Some(raw_identity), Some(did_str))
+        } else {
+            (None, None)
+        };
+
+        // Open database with node identity (if signing enabled)
+        let mut db_options = db::DbOptions::default();
+        if let Some(raw_id) = raw_identity_opt {
+            db_options = db_options.with_node_identity(raw_id);
+        }
+
+        let mut database = db::DB::open_from_arc_with_options(store.clone(), db_options)
             .await
             .map_err(|e| format!("failed to open database: {}", e))?;
 
@@ -411,7 +485,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
             event_bus,
             policy_store,
             p2p: Some(p2p_state),
-            node_identity_did: None,
+            node_identity_did,
         };
 
         // Register and get handle
