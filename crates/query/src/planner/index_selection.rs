@@ -5,9 +5,9 @@
 
 use std::collections::HashMap;
 
-use document::{JsonLeafValue, JsonPath, JsonScalarValue, NormalValue};
 #[cfg(test)]
 use document::JsonPathPart;
+use document::{JsonLeafValue, JsonPath, JsonScalarValue, NormalValue};
 use schema::{FieldKind, IndexDescription, ScalarKind};
 use serde_json::Value as JsonValue;
 use storage::index::Bound;
@@ -176,7 +176,6 @@ impl FieldCondition {
 
         conditions
     }
-
 }
 
 /// Convert JSON value to NormalValue.
@@ -230,7 +229,10 @@ fn wrap_value_for_json_path(value: NormalValue, json_path: Option<&JsonPath>) ->
 }
 
 /// Wrap multiple values for JSON path (for _in operator).
-fn wrap_values_for_json_path(values: Vec<NormalValue>, json_path: Option<&JsonPath>) -> Vec<NormalValue> {
+fn wrap_values_for_json_path(
+    values: Vec<NormalValue>,
+    json_path: Option<&JsonPath>,
+) -> Vec<NormalValue> {
     match json_path {
         Some(path) if !path.0.is_empty() => values
             .into_iter()
@@ -457,9 +459,9 @@ pub fn filter_to_index_scan(
     let first_field = &index.fields[0].name;
 
     // Check if the first index field is JSON-typed
-    let first_field_is_json = collection_fields.iter().any(|f| {
-        &f.name == first_field && matches!(f.kind, FieldKind::Scalar(ScalarKind::Json))
-    });
+    let first_field_is_json = collection_fields
+        .iter()
+        .any(|f| &f.name == first_field && matches!(f.kind, FieldKind::Scalar(ScalarKind::Json)));
 
     // Find conditions on the first index field
     // For JSON fields, ensure top-level conditions get an empty json_path
@@ -1283,10 +1285,7 @@ mod tests {
                 match &values[0] {
                     NormalValue::JsonLeaf(leaf) => {
                         assert_eq!(leaf.path.0.len(), 1);
-                        assert_eq!(
-                            leaf.path.0[0],
-                            JsonPathPart::Property("height".to_string())
-                        );
+                        assert_eq!(leaf.path.0[0], JsonPathPart::Property("height".to_string()));
                         assert_eq!(leaf.value, JsonScalarValue::Number(168.0));
                     }
                     _ => panic!("expected JsonLeaf value, got {:?}", values[0]),

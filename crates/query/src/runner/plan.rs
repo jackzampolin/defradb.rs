@@ -10,9 +10,9 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
-    AllDocsNode, AverageNode, ChildSelectMeta, CountNode, CountSourceMeta, GroupAlias,
-    GroupByNode, LimitNode, MaxNode, MaxSourceMeta, MinNode, MinSourceMeta, OrderByNode,
-    PermissionFilterNode, ScanNode, SelectNode, SumNode, SumSourceMeta,
+    AllDocsNode, AverageNode, ChildSelectMeta, CountNode, CountSourceMeta, GroupAlias, GroupByNode,
+    LimitNode, MaxNode, MaxSourceMeta, MinNode, MinSourceMeta, OrderByNode, PermissionFilterNode,
+    ScanNode, SelectNode, SumNode, SumSourceMeta,
 };
 use crate::planner::{Doc, PlanNode};
 
@@ -416,8 +416,7 @@ pub(crate) fn build_plan(
     for field in &select.fields {
         if let Requestable::Aggregate(agg) = field {
             if agg.aggregate_type == AggregateType::Average {
-                if let Some(field_name) = agg.targets.first().and_then(|t| t.field_name.as_ref())
-                {
+                if let Some(field_name) = agg.targets.first().and_then(|t| t.field_name.as_ref()) {
                     filter_for_scan = Some(match filter_for_scan {
                         Some(existing) => {
                             // Merge {field: {_neq: null}} into existing conditions
@@ -426,15 +425,10 @@ pub(crate) fn build_plan(
                                 .entry(field_name.clone())
                                 .and_modify(|v| {
                                     if let serde_json::Value::Object(ref mut ops) = v {
-                                        ops.insert(
-                                            "_neq".to_string(),
-                                            serde_json::Value::Null,
-                                        );
+                                        ops.insert("_neq".to_string(), serde_json::Value::Null);
                                     }
                                 })
-                                .or_insert(
-                                    serde_json::json!({"_neq": serde_json::Value::Null}),
-                                );
+                                .or_insert(serde_json::json!({"_neq": serde_json::Value::Null}));
                             Filter::from_conditions(merged)
                         }
                         None => {
@@ -576,10 +570,7 @@ pub(crate) fn build_plan(
                             .entry(field_name.clone())
                             .and_modify(|v| {
                                 if let serde_json::Value::Object(ref mut ops) = v {
-                                    ops.insert(
-                                        "_neq".to_string(),
-                                        serde_json::Value::Null,
-                                    );
+                                    ops.insert("_neq".to_string(), serde_json::Value::Null);
                                 }
                             })
                             .or_insert(serde_json::json!({

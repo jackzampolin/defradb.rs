@@ -172,7 +172,10 @@ impl Bus for ChannelBus {
             );
         }
 
-        if matches!(msg.name, EventName::MergeComplete | EventName::ReplicatorCompleted) {
+        if matches!(
+            msg.name,
+            EventName::MergeComplete | EventName::ReplicatorCompleted
+        ) {
             eprintln!("[EVENT-BUS] Published event={} sub_count={} delivered={} dropped={} buffer_full={}", msg.name, sub_count, delivered, dropped, buffer_full);
         }
     }

@@ -422,8 +422,15 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         }
 
         // Check if requestor can manage this relation (owner OR has managing relation)
-        self.check_manage_relation(requestor, collection_id, collection_id, doc_id, relation, "create")
-            .await?;
+        self.check_manage_relation(
+            requestor,
+            collection_id,
+            collection_id,
+            doc_id,
+            relation,
+            "create",
+        )
+        .await?;
 
         // Check if relationship already exists
         let has = self
@@ -490,8 +497,15 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         }
 
         // Check if requestor can manage this relation (owner OR has managing relation)
-        self.check_manage_relation(requestor, collection_id, collection_id, doc_id, relation, "delete")
-            .await?;
+        self.check_manage_relation(
+            requestor,
+            collection_id,
+            collection_id,
+            doc_id,
+            relation,
+            "delete",
+        )
+        .await?;
 
         // Delete relationship
         let rel = Relationship::with_entity(collection_id, doc_id, relation, target.clone());

@@ -398,10 +398,7 @@ impl PlanNode for AverageNode {
                         );
                     }
                     None => {
-                        source_obj.insert(
-                            "childFieldName".to_string(),
-                            serde_json::Value::Null,
-                        );
+                        source_obj.insert("childFieldName".to_string(), serde_json::Value::Null);
                     }
                 }
                 source_obj.insert("filter".to_string(), Self::build_source_filter(s));

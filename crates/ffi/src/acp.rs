@@ -55,10 +55,7 @@ fn normalize_auth_error(err: String) -> String {
 ///
 /// This function is NAC-gated with the `NacStatus` permission.
 #[no_mangle]
-pub unsafe extern "C" fn get_nac_status(
-    node_ptr: usize,
-    identity_did: *const c_char,
-) -> FfiResult {
+pub unsafe extern "C" fn get_nac_status(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
     if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::NacStatus) {
@@ -656,7 +653,8 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, requestor_did, NodePermission::DacRelationAdd) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, requestor_did, NodePermission::DacRelationAdd)
+    {
         return e;
     }
 
@@ -702,32 +700,33 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
     }
 
     // Validate node handle and get database, document_acp, and policy_store
-    let (database, document_acp, policy_store) =
-        match NODES.get(node_ptr, |state| {
-            (state.database.clone(), state.document_acp.clone(), state.policy_store.clone())
-        }) {
-            Some(tuple) => tuple,
-            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-        };
+    let (database, document_acp, policy_store) = match NODES.get(node_ptr, |state| {
+        (
+            state.database.clone(),
+            state.document_acp.clone(),
+            state.policy_store.clone(),
+        )
+    }) {
+        Some(tuple) => tuple,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
     // Resolve collection name → policy resource_name and policy_id
     let (resource_name, policy_id) = match database.get_collection(&collection_id_str) {
         Ok(Some(col)) => match col.schema().policy {
             Some(ref policy) => (policy.resource_name.clone(), policy.id.clone()),
             None => {
-                return FfiResult::error(
-                    "operation requires ACP, but collection has no policy",
-                );
+                return FfiResult::error("operation requires ACP, but collection has no policy");
             }
         },
         Ok(None) => {
-            return FfiResult::error(format!(
-                "collection '{}' does not exist",
-                collection_id_str
-            ));
+            return FfiResult::error(format!("collection '{}' does not exist", collection_id_str));
         }
         Err(e) => {
-            return FfiResult::error(format!("failed to get collection '{}': {}", collection_id_str, e));
+            return FfiResult::error(format!(
+                "failed to get collection '{}': {}",
+                collection_id_str, e
+            ));
         }
     };
 
@@ -811,7 +810,12 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, requestor_did, NodePermission::DacRelationDelete) {
+    if let Err(e) = check_nac_for_node(
+        rt,
+        node_ptr,
+        requestor_did,
+        NodePermission::DacRelationDelete,
+    ) {
         return e;
     }
 
@@ -857,32 +861,33 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
     }
 
     // Validate node handle and get database, document_acp, and policy_store
-    let (database, document_acp, policy_store) =
-        match NODES.get(node_ptr, |state| {
-            (state.database.clone(), state.document_acp.clone(), state.policy_store.clone())
-        }) {
-            Some(tuple) => tuple,
-            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-        };
+    let (database, document_acp, policy_store) = match NODES.get(node_ptr, |state| {
+        (
+            state.database.clone(),
+            state.document_acp.clone(),
+            state.policy_store.clone(),
+        )
+    }) {
+        Some(tuple) => tuple,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
     // Resolve collection name → policy resource_name and policy_id
     let (resource_name, policy_id) = match database.get_collection(&collection_id_str) {
         Ok(Some(col)) => match col.schema().policy {
             Some(ref policy) => (policy.resource_name.clone(), policy.id.clone()),
             None => {
-                return FfiResult::error(
-                    "operation requires ACP, but collection has no policy",
-                );
+                return FfiResult::error("operation requires ACP, but collection has no policy");
             }
         },
         Ok(None) => {
-            return FfiResult::error(format!(
-                "collection '{}' does not exist",
-                collection_id_str
-            ));
+            return FfiResult::error(format!("collection '{}' does not exist", collection_id_str));
         }
         Err(e) => {
-            return FfiResult::error(format!("failed to get collection '{}': {}", collection_id_str, e));
+            return FfiResult::error(format!(
+                "failed to get collection '{}': {}",
+                collection_id_str, e
+            ));
         }
     };
 
@@ -1165,8 +1170,14 @@ mod tests {
         // Add admin relationship
         let target_did = CString::new(test_did2()).unwrap();
         let relation = CString::new("admin").unwrap();
-        let result =
-            unsafe { add_nac_actor_relationship(node, owner_did.as_ptr(), relation.as_ptr(), target_did.as_ptr()) };
+        let result = unsafe {
+            add_nac_actor_relationship(
+                node,
+                owner_did.as_ptr(),
+                relation.as_ptr(),
+                target_did.as_ptr(),
+            )
+        };
         assert_eq!(
             result.status, 0,
             "add_nac_actor_relationship should succeed"
@@ -1176,8 +1187,14 @@ mod tests {
         unsafe { crate::types::defra_free_string(result.value) };
 
         // Delete admin relationship
-        let result =
-            unsafe { delete_nac_actor_relationship(node, owner_did.as_ptr(), relation.as_ptr(), target_did.as_ptr()) };
+        let result = unsafe {
+            delete_nac_actor_relationship(
+                node,
+                owner_did.as_ptr(),
+                relation.as_ptr(),
+                target_did.as_ptr(),
+            )
+        };
         assert_eq!(
             result.status, 0,
             "delete_nac_actor_relationship should succeed"

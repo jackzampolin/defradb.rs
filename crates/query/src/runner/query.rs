@@ -454,18 +454,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         match mutation.mutation_type {
             MutationType::Create => {
                 let (_, _, plan_execs) = phase2.as_ref().unwrap();
-                mutation_inner
-                    .insert("iterations".to_string(), serde_json::json!(*plan_execs));
+                mutation_inner.insert("iterations".to_string(), serde_json::json!(*plan_execs));
             }
             MutationType::Delete => {
                 let (_, _, plan_execs) = phase1.as_ref().unwrap();
-                mutation_inner
-                    .insert("iterations".to_string(), serde_json::json!(*plan_execs));
+                mutation_inner.insert("iterations".to_string(), serde_json::json!(*plan_execs));
             }
             MutationType::Update => {
                 let (_, result_count, plan_execs) = phase1.as_ref().unwrap();
-                mutation_inner
-                    .insert("iterations".to_string(), serde_json::json!(*plan_execs));
+                mutation_inner.insert("iterations".to_string(), serde_json::json!(*plan_execs));
                 mutation_inner.insert(
                     "updates".to_string(),
                     serde_json::json!(*result_count as u64),
@@ -644,8 +641,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     for (field_name, value) in &mutation.create_input[0] {
                         create_obj.insert(field_name.clone(), value.clone());
                     }
-                    mutation_attrs
-                        .insert("create".to_string(), JsonValue::Object(create_obj));
+                    mutation_attrs.insert("create".to_string(), JsonValue::Object(create_obj));
                 }
 
                 // filter: filter expression used to find existing documents
@@ -654,8 +650,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     if conditions.is_empty() {
                         mutation_attrs.insert("filter".to_string(), JsonValue::Null);
                     } else {
-                        mutation_attrs
-                            .insert("filter".to_string(), serde_json::json!(conditions));
+                        mutation_attrs.insert("filter".to_string(), serde_json::json!(conditions));
                     }
                 } else {
                     mutation_attrs.insert("filter".to_string(), JsonValue::Null);
@@ -667,8 +662,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     for (field_name, value) in &mutation.update_input {
                         update_obj.insert(field_name.clone(), value.clone());
                     }
-                    mutation_attrs
-                        .insert("update".to_string(), JsonValue::Object(update_obj));
+                    mutation_attrs.insert("update".to_string(), JsonValue::Object(update_obj));
                 }
             }
         }
@@ -988,20 +982,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let doc_count = plan_docs.len();
 
             // Build ACP filter config if collection has policy and ACP is configured
-            let acp_filter = if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
-                Some(plan::AcpFilter {
-                    acp: acp.clone(),
-                    identity: Identity::from(caller_identity),
-                    policy_id: policy.id.clone(),
-                    resource_name: policy.resource_name.clone(),
-                })
-            } else {
-                None
-            };
+            let acp_filter =
+                if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+                    Some(plan::AcpFilter {
+                        acp: acp.clone(),
+                        identity: Identity::from(caller_identity),
+                        policy_id: policy.id.clone(),
+                        resource_name: policy.resource_name.clone(),
+                    })
+                } else {
+                    None
+                };
 
             // Build the plan (ACP filter is inserted inside, after Select but before aggregates)
-            let mut plan =
-                plan::build_plan(select, plan_docs.clone(), mapping.clone(), &collection, acp_filter)?;
+            let mut plan = plan::build_plan(
+                select,
+                plan_docs.clone(),
+                mapping.clone(),
+                &collection,
+                acp_filter,
+            )?;
 
             // Execute the plan and count iterations
             plan.init().await?;
@@ -1064,10 +1064,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     );
                     // fieldFetches = number of fields per doc * number of docs fetched
                     let field_fetches = (field_count * doc_fetches) as u64;
-                    scan_obj.insert(
-                        "fieldFetches".to_string(),
-                        serde_json::json!(field_fetches),
-                    );
+                    scan_obj.insert("fieldFetches".to_string(), serde_json::json!(field_fetches));
 
                     // indexFetches is set by IndexScanNode::explain_inner() with
                     // the actual index key lookup count. For regular scans without an
@@ -1511,15 +1508,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 .entry(field_name.to_string())
                                 .and_modify(|v| {
                                     if let JsonValue::Object(ref mut ops) = v {
-                                        ops.insert(
-                                            "_neq".to_string(),
-                                            serde_json::Value::Null,
-                                        );
+                                        ops.insert("_neq".to_string(), serde_json::Value::Null);
                                     }
                                 })
-                                .or_insert(
-                                    serde_json::json!({"_neq": serde_json::Value::Null}),
-                                );
+                                .or_insert(serde_json::json!({"_neq": serde_json::Value::Null}));
                             JsonValue::Object(merged)
                         } else {
                             serde_json::json!({field_name: {"_neq": serde_json::Value::Null}})
@@ -1933,9 +1925,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Validate collection has encrypted indexes (Go-compatible error)
         if collection.encrypted_indexes.is_empty() {
-            return Err(QueryError::internal(
-                "collection has no encrypted indexes",
-            ));
+            return Err(QueryError::internal("collection has no encrypted indexes"));
         }
 
         // Extract filtered field names and validate they have encrypted indexes
@@ -1963,11 +1953,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let json_map = doc
                     .to_map()
                     .map_err(|e| QueryError::internal(e.to_string()))?;
-                let json_obj = JsonValue::Object(
-                    json_map
-                        .into_iter()
-                        .collect::<Map<String, JsonValue>>(),
-                );
+                let json_obj =
+                    JsonValue::Object(json_map.into_iter().collect::<Map<String, JsonValue>>());
                 if filter.matches_json_object(&json_obj)? {
                     if let Some(id) = doc.id() {
                         ids.push(id.to_string());
@@ -2262,7 +2249,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                                     // For scalar inline arrays, order: ASC/DESC has no field path
                                                     // (fields is either empty or contains a single empty string)
                                                     if fields.is_empty()
-                                                        || (fields.len() == 1 && fields[0].is_empty())
+                                                        || (fields.len() == 1
+                                                            && fields[0].is_empty())
                                                     {
                                                         return Some((*item).clone());
                                                     }
@@ -2440,8 +2428,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 for relation_name in &aggregate_relation_names {
                     let selected_with_same_key = select.fields.iter().any(|f| {
                         if let Requestable::Select(s) = f {
-                            s.field.name == *relation_name
-                                && s.field.output_name() == relation_name
+                            s.field.name == *relation_name && s.field.output_name() == relation_name
                         } else {
                             false
                         }
@@ -2835,7 +2822,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         // Build ACP filter config if collection has policy and ACP is configured
-        let acp_filter = if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+        let acp_filter = if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy)
+        {
             Some(plan::AcpFilter {
                 acp: acp.clone(),
                 identity: Identity::from(identity),
@@ -2853,7 +2841,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         // Build and execute the plan (ACP filter is inserted inside, after Select but before aggregates)
-        let mut plan = plan::build_plan(select, plan_docs, mapping.clone(), collection, acp_filter)?;
+        let mut plan =
+            plan::build_plan(select, plan_docs, mapping.clone(), collection, acp_filter)?;
 
         // Execute the plan and collect results
         plan.init().await?;
@@ -3751,7 +3740,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 vec![Requestable::Field(crate::mapper::Field::new(fname.clone()))]
             } else {
                 // For count, we just need any field to count docs
-                vec![Requestable::Field(crate::mapper::Field::new("_docID".to_string()))]
+                vec![Requestable::Field(crate::mapper::Field::new(
+                    "_docID".to_string(),
+                ))]
             },
             filter: target_filter.cloned(),
             order_by: None,
@@ -4018,7 +4009,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
                         // Handle __typename specially for commits (Go returns "Commit")
                         if field_name == "__typename" {
-                            obj.insert(output_name.to_string(), JsonValue::String("Commit".to_string()));
+                            obj.insert(
+                                output_name.to_string(),
+                                JsonValue::String("Commit".to_string()),
+                            );
                         } else if let Some(value) = commit.get(field_name) {
                             let json_value = crate::json_convert::normal_value_to_json(value)
                                 .unwrap_or(JsonValue::Null);
@@ -4242,15 +4236,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                             let nf_name = &nf.name;
                                             let nf_output = nf.output_name();
                                             if let Some(nv) = json_val.get(nf_name) {
-                                                nested_obj.insert(
-                                                    nf_output.to_string(),
-                                                    nv.clone(),
-                                                );
+                                                nested_obj
+                                                    .insert(nf_output.to_string(), nv.clone());
                                             } else {
-                                                nested_obj.insert(
-                                                    nf_output.to_string(),
-                                                    JsonValue::Null,
-                                                );
+                                                nested_obj
+                                                    .insert(nf_output.to_string(), JsonValue::Null);
                                             }
                                         }
                                     }

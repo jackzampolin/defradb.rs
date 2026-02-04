@@ -492,7 +492,10 @@ mod tests {
 
     #[test]
     fn test_encode_json_string() {
-        let leaf = JsonLeafValue::new(JsonPath::new(), JsonScalarValue::String("hello".to_string()));
+        let leaf = JsonLeafValue::new(
+            JsonPath::new(),
+            JsonScalarValue::String("hello".to_string()),
+        );
 
         let encoded = encode_json_ascending(vec![], &leaf);
         assert_eq!(encoded[0], JSON_MARKER);

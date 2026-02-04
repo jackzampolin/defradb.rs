@@ -317,8 +317,7 @@ impl TypeJoinMany {
 
         // Capture per-scan totals for Go-compatible metric simulation.
         // Go re-scans ALL children per parent, so we need these totals.
-        self.total_children_in_cache =
-            self.child_cache.values().map(|v| v.len() as u64).sum();
+        self.total_children_in_cache = self.child_cache.values().map(|v| v.len() as u64).sum();
         self.total_fields_per_scan = self.child_exec_info.fields_fetched;
 
         self.child_plan.close().await?;

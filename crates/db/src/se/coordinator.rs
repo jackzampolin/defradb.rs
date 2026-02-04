@@ -209,13 +209,7 @@ mod tests {
         field_values.insert("name".to_string(), NormalValue::String("Test".to_string()));
 
         let artifacts = coordinator
-            .generate_artifacts(
-                "users_v1",
-                "bae123",
-                &encrypted_indexes,
-                &[],
-                &field_values,
-            )
+            .generate_artifacts("users_v1", "bae123", &encrypted_indexes, &[], &field_values)
             .unwrap();
 
         assert_eq!(artifacts.len(), 1);
@@ -229,9 +223,7 @@ mod tests {
 
         let queries = vec![FieldValueQuery::equality("age", NormalValue::Int(30))];
 
-        let field_queries = coordinator
-            .to_field_queries("users_v1", &queries)
-            .unwrap();
+        let field_queries = coordinator.to_field_queries("users_v1", &queries).unwrap();
 
         assert_eq!(field_queries.len(), 1);
         assert_eq!(field_queries[0].field_name, "age");

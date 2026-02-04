@@ -125,16 +125,27 @@ pub unsafe extern "C" fn exec_request(
     if let Some(ref s) = identity_str {
         if !s.is_empty() {
             if let Some(signing_config) = defra_core::signing::get_identity(s) {
-                eprintln!("[SIGN-DEBUG] Using explicit identity signing config for DID: {}", s);
+                eprintln!(
+                    "[SIGN-DEBUG] Using explicit identity signing config for DID: {}",
+                    s
+                );
                 defra_core::signing::set_signing_config(Some(signing_config));
             } else {
-                eprintln!("[SIGN-DEBUG] No signing config found for explicit DID: {}", s);
+                eprintln!(
+                    "[SIGN-DEBUG] No signing config found for explicit DID: {}",
+                    s
+                );
                 defra_core::signing::set_signing_config(None);
             }
         } else {
             // Empty string identity — fall back to node identity
-            let node_did = NODES.get(node_ptr, |state| state.node_identity_did.clone()).flatten();
-            eprintln!("[SIGN-DEBUG] Empty identity, node_identity_did={:?}", node_did);
+            let node_did = NODES
+                .get(node_ptr, |state| state.node_identity_did.clone())
+                .flatten();
+            eprintln!(
+                "[SIGN-DEBUG] Empty identity, node_identity_did={:?}",
+                node_did
+            );
             let node_signing_config = NODES
                 .get(node_ptr, |state| {
                     state
@@ -143,13 +154,21 @@ pub unsafe extern "C" fn exec_request(
                         .and_then(|did| defra_core::signing::get_identity(did))
                 })
                 .flatten();
-            eprintln!("[SIGN-DEBUG] Node signing config present: {}", node_signing_config.is_some());
+            eprintln!(
+                "[SIGN-DEBUG] Node signing config present: {}",
+                node_signing_config.is_some()
+            );
             defra_core::signing::set_signing_config(node_signing_config);
         }
     } else {
         // Null identity — fall back to node identity
-        let node_did = NODES.get(node_ptr, |state| state.node_identity_did.clone()).flatten();
-        eprintln!("[SIGN-DEBUG] Null identity, node_identity_did={:?}", node_did);
+        let node_did = NODES
+            .get(node_ptr, |state| state.node_identity_did.clone())
+            .flatten();
+        eprintln!(
+            "[SIGN-DEBUG] Null identity, node_identity_did={:?}",
+            node_did
+        );
         let node_signing_config = NODES
             .get(node_ptr, |state| {
                 state
@@ -158,7 +177,10 @@ pub unsafe extern "C" fn exec_request(
                     .and_then(|did| defra_core::signing::get_identity(did))
             })
             .flatten();
-        eprintln!("[SIGN-DEBUG] Node signing config present: {}", node_signing_config.is_some());
+        eprintln!(
+            "[SIGN-DEBUG] Node signing config present: {}",
+            node_signing_config.is_some()
+        );
         defra_core::signing::set_signing_config(node_signing_config);
     }
 
@@ -169,7 +191,9 @@ pub unsafe extern "C" fn exec_request(
     // Go only generates the encrypted_<Collection> GraphQL field when P2P is enabled,
     // so we need to return a schema validation error if P2P is disabled
     if query_str.contains("encrypted_") {
-        let has_p2p = NODES.get(node_ptr, |state| state.p2p.is_some()).unwrap_or(false);
+        let has_p2p = NODES
+            .get(node_ptr, |state| state.p2p.is_some())
+            .unwrap_or(false);
         if !has_p2p {
             // Extract the collection name from the query to generate Go-compatible error
             // e.g., "encrypted_User" -> "Cannot query field \"encrypted_User\" on type \"Query\"."

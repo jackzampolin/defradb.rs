@@ -128,9 +128,7 @@ impl SelectNode {
         let mut current = join_content.clone();
 
         loop {
-            if let Some(current_root) =
-                Self::get_join_root(&current).and_then(|r| r.as_object())
-            {
+            if let Some(current_root) = Self::get_join_root(&current).and_then(|r| r.as_object()) {
                 if let Some(inner_join) = current_root.get("typeIndexJoin") {
                     joins_data.push(current.clone());
                     current = inner_join.as_object()?.clone();
@@ -189,10 +187,7 @@ impl SelectNode {
         let mut current = join_content.clone();
 
         loop {
-            if let Some(inner_join) = current
-                .get("typeIndexJoin")
-                .and_then(|v| v.as_object())
-            {
+            if let Some(inner_join) = current.get("typeIndexJoin").and_then(|v| v.as_object()) {
                 joins_data.push(current.clone());
                 current = inner_join.clone();
                 continue;

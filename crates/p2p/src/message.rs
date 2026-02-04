@@ -926,7 +926,11 @@ pub struct SEFieldQuery {
 
 impl SEFieldQuery {
     /// Create a new SE field query.
-    pub fn new(field_name: impl Into<String>, index_id: impl Into<String>, search_tag: Vec<u8>) -> Self {
+    pub fn new(
+        field_name: impl Into<String>,
+        index_id: impl Into<String>,
+        search_tag: Vec<u8>,
+    ) -> Self {
         Self {
             field_name: field_name.into(),
             index_id: index_id.into(),
@@ -1147,7 +1151,11 @@ pub struct SEArtifact {
 
 impl SEArtifact {
     /// Create a new SE artifact.
-    pub fn new(doc_id: impl Into<String>, index_id: impl Into<String>, search_tag: Vec<u8>) -> Self {
+    pub fn new(
+        doc_id: impl Into<String>,
+        index_id: impl Into<String>,
+        search_tag: Vec<u8>,
+    ) -> Self {
         Self {
             doc_id: doc_id.into(),
             index_id: index_id.into(),

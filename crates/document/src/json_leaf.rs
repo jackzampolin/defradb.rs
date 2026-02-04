@@ -133,7 +133,9 @@ mod tests {
 
     #[test]
     fn test_json_leaf_from_json() {
-        let path = JsonPath::new().append_property("custom").append_property("height");
+        let path = JsonPath::new()
+            .append_property("custom")
+            .append_property("height");
         let value = json!(168);
 
         let leaf = JsonLeafValue::from_json(path.clone(), &value);

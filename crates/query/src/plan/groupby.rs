@@ -1113,18 +1113,9 @@ impl PlanNode for GroupByNode {
             "childSelections".to_string(),
             serde_json::json!(self.child_selects.len() as u64),
         );
-        obj.insert(
-            "hiddenBeforeOffset".to_string(),
-            serde_json::json!(0u64),
-        );
-        obj.insert(
-            "hiddenAfterLimit".to_string(),
-            serde_json::json!(0u64),
-        );
-        obj.insert(
-            "hiddenChildSelections".to_string(),
-            serde_json::json!(0u64),
-        );
+        obj.insert("hiddenBeforeOffset".to_string(), serde_json::json!(0u64));
+        obj.insert("hiddenAfterLimit".to_string(), serde_json::json!(0u64));
+        obj.insert("hiddenChildSelections".to_string(), serde_json::json!(0u64));
 
         // Recursively explain child node with execution info
         let child_explain = self.source.explain_execute();

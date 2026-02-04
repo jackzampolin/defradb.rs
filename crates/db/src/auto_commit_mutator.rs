@@ -103,7 +103,8 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     // If this is a unique constraint violation, return the core message without wrapping
                     if msg.contains("can not index a doc's field(s) that violates unique index") {
                         query::error::QueryError::execution(
-                            "can not index a doc's field(s) that violates unique index.".to_string(),
+                            "can not index a doc's field(s) that violates unique index."
+                                .to_string(),
                         )
                     } else {
                         query::error::QueryError::execution(format!("create error: {}", e))
@@ -137,7 +138,10 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     let enc_config = get_encryption_config();
                     // Get signing config from thread-local (set by FFI exec_request)
                     let sign_config = get_signing_config();
-                    eprintln!("[SIGN-DEBUG] auto_commit_mutator::create sign_config.is_some()={}", sign_config.is_some());
+                    eprintln!(
+                        "[SIGN-DEBUG] auto_commit_mutator::create sign_config.is_some()={}",
+                        sign_config.is_some()
+                    );
 
                     // For create operations, all fields are new - pass None for modified_fields
                     match write_document_blocks(
@@ -305,9 +309,11 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     other => {
                         let msg = other.to_string();
                         // If this is a unique constraint violation, return the core message without wrapping
-                        if msg.contains("can not index a doc's field(s) that violates unique index") {
+                        if msg.contains("can not index a doc's field(s) that violates unique index")
+                        {
                             query::error::QueryError::execution(
-                                "can not index a doc's field(s) that violates unique index.".to_string(),
+                                "can not index a doc's field(s) that violates unique index."
+                                    .to_string(),
                             )
                         } else {
                             query::error::QueryError::execution(format!("update error: {}", other))

@@ -513,7 +513,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ///
     /// This is used for filter-based mutations where we need to first
     /// find matching documents, then perform the mutation on them.
-    pub(crate) async fn resolve_filter_to_doc_ids(&self, mutation: &Mutation) -> Result<Option<Vec<String>>> {
+    pub(crate) async fn resolve_filter_to_doc_ids(
+        &self,
+        mutation: &Mutation,
+    ) -> Result<Option<Vec<String>>> {
         // Only resolve if there's a filter but no explicit doc_ids
         let filter = match (&mutation.filter, &mutation.doc_ids) {
             (Some(filter), None) => filter,

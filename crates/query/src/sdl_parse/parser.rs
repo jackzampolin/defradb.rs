@@ -46,7 +46,11 @@ fn preprocess_empty_types(sdl: &str) -> String {
 ///
 /// If the base name already exists, appends `_2`, `_3`, etc. to avoid collisions.
 /// This matches Go's `generateIndexName()` in collection_index.go.
-fn generate_index_name(collection_name: &str, first_field: &str, existing_names: &[String]) -> String {
+fn generate_index_name(
+    collection_name: &str,
+    first_field: &str,
+    existing_names: &[String],
+) -> String {
     let base = format!("{}_{}_ASC", collection_name, first_field);
     if !existing_names.contains(&base) {
         return base;
@@ -451,7 +455,8 @@ impl<'a> SdlParser<'a> {
                 "relation" => result.relation_name = get_directive_string(directive, "name"),
                 "default" => {
                     let arg_name = directive.arguments.first().map(|(n, _)| n.clone());
-                    result.default_value = Some(self.parse_default_directive(directive, field_name)?);
+                    result.default_value =
+                        Some(self.parse_default_directive(directive, field_name)?);
                     result.default_arg_name = arg_name;
                 }
                 "constraints" => {
@@ -1670,8 +1675,7 @@ impl<'a> SdlParser<'a> {
                             .get(&parsed_field.field_type.base_type)
                             .map(|target_def| {
                                 target_def.fields.iter().any(|f| {
-                                    f.field_type.base_type == type_def.name
-                                        && !f.field_type.is_list
+                                    f.field_type.base_type == type_def.name && !f.field_type.is_list
                                 })
                             })
                             .unwrap_or(false);
@@ -1717,7 +1721,9 @@ impl<'a> SdlParser<'a> {
                 // For relation fields (non-array), Go DefraDB stores indexes on the FK field
                 // (_fieldID) rather than the relation field name.
                 let is_relation_field = !parsed_field.field_type.is_list
-                    && self.type_defs.contains_key(&parsed_field.field_type.base_type);
+                    && self
+                        .type_defs
+                        .contains_key(&parsed_field.field_type.base_type);
 
                 let primary_field_name = if is_relation_field {
                     // Use FK field name for relation fields (e.g., "address" -> "_addressID")
@@ -1727,48 +1733,48 @@ impl<'a> SdlParser<'a> {
                 };
                 let primary_descending = matches!(idx_config.direction, IndexDirection::Desc);
 
-                let index_fields: Vec<IndexedFieldDescription> =
-                    if idx_config.includes.iter().any(|(name, _)| {
-                        name == &parsed_field.name || name == &primary_field_name
-                    }) {
-                        // includes explicitly contains the primary field - use includes order
-                        // Transform relation field names to FK field names
-                        idx_config
-                            .includes
-                            .iter()
-                            .map(|(name, descending)| {
-                                let final_name =
-                                    if *name == parsed_field.name && is_relation_field {
-                                        format!("_{}ID", parsed_field.name)
-                                    } else {
-                                        name.clone()
-                                    };
-                                IndexedFieldDescription {
-                                    name: final_name,
-                                    descending: *descending,
-                                }
-                            })
-                            .collect()
-                    } else if idx_config.includes.is_empty() {
-                        // No includes - just the primary field
-                        vec![IndexedFieldDescription {
-                            name: primary_field_name.clone(),
-                            descending: primary_descending,
-                        }]
-                    } else {
-                        // includes doesn't contain primary field - prepend it
-                        let mut fields = vec![IndexedFieldDescription {
-                            name: primary_field_name.clone(),
-                            descending: primary_descending,
-                        }];
-                        for (name, descending) in &idx_config.includes {
-                            fields.push(IndexedFieldDescription {
-                                name: name.clone(),
+                let index_fields: Vec<IndexedFieldDescription> = if idx_config
+                    .includes
+                    .iter()
+                    .any(|(name, _)| name == &parsed_field.name || name == &primary_field_name)
+                {
+                    // includes explicitly contains the primary field - use includes order
+                    // Transform relation field names to FK field names
+                    idx_config
+                        .includes
+                        .iter()
+                        .map(|(name, descending)| {
+                            let final_name = if *name == parsed_field.name && is_relation_field {
+                                format!("_{}ID", parsed_field.name)
+                            } else {
+                                name.clone()
+                            };
+                            IndexedFieldDescription {
+                                name: final_name,
                                 descending: *descending,
-                            });
-                        }
-                        fields
-                    };
+                            }
+                        })
+                        .collect()
+                } else if idx_config.includes.is_empty() {
+                    // No includes - just the primary field
+                    vec![IndexedFieldDescription {
+                        name: primary_field_name.clone(),
+                        descending: primary_descending,
+                    }]
+                } else {
+                    // includes doesn't contain primary field - prepend it
+                    let mut fields = vec![IndexedFieldDescription {
+                        name: primary_field_name.clone(),
+                        descending: primary_descending,
+                    }];
+                    for (name, descending) in &idx_config.includes {
+                        fields.push(IndexedFieldDescription {
+                            name: name.clone(),
+                            descending: *descending,
+                        });
+                    }
+                    fields
+                };
 
                 // Generate index name based on first field
                 let first_field_name = index_fields
@@ -2030,10 +2036,8 @@ fn generate_collection_id(
     // Include fields with non-empty FieldID in the CID.
     // Go's Delta() excludes: secondary relations, self-ref with empty relative_id.
     // All excluded fields have empty FieldIDs, so filtering on !id.is_empty() suffices.
-    let mut sorted_fields: Vec<&FieldDescription> = fields
-        .iter()
-        .filter(|f| !f.id.is_empty())
-        .collect();
+    let mut sorted_fields: Vec<&FieldDescription> =
+        fields.iter().filter(|f| !f.id.is_empty()).collect();
     sorted_fields.sort_by(|a, b| {
         // _docID always comes first
         if a.name == "_docID" {
@@ -2049,9 +2053,7 @@ fn generate_collection_id(
     // All fields use the same priority=1, not incrementing priorities
     let field_cids: Vec<Cid> = sorted_fields
         .iter()
-        .filter_map(|f| {
-            schema::generate_field_cid_with_priority(f, 1).ok()
-        })
+        .filter_map(|f| schema::generate_field_cid_with_priority(f, 1).ok())
         .collect();
 
     // Simulate Go's headstore prefix collision:
@@ -2870,7 +2872,10 @@ mod tests {
         assert_eq!(idx.fields.len(), 2);
         // name inherits DESC, age overrides to ASC
         assert!(idx.fields[0].descending, "name should be descending");
-        assert!(!idx.fields[1].descending, "age should be ascending (override)");
+        assert!(
+            !idx.fields[1].descending,
+            "age should be ascending (override)"
+        );
     }
 
     // =========================================================================

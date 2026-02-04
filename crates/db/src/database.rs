@@ -506,20 +506,16 @@ impl<S: Store> DB<S> {
             // Write CollectionVersionKey entries so get_collection_version_ids() can
             // find these versions via prefix scan on /collection/version/{collection_id}/
             if !source_col.collection_id.is_empty() {
-                let src_version_key = CollectionVersionKey::new(
-                    &source_col.collection_id,
-                    &source_version_id,
-                );
+                let src_version_key =
+                    CollectionVersionKey::new(&source_col.collection_id, &source_version_id);
                 systemstore
                     .set(&src_version_key.bytes(), b"1")
                     .await
                     .map_err(Error::Storage)?;
             }
             if !dst_col.collection_id.is_empty() {
-                let dst_version_key = CollectionVersionKey::new(
-                    &dst_col.collection_id,
-                    &dest_version_id,
-                );
+                let dst_version_key =
+                    CollectionVersionKey::new(&dst_col.collection_id, &dest_version_id);
                 systemstore
                     .set(&dst_version_key.bytes(), b"1")
                     .await
@@ -548,8 +544,7 @@ impl<S: Store> DB<S> {
             if let Err(e) = self
                 .maybe_reindex_after_migration(&collection_name, &dest_version_id)
                 .await
-            {
-            }
+            {}
         } else {
         }
 
@@ -573,7 +568,6 @@ impl<S: Store> DB<S> {
             }
         };
 
-
         // Only reindex if destination is the current active version
         if collection.version_id() != dest_version_id {
             return Ok(());
@@ -583,7 +577,6 @@ impl<S: Store> DB<S> {
         if collection.get_indexes().is_empty() {
             return Ok(());
         }
-
 
         let collection_id = collection.collection_id().to_string();
         let target_version_id = collection.version_id().to_string();
@@ -681,7 +674,11 @@ impl<S: Store> DB<S> {
                             for (field_name, value) in migrated_lens_doc {
                                 if field_name != DOC_ID_FIELD {
                                     // Convert JSON value to native type based on schema field kind
-                                    let native_value = json_to_native_value(&value, &field_name, collection.schema());
+                                    let native_value = json_to_native_value(
+                                        &value,
+                                        &field_name,
+                                        collection.schema(),
+                                    );
                                     migrated.set(&field_name, native_value);
                                 }
                             }
@@ -711,7 +708,12 @@ impl<S: Store> DB<S> {
 
                 // Bulk re-index with migrated documents
                 index_manager
-                    .bulk_index(&datastore, &index_desc.name, &migrated_docs, collection.schema())
+                    .bulk_index(
+                        &datastore,
+                        &index_desc.name,
+                        &migrated_docs,
+                        collection.schema(),
+                    )
                     .await?;
             }
 
@@ -995,8 +997,7 @@ impl<S: Store> DB<S> {
         // Go assigns them via IndexManager.next_index_id() which uses a per-collection
         // sequence key. We replicate that here so IDs match Go exactly.
         if !schema.indexes.is_empty() {
-            let col_short_id =
-                crate::collection::collection_short_id(collection_id.as_str());
+            let col_short_id = crate::collection::collection_short_id(collection_id.as_str());
             let seq_key = IndexIDSequenceKey::new(format!("{}", col_short_id));
             let key_bytes = seq_key.bytes();
             let mut current: u32 =
@@ -1049,11 +1050,8 @@ impl<S: Store> DB<S> {
         // This was verified by comparing actual Go AddSchema output with manual CID generation.
         // Only fields with non-empty FieldID are stored (secondary relations are excluded).
         // Fields must be sorted: _docID first, then alphabetically by name (matches Go).
-        let mut sorted_fields: Vec<&schema::FieldDescription> = schema
-            .fields
-            .iter()
-            .filter(|f| !f.id.is_empty())
-            .collect();
+        let mut sorted_fields: Vec<&schema::FieldDescription> =
+            schema.fields.iter().filter(|f| !f.id.is_empty()).collect();
         sorted_fields.sort_by(|a, b| {
             if a.name == "_docID" {
                 std::cmp::Ordering::Less
@@ -2067,8 +2065,7 @@ impl<S: Store> DB<S> {
                         // Go compatibility: For top-level array fields that don't exist (like
                         // EncryptedIndexes which isn't exposed in Go's JSON), produce Go-compatible
                         // error messages.
-                        let is_top_level_path =
-                            path.starts_with('/') && !path[1..].contains('/');
+                        let is_top_level_path = path.starts_with('/') && !path[1..].contains('/');
                         if is_top_level_path {
                             let key = &path[1..];
                             let key_exists = schema_json
@@ -2362,7 +2359,9 @@ impl<S: Store> DB<S> {
                     next_id += 1;
                     id
                 })
-                .map_err(|e| Error::InvalidPatch(format!("failed to add relation id fields: {}", e)))?;
+                .map_err(|e| {
+                    Error::InvalidPatch(format!("failed to add relation id fields: {}", e))
+                })?;
         }
 
         // Handle in-place updates (deactivation, IsActive-only, or PreviousVersion/Transform-only).
@@ -2567,7 +2566,7 @@ impl<S: Store> DB<S> {
                         None
                     }
                 }
-                None => None
+                None => None,
             }
         };
 

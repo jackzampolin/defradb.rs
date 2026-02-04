@@ -87,7 +87,13 @@ async fn test_create_duplicate_index_fails() {
     }];
 
     manager
-        .create_index(&datastore, "users", "idx_name".to_string(), fields.clone(), false)
+        .create_index(
+            &datastore,
+            "users",
+            "idx_name".to_string(),
+            fields.clone(),
+            false,
+        )
         .await
         .unwrap();
 

@@ -208,23 +208,26 @@ fn build_collection_type(
 ) -> Object {
     let mut obj = Object::new(&collection.name);
     let coll_name = &collection.name;
+    let is_view = collection.query.is_some();
 
     // We'll collect fields as Field objects (not just name+type) so we can add args
     let mut named_fields: Vec<(String, Field)> = Vec::new();
 
-    // Simple scalar virtual fields
-    named_fields.push((
-        "_docID".to_string(),
-        Field::new("_docID", TypeRef::named("ID"), |_| {
-            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-        }),
-    ));
-    named_fields.push((
-        "_deleted".to_string(),
-        Field::new("_deleted", TypeRef::named("Boolean"), |_| {
-            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-        }),
-    ));
+    // Views don't expose _docID, _deleted, or _version virtual fields
+    if !is_view {
+        named_fields.push((
+            "_docID".to_string(),
+            Field::new("_docID", TypeRef::named("ID"), |_| {
+                FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+            }),
+        ));
+        named_fields.push((
+            "_deleted".to_string(),
+            Field::new("_deleted", TypeRef::named("Boolean"), |_| {
+                FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+            }),
+        ));
+    }
 
     // _group field with args sorted alphabetically
     let group_filter = format!("{}FilterArg", coll_name);
@@ -246,17 +249,19 @@ fn build_collection_type(
         .argument(InputValue::new("order", TypeRef::named_list(&group_order))),
     ));
 
-    // _version field
-    named_fields.push((
-        "_version".to_string(),
-        Field::new("_version", TypeRef::named_list("Commit"), |_| {
-            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-        }),
-    ));
+    // _version field (not for views)
+    if !is_view {
+        named_fields.push((
+            "_version".to_string(),
+            Field::new("_version", TypeRef::named_list("Commit"), |_| {
+                FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+            }),
+        ));
+    }
 
     // Build aggregate fields with args
 
-    // _count: takes args for _group, _version, and each inline array/relation field
+    // _count: takes args for _group, _version (non-views), and each inline array/relation field
     // Collect args and sort alphabetically
     {
         let mut count_args: Vec<(String, InputValue)> = Vec::new();
@@ -267,13 +272,15 @@ fn build_collection_type(
                 TypeRef::named(format!("{}__CountSelector", coll_name)),
             ),
         ));
-        count_args.push((
-            "_version".to_string(),
-            InputValue::new(
-                "_version",
-                TypeRef::named(format!("{}___version__CountSelector", coll_name)),
-            ),
-        ));
+        if !is_view {
+            count_args.push((
+                "_version".to_string(),
+                InputValue::new(
+                    "_version",
+                    TypeRef::named(format!("{}___version__CountSelector", coll_name)),
+                ),
+            ));
+        }
         for field in &collection.fields {
             match &field.kind {
                 FieldKind::ScalarArray(_) | FieldKind::Relation { is_array: true, .. } => {
