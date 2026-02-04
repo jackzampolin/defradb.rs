@@ -2015,6 +2015,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let plan_result = planner.plan_with_index_info(select)?;
         let mut plan = plan_result.plan;
         let ordering_only_fields = plan_result.ordering_only_fields;
+        let aggregate_internal_keys = plan_result.aggregate_internal_keys;
 
         // Get the mapping from the plan
         let mapping = plan.document_map().clone();
@@ -2048,7 +2049,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Post-process relation-based aggregates
         // For aggregates like _count(books: {}), compute the value from joined data
-        let results = self.compute_relation_aggregates(results, select)?;
+        let results =
+            self.compute_relation_aggregates(results, select, &aggregate_internal_keys)?;
 
         // Strip fields from relation data that were added for filter evaluation
         // but not explicitly requested in the selection set.
@@ -2072,6 +2074,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         &self,
         mut results: Vec<JsonValue>,
         select: &Select,
+        aggregate_internal_keys: &std::collections::HashMap<String, (String, String)>,
     ) -> Result<Vec<JsonValue>> {
         use crate::mapper::AggregateType;
 
@@ -2195,9 +2198,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         let relation_name = &target.host_name;
                         let field_name = target.field_name.as_deref();
 
-                        // Try the direct relation name first, then fall back to alias
-                        let relation_data = obj
-                            .get(relation_name.as_str())
+                        // Try internal key first (when selection and aggregate use same relation),
+                        // then direct relation name, then fall back to alias
+                        let relation_data = aggregate_internal_keys
+                            .get(output_name)
+                            .and_then(|(_, internal_key)| obj.get(internal_key.as_str()))
+                            .or_else(|| obj.get(relation_name.as_str()))
                             .or_else(|| {
                                 relation_alias_map
                                     .get(relation_name.as_str())
@@ -2591,6 +2597,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     }
                     std::cmp::Ordering::Equal
                 });
+            }
+        }
+
+        // Clean up internal aggregate keys from output (keys like "__agg_published__count")
+        // These are only used for looking up relation data when there's a collision with
+        // a relation selection.
+        if !aggregate_internal_keys.is_empty() {
+            for result in &mut results {
+                if let JsonValue::Object(ref mut obj) = result {
+                    obj.retain(|k, _| !k.starts_with("__agg_"));
+                }
             }
         }
 
