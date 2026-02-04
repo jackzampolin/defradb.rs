@@ -21,6 +21,10 @@ pub struct IndexScanParams {
     pub index_name: String,
     /// Scan type and parameters
     pub scan_type: IndexScanType,
+    /// Optional limit for early termination (for ORDER BY + LIMIT optimization)
+    pub limit: Option<u64>,
+    /// Offset to skip before collecting results (for ORDER BY + LIMIT + OFFSET optimization)
+    pub offset: u64,
 }
 
 /// Type of index scan to perform.
@@ -425,6 +429,12 @@ pub fn can_be_ordered_by_index(order_by: &OrderBy, index: &IndexDescription) -> 
 /// - If ordering matches index direction: forward scan
 /// - If ordering is opposite of index direction: reverse scan
 ///
+/// # Limit/Offset Support
+///
+/// If `limit` and `offset` are provided and the index provides ordering,
+/// these are passed through to enable early termination during index scan.
+/// This optimization allows ORDER BY + LIMIT queries to stop scanning early.
+///
 /// # Array Field Support
 ///
 /// For array fields with `_any`, `_all` operators, the scan type is determined
@@ -436,6 +446,8 @@ pub fn filter_to_index_scan(
     index: &IndexDescription,
     order_by: Option<&OrderBy>,
     collection_fields: &[schema::FieldDescription],
+    limit: Option<u64>,
+    offset: u64,
 ) -> Option<IndexScanParams> {
     if !can_use_index(filter, index) {
         return None;
@@ -696,9 +708,17 @@ pub fn filter_to_index_scan(
         return None;
     };
 
+    // Only pass limit/offset if the index provides ordering
+    // (otherwise the limit needs to be applied after sorting)
+    let index_provides_ordering = order_by
+        .map(|o| can_be_ordered_by_index(o, index).0)
+        .unwrap_or(false);
+
     Some(IndexScanParams {
         index_name: index.name.clone(),
         scan_type,
+        limit: if index_provides_ordering { limit } else { None },
+        offset: if index_provides_ordering { offset } else { 0 },
     })
 }
 
@@ -890,7 +910,7 @@ mod tests {
         )]));
         let index = single_field_index("name");
 
-        let params = filter_to_index_scan(&filter, &index, None, &[]).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None, &[], None, 0).unwrap();
         assert_eq!(params.index_name, "name_idx");
 
         match params.scan_type {
@@ -910,7 +930,7 @@ mod tests {
         )]));
         let index = single_field_index("status");
 
-        let params = filter_to_index_scan(&filter, &index, None, &[]).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None, &[], None, 0).unwrap();
 
         match params.scan_type {
             IndexScanType::InScan { values } => {
@@ -928,7 +948,7 @@ mod tests {
         )]));
         let index = single_field_index("age");
 
-        let params = filter_to_index_scan(&filter, &index, None, &[]).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None, &[], None, 0).unwrap();
 
         match params.scan_type {
             IndexScanType::RangeScan {
@@ -1156,7 +1176,7 @@ mod tests {
         )]));
         let index = single_field_index("numbers");
 
-        let params = filter_to_index_scan(&filter, &index, None, &[]).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None, &[], None, 0).unwrap();
         assert_eq!(params.index_name, "numbers_idx");
 
         match params.scan_type {
@@ -1253,7 +1273,7 @@ mod tests {
         )]));
         let index = single_field_index("custom");
 
-        let params = filter_to_index_scan(&filter, &index, None, &[]).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None, &[], None, 0).unwrap();
         assert_eq!(params.index_name, "custom_idx");
 
         match params.scan_type {
@@ -1285,7 +1305,7 @@ mod tests {
         )]));
         let index = single_field_index("custom");
 
-        let params = filter_to_index_scan(&filter, &index, None, &[]).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None, &[], None, 0).unwrap();
         assert_eq!(params.index_name, "custom_idx");
 
         match params.scan_type {
@@ -1332,7 +1352,7 @@ mod tests {
         )]));
         let index = single_field_index("custom");
 
-        let params = filter_to_index_scan(&filter, &index, None, &[]).unwrap();
+        let params = filter_to_index_scan(&filter, &index, None, &[], None, 0).unwrap();
         assert_eq!(params.index_name, "custom_idx");
 
         match params.scan_type {

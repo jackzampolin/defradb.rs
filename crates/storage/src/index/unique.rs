@@ -216,7 +216,7 @@ impl CollectionIndex for UniqueIndex {
                 .map_err(|e| crate::corekv::Error::Other(e.to_string()))?;
             if existing_doc_id != doc_id {
                 return Err(crate::corekv::Error::Other(
-                    "can not index a doc's field(s) that violates unique index".to_string(),
+                    "can not index a doc's field(s) that violates unique index.".to_string(),
                 ));
             }
         }
@@ -245,7 +245,7 @@ impl CollectionIndex for UniqueIndex {
                     .map_err(|e| crate::corekv::Error::Other(e.to_string()))?;
                 if existing_doc_id != doc_id {
                     return Err(crate::corekv::Error::Other(
-                        "can not index a doc's field(s) that violates unique index".to_string(),
+                        "can not index a doc's field(s) that violates unique index.".to_string(),
                     ));
                 }
             }

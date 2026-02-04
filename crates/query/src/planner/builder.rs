@@ -1578,12 +1578,21 @@ impl Planner {
             return None;
         }
 
+        // Extract limit/offset from select for passing to index scan
+        let limit = select.limit.as_ref().and_then(|l| l.limit);
+        let offset = select.limit.as_ref().map(|l| l.offset).unwrap_or(0);
+
         // Try filter-based index selection first
         if let Some(filter) = select.filter.as_ref() {
             if let Some(best_index) = select_best_index(filter, &collection.indexes) {
-                if let Some(params) =
-                    filter_to_index_scan(filter, best_index, select.order_by.as_ref(), &collection.fields)
-                {
+                if let Some(params) = filter_to_index_scan(
+                    filter,
+                    best_index,
+                    select.order_by.as_ref(),
+                    &collection.fields,
+                    limit,
+                    offset,
+                ) {
                     // Check if this index also provides ordering
                     let provides_ordering = select
                         .order_by
@@ -1606,6 +1615,9 @@ impl Planner {
                             prefix_values: vec![],
                             reverse: needs_reverse,
                         },
+                        // Pass limit/offset for early termination (index provides ordering)
+                        limit,
+                        offset,
                     };
                     return Some((params, true));
                 }
@@ -1634,7 +1646,8 @@ impl Planner {
             _ => return None,
         }
         let best_index = select_best_index(filter, &collection.indexes)?;
-        filter_to_index_scan(filter, best_index, None, &collection.fields)
+        // Child scans don't use limit optimization (limit is handled at parent level)
+        filter_to_index_scan(filter, best_index, None, &collection.fields, None, 0)
     }
 
     /// Apply join nodes for nested selects (relation fields)
