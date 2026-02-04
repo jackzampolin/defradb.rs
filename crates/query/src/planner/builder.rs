@@ -13,7 +13,7 @@ use tracing::{debug, warn};
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
-use crate::mapper::{AggregateType, Filter, OrderBy, Requestable, Select};
+use crate::mapper::{AggregateType, Filter, OrderBy, OrderCondition, Requestable, Select};
 use crate::plan::groupby::ChildSelectMeta;
 use crate::plan::{
     AllDocsNode, AverageNode, AvgSourceMeta, CountNode, CountSourceMeta, GroupAlias, GroupByNode,
@@ -2103,9 +2103,55 @@ impl Planner {
             // filters (e.g., User(filter: {devices: {model: ...}})) need the
             // full child set because TypeJoin uses check_relation_filter to gate
             // the *parent*, but all children of matching parents must appear.
+            //
+            // For ordering, extract parent's order_by conditions that reference this relation
+            // and convert them to child-level order_by. e.g., parent's `{device: {model: ASC}}`
+            // becomes child's `{model: ASC}` for index selection on the Device collection.
+            let parent_order_for_child: Option<OrderBy> = select.order_by.as_ref().and_then(|o| {
+                let child_conditions: Vec<OrderCondition> = o
+                    .conditions
+                    .iter()
+                    .filter_map(|c| {
+                        if c.fields.len() >= 2 && c.fields[0] == *relation_field_name {
+                            // Convert nested path to child-relative path
+                            Some(OrderCondition {
+                                fields: c.fields[1..].to_vec(),
+                                direction: c.direction.clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if child_conditions.is_empty() {
+                    None
+                } else {
+                    Some(OrderBy {
+                        conditions: child_conditions,
+                    })
+                }
+            });
+
+            // Combine child's own order_by with parent's order for this relation
+            let combined_child_order = match (&nested_select.order_by, &parent_order_for_child) {
+                (Some(child), Some(parent)) => {
+                    // Child's explicit order takes precedence, but append parent's for index selection
+                    let mut combined = child.conditions.clone();
+                    for pc in &parent.conditions {
+                        if !combined.iter().any(|c| c.fields == pc.fields) {
+                            combined.push(pc.clone());
+                        }
+                    }
+                    Some(OrderBy { conditions: combined })
+                }
+                (Some(child), None) => Some(child.clone()),
+                (None, Some(parent)) => Some(parent.clone()),
+                (None, None) => None,
+            };
+
             let child_index_result = self.try_select_child_index(
                 nested_select.filter.as_ref(),
-                nested_select.order_by.as_ref(),
+                combined_child_order.as_ref(),
                 &target_collection,
             );
             let child_uses_index = child_index_result.is_some();
