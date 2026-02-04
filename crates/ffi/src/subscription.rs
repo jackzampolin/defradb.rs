@@ -312,26 +312,6 @@ pub extern "C" fn close_subscription(subscription_handle: usize) -> CloseSubscri
     CloseSubscriptionResult::success()
 }
 
-// ============================================================================
-// GraphQL Subscription Stubs (for compatibility with other worktrees)
-// ============================================================================
-
-/// Poll a GraphQL subscription for the next result (stub).
-///
-/// This is a stub function for compatibility with worktrees that have
-/// GraphQL subscription support. Returns an error indicating the feature
-/// is not available.
-///
-/// # Safety
-///
-/// The subscription_id must be a valid null-terminated C string or null.
-#[no_mangle]
-pub unsafe extern "C" fn poll_graphql_subscription(
-    _subscription_id: *const std::ffi::c_char,
-) -> PollSubscriptionResult {
-    PollSubscriptionResult::error("GraphQL subscriptions not implemented in this build")
-}
-
 /// Alias for close_subscription (for Go compatibility)
 /// Accepts a string subscription ID and parses it as a numeric handle.
 #[no_mangle]
