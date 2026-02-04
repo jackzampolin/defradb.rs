@@ -57,15 +57,16 @@ async fn show_current_worktree() -> Result<()> {
 
     // Print table header
     println!(
-        "{:<50} {:<8} {:>12} {:>12} {:>12} {:>6}",
+        "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
         "Package".bold(),
         "Commit".bold(),
+        "Timestamp".bold(),
         "Pass".bold(),
         "Fail".bold(),
         "Skip".bold(),
         "Total".bold()
     );
-    println!("{}", "─".repeat(102));
+    println!("{}", "─".repeat(114));
 
     // Track totals
     let mut grand_total = 0;
@@ -97,10 +98,13 @@ async fn show_current_worktree() -> Result<()> {
                 skip_str.normal()
             };
 
+            let timestamp = report.timestamp.format("%m-%d %H:%M").to_string();
+
             println!(
-                "{:<50} {:<8} {:>12} {:>12} {:>12} {:>6}",
+                "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
                 package,
                 report.commit.dimmed(),
+                timestamp.dimmed(),
                 pass_colored,
                 fail_colored,
                 skip_colored,
@@ -115,8 +119,9 @@ async fn show_current_worktree() -> Result<()> {
             packages_run += 1;
         } else {
             println!(
-                "{:<50} {:<8} {:>12} {:>12} {:>12} {:>6}",
+                "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
                 package,
+                "-".dimmed(),
                 "-".dimmed(),
                 "-".dimmed(),
                 "-".dimmed(),
@@ -127,37 +132,65 @@ async fn show_current_worktree() -> Result<()> {
     }
 
     // Print totals if we have any data
+    // For totals, only count leaf packages (packages that aren't prefixes of other packages)
+    // to avoid double counting when both parent and child packages have been run
     if packages_run > 0 {
-        println!("{}", "─".repeat(102));
+        println!("{}", "─".repeat(114));
 
-        let pass_pct = format_pct(grand_pass, grand_total);
-        let fail_pct = format_pct(grand_fail, grand_total);
-        let skip_pct = format_pct(grand_skip, grand_total);
+        // Get list of packages with reports
+        let reported_packages: Vec<&String> = latest_by_package.keys().collect();
 
-        let pass_str = format!("{:>4} {}", grand_pass, pass_pct);
-        let fail_str = format!("{:>4} {}", grand_fail, fail_pct);
-        let skip_str = format!("{:>4} {}", grand_skip, skip_pct);
+        // Calculate totals excluding packages that are prefixes of other packages
+        let mut leaf_total = 0;
+        let mut leaf_pass = 0;
+        let mut leaf_fail = 0;
+        let mut leaf_skip = 0;
+        let mut leaf_count = 0;
+
+        for (pkg, report) in &latest_by_package {
+            // Check if this package is a prefix of any other package
+            let is_prefix = reported_packages.iter().any(|other| {
+                *other != pkg && other.starts_with(&format!("{}/", pkg))
+            });
+
+            if !is_prefix {
+                leaf_total += report.summary.total;
+                leaf_pass += report.summary.passed;
+                leaf_fail += report.summary.failed;
+                leaf_skip += report.summary.skipped;
+                leaf_count += 1;
+            }
+        }
+
+        let pass_pct = format_pct(leaf_pass, leaf_total);
+        let fail_pct = format_pct(leaf_fail, leaf_total);
+        let skip_pct = format_pct(leaf_skip, leaf_total);
+
+        let pass_str = format!("{:>4} {}", leaf_pass, pass_pct);
+        let fail_str = format!("{:>4} {}", leaf_fail, fail_pct);
+        let skip_str = format!("{:>4} {}", leaf_skip, skip_pct);
 
         let pass_colored = pass_str.green().bold();
-        let fail_colored = if grand_fail > 0 {
+        let fail_colored = if leaf_fail > 0 {
             fail_str.red().bold()
         } else {
             fail_str.bold()
         };
-        let skip_colored = if grand_skip > 0 {
+        let skip_colored = if leaf_skip > 0 {
             skip_str.yellow().bold()
         } else {
             skip_str.bold()
         };
 
         println!(
-            "{:<50} {:<8} {:>12} {:>12} {:>12} {:>6}",
-            format!("TOTAL ({} packages)", packages_run).bold(),
+            "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
+            format!("TOTAL ({} leaf packages)", leaf_count).bold(),
+            "",
             "",
             pass_colored,
             fail_colored,
             skip_colored,
-            grand_total.to_string().bold()
+            leaf_total.to_string().bold()
         );
     }
 
