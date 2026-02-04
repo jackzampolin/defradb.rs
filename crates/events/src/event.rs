@@ -17,6 +17,8 @@ pub enum EventName {
     ReplicatorCompleted,
     /// GossipSub peer joined/left a topic.
     TopicPeerEvent,
+    /// SE artifact received after merge (encrypted index document).
+    SEArtifactReceived,
 }
 
 impl EventName {
@@ -38,6 +40,7 @@ impl std::fmt::Display for EventName {
             EventName::MergeComplete => write!(f, "merge-complete"),
             EventName::ReplicatorCompleted => write!(f, "replicator-completed"),
             EventName::TopicPeerEvent => write!(f, "topic-peer-event"),
+            EventName::SEArtifactReceived => write!(f, "se-artifact-received"),
         }
     }
 }
@@ -64,6 +67,13 @@ pub struct TopicPeerEventData {
     pub topic: String,
     /// "JOINED" or "LEFT".
     pub event_type: String,
+}
+
+/// SE artifact received event data.
+#[derive(Debug, Clone)]
+pub struct SEArtifactReceivedData {
+    /// Document ID the artifact is for.
+    pub doc_id: String,
 }
 
 /// Document update event data.
@@ -126,6 +136,8 @@ pub enum MessageData {
     ReplicatorCompleted,
     /// GossipSub topic peer event.
     TopicPeerEvent(TopicPeerEventData),
+    /// SE artifact received after merge.
+    SEArtifactReceived(SEArtifactReceivedData),
 }
 
 impl Message {
@@ -166,6 +178,22 @@ impl Message {
         Self {
             name: EventName::TopicPeerEvent,
             data: MessageData::TopicPeerEvent(data),
+        }
+    }
+
+    /// Create a new SEArtifactReceived message.
+    pub fn se_artifact_received(data: SEArtifactReceivedData) -> Self {
+        Self {
+            name: EventName::SEArtifactReceived,
+            data: MessageData::SEArtifactReceived(data),
+        }
+    }
+
+    /// Get the SEArtifactReceivedData if this is an SEArtifactReceived message.
+    pub fn as_se_artifact_received(&self) -> Option<&SEArtifactReceivedData> {
+        match &self.data {
+            MessageData::SEArtifactReceived(d) => Some(d),
+            _ => None,
         }
     }
 

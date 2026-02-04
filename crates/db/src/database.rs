@@ -1641,8 +1641,10 @@ impl<S: Store> DB<S> {
         // Go always serializes these as null/empty arrays, but Rust's
         // skip_serializing_if omits them. Patches targeting these paths
         // (e.g., /VectorEmbeddings/-) need the key to exist.
+        // Note: EncryptedIndexes is NOT pre-populated because Go doesn't expose
+        // it in the JSON representation - patches targeting it should fail.
         if let serde_json::Value::Object(ref mut map) = schema_json {
-            for key in &["Indexes", "EncryptedIndexes", "VectorEmbeddings"] {
+            for key in &["Indexes", "VectorEmbeddings"] {
                 map.entry(key.to_string())
                     .or_insert(serde_json::Value::Array(vec![]));
             }
@@ -1805,6 +1807,33 @@ impl<S: Store> DB<S> {
                             }
                         }
 
+                        // Go compatibility: For top-level array fields that don't exist (like
+                        // EncryptedIndexes which isn't exposed in Go's JSON), produce Go-compatible
+                        // error messages.
+                        let is_top_level_path =
+                            path.starts_with('/') && !path[1..].contains('/');
+                        if is_top_level_path {
+                            let key = &path[1..];
+                            let key_exists = schema_json
+                                .as_object()
+                                .map(|m| m.contains_key(key))
+                                .unwrap_or(false);
+                            if !key_exists {
+                                // For add with array value, Go produces unmarshal error
+                                if operation == Some("add") && value.is_array() {
+                                    return Err(Error::InvalidPatch(
+                                        "cannot unmarshal array into Go value".to_string(),
+                                    ));
+                                }
+                                // For replace on non-existent key, Go produces "doc is missing key"
+                                if operation == Some("replace") {
+                                    return Err(Error::InvalidPatch(
+                                        "doc is missing key".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+
                         Self::json_pointer_set(&mut schema_json, path, value)?;
                     }
                     (Some("remove"), Some(path)) => {
@@ -1812,6 +1841,22 @@ impl<S: Store> DB<S> {
                             // Root-level remove = deactivate collection
                             is_deactivation = true;
                         } else {
+                            // Go compatibility: For top-level keys that don't exist (like
+                            // EncryptedIndexes), produce Go-compatible error message.
+                            let is_top_level_path =
+                                path.starts_with('/') && !path[1..].contains('/');
+                            if is_top_level_path {
+                                let key = &path[1..];
+                                let key_exists = schema_json
+                                    .as_object()
+                                    .map(|m| m.contains_key(key))
+                                    .unwrap_or(false);
+                                if !key_exists {
+                                    return Err(Error::InvalidPatch(
+                                        "unable to remove nonexistent key".to_string(),
+                                    ));
+                                }
+                            }
                             Self::json_pointer_remove(&mut schema_json, path)?;
                         }
                     }
@@ -2531,16 +2576,62 @@ impl<S: Store> DB<S> {
 
     /// Handle patches targeting a collection that doesn't exist by name or version ID.
     ///
-    /// This handles two cases:
-    /// 1. Collection-level copy where the "path" targets a new collection name
+    /// This handles several cases:
+    /// 1. Schema field names (EncryptedIndexes, Indexes, etc.) - produce JSON patch errors
+    ///    because these fields don't exist in Go's JSON representation
+    /// 2. Collection-level copy where the "path" targets a new collection name
     ///    (e.g., copy from /Users to /Book) → returns "adding collections not supported"
-    /// 2. Collection-level move to a new name (no-op in Go) → finds source via "from"
+    /// 3. Collection-level move to a new name (no-op in Go) → finds source via "from"
     ///    and returns the original schema unchanged
     async fn handle_unknown_collection_patch(
         &self,
         collection_name: &str,
         patch_ops: &serde_json::Value,
     ) -> Result<CollectionVersion> {
+        // Schema field names that don't exist in Go's JSON representation
+        // When the "collection name" is actually one of these, produce Go-compatible
+        // JSON patch errors instead of "adding collections" errors.
+        const SCHEMA_FIELDS: &[&str] = &[
+            "EncryptedIndexes",
+            "VectorEmbeddings",
+            "Indexes",
+            "Fields",
+            "Policy",
+        ];
+
+        // Check if the "collection name" is actually a schema field
+        if SCHEMA_FIELDS.contains(&collection_name) {
+            if let serde_json::Value::Array(ops) = patch_ops {
+                for op in ops {
+                    let operation = op.get("op").and_then(|v| v.as_str());
+                    let value = op.get("value");
+
+                    match operation {
+                        Some("add") => {
+                            // For add with array value, Go produces unmarshal error
+                            if value.map(|v| v.is_array()).unwrap_or(false) {
+                                return Err(Error::InvalidPatch(
+                                    "cannot unmarshal array into Go value".to_string(),
+                                ));
+                            }
+                            return Err(Error::InvalidPatch(
+                                "cannot unmarshal array into Go value".to_string(),
+                            ));
+                        }
+                        Some("remove") => {
+                            return Err(Error::InvalidPatch(
+                                "unable to remove nonexistent key".to_string(),
+                            ));
+                        }
+                        Some("replace") => {
+                            return Err(Error::InvalidPatch("doc is missing key".to_string()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         // Try to extract the actual collection name from the patch value's Name field.
         // This handles cases like path "/-" where the collection name in the path is "-"
         // but the actual name is in the value object.

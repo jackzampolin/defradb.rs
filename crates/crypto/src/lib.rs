@@ -5,6 +5,7 @@
 //! - Digital signatures (ECDSA, EdDSA)
 //! - Symmetric encryption (AES-256-GCM)
 //! - Asymmetric encryption (ECIES)
+//! - Searchable encryption (HMAC-based equality tags)
 //! - DID key generation
 //! - Merkle proof generation and verification
 //!
@@ -17,6 +18,7 @@ pub mod error;
 pub mod hash;
 pub mod keys;
 pub mod merkle_proof;
+pub mod se;
 pub mod signature;
 pub mod types;
 
@@ -56,4 +58,10 @@ pub use hash::{sha256, sha256_hash, Sha256Hash};
 pub use merkle_proof::{
     extract_proof, verify_proof, verify_signed_proof, MerkleProof, ProofBlockstore, ProofNode,
     SignedMerkleProof,
+};
+
+// Re-export searchable encryption types
+pub use se::{
+    generate_equality_tag, generate_equality_tag_str, Artifact, ArtifactBatch, ArtifactType,
+    OperationType, SEARCH_TAG_SIZE,
 };
