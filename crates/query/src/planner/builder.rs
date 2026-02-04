@@ -4665,7 +4665,7 @@ mod tests {
         assert_eq!(result.index_scan.as_ref().unwrap().index_name, "name_idx");
 
         match &result.index_scan.as_ref().unwrap().scan_type {
-            IndexScanType::InScan { values } => {
+            IndexScanType::InScan { values, .. } => {
                 assert_eq!(values.len(), 2);
             }
             _ => panic!("expected InScan"),

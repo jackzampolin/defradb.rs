@@ -612,18 +612,60 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
                 })?;
                 collect_with_limit(&mut iter, limit, offset).await?
             }
-            IndexScanType::InScan { values } => {
-                // For IN operator, we need to collect results for each value
-                // Note: limit/offset doesn't apply cleanly to InScan since order is arbitrary
+            IndexScanType::InScan {
+                values,
+                suffix_values,
+            } => {
+                // For IN operator, we need to collect results for each value.
+                // For composite indexes with suffix_values (subsequent Eq conditions),
+                // use exact match (get) with combined values for efficiency.
+                // For composite indexes without suffix_values, use scan_prefix.
+                let is_composite = index.description().fields.len() > 1;
+                let has_full_key = !suffix_values.is_empty()
+                    && suffix_values.len() == index.description().fields.len() - 1;
                 let mut all_doc_ids = Vec::new();
                 for value in values {
-                    let mut iter = index.get(&datastore, &[value.clone()]).await.map_err(|e| {
-                        query::error::QueryError::execution(format!("index error: {}", e))
-                    })?;
-                    let entries = iter.collect_all().await.map_err(|e| {
-                        query::error::QueryError::execution(format!("index iteration error: {}", e))
-                    })?;
-                    all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
+                    if has_full_key {
+                        let mut key_values = vec![value.clone()];
+                        key_values.extend(suffix_values.iter().cloned());
+                        let mut iter =
+                            index.get(&datastore, &key_values).await.map_err(|e| {
+                                query::error::QueryError::execution(format!("index error: {}", e))
+                            })?;
+                        let entries = iter.collect_all().await.map_err(|e| {
+                            query::error::QueryError::execution(format!(
+                                "index iteration error: {}",
+                                e
+                            ))
+                        })?;
+                        all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
+                    } else if is_composite {
+                        let mut iter = index
+                            .scan_prefix(&datastore, &[value.clone()], false)
+                            .await
+                            .map_err(|e| {
+                                query::error::QueryError::execution(format!("index error: {}", e))
+                            })?;
+                        let entries = iter.collect_all().await.map_err(|e| {
+                            query::error::QueryError::execution(format!(
+                                "index iteration error: {}",
+                                e
+                            ))
+                        })?;
+                        all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
+                    } else {
+                        let mut iter =
+                            index.get(&datastore, &[value.clone()]).await.map_err(|e| {
+                                query::error::QueryError::execution(format!("index error: {}", e))
+                            })?;
+                        let entries = iter.collect_all().await.map_err(|e| {
+                            query::error::QueryError::execution(format!(
+                                "index iteration error: {}",
+                                e
+                            ))
+                        })?;
+                        all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
+                    }
                 }
                 all_doc_ids
             }
