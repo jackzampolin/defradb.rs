@@ -606,6 +606,12 @@ impl Planner {
                             continue;
                         }
                     }
+                    // Skip logical operators (_and, _or, _not) that contain relation filters.
+                    // These were put in relation_filter by split_by_relation() because they
+                    // contain relation conditions. They must be evaluated AFTER joins, not here.
+                    if field_name == "_and" || field_name == "_or" || field_name == "_not" {
+                        continue;
+                    }
                     // Not a relation field - treat as scalar (could be JSON, etc.)
                     combined_conditions.insert(field_name.clone(), condition.clone());
                 }
@@ -2562,6 +2568,7 @@ impl Planner {
                 // Include _docID and the FK field for the join to work correctly
                 let mut child_mapping = DocumentMapping::new();
                 child_mapping.add(0, "_docID");
+                child_mapping.add_render_key(0, "_docID");
 
                 // Add the FK field (e.g., _authorID) - needed for TypeJoinMany cache indexing
                 let fk_field_name = if let Some(ref target_rel) = target_relation_field {
@@ -2575,6 +2582,7 @@ impl Planner {
                     .position(|f| f.name == fk_field_name)
                 {
                     child_mapping.add(fk_idx, &fk_field_name);
+                    child_mapping.add_render_key(fk_idx, &fk_field_name);
                 }
 
                 // Add any fields referenced by the filter
@@ -2586,6 +2594,7 @@ impl Planner {
                             .position(|f| f.name == field_name)
                         {
                             child_mapping.add(idx, &field_name);
+                            child_mapping.add_render_key(idx, &field_name);
                         }
                     }
                 }
@@ -2621,6 +2630,8 @@ impl Planner {
                         mapping.add(idx, &relation_name);
                         idx
                     });
+
+                mapping.set_child_at(relation_field_index, child_mapping.clone());
 
                 // Find child relation index
                 let child_relation_index = target_relation_field

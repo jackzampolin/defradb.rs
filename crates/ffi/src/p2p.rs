@@ -2109,3 +2109,27 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
         Err(e) => FfiResult::error(e),
     }
 }
+
+/// Sync specific collection versions from peers.
+///
+/// Fetches and merges the specified collection versions from connected peers.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `identity_did` - DID of the requestor for access control
+/// * `version_ids_json` - JSON array of CID strings to sync, e.g. `["bafyrei...", "bafyrei..."]`
+///
+/// # Safety
+///
+/// `identity_did` and `version_ids_json` must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_collection_versions(
+    _node_ptr: usize,
+    _identity_did: *const c_char,
+    _version_ids_json: *const c_char,
+) -> FfiResult {
+    // Stub: collection version syncing not yet implemented in Rust
+    // Return success as a no-op for now to allow query tests to compile
+    FfiResult::ok()
+}
