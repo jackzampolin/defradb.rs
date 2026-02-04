@@ -514,11 +514,15 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let nac_config = db::NacConfig::new().with_dev_mode();
         let nac_manager = Arc::new(db::NacManager::new(nac_store, nac_config));
 
-        // Create query runner with lens support
+        // Encryption key for CRDT delta encryption (test key matching Go DefraDB)
+        let encryption_key = b"examplekey1234567890examplekey12".to_vec();
+
+        // Create query runner with lens and encryption support
         let query_runner =
             query::QueryRunner::with_registry_and_provider(fetcher, collection_provider, registry)
                 .with_mutator(mutator)
                 .with_acp(document_acp.clone())
+                .with_encryption_key(encryption_key)
                 .with_lens_store(database.lens_store().clone());
 
         let runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);

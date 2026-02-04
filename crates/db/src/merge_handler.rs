@@ -12,7 +12,7 @@ use crdt::traits::{Context, ReplicatedData, ValueReader};
 use crdt::{Counter, CounterDelta, Lww, LwwDelta, NumericKind};
 use datastore::NamespaceView;
 use defra_core::block::{
-    Block, CollectionDefinitionDeltaPayload, CrdtDelta, FieldDefinitionDeltaPayload,
+    Block, CollectionDefinitionDeltaPayload, CrdtDelta, Encryption, FieldDefinitionDeltaPayload,
 };
 use defra_core::types::DocId;
 use document::{DocID, Document, NormalValue};
@@ -25,6 +25,7 @@ use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
 use crate::collection::collection_short_id;
 use crate::database::DB;
 use crate::error::Error;
+use crate::index_manager::IndexManager;
 
 /// Marker byte indicating a document is deleted (matches Go's DeletedObjectMarker).
 const DELETED_MARKER: u8 = 0x01;
@@ -117,6 +118,40 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     /// Get reference to blockstore.
     pub fn blockstore(&self) -> &Arc<B> {
         &self.blockstore
+    }
+
+    /// Decrypt block delta data using the encryption metadata block.
+    ///
+    /// If `encryption_cid` is Some, loads the Encryption block from blockstore,
+    /// extracts the AES key, and decrypts the data. Returns data unchanged if
+    /// no encryption CID is present.
+    async fn decrypt_block_data(
+        &self,
+        data: &[u8],
+        encryption_cid: Option<&Cid>,
+    ) -> std::result::Result<Vec<u8>, MergeError> {
+        let enc_cid = match encryption_cid {
+            Some(cid) => cid,
+            None => return Ok(data.to_vec()),
+        };
+
+        // Load the Encryption block from blockstore
+        let enc_data = self
+            .blockstore
+            .get(enc_cid)
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))?
+            .ok_or_else(|| {
+                MergeError::Storage(format!("Encryption block {} not found", enc_cid))
+            })?;
+
+        let enc_block = Encryption::from_dag_cbor(&enc_data).map_err(|e| {
+            MergeError::BlockDecode(format!("Failed to decode encryption block: {}", e))
+        })?;
+
+        // Decrypt using AES-256-GCM (nonce is prepended to ciphertext)
+        crypto::encryption::aes::decrypt_aes(None, data, &enc_block.key, &[])
+            .map_err(|e| MergeError::MergeFailed(format!("Decryption failed: {}", e)))
     }
 
     /// Process an LWW delta from a block (standalone, with its own transaction).
@@ -496,7 +531,38 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         }
                     };
 
-                    match &linked_block.delta {
+                    // Decrypt linked block data if it has encryption
+                    let effective_linked_delta = match &linked_block.delta {
+                        CrdtDelta::Lww(p) if linked_block.encryption.is_some() => {
+                            match self
+                                .decrypt_block_data(&p.data, linked_block.encryption.as_ref())
+                                .await
+                            {
+                                Ok(decrypted) => {
+                                    let mut dp = p.clone();
+                                    dp.data = decrypted;
+                                    CrdtDelta::Lww(dp)
+                                }
+                                Err(_) => linked_block.delta.clone(),
+                            }
+                        }
+                        CrdtDelta::Counter(p) if linked_block.encryption.is_some() => {
+                            match self
+                                .decrypt_block_data(&p.data, linked_block.encryption.as_ref())
+                                .await
+                            {
+                                Ok(decrypted) => {
+                                    let mut dp = p.clone();
+                                    dp.data = decrypted;
+                                    CrdtDelta::Counter(dp)
+                                }
+                                Err(_) => linked_block.delta.clone(),
+                            }
+                        }
+                        other => other.clone(),
+                    };
+
+                    match &effective_linked_delta {
                         CrdtDelta::Lww(lww_payload) => {
                             // Process the LWW delta within our transaction
                             match self
@@ -606,15 +672,18 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             // updates that only touch a subset of fields.
                             match DocID::from_string(&doc_id_str) {
                                 Ok(doc_id) => {
-                                    let mut doc = match collection
+                                    let (mut doc, old_doc) = match collection
                                         .get_with_datastore(&datastore, &doc_id)
                                         .await
                                     {
-                                        Ok(Some(existing)) => existing,
+                                        Ok(Some(existing)) => {
+                                            let old = existing.clone();
+                                            (existing, Some(old))
+                                        }
                                         _ => {
                                             let mut new_doc = Document::new();
                                             new_doc.set_id(doc_id.clone());
-                                            new_doc
+                                            (new_doc, None)
                                         }
                                     };
 
@@ -645,6 +714,43 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                     {
                                         process_error = Some(MergeError::Database(e));
                                     } else {
+                                        // Update indexes for the merged document
+                                        let short_id =
+                                            collection_short_id(collection.collection_id());
+                                        if let Ok(index_manager) = IndexManager::from_collection(
+                                            short_id,
+                                            collection.schema(),
+                                        ) {
+                                            let index_result = match &old_doc {
+                                                Some(old) => {
+                                                    index_manager
+                                                        .on_document_update(
+                                                            &datastore,
+                                                            old,
+                                                            &doc,
+                                                            collection.schema(),
+                                                        )
+                                                        .await
+                                                }
+                                                None => {
+                                                    index_manager
+                                                        .on_document_create(
+                                                            &datastore,
+                                                            &doc,
+                                                            collection.schema(),
+                                                        )
+                                                        .await
+                                                }
+                                            };
+                                            if let Err(e) = index_result {
+                                                tracing::warn!(
+                                                    doc_id = %doc_id_str,
+                                                    error = %e,
+                                                    "Failed to update indexes after merge"
+                                                );
+                                            }
+                                        }
+
                                         tracing::info!(
                                             doc_id = %doc_id_str,
                                             collection = %collection.name(),
@@ -1592,8 +1698,58 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
             "Block decoded successfully"
         );
 
+        // Decrypt delta data if the block has encryption
+        let decrypted_block;
+        let effective_block = if block.encryption.is_some() {
+            match &block.delta {
+                CrdtDelta::Lww(payload) => {
+                    match self
+                        .decrypt_block_data(&payload.data, block.encryption.as_ref())
+                        .await
+                    {
+                        Ok(decrypted_data) => {
+                            let mut new_payload = payload.clone();
+                            new_payload.data = decrypted_data;
+                            decrypted_block = Block {
+                                delta: CrdtDelta::Lww(new_payload),
+                                heads: block.heads.clone(),
+                                links: block.links.clone(),
+                                encryption: block.encryption,
+                                signature: block.signature,
+                            };
+                            &decrypted_block
+                        }
+                        Err(_) => &block, // Decryption failed (no key) — use encrypted data
+                    }
+                }
+                CrdtDelta::Counter(payload) => {
+                    match self
+                        .decrypt_block_data(&payload.data, block.encryption.as_ref())
+                        .await
+                    {
+                        Ok(decrypted_data) => {
+                            let mut new_payload = payload.clone();
+                            new_payload.data = decrypted_data;
+                            decrypted_block = Block {
+                                delta: CrdtDelta::Counter(new_payload),
+                                heads: block.heads.clone(),
+                                links: block.links.clone(),
+                                encryption: block.encryption,
+                                signature: block.signature,
+                            };
+                            &decrypted_block
+                        }
+                        Err(_) => &block,
+                    }
+                }
+                _ => &block,
+            }
+        } else {
+            &block
+        };
+
         // Process based on delta type
-        match &block.delta {
+        match &effective_block.delta {
             CrdtDelta::Lww(payload) => self.process_lww_delta(cid, payload, &metadata).await,
             CrdtDelta::Counter(payload) => {
                 self.process_counter_delta(cid, payload, &metadata).await
