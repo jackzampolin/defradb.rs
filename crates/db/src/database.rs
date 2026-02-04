@@ -2241,6 +2241,7 @@ impl<S: Store> DB<S> {
                 if let serde_json::Value::Object(ref mut map) = field {
                     if !map.contains_key("FieldID")
                         || map.get("FieldID") == Some(&serde_json::Value::Null)
+                        || map.get("FieldID").and_then(|v| v.as_str()) == Some("")
                     {
                         map.insert("FieldID".to_string(), next_id.to_string().into());
                         next_id += 1;
@@ -2309,6 +2310,25 @@ impl<S: Store> DB<S> {
             if !field_errors.is_empty() {
                 return Err(Error::InvalidPatch(field_errors.join("\n")));
             }
+        }
+
+        // Go compatibility: auto-generate _fieldID for foreign object fields added via patch.
+        // This matches Go's collection_define.go behavior for fields with Kind.IsObject() && !Kind.IsArray().
+        {
+            let max_field_id: u64 = new_schema
+                .fields
+                .iter()
+                .filter_map(|f| f.id.parse::<u64>().ok())
+                .max()
+                .unwrap_or(0);
+            let mut next_id = max_field_id + 1;
+            new_schema
+                .add_relation_id_fields(|| {
+                    let id = next_id.to_string();
+                    next_id += 1;
+                    id
+                })
+                .map_err(|e| Error::InvalidPatch(format!("failed to add relation id fields: {}", e)))?;
         }
 
         // Handle in-place updates (deactivation, IsActive-only, or PreviousVersion/Transform-only).

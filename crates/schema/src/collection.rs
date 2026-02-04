@@ -63,7 +63,11 @@ pub struct CollectionVersion {
     pub previous_version: Option<CollectionSource>,
 
     /// Fields in this collection
-    #[serde(rename = "Fields", deserialize_with = "deserialize_null_as_empty_vec")]
+    #[serde(
+        rename = "Fields",
+        default,
+        deserialize_with = "deserialize_null_as_empty_vec"
+    )]
     pub fields: Vec<FieldDescription>,
 
     /// Secondary indexes on this collection
