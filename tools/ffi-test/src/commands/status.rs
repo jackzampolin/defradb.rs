@@ -57,7 +57,7 @@ async fn show_current_worktree() -> Result<()> {
 
     // Print table header
     println!(
-        "{:<30} {:<12} {:>12} {:>12} {:>12} {:>6}",
+        "{:<50} {:<8} {:>12} {:>12} {:>12} {:>6}",
         "Package".bold(),
         "Commit".bold(),
         "Pass".bold(),
@@ -65,7 +65,7 @@ async fn show_current_worktree() -> Result<()> {
         "Skip".bold(),
         "Total".bold()
     );
-    println!("{}", "─".repeat(86));
+    println!("{}", "─".repeat(102));
 
     // Track totals
     let mut grand_total = 0;
@@ -98,7 +98,7 @@ async fn show_current_worktree() -> Result<()> {
             };
 
             println!(
-                "{:<30} {:<12} {:>12} {:>12} {:>12} {:>6}",
+                "{:<50} {:<8} {:>12} {:>12} {:>12} {:>6}",
                 package,
                 report.commit.dimmed(),
                 pass_colored,
@@ -115,7 +115,7 @@ async fn show_current_worktree() -> Result<()> {
             packages_run += 1;
         } else {
             println!(
-                "{:<30} {:<12} {:>12} {:>12} {:>12} {:>6}",
+                "{:<50} {:<8} {:>12} {:>12} {:>12} {:>6}",
                 package,
                 "-".dimmed(),
                 "-".dimmed(),
@@ -128,7 +128,7 @@ async fn show_current_worktree() -> Result<()> {
 
     // Print totals if we have any data
     if packages_run > 0 {
-        println!("{}", "─".repeat(86));
+        println!("{}", "─".repeat(102));
 
         let pass_pct = format_pct(grand_pass, grand_total);
         let fail_pct = format_pct(grand_fail, grand_total);
@@ -151,7 +151,7 @@ async fn show_current_worktree() -> Result<()> {
         };
 
         println!(
-            "{:<30} {:<12} {:>12} {:>12} {:>12} {:>6}",
+            "{:<50} {:<8} {:>12} {:>12} {:>12} {:>6}",
             format!("TOTAL ({} packages)", packages_run).bold(),
             "",
             pass_colored,
