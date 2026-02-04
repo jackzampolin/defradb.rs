@@ -2135,16 +2135,21 @@ impl Planner {
             // Recursively apply joins for any nested selections within this nested select.
             // This handles multi-level nesting like Users -> Posts -> Comments.
             // Note: We pass None for parent_filter since relation filters only apply at the top level.
+            //
+            // IMPORTANT: We do NOT reassign child_scan_mapping from the recursive result.
+            // The recursive call may modify the mapping's nested child mappings (for deeper relations),
+            // but the render_keys at THIS level were already correctly set when child_scan_mapping
+            // was built. Reassigning would lose those render_keys, causing empty selection items
+            // when both an aggregate and selection target the same relation.
             let nested_joins_result = self.apply_joins(
                 child_plan,
                 nested_select,
                 &target_collection,
-                child_scan_mapping,
+                child_scan_mapping.clone(),
                 depth + 1,
                 None, // Nested relation filters handled differently
             )?;
             child_plan = nested_joins_result.0;
-            child_scan_mapping = nested_joins_result.1;
             // Merge nested aggregate internal keys into our collection
             aggregate_internal_keys.extend(nested_joins_result.2);
 
