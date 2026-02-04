@@ -1092,6 +1092,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         select: &Select,
         explain_type: ExplainType,
     ) -> Result<JsonValue> {
+        // Handle encrypted search queries - return a simple seScanNode explanation
+        if select.is_encrypted {
+            return Ok(serde_json::json!({
+                "selectNode": {
+                    "seScanNode": {
+                        "collection": select.collection_name,
+                        "filter": select.filter.as_ref().map(|f| f.conditions())
+                    }
+                }
+            }));
+        }
+
         // Handle _commits system collection specially
         if select.collection_name == "_commits" {
             return self.explain_commits_select(select, explain_type);
@@ -1643,6 +1655,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         fetcher: &dyn DocFetcher,
         caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
+        // Handle encrypted search queries (encrypted_<Collection>)
+        if select.is_encrypted {
+            return self.execute_encrypted_select(select, fetcher).await;
+        }
+
         // Handle _commits system collection specially
         if select.collection_name == "_commits" {
             return self.execute_commits_query(select).await;
@@ -1740,11 +1757,33 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         });
 
+        // Check if any aggregate targets have filters with relation conditions.
+        // If so, we need the planner to join relation data before filtering.
+        let aggregate_filter_has_relations = select.fields.iter().any(|f| {
+            if let Requestable::Aggregate(agg) = f {
+                agg.targets.iter().any(|t| {
+                    t.filter
+                        .as_ref()
+                        .map(|f| f.has_relation_filters())
+                        .unwrap_or(false)
+                })
+            } else {
+                false
+            }
+        });
+
         // Handle top-level aggregates specially - return single value, not array
         if is_top_level_aggregate {
-            return self
-                .execute_top_level_aggregate(select, fetcher, &collection, caller_identity)
-                .await;
+            if aggregate_filter_has_relations {
+                // Use planner path to join relation data before filtering
+                return self
+                    .execute_top_level_aggregate_with_planner(select, fetcher, caller_identity)
+                    .await;
+            } else {
+                return self
+                    .execute_top_level_aggregate(select, fetcher, &collection, caller_identity)
+                    .await;
+            }
         }
 
         // Check if any secondary relation ID fields are selected (e.g., `_authorID` for a secondary `author` relation).
@@ -1856,13 +1895,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let is_view = collection.query.is_some();
 
         // Use Planner if there are nested selections, filter through relations,
-        // order through relations, aggregates on relations, secondary relation ID fields,
-        // similarity computations, when an index can provide ordering, or when querying a view
+        // order through relations, aggregates on relations, aggregate filters with relations,
+        // secondary relation ID fields, similarity computations, when an index can provide
+        // ordering, or when querying a view
         let needs_planner = is_view
             || has_nested
             || filter_has_relations
             || order_has_relations
             || aggregates_have_relations
+            || aggregate_filter_has_relations
             || has_secondary_relation_id
             || has_ordering_index
             || has_similarity;
@@ -1876,6 +1917,71 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             self.execute_simple_select(select, fetcher, &collection, caller_identity)
                 .await
         }
+    }
+
+    /// Execute an encrypted search query (`encrypted_<Collection>`).
+    ///
+    /// Validates encrypted index exists, then fetches documents, applies _eq filter
+    /// conditions, and returns Go-compatible `[{"docIDs": [...]}]` format.
+    async fn execute_encrypted_select(
+        &self,
+        select: &Select,
+        fetcher: &dyn DocFetcher,
+    ) -> Result<JsonValue> {
+        // Get collection to check for encrypted indexes
+        let collection = self.get_collection(&select.collection_name).await?;
+
+        // Validate collection has encrypted indexes (Go-compatible error)
+        if collection.encrypted_indexes.is_empty() {
+            return Err(QueryError::internal(
+                "collection has no encrypted indexes",
+            ));
+        }
+
+        // Extract filtered field names and validate they have encrypted indexes
+        if let Some(ref filter) = select.filter {
+            let filtered_fields = filter.referenced_fields();
+            for field_name in &filtered_fields {
+                let has_index = collection
+                    .encrypted_indexes
+                    .iter()
+                    .any(|idx| idx.field_name == *field_name);
+                if !has_index {
+                    return Err(QueryError::internal(format!(
+                        "no encrypted index found for field: {}",
+                        field_name
+                    )));
+                }
+            }
+        }
+
+        let docs = fetcher.get_all(&select.collection_name).await?;
+
+        let matching_ids: Vec<String> = if let Some(ref filter) = select.filter {
+            let mut ids = Vec::new();
+            for doc in &docs {
+                let json_map = doc
+                    .to_map()
+                    .map_err(|e| QueryError::internal(e.to_string()))?;
+                let json_obj = JsonValue::Object(
+                    json_map
+                        .into_iter()
+                        .collect::<Map<String, JsonValue>>(),
+                );
+                if filter.matches_json_object(&json_obj)? {
+                    if let Some(id) = doc.id() {
+                        ids.push(id.to_string());
+                    }
+                }
+            }
+            ids
+        } else {
+            docs.iter()
+                .filter_map(|doc| doc.id().map(|id| id.to_string()))
+                .collect()
+        };
+
+        Ok(serde_json::json!([{"docIDs": matching_ids}]))
     }
 
     /// Execute a query with nested selections using the Planner.
@@ -1909,6 +2015,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let plan_result = planner.plan_with_index_info(select)?;
         let mut plan = plan_result.plan;
         let ordering_only_fields = plan_result.ordering_only_fields;
+        let aggregate_internal_keys = plan_result.aggregate_internal_keys;
 
         // Get the mapping from the plan
         let mapping = plan.document_map().clone();
@@ -1942,7 +2049,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Post-process relation-based aggregates
         // For aggregates like _count(books: {}), compute the value from joined data
-        let results = self.compute_relation_aggregates(results, select)?;
+        let results =
+            self.compute_relation_aggregates(results, select, &aggregate_internal_keys)?;
 
         // Strip fields from relation data that were added for filter evaluation
         // but not explicitly requested in the selection set.
@@ -1966,6 +2074,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         &self,
         mut results: Vec<JsonValue>,
         select: &Select,
+        aggregate_internal_keys: &std::collections::HashMap<String, (String, String)>,
     ) -> Result<Vec<JsonValue>> {
         use crate::mapper::AggregateType;
 
@@ -2089,9 +2198,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         let relation_name = &target.host_name;
                         let field_name = target.field_name.as_deref();
 
-                        // Try the direct relation name first, then fall back to alias
-                        let relation_data = obj
-                            .get(relation_name.as_str())
+                        // Try internal key first (when selection and aggregate use same relation),
+                        // then direct relation name, then fall back to alias
+                        let relation_data = aggregate_internal_keys
+                            .get(output_name)
+                            .and_then(|(_, internal_key)| obj.get(internal_key.as_str()))
+                            .or_else(|| obj.get(relation_name.as_str()))
                             .or_else(|| {
                                 relation_alias_map
                                     .get(relation_name.as_str())
@@ -2147,7 +2259,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                         ordered_items.sort_by(|a, b| {
                                             let resolve_value =
                                                 |item: &&JsonValue| -> Option<JsonValue> {
-                                                    if fields.is_empty() {
+                                                    // For scalar inline arrays, order: ASC/DESC has no field path
+                                                    // (fields is either empty or contains a single empty string)
+                                                    if fields.is_empty()
+                                                        || (fields.len() == 1 && fields[0].is_empty())
+                                                    {
                                                         return Some((*item).clone());
                                                     }
                                                     // Start with the first field
@@ -2484,6 +2600,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        // Clean up internal aggregate keys from output (keys like "__agg_published__count")
+        // These are only used for looking up relation data when there's a collision with
+        // a relation selection.
+        if !aggregate_internal_keys.is_empty() {
+            for result in &mut results {
+                if let JsonValue::Object(ref mut obj) = result {
+                    obj.retain(|k, _| !k.starts_with("__agg_"));
+                }
+            }
+        }
+
         Ok(results)
     }
 
@@ -2664,21 +2791,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 // Try to use an index if available
                 if fetcher.supports_index_queries() && !collection.indexes.is_empty() {
                     if let Some(best_index) = select_best_index(filter, &collection.indexes) {
-                        if let Some(params) =
-                            filter_to_index_scan(filter, best_index, select.order_by.as_ref())
-                        {
+                        // Extract limit/offset for index optimization
+                        let limit = select.limit.as_ref().and_then(|l| l.limit);
+                        let offset = select.limit.as_ref().map(|l| l.offset).unwrap_or(0);
+                        if let Some(params) = filter_to_index_scan(
+                            filter,
+                            best_index,
+                            select.order_by.as_ref(),
+                            &collection.fields,
+                            limit,
+                            offset,
+                        ) {
                             debug!(
                                 collection = %select.collection_name,
                                 index = %params.index_name,
                                 "Using index for query"
                             );
                             // Get doc IDs from index
-                            let doc_ids = fetcher
+                            let scan_result = fetcher
                                 .get_by_index_scan(&select.collection_name, &params)
                                 .await?;
                             // Fetch the actual documents by ID
                             let result = fetcher
-                                .get_by_ids(&select.collection_name, &doc_ids)
+                                .get_by_ids(&select.collection_name, scan_result.doc_ids())
                                 .await?;
                             result.into_docs()
                         } else {
@@ -3578,6 +3713,190 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
     }
 
+    /// Execute a top-level aggregate with filters that reference relations.
+    ///
+    /// This function uses the planner to build a join plan so relation data is
+    /// available for filter evaluation, then counts the filtered results.
+    /// Unlike `execute_top_level_aggregate`, this handles filters like:
+    /// `_count(Book: {filter: {author: {age: {_gt: 30}}}})`
+    async fn execute_top_level_aggregate_with_planner(
+        &self,
+        select: &Select,
+        fetcher: &dyn DocFetcher,
+        identity: Option<Did>,
+    ) -> Result<JsonValue> {
+        use crate::mapper::AggregateType;
+
+        // Get the aggregate info
+        let agg = match select.fields.first() {
+            Some(Requestable::Aggregate(a)) => a,
+            _ => return Ok(JsonValue::Null),
+        };
+        let output_name = agg.output_name().to_string();
+        let target = agg.targets.first();
+        let target_filter = target.and_then(|t| t.filter.as_ref());
+        let field_name = target.and_then(|t| t.field_name.as_ref());
+
+        // Create a modified select that fetches the collection with the filter applied.
+        // This select returns documents (not aggregates), so the planner will build
+        // a proper join plan with the relation filter.
+        let collection_name = target
+            .map(|t| t.host_name.clone())
+            .unwrap_or_else(|| select.collection_name.clone());
+        let filter_select = Select {
+            collection_name: collection_name.clone(),
+            field: crate::mapper::Field::new(collection_name.clone()),
+            fields: if let Some(fname) = field_name {
+                // For sum/avg/etc., we need the field value
+                vec![Requestable::Field(crate::mapper::Field::new(fname.clone()))]
+            } else {
+                // For count, we just need any field to count docs
+                vec![Requestable::Field(crate::mapper::Field::new("_docID".to_string()))]
+            },
+            filter: target_filter.cloned(),
+            order_by: None,
+            limit: None,
+            group_by: None,
+            doc_ids: None,
+            cid: None,
+            depth: None,
+            show_deleted: false,
+            is_encrypted: false,
+            selection_type: crate::mapper::SelectionType::Object,
+            document_mapping: crate::document::DocumentMapping::default(),
+        };
+
+        // Execute with the planner to get filtered documents
+        let fetcher_arc = FetcherWrapper::new(fetcher);
+        let collections_map = self.collections_map().await?;
+        let collections: Vec<CollectionVersion> =
+            collections_map.values().map(|c| (**c).clone()).collect();
+
+        let mut planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+        if let Some(ref acp) = self.acp {
+            planner = planner.with_acp(acp.clone(), identity);
+        }
+        if let Some(ref lens_store) = self.lens_store {
+            planner = planner.with_lens_store(lens_store.clone());
+        }
+        let plan_result = planner.plan_with_index_info(&filter_select)?;
+        let mut plan = plan_result.plan;
+        let mapping = plan.document_map().clone();
+
+        // Execute the plan and collect results
+        plan.init().await?;
+        plan.start().await?;
+
+        let mut docs = Vec::new();
+        while plan.next().await? {
+            let doc = plan.value().deep_clone();
+            docs.push(doc);
+        }
+        plan.close().await?;
+
+        // Compute the aggregate based on type
+        let value = match agg.aggregate_type {
+            AggregateType::Count => {
+                let count = docs.len() as i64;
+                JsonValue::Number(count.into())
+            }
+            AggregateType::Sum => {
+                if let Some(fname) = field_name {
+                    if let Some(field_idx) = mapping.first_index_of_name(fname) {
+                        let sum: f64 = docs
+                            .iter()
+                            .filter_map(|doc| doc.get(field_idx))
+                            .filter_map(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
+                            .sum();
+                        if sum == sum.floor() {
+                            JsonValue::Number((sum as i64).into())
+                        } else {
+                            JsonValue::Number(
+                                serde_json::Number::from_f64(sum).unwrap_or_else(|| 0.into()),
+                            )
+                        }
+                    } else {
+                        JsonValue::Number(0.into())
+                    }
+                } else {
+                    JsonValue::Number(0.into())
+                }
+            }
+            AggregateType::Average => {
+                if let Some(fname) = field_name {
+                    if let Some(field_idx) = mapping.first_index_of_name(fname) {
+                        let values: Vec<f64> = docs
+                            .iter()
+                            .filter_map(|doc| doc.get(field_idx))
+                            .filter_map(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
+                            .collect();
+                        if values.is_empty() {
+                            JsonValue::Number(0.into())
+                        } else {
+                            let avg = values.iter().sum::<f64>() / values.len() as f64;
+                            JsonValue::Number(
+                                serde_json::Number::from_f64(avg).unwrap_or_else(|| 0.into()),
+                            )
+                        }
+                    } else {
+                        JsonValue::Number(0.into())
+                    }
+                } else {
+                    JsonValue::Number(0.into())
+                }
+            }
+            AggregateType::Min => {
+                if let Some(fname) = field_name {
+                    if let Some(field_idx) = mapping.first_index_of_name(fname) {
+                        let min: Option<f64> = docs
+                            .iter()
+                            .filter_map(|doc| doc.get(field_idx))
+                            .filter_map(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
+                            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        match min {
+                            Some(v) if v == v.floor() => JsonValue::Number((v as i64).into()),
+                            Some(v) => JsonValue::Number(
+                                serde_json::Number::from_f64(v).unwrap_or_else(|| 0.into()),
+                            ),
+                            None => JsonValue::Null,
+                        }
+                    } else {
+                        JsonValue::Null
+                    }
+                } else {
+                    JsonValue::Null
+                }
+            }
+            AggregateType::Max => {
+                if let Some(fname) = field_name {
+                    if let Some(field_idx) = mapping.first_index_of_name(fname) {
+                        let max: Option<f64> = docs
+                            .iter()
+                            .filter_map(|doc| doc.get(field_idx))
+                            .filter_map(|v| v.as_f64().or_else(|| v.as_i64().map(|i| i as f64)))
+                            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        match max {
+                            Some(v) if v == v.floor() => JsonValue::Number((v as i64).into()),
+                            Some(v) => JsonValue::Number(
+                                serde_json::Number::from_f64(v).unwrap_or_else(|| 0.into()),
+                            ),
+                            None => JsonValue::Null,
+                        }
+                    } else {
+                        JsonValue::Null
+                    }
+                } else {
+                    JsonValue::Null
+                }
+            }
+        };
+
+        // Return just the value (not wrapped in an object with output_name)
+        // The caller will insert this with the correct key
+        let _ = output_name; // suppress unused warning
+        Ok(value)
+    }
+
     /// Execute a _commits system collection query.
     ///
     /// This handles queries to the special _commits collection which fetches
@@ -3697,7 +4016,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         let field_name = &f.name;
                         let output_name = f.output_name();
 
-                        if let Some(value) = commit.get(field_name) {
+                        // Handle __typename specially for commits (Go returns "Commit")
+                        if field_name == "__typename" {
+                            obj.insert(output_name.to_string(), JsonValue::String("Commit".to_string()));
+                        } else if let Some(value) = commit.get(field_name) {
                             let json_value = crate::json_convert::normal_value_to_json(value)
                                 .unwrap_or(JsonValue::Null);
                             obj.insert(output_name.to_string(), json_value);
@@ -3796,8 +4118,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             if let Ok(json_val) = crate::json_convert::normal_value_to_json(value) {
                                 if let Some(arr) = json_val.as_array() {
                                     // Handle array nested selects (e.g., links { cid }, heads { cid })
+                                    // Apply filter if present (e.g., links(filter: {fieldName: {_eq: "age"}}))
                                     let nested_results: Vec<JsonValue> = arr
                                         .iter()
+                                        .filter(|item| {
+                                            // Apply nested filter if present
+                                            if let Some(ref filter) = nested.filter {
+                                                Self::matches_json_filter(item, filter)
+                                            } else {
+                                                true
+                                            }
+                                        })
                                         .map(|item: &JsonValue| {
                                             let mut nested_obj = serde_json::Map::new();
                                             for nested_field in &nested.fields {
@@ -3813,6 +4144,85 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                                         nested_obj.insert(
                                                             nf_output.to_string(),
                                                             JsonValue::Null,
+                                                        );
+                                                    }
+                                                } else if let Requestable::Select(inner_nested) =
+                                                    nested_field
+                                                {
+                                                    // Handle double-nested selects (e.g., heads { links { cid } })
+                                                    let inner_name = &inner_nested.field.name;
+                                                    let inner_output =
+                                                        inner_nested.field.output_name();
+                                                    if let Some(inner_val) = item.get(inner_name) {
+                                                        if let Some(inner_arr) = inner_val.as_array()
+                                                        {
+                                                            // Apply filter and extract requested fields
+                                                            let inner_results: Vec<JsonValue> =
+                                                                inner_arr
+                                                                    .iter()
+                                                                    .filter(|inner_item| {
+                                                                        if let Some(ref filter) =
+                                                                            inner_nested.filter
+                                                                        {
+                                                                            Self::matches_json_filter(
+                                                                                inner_item, filter,
+                                                                            )
+                                                                        } else {
+                                                                            true
+                                                                        }
+                                                                    })
+                                                                    .map(|inner_item| {
+                                                                        let mut inner_obj =
+                                                                            serde_json::Map::new();
+                                                                        for inner_field in
+                                                                            &inner_nested.fields
+                                                                        {
+                                                                            if let Requestable::Field(
+                                                                                inf,
+                                                                            ) = inner_field
+                                                                            {
+                                                                                let inf_name =
+                                                                                    &inf.name;
+                                                                                let inf_output =
+                                                                                    inf.output_name(
+                                                                                    );
+                                                                                if let Some(inv) =
+                                                                                    inner_item
+                                                                                        .get(inf_name)
+                                                                                {
+                                                                                    inner_obj.insert(
+                                                                                        inf_output
+                                                                                            .to_string(
+                                                                                            ),
+                                                                                        inv.clone(),
+                                                                                    );
+                                                                                } else {
+                                                                                    inner_obj.insert(
+                                                                                        inf_output
+                                                                                            .to_string(
+                                                                                            ),
+                                                                                        JsonValue::Null,
+                                                                                    );
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                        JsonValue::Object(inner_obj)
+                                                                    })
+                                                                    .collect();
+                                                            nested_obj.insert(
+                                                                inner_output.to_string(),
+                                                                JsonValue::Array(inner_results),
+                                                            );
+                                                        } else {
+                                                            nested_obj.insert(
+                                                                inner_output.to_string(),
+                                                                inner_val.clone(),
+                                                            );
+                                                        }
+                                                    } else {
+                                                        nested_obj.insert(
+                                                            inner_output.to_string(),
+                                                            JsonValue::Array(vec![]),
                                                         );
                                                     }
                                                 }
@@ -3916,6 +4326,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 )
             }
         }
+    }
+
+    /// Check if a JSON value matches a filter.
+    /// Used for filtering nested arrays like links and heads in commit queries.
+    fn matches_json_filter(value: &JsonValue, filter: &crate::Filter) -> bool {
+        filter.matches_json_object(value).unwrap_or(false)
     }
 
     /// Build a DocumentMapping for commit fields.

@@ -93,6 +93,38 @@ fn graphql_schema_value_to_json(
     }
 }
 
+/// Normalize a datetime string to RFC3339 format to match Go's time.Time serialization.
+/// Go's time.Time drops trailing zeros in fractional seconds, so:
+/// - "2000-07-23T03:00:00.000Z" becomes "2000-07-23T03:00:00Z"
+/// - "2000-07-23T03:00:00.123Z" stays "2000-07-23T03:00:00.123Z"
+/// If parsing fails, returns the original string (e.g., for special values).
+fn normalize_datetime_string(s: &str) -> String {
+    // Try to parse as RFC3339 variant (ISO 8601)
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        // Format back using RFC3339 which drops trailing zeros in nanoseconds
+        // Go uses time.RFC3339Nano which behaves this way
+        let nanos = dt.timestamp_subsec_nanos();
+        if nanos == 0 {
+            // No fractional seconds - output without them
+            dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+        } else {
+            // Has fractional seconds - output with them, but trim trailing zeros
+            let s = dt.format("%Y-%m-%dT%H:%M:%S%.9fZ").to_string();
+            // Remove trailing zeros after decimal point (but keep at least one digit)
+            let trimmed = s.trim_end_matches('0');
+            // If we trimmed all digits after the decimal, we need to handle that
+            if trimmed.ends_with('.') {
+                format!("{}Z", trimmed.trim_end_matches('.'))
+            } else {
+                format!("{}Z", trimmed.trim_end_matches('Z'))
+            }
+        }
+    } else {
+        // Not a parseable datetime - return as-is (could be a special value)
+        s.to_string()
+    }
+}
+
 /// Parse @policy directive arguments with Go-compatible error messages.
 fn parse_policy_directive(directive: &Directive<'_, String>) -> Result<PolicyConfig> {
     let id_raw = get_directive_arg(directive, "id");
@@ -435,7 +467,11 @@ impl<'a> SdlParser<'a> {
                         result.size_constraint = Some(size as usize);
                     }
                 }
-                "embedding" | "encryptedIndex" | "policy" => {
+                "encryptedIndex" => {
+                    // Searchable encryption index
+                    result.encrypted_index = true;
+                }
+                "embedding" | "policy" => {
                     // Known but not yet implemented - emit warning so users know
                     self.warnings.push(ParseWarning::UnimplementedDirective {
                         directive_name: directive.name.clone(),
@@ -597,13 +633,24 @@ impl<'a> SdlParser<'a> {
 
             match name {
                 "index" => {
+                    // Parse top-level direction argument (default for all fields)
+                    let default_descending = self
+                        .get_string_with_warning(directive, "direction", &type_name, None)
+                        .as_deref()
+                        .map(|d| matches!(d, "DESC" | "desc" | "Descending"))
+                        .unwrap_or(false);
+
                     // Try "fields" argument first (simple format: ["name", "age"])
                     let simple_fields = get_directive_string_list(directive, "fields");
                     let fields: Vec<(String, bool)> = if !simple_fields.is_empty() {
-                        simple_fields.into_iter().map(|f| (f, false)).collect()
+                        // Apply default direction to all fields from simple format
+                        simple_fields
+                            .into_iter()
+                            .map(|f| (f, default_descending))
+                            .collect()
                     } else {
                         // Try "includes" argument (Go format: [{field: "name", direction: DESC}, ...])
-                        self.parse_includes_argument(directive)
+                        self.parse_includes_argument(directive, default_descending)
                     };
 
                     let idx_name = get_directive_string(directive, "name");
@@ -680,10 +727,16 @@ impl<'a> SdlParser<'a> {
             _ => IndexDirection::Asc,
         };
 
+        // Parse includes for composite indexes
+        // The default direction for included fields is inherited from the top-level direction
+        let default_descending = matches!(direction, IndexDirection::Desc);
+        let includes = self.parse_includes_argument(directive, default_descending);
+
         Ok(IndexConfig {
             name,
             unique,
             direction,
+            includes,
         })
     }
 
@@ -691,7 +744,15 @@ impl<'a> SdlParser<'a> {
     ///
     /// Go format: `@index(includes: [{field: "name"}, {field: "age", direction: DESC}])`
     /// Returns (field_name, descending) tuples extracted from the objects.
-    fn parse_includes_argument(&self, directive: &Directive<'_, String>) -> Vec<(String, bool)> {
+    ///
+    /// The `default_descending` parameter is used when a field in the includes array
+    /// doesn't specify its own direction. This comes from the top-level `direction`
+    /// argument on the @index directive.
+    fn parse_includes_argument(
+        &self,
+        directive: &Directive<'_, String>,
+        default_descending: bool,
+    ) -> Vec<(String, bool)> {
         let Some(value) = get_directive_arg(directive, "includes") else {
             return Vec::new();
         };
@@ -715,7 +776,7 @@ impl<'a> SdlParser<'a> {
                     _ => None,
                 })?;
 
-                // Extract direction (defaults to ASC)
+                // Extract direction (defaults to the top-level direction or ASC)
                 let descending = obj
                     .get("direction")
                     .map(|v| match v {
@@ -723,9 +784,9 @@ impl<'a> SdlParser<'a> {
                         | graphql_parser::schema::Value::Enum(s) => {
                             matches!(s.as_str(), "DESC" | "desc" | "Descending")
                         }
-                        _ => false,
+                        _ => default_descending,
                     })
-                    .unwrap_or(false);
+                    .unwrap_or(default_descending);
 
                 Some((field_name, descending))
             })
@@ -813,7 +874,14 @@ impl<'a> SdlParser<'a> {
                 other => Err(default_type_error("float32", "float", other)),
             },
             "dateTime" => match value {
-                graphql_parser::schema::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+                graphql_parser::schema::Value::String(s) => {
+                    // Normalize to RFC3339 format to match Go's time.Time serialization.
+                    // Go parses the datetime string into time.Time then formats it back,
+                    // which drops trailing zeros in the fractional seconds.
+                    // Parse as DateTime and re-format, or pass through if it's a special value.
+                    let normalized = normalize_datetime_string(s);
+                    Ok(serde_json::Value::String(normalized))
+                }
                 // Accept Enum for special values like UTC_NOW
                 graphql_parser::schema::Value::Enum(s) => Ok(serde_json::Value::String(s.clone())),
                 other => Err(default_type_error("dateTime", "string", other)),
@@ -1592,6 +1660,11 @@ impl<'a> SdlParser<'a> {
                         // pointing back to this type. No back-reference (join tables)
                         // or array back-reference (one-to-many) means no unique index.
                         // See Go's ensureOneToOneUniqueIndex() in collection_define.go
+                        //
+                        // Skip auto-index creation if the user has defined their own @index
+                        // directive on this field - they take responsibility for the index.
+                        let has_user_index = parsed_field.directives.index.is_some();
+
                         let is_one_to_one = self
                             .type_defs
                             .get(&parsed_field.field_type.base_type)
@@ -1603,7 +1676,18 @@ impl<'a> SdlParser<'a> {
                             })
                             .unwrap_or(false);
 
+                        // Validate user-defined index on one-to-one relation must be unique
                         if is_one_to_one {
+                            if let Some(ref idx) = parsed_field.directives.index {
+                                if !idx.unique {
+                                    return Err(QueryError::parse(
+                                        "one-to-one relation must have a unique index",
+                                    ));
+                                }
+                            }
+                        }
+
+                        if is_one_to_one && !has_user_index {
                             let idx_name = generate_index_name(
                                 &type_def.name,
                                 &id_field_name,
@@ -1629,22 +1713,77 @@ impl<'a> SdlParser<'a> {
 
             // Handle field-level @index directive
             if let Some(ref idx_config) = parsed_field.directives.index {
+                // Build fields list based on includes
+                // For relation fields (non-array), Go DefraDB stores indexes on the FK field
+                // (_fieldID) rather than the relation field name.
+                let is_relation_field = !parsed_field.field_type.is_list
+                    && self.type_defs.contains_key(&parsed_field.field_type.base_type);
+
+                let primary_field_name = if is_relation_field {
+                    // Use FK field name for relation fields (e.g., "address" -> "_addressID")
+                    format!("_{}ID", parsed_field.name)
+                } else {
+                    parsed_field.name.clone()
+                };
+                let primary_descending = matches!(idx_config.direction, IndexDirection::Desc);
+
+                let index_fields: Vec<IndexedFieldDescription> =
+                    if idx_config.includes.iter().any(|(name, _)| {
+                        name == &parsed_field.name || name == &primary_field_name
+                    }) {
+                        // includes explicitly contains the primary field - use includes order
+                        // Transform relation field names to FK field names
+                        idx_config
+                            .includes
+                            .iter()
+                            .map(|(name, descending)| {
+                                let final_name =
+                                    if *name == parsed_field.name && is_relation_field {
+                                        format!("_{}ID", parsed_field.name)
+                                    } else {
+                                        name.clone()
+                                    };
+                                IndexedFieldDescription {
+                                    name: final_name,
+                                    descending: *descending,
+                                }
+                            })
+                            .collect()
+                    } else if idx_config.includes.is_empty() {
+                        // No includes - just the primary field
+                        vec![IndexedFieldDescription {
+                            name: primary_field_name.clone(),
+                            descending: primary_descending,
+                        }]
+                    } else {
+                        // includes doesn't contain primary field - prepend it
+                        let mut fields = vec![IndexedFieldDescription {
+                            name: primary_field_name.clone(),
+                            descending: primary_descending,
+                        }];
+                        for (name, descending) in &idx_config.includes {
+                            fields.push(IndexedFieldDescription {
+                                name: name.clone(),
+                                descending: *descending,
+                            });
+                        }
+                        fields
+                    };
+
+                // Generate index name based on first field
+                let first_field_name = index_fields
+                    .first()
+                    .map(|f| f.name.as_str())
+                    .unwrap_or(&primary_field_name);
                 let idx_name = idx_config.name.clone().unwrap_or_else(|| {
-                    generate_index_name(
-                        &type_def.name,
-                        &parsed_field.name,
-                        &existing_index_names,
-                    )
+                    generate_index_name(&type_def.name, first_field_name, &existing_index_names)
                 });
                 existing_index_names.push(idx_name.clone());
 
                 indexes.push(IndexDescription {
                     name: idx_name,
                     id: field_id_counter,
-                    fields: vec![IndexedFieldDescription {
-                        name: parsed_field.name.clone(),
-                        descending: matches!(idx_config.direction, IndexDirection::Desc),
-                    }],
+                    fields: index_fields,
                     unique: idx_config.unique,
                 });
             }
@@ -1654,9 +1793,11 @@ impl<'a> SdlParser<'a> {
         }
 
         // Handle type-level @index directives (composite indexes)
-        // Build a set of valid field names for validation
+        // Build a set of valid field names for validation.
+        // Use the `fields` vector (not type_def.fields) because it includes auto-generated
+        // FK fields like `_addressID` that may be referenced in type-level indexes.
         let valid_field_names: std::collections::HashSet<_> =
-            type_def.fields.iter().map(|f| f.name.as_str()).collect();
+            fields.iter().map(|f| f.name.as_str()).collect();
 
         for composite_idx in &type_def.directives.indexes {
             // Validate that all referenced fields exist
@@ -1720,9 +1861,18 @@ impl<'a> SdlParser<'a> {
         // Version ID equals collection ID for new schemas (Go behavior)
         let version_id = collection_id.clone();
 
+        // Build encrypted indexes from @encryptedIndex directives
+        let encrypted_indexes: Vec<schema::EncryptedIndexDescription> = type_def
+            .fields
+            .iter()
+            .filter(|f| f.directives.encrypted_index)
+            .map(|f| schema::EncryptedIndexDescription::new(&f.name))
+            .collect();
+
         let mut collection =
             CollectionVersion::new(&type_def.name, &version_id, &collection_id, fields);
         collection.indexes = indexes;
+        collection.encrypted_indexes = encrypted_indexes;
         collection.is_materialized = type_def.directives.is_materialized;
         collection.is_branchable = type_def.directives.is_branchable;
         if let Some(ref policy_config) = type_def.directives.policy {
@@ -2679,6 +2829,48 @@ mod tests {
 
         assert_eq!(event.indexes.len(), 1);
         assert!(event.indexes[0].fields[0].descending);
+    }
+
+    #[test]
+    fn test_composite_index_with_default_direction() {
+        // Type-level @index with direction: DESC should apply to all fields
+        let sdl = r#"
+            type User @index(direction: DESC, includes: [{field: "name"}, {field: "age"}]) {
+                name: String
+                age: Int
+            }
+        "#;
+
+        let collections = parse_sdl(sdl).unwrap();
+        let user = &collections[0];
+
+        assert_eq!(user.indexes.len(), 1);
+        let idx = &user.indexes[0];
+        assert_eq!(idx.fields.len(), 2);
+        // Both fields should inherit DESC from the top-level direction
+        assert!(idx.fields[0].descending, "name should be descending");
+        assert!(idx.fields[1].descending, "age should be descending");
+    }
+
+    #[test]
+    fn test_composite_index_override_default_direction() {
+        // Per-field direction should override top-level direction
+        let sdl = r#"
+            type User @index(direction: DESC, includes: [{field: "name"}, {field: "age", direction: ASC}]) {
+                name: String
+                age: Int
+            }
+        "#;
+
+        let collections = parse_sdl(sdl).unwrap();
+        let user = &collections[0];
+
+        assert_eq!(user.indexes.len(), 1);
+        let idx = &user.indexes[0];
+        assert_eq!(idx.fields.len(), 2);
+        // name inherits DESC, age overrides to ASC
+        assert!(idx.fields[0].descending, "name should be descending");
+        assert!(!idx.fields[1].descending, "age should be ascending (override)");
     }
 
     // =========================================================================

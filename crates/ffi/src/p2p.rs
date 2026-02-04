@@ -18,7 +18,8 @@ use crate::state::{FfiStore, NodeState, P2PState, PolicyStore, NODES};
 use crate::types::{c_str_to_string, FfiResult, NewNodeResult, NodeInitOptions};
 use crate::ERR_INVALID_NODE_HANDLE;
 
-use blockstore::DefraBlockstore;
+use blockstore::{Blockstore, DefraBlockstore};
+use defra_core::Block;
 use p2p::bitswap::BitswapStoreAdapter;
 use p2p::message::PushLogRequest;
 use p2p::sync::{ReplicationConfig, ReplicationLoop, ReplicationResult, SyncConfig, SyncCoordinator};
@@ -128,16 +129,19 @@ pub unsafe extern "C" fn new_node_with_p2p(
         // Create event bus for subscriptions
         let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::default());
 
-        // Generate or load node identity for signing (matches new_node behavior)
+        // Generate or load node identity BEFORE opening database so it can be passed via options.
         let (raw_identity_opt, node_identity_did) = if enable_signing {
+            // Check if a signing key was provided by the caller
             let raw_identity = if !options.signing_private_key.is_null()
                 && options.signing_private_key_len > 0
             {
-                let key_bytes = std::slice::from_raw_parts(
-                    options.signing_private_key,
-                    options.signing_private_key_len,
-                );
-                let key_type = crate::types::c_str_to_string(options.signing_key_type)
+                let key_bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        options.signing_private_key,
+                        options.signing_private_key_len,
+                    )
+                };
+                let key_type = unsafe { crate::types::c_str_to_string(options.signing_key_type) }
                     .unwrap_or_else(|| "secp256k1".to_string());
 
                 match key_type.as_str() {
@@ -160,6 +164,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
                     }
                 }
             } else {
+                // Auto-generate secp256k1 key
                 let private_key = crypto::generate_secp256k1()
                     .map_err(|e| format!("failed to generate node signing key: {}", e))?;
                 identity::RawIdentity::from_secp256k1(private_key)
@@ -172,12 +177,13 @@ pub unsafe extern "C" fn new_node_with_p2p(
             let did_str = did.to_string();
 
             let key_type = if !options.signing_private_key.is_null() {
-                crate::types::c_str_to_string(options.signing_key_type)
+                unsafe { crate::types::c_str_to_string(options.signing_key_type) }
                     .unwrap_or_else(|| "secp256k1".to_string())
             } else {
                 "secp256k1".to_string()
             };
 
+            // Store in global identity store so exec_request can look up the signing config
             defra_core::signing::store_identity(
                 &did_str,
                 defra_core::signing::SigningConfig {
@@ -332,6 +338,18 @@ pub unsafe extern "C" fn new_node_with_p2p(
                         };
                         event_bus_for_repl.publish(events::Message::merge_complete(mc));
                         eprintln!("[REPL-LOOP] merge_complete published for cid={}", cid);
+
+                        // Publish SE artifact received event so the Go SE coordinator
+                        // bridge picks it up. The Go test framework uses this to know
+                        // when encrypted index data is available after replication.
+                        if !doc_id.is_empty() {
+                            eprintln!("[REPL-LOOP] Publishing se_artifact_received for doc_id={}", doc_id);
+                            event_bus_for_repl.publish(events::Message::se_artifact_received(
+                                events::SEArtifactReceivedData {
+                                    doc_id: doc_id.clone(),
+                                },
+                            ));
+                        }
                     }
                     ReplicationResult::MergedButBroadcastFailed {
                         cid,
@@ -352,6 +370,14 @@ pub unsafe extern "C" fn new_node_with_p2p(
                             by_peer: coord_for_repl.local_peer_id().to_string(),
                         };
                         event_bus_for_repl.publish(events::Message::merge_complete(mc));
+
+                        if !doc_id.is_empty() {
+                            event_bus_for_repl.publish(events::Message::se_artifact_received(
+                                events::SEArtifactReceivedData {
+                                    doc_id: doc_id.clone(),
+                                },
+                            ));
+                        }
                     }
                     ReplicationResult::ChannelClosed => {
                         tracing::info!("Sync event channel closed, stopping replication loop");
@@ -432,9 +458,11 @@ pub unsafe extern "C" fn new_node_with_p2p(
             }
         });
 
-        // Create P2P state with sync pipeline abort handles
-        let p2p_state = Arc::new(P2PState::with_sync_pipeline(
+        // Create P2P state with sync pipeline components and abort handles
+        let p2p_state = Arc::new(P2PState::new(
             handle.clone(),
+            blockstore.clone(),
+            merge_handler.clone(),
             host_event_task.abort_handle(),
             replication_task.abort_handle(),
             broadcast_task.abort_handle(),
@@ -1530,6 +1558,8 @@ pub unsafe extern "C" fn p2p_sync_documents(
         Err(e) => return FfiResult::error(e),
     };
 
+    eprintln!("[DOCSYNC] p2p_sync_documents called: collection={} doc_ids={:?}", collection_name_str, doc_ids);
+
     let result = NODES
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
@@ -1552,17 +1582,14 @@ pub unsafe extern "C" fn p2p_sync_documents(
                     .await
                     .map_err(|e| format!("failed to get connected peers: {}", e))?;
 
+                eprintln!("[DOCSYNC] connected_peers count={}", connected_peers.len());
+
                 if connected_peers.is_empty() {
-                    tracing::debug!("No connected peers for DocSync");
+                    eprintln!("[DOCSYNC] No connected peers for DocSync");
                     return Ok(());
                 }
 
-                tracing::info!(
-                    collection = %collection_name_str,
-                    doc_ids = ?doc_ids,
-                    peer_count = connected_peers.len(),
-                    "Starting DocSync for documents"
-                );
+                eprintln!("[DOCSYNC] Starting DocSync for {} documents to {} peers", doc_ids.len(), connected_peers.len());
 
                 // Create DocSync request
                 let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
@@ -1578,20 +1605,154 @@ pub unsafe extern "C" fn p2p_sync_documents(
                 // 2. Peer responds with DocSyncReply containing head CIDs
                 // 3. Coordinator receives DocSyncReply and initiates Bitswap fetch
                 // 4. Blocks are stored and merged via the replication loop
-                for peer_id in connected_peers {
+                for peer_id in &connected_peers {
+                    eprintln!("[DOCSYNC] Sending DocSync request to peer={}", peer_id);
                     let request_clone = request.clone();
                     let handle = p2p.handle.clone();
+                    let peer_id = *peer_id;
 
                     tokio::spawn(async move {
-                        tracing::info!(
-                            peer_id = %peer_id,
-                            "Sending DocSync request to peer"
+                        eprintln!("[DOCSYNC] Spawned task sending to peer={}", peer_id);
+                        match handle.send_doc_sync_request(peer_id, request_clone).await {
+                            Ok(()) => eprintln!("[DOCSYNC] Sent DocSync request to peer={}", peer_id),
+                            Err(e) => eprintln!("[DOCSYNC] Failed to send DocSync request to peer={}: {}", peer_id, e),
+                        }
+                    });
+                }
+
+                Ok(())
+            })
+        })
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+        .and_then(|r| r);
+
+    match result {
+        Ok(()) => FfiResult::ok(),
+        Err(e) => FfiResult::error(e),
+    }
+}
+
+/// Sync a branchable collection from connected peers.
+///
+/// Looks up the collection, verifies it is branchable, then sends a
+/// BranchableSyncRequest to each connected peer via the two-stream protocol.
+///
+/// # Safety
+///
+/// `identity_did` and `collection_id` must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_sync_branchable_collection(
+    node_ptr: usize,
+    identity_did: *const c_char,
+    collection_id: *const c_char,
+) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pCollectionCreate) {
+        return e;
+    }
+
+    let collection_id_str = match c_str_to_string(collection_id) {
+        Some(s) => s,
+        None => return FfiResult::error("collection_id is null"),
+    };
+
+    eprintln!(
+        "[FFI-BRANCHABLE] p2p_sync_branchable_collection called with collection_id={}",
+        collection_id_str
+    );
+
+    let result = NODES
+        .get(node_ptr, |state| {
+            let p2p = match &state.p2p {
+                Some(p2p) => p2p,
+                None => return Err("P2P not enabled for this node".to_string()),
+            };
+            let db = &state.database;
+
+            rt.block_on(async {
+                // Look up collection by its collection_id
+                let collection = match db.find_collection_by_id(&collection_id_str) {
+                    Ok(Some(c)) => c,
+                    Ok(None) => {
+                        eprintln!(
+                            "[FFI-BRANCHABLE] collection '{}' not found",
+                            collection_id_str
                         );
-                        if let Err(e) = handle.send_doc_sync_request(peer_id, request_clone).await {
-                            tracing::warn!(
-                                peer_id = %peer_id,
-                                error = %e,
-                                "Failed to send DocSync request"
+                        return Err(format!(
+                            "collection with ID '{}' not found",
+                            collection_id_str
+                        ));
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[FFI-BRANCHABLE] find_collection_by_id error: {}",
+                            e
+                        );
+                        return Err(format!("failed to find collection: {}", e));
+                    }
+                };
+
+                eprintln!(
+                    "[FFI-BRANCHABLE] Found collection name={} branchable={}",
+                    collection.name(),
+                    collection.schema().is_branchable
+                );
+
+                // Check if the collection is branchable
+                if !collection.schema().is_branchable {
+                    return Err("collection is not branchable".to_string());
+                }
+
+                // Get connected peers
+                let connected_peers = p2p
+                    .handle
+                    .connected_peers()
+                    .await
+                    .map_err(|e| format!("failed to get connected peers: {}", e))?;
+
+                eprintln!(
+                    "[FFI-BRANCHABLE] Connected peers: {}",
+                    connected_peers.len()
+                );
+
+                if connected_peers.is_empty() {
+                    eprintln!("[FFI-BRANCHABLE] No connected peers, returning early");
+                    return Ok(());
+                }
+
+                // Create BranchableSync request
+                let mut request =
+                    p2p::message::BranchableSyncRequest::new(collection_id_str.clone());
+
+                // Sign the request
+                if let Err(e) = p2p::signing::sign_message(p2p.handle.keypair(), &mut request) {
+                    return Err(format!("failed to sign BranchableSync request: {}", e));
+                }
+
+                // Send to each connected peer (fire-and-forget)
+                for peer_id in &connected_peers {
+                    eprintln!(
+                        "[FFI-BRANCHABLE] Sending BranchableSyncRequest to peer={}",
+                        peer_id
+                    );
+                    let request_clone = request.clone();
+                    let handle = p2p.handle.clone();
+                    let peer_id = *peer_id;
+
+                    tokio::spawn(async move {
+                        if let Err(e) = handle
+                            .send_branchable_sync_request(peer_id, request_clone)
+                            .await
+                        {
+                            eprintln!(
+                                "[FFI-BRANCHABLE] Failed to send request to peer={}: {}",
+                                peer_id, e
+                            );
+                        } else {
+                            eprintln!(
+                                "[FFI-BRANCHABLE] Successfully sent request to peer={}",
+                                peer_id
                             );
                         }
                     });
@@ -1609,18 +1770,24 @@ pub unsafe extern "C" fn p2p_sync_documents(
     }
 }
 
-/// Sync a branchable collection from peers.
+/// Sync collection versions (schema definitions) from connected peers via Bitswap.
 ///
-/// Subscribes to the collection's GossipSub topic for P2P replication.
+/// This fetches collection definition blocks by their CIDs (version IDs), recursively
+/// fetches previous versions and field definition blocks, then saves them to the
+/// database as inactive collection versions.
+///
+/// Unlike DocSync and BranchableSync (which use PubSub request/reply), this uses
+/// Bitswap directly to fetch blocks by CID.
 ///
 /// # Safety
 ///
-/// `identity_did` and `collection_id` must be valid null-terminated UTF-8 strings.
+/// `identity_did` and `version_ids_json` must be valid null-terminated UTF-8 strings.
+/// `version_ids_json` should be a JSON array of CID strings: `["bafyrei...", "bafyrei..."]`
 #[no_mangle]
-pub unsafe extern "C" fn p2p_sync_branchable_collection(
+pub unsafe extern "C" fn p2p_sync_collection_versions(
     node_ptr: usize,
     identity_did: *const c_char,
-    collection_id: *const c_char,
+    version_ids_json: *const c_char,
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
@@ -1628,10 +1795,36 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
         return e;
     }
 
-    let col_id = match c_str_to_string(collection_id) {
+    let version_ids_str = match c_str_to_string(version_ids_json) {
         Some(s) => s,
-        None => return FfiResult::error("collection_id is null"),
+        None => return FfiResult::error("version_ids_json is null"),
     };
+
+    eprintln!(
+        "[FFI-COLLECTION-VERSION] p2p_sync_collection_versions called with version_ids={}",
+        version_ids_str
+    );
+
+    // Parse the JSON array of version IDs
+    let version_ids: Vec<String> = match serde_json::from_str(&version_ids_str) {
+        Ok(ids) => ids,
+        Err(e) => {
+            return FfiResult::error(format!(
+                "failed to parse version_ids_json: {}",
+                e
+            ))
+        }
+    };
+
+    if version_ids.is_empty() {
+        eprintln!("[FFI-COLLECTION-VERSION] No version IDs provided, returning early");
+        return FfiResult::ok();
+    }
+
+    eprintln!(
+        "[FFI-COLLECTION-VERSION] Parsed {} version IDs to sync",
+        version_ids.len()
+    );
 
     let result = NODES
         .get(node_ptr, |state| {
@@ -1639,15 +1832,273 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
                 Some(p2p) => p2p,
                 None => return Err("P2P not enabled for this node".to_string()),
             };
+            let db = &state.database;
 
             rt.block_on(async {
-                let topic = DefraTopic::collection(&col_id);
-                p2p.handle
-                    .subscribe(topic)
+                // Get connected peers to use as providers
+                let connected_peers = p2p
+                    .handle
+                    .connected_peers()
                     .await
-                    .map_err(|e| format!("failed to sync branchable collection: {}", e))?;
-                p2p.add_collection(&col_id);
-                Ok::<(), String>(())
+                    .map_err(|e| format!("failed to get connected peers: {}", e))?;
+
+                eprintln!(
+                    "[FFI-COLLECTION-VERSION] Connected peers: {}",
+                    connected_peers.len()
+                );
+
+                if connected_peers.is_empty() {
+                    eprintln!("[FFI-COLLECTION-VERSION] No connected peers, returning early");
+                    return Ok(());
+                }
+
+                // Process each version ID
+                for version_id_str in &version_ids {
+                    eprintln!(
+                        "[FFI-COLLECTION-VERSION] Processing version_id={}",
+                        version_id_str
+                    );
+
+                    // Parse CID from version ID string
+                    let version_cid = match cid::Cid::try_from(version_id_str.as_str()) {
+                        Ok(cid) => cid,
+                        Err(e) => {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Invalid CID '{}': {}",
+                                version_id_str, e
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Start Bitswap sync for the version CID
+                    eprintln!(
+                        "[FFI-COLLECTION-VERSION] Starting Bitswap sync for cid={}",
+                        version_cid
+                    );
+
+                    if let Err(e) = p2p.handle
+                        .bitswap_sync(version_cid, connected_peers.clone(), vec![version_cid])
+                        .await
+                    {
+                        eprintln!(
+                            "[FFI-COLLECTION-VERSION] Bitswap sync failed for {}: {}",
+                            version_cid, e
+                        );
+                        continue;
+                    }
+
+                    // Wait for block to be fetched by polling the blockstore via transaction
+                    let timeout = std::time::Duration::from_secs(30);
+                    let start = std::time::Instant::now();
+                    let mut block_found = false;
+
+                    while start.elapsed() < timeout {
+                        // Create a read-only transaction to check blockstore
+                        let txn = match db.new_txn(true).await {
+                            Ok(t) => t,
+                            Err(e) => {
+                                eprintln!(
+                                    "[FFI-COLLECTION-VERSION] Failed to create txn: {}",
+                                    e
+                                );
+                                break;
+                            }
+                        };
+
+                        let blockstore = match txn.blockstore() {
+                            Ok(b) => b,
+                            Err(e) => {
+                                eprintln!(
+                                    "[FFI-COLLECTION-VERSION] Failed to get blockstore: {}",
+                                    e
+                                );
+                                break;
+                            }
+                        };
+
+                        // Check if block exists
+                        let cid_bytes = version_cid.to_bytes();
+                        match blockstore.has(&cid_bytes).await {
+                            Ok(true) => {
+                                block_found = true;
+                                eprintln!(
+                                    "[FFI-COLLECTION-VERSION] Block {} fetched successfully",
+                                    version_cid
+                                );
+                                break;
+                            }
+                            Ok(false) => {
+                                // Not yet, wait and retry
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[FFI-COLLECTION-VERSION] Blockstore check failed: {}",
+                                    e
+                                );
+                                break;
+                            }
+                        }
+                    }
+
+                    if !block_found {
+                        eprintln!(
+                            "[FFI-COLLECTION-VERSION] Timeout waiting for block {}",
+                            version_cid
+                        );
+                        continue;
+                    }
+
+                    eprintln!(
+                        "[FFI-COLLECTION-VERSION] Block fetched, extracting linked field blocks"
+                    );
+
+                    // Read block data from blockstore
+                    let block_data = match p2p.blockstore.get(&version_cid).await {
+                        Ok(Some(data)) => data,
+                        Ok(None) => {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Block {} not found in blockstore after fetch",
+                                version_cid
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Failed to read block {}: {}",
+                                version_cid, e
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Decode block to extract linked field CIDs
+                    let linked_cids = match Block::from_dag_cbor(&block_data) {
+                        Ok(block) => {
+                            let links = block.all_links();
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Collection block has {} linked CIDs",
+                                links.len()
+                            );
+                            links
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Failed to decode block {}: {}",
+                                version_cid, e
+                            );
+                            vec![]
+                        }
+                    };
+
+                    // Fetch all linked field blocks
+                    for link_cid in &linked_cids {
+                        // Check if we already have this block
+                        match p2p.blockstore.get(link_cid).await {
+                            Ok(Some(_)) => {
+                                eprintln!(
+                                    "[FFI-COLLECTION-VERSION] Link {} already present",
+                                    link_cid
+                                );
+                                continue;
+                            }
+                            Ok(None) => {
+                                // Need to fetch
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[FFI-COLLECTION-VERSION] Error checking link {}: {}",
+                                    link_cid, e
+                                );
+                                continue;
+                            }
+                        }
+
+                        eprintln!(
+                            "[FFI-COLLECTION-VERSION] Fetching linked block {}",
+                            link_cid
+                        );
+
+                        // Start Bitswap sync for linked block
+                        if let Err(e) = p2p.handle
+                            .bitswap_sync(*link_cid, connected_peers.clone(), vec![*link_cid])
+                            .await
+                        {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Bitswap sync failed for link {}: {}",
+                                link_cid, e
+                            );
+                            continue;
+                        }
+
+                        // Wait for linked block
+                        let link_timeout = std::time::Duration::from_secs(10);
+                        let link_start = std::time::Instant::now();
+                        let mut link_found = false;
+
+                        while link_start.elapsed() < link_timeout {
+                            match p2p.blockstore.get(link_cid).await {
+                                Ok(Some(_)) => {
+                                    link_found = true;
+                                    eprintln!(
+                                        "[FFI-COLLECTION-VERSION] Linked block {} fetched",
+                                        link_cid
+                                    );
+                                    break;
+                                }
+                                Ok(None) => {
+                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[FFI-COLLECTION-VERSION] Error waiting for link {}: {}",
+                                        link_cid, e
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+
+                        if !link_found {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Timeout waiting for linked block {}",
+                                link_cid
+                            );
+                        }
+                    }
+
+                    eprintln!(
+                        "[FFI-COLLECTION-VERSION] All linked blocks fetched, processing through merge handler"
+                    );
+
+                    // Process through merge handler with recovery metadata
+                    // (collection definitions don't have doc_id/collection_id in the traditional sense)
+                    use p2p::sync::{BlockMetadata, MergeHandler};
+                    let metadata = BlockMetadata::recovery();
+
+                    match p2p.merge_handler.handle_block(&version_cid, &block_data, metadata).await {
+                        Ok(outcome) => {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Merge handler result for {}: {:?}",
+                                version_cid, outcome
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Merge handler error for {}: {}",
+                                version_cid, e
+                            );
+                        }
+                    }
+
+                    eprintln!(
+                        "[FFI-COLLECTION-VERSION] Successfully synced version {}",
+                        version_id_str
+                    );
+                }
+
+                Ok(())
             })
         })
         .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
@@ -1658,3 +2109,4 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
         Err(e) => FfiResult::error(e),
     }
 }
+

@@ -11,14 +11,18 @@ use cid::Cid;
 use crdt::traits::{Context, ReplicatedData, ValueReader};
 use crdt::{Counter, CounterDelta, Lww, LwwDelta, NumericKind};
 use datastore::NamespaceView;
-use defra_core::block::{Block, CrdtDelta};
+use defra_core::block::{
+    Block, CollectionDefinitionDeltaPayload, CrdtDelta, FieldDefinitionDeltaPayload,
+};
 use defra_core::types::DocId;
 use document::{DocID, Document, NormalValue};
-use events::{Message, Update};
+use events::{MergeCompleteData, Message, Update};
 use p2p::sync::{BlockMetadata, MergeHandler, MergeOutcome};
-use schema;
-use storage::corekv::Store;
+use schema::{self, CType, CollectionVersion, FieldDescription, FieldKind, ScalarKind};
+use storage::corekv::{Key, Store};
+use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
 
+use crate::collection::collection_short_id;
 use crate::database::DB;
 use crate::error::Error;
 
@@ -422,6 +426,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let mut field_values: HashMap<String, NormalValue> = HashMap::new();
         let mut any_field_applied = false;
         let mut process_error: Option<MergeError> = None;
+        let mut is_branchable = false;
 
         // Process linked blocks within the transaction scope
         // Use a scoped block to ensure datastore is dropped before commit/discard
@@ -573,6 +578,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
                 match collection_lookup {
                     Some(collection) => {
+                        is_branchable = collection.schema().is_branchable;
                         if is_delete {
                             // Handle delete: write the deletion marker so queries
                             // exclude this document (or show _deleted:true).
@@ -773,6 +779,26 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         true,   // is_relay (P2P update)
                     );
                     bus.publish(Message::update(update));
+
+                    // For branchable collections, emit a collection-level merge_complete
+                    // event so the test framework (and Go event system) can track
+                    // collection DAG heads separately from document DAG heads.
+                    if is_branchable {
+                        let by_peer = metadata
+                            .creator
+                            .unwrap_or("")
+                            .to_string();
+                        let mc = MergeCompleteData {
+                            doc_id: String::new(), // empty → keyed by collection_id
+                            cid: *cid,
+                            collection_id: metadata
+                                .collection_id
+                                .unwrap_or(&payload.schema_version_id)
+                                .to_string(),
+                            by_peer,
+                        };
+                        bus.publish(Message::merge_complete(mc));
+                    }
                 }
 
                 Ok(MergeOutcome::Merged)
@@ -1084,6 +1110,229 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         }
     }
 
+    /// Process a Collection delta from a block.
+    ///
+    /// Collection blocks are metadata containers that link to document composite
+    /// blocks. The collection CRDT merge itself is a no-op (matching Go behavior).
+    /// The real work is:
+    /// 1. Recursively process parent collection blocks from `heads`
+    /// 2. Process each linked document composite via `process_composite_delta`
+    /// 3. Update the collection headstore with the new head CID
+    async fn process_collection_delta(
+        &self,
+        cid: &Cid,
+        block: &Block,
+        payload: &defra_core::block::CollectionDeltaPayload,
+        metadata: &BlockMetadata<'_>,
+    ) -> std::result::Result<MergeOutcome, MergeError> {
+        eprintln!(
+            "[MERGE-COL] Processing Collection delta cid={} schema_version={} priority={} links={} heads={}",
+            cid,
+            payload.schema_version_id,
+            payload.priority,
+            block.links.as_ref().map(|l| l.len()).unwrap_or(0),
+            block.heads.as_ref().map(|h| h.len()).unwrap_or(0),
+        );
+
+        // Recursively process parent collection blocks from `heads` before
+        // this block, ensuring older documents are merged first.
+        if let Some(heads) = &block.heads {
+            for head_cid in heads {
+                let head_data = match self.blockstore.get(head_cid).await {
+                    Ok(Some(data)) => data,
+                    Ok(None) => {
+                        tracing::debug!(
+                            parent_cid = %head_cid,
+                            child_cid = %cid,
+                            "Parent collection block not in blockstore, skipping"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            parent_cid = %head_cid,
+                            error = %e,
+                            "Failed to load parent collection block, skipping"
+                        );
+                        continue;
+                    }
+                };
+
+                let head_block = match Block::from_dag_cbor(&head_data) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+
+                if let CrdtDelta::Collection(head_payload) = &head_block.delta {
+                    tracing::info!(
+                        parent_cid = %head_cid,
+                        child_cid = %cid,
+                        "Recursively merging parent collection block"
+                    );
+                    let _ = Box::pin(
+                        self.process_collection_delta(head_cid, &head_block, head_payload, metadata),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // Process linked document composites
+        let mut any_merged = false;
+        if let Some(links) = &block.links {
+            for dag_link in links {
+                let link_cid = &dag_link.link;
+
+                tracing::debug!(
+                    collection_cid = %cid,
+                    link_cid = %link_cid,
+                    link_name = %dag_link.name,
+                    "Processing linked block from Collection delta"
+                );
+
+                let linked_data = match self.blockstore.get(link_cid).await {
+                    Ok(Some(data)) => data,
+                    Ok(None) => {
+                        tracing::warn!(
+                            link_cid = %link_cid,
+                            "Linked block not found in blockstore"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            link_cid = %link_cid,
+                            error = %e,
+                            "Failed to load linked block"
+                        );
+                        continue;
+                    }
+                };
+
+                let linked_block = match Block::from_dag_cbor(&linked_data) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(
+                            link_cid = %link_cid,
+                            error = %e,
+                            "Failed to decode linked block"
+                        );
+                        continue;
+                    }
+                };
+
+                eprintln!(
+                    "[MERGE-COL] Linked block {} delta_type={:?}",
+                    link_cid,
+                    std::mem::discriminant(&linked_block.delta)
+                );
+
+                match &linked_block.delta {
+                    CrdtDelta::Composite(composite_payload) => {
+                        let doc_id_str = String::from_utf8_lossy(&composite_payload.doc_id).to_string();
+                        eprintln!(
+                            "[MERGE-COL] Processing linked composite {} doc_id={}",
+                            link_cid, doc_id_str
+                        );
+                        match self
+                            .process_composite_delta(link_cid, &linked_block, composite_payload, metadata)
+                            .await
+                        {
+                            Ok(MergeOutcome::Merged) => {
+                                eprintln!("[MERGE-COL] Composite {} merged OK", link_cid);
+                                any_merged = true;
+
+                                // Publish per-document MergeComplete so the Go test
+                                // framework's WaitForSync can track each document.
+                                if let Some(bus) = self.db.event_bus() {
+                                    let col_id = metadata
+                                        .collection_id
+                                        .unwrap_or(&payload.schema_version_id)
+                                        .to_string();
+                                    bus.publish(Message::merge_complete(MergeCompleteData {
+                                        doc_id: doc_id_str,
+                                        cid: *link_cid,
+                                        collection_id: col_id,
+                                        by_peer: String::new(),
+                                    }));
+                                }
+                            }
+                            Ok(outcome) => {
+                                eprintln!("[MERGE-COL] Composite {} skipped: {:?}", link_cid, outcome);
+                            }
+                            Err(e) => {
+                                eprintln!("[MERGE-COL] Composite {} FAILED: {}", link_cid, e);
+                            }
+                        }
+                    }
+                    other => {
+                        eprintln!(
+                            "[MERGE-COL] Skipping non-composite link {} type={:?}",
+                            link_cid,
+                            std::mem::discriminant(other)
+                        );
+                    }
+                }
+            }
+        }
+
+        // Update collection headstore: write the new collection head CID
+        // and delete any previous heads that this block supersedes.
+        let collection_id = metadata
+            .collection_id
+            .unwrap_or(&payload.schema_version_id);
+        let short_id = collection_short_id(collection_id);
+
+        let txn = self.db.new_txn(false).await?;
+        if let Ok(headstore) = txn.headstore() {
+            // Delete existing collection heads
+            let prefix = storage::keys::headstore::HeadstoreColKey::collection_prefix(short_id);
+            if let Ok(mut iter) = headstore
+                .iterator(datastore::IterOptions::new().with_prefix(prefix))
+                .await
+            {
+                while let Ok(Some(pair)) = iter.next().await {
+                    let _ = headstore.delete(&pair.key).await;
+                }
+                let _ = iter.close().await;
+            }
+
+            // Write the new collection head
+            let col_key = storage::keys::headstore::HeadstoreColKey::new(short_id, *cid);
+            let priority_bytes = encode_priority_varint(payload.priority);
+            if let Err(e) = headstore
+                .set(
+                    &<storage::keys::headstore::HeadstoreColKey as storage::corekv::Key>::bytes(
+                        &col_key,
+                    ),
+                    &priority_bytes,
+                )
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    collection_id = %collection_id,
+                    "Failed to write collection head to headstore"
+                );
+            }
+        }
+        txn.force_commit().await?;
+
+        tracing::info!(
+            cid = %cid,
+            collection_id = %collection_id,
+            short_id = short_id,
+            any_merged = any_merged,
+            "Collection delta processed"
+        );
+
+        if any_merged {
+            Ok(MergeOutcome::Merged)
+        } else {
+            Ok(MergeOutcome::skipped("no linked composites needed merging"))
+        }
+    }
+
     /// Create a CounterDelta from the block payload
     fn create_counter_delta(
         &self,
@@ -1129,6 +1378,185 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
     }
+
+    /// Process a CollectionDefinition delta - register synced collection schema in systemstore.
+    ///
+    /// When a peer receives collection definition blocks via Bitswap sync, this method
+    /// reconstructs the `CollectionVersion` from the definition deltas and stores it
+    /// in systemstore so `set_active_collection_version` can find and activate it.
+    async fn process_collection_definition_delta(
+        &self,
+        cid: &Cid,
+        block: &Block,
+        payload: &CollectionDefinitionDeltaPayload,
+        _metadata: &BlockMetadata<'_>,
+    ) -> Result<MergeOutcome, MergeError> {
+        let collection_name = match &payload.name {
+            Some(name) => name.clone(),
+            None => {
+                tracing::debug!(cid = %cid, "CollectionDefinition has no name - skipping");
+                return Ok(MergeOutcome::skipped("collection definition has no name"));
+            }
+        };
+
+        // The version_id is the CID of this collection definition block
+        let version_id = cid.to_string();
+
+        tracing::info!(
+            cid = %cid,
+            collection_name = %collection_name,
+            version_id = %version_id,
+            "Processing collection definition delta"
+        );
+
+        // Load and decode all linked field definition blocks
+        // Note: _docID is already included in the linked blocks from the source node,
+        // so we don't need to add it implicitly.
+        let mut fields = Vec::new();
+        if let Some(links) = &block.links {
+            for link in links.iter() {
+                let field_cid = &link.link;
+                let field_bytes = self
+                    .blockstore
+                    .get(field_cid)
+                    .await
+                    .map_err(|e| MergeError::Storage(format!("Failed to load field block: {}", e)))?
+                    .ok_or_else(|| {
+                        MergeError::Storage(format!("Field block not found: {}", field_cid))
+                    })?;
+
+                let field_block = Block::from_dag_cbor(&field_bytes)
+                    .map_err(|e| MergeError::BlockDecode(format!("Failed to decode field block: {}", e)))?;
+
+                if let CrdtDelta::FieldDefinition(field_payload) = &field_block.delta {
+                    // Use the field block CID as the field ID (matches Go's behavior)
+                    let field_desc = self.field_definition_to_description(field_payload, &field_cid.to_string())?;
+                    fields.push(field_desc);
+                } else {
+                    tracing::warn!(
+                        field_cid = %field_cid,
+                        "Linked block is not a FieldDefinition - skipping"
+                    );
+                }
+            }
+        }
+
+        // Ensure _docID is first in the fields list (Go expects this ordering)
+        if let Some(docid_pos) = fields.iter().position(|f| f.name == "_docID") {
+            if docid_pos > 0 {
+                let docid_field = fields.remove(docid_pos);
+                fields.insert(0, docid_field);
+            }
+        }
+
+        // For initial collection creation, collection_id equals version_id (the CID)
+        // For patched versions, we'd need to look up the existing collection
+        let collection_id = version_id.clone();
+
+        // Build the CollectionVersion
+        // Synced collections come in as inactive (user must activate manually via SetActiveCollectionVersion)
+        // and materialized (matching Go's behavior)
+        let mut schema = CollectionVersion::new(
+            &collection_name,
+            &version_id,
+            &collection_id,
+            fields,
+        );
+        schema.is_active = false;
+        schema.is_materialized = true;
+
+        // Store in systemstore
+        let txn = self.db.new_txn(false).await.map_err(MergeError::Database)?;
+        {
+            let systemstore = txn.systemstore().map_err(MergeError::Database)?;
+
+            // 1. Store full schema at /collection/id/{version_id}
+            let collection_key = CollectionKey::new(&version_id);
+            let data = serde_json::to_vec(&schema).map_err(|e| {
+                MergeError::Storage(format!("Failed to serialize collection schema: {}", e))
+            })?;
+            systemstore
+                .set(&collection_key.bytes(), &data)
+                .await
+                .map_err(|e| MergeError::Storage(format!("Failed to store collection: {}", e)))?;
+
+            // 2. Store version index at /collection/version/{collection_id}/{version_id}
+            let version_key = CollectionVersionKey::new(&collection_id, &version_id);
+            systemstore
+                .set(&version_key.bytes(), b"1")
+                .await
+                .map_err(|e| MergeError::Storage(format!("Failed to store version index: {}", e)))?;
+
+        }
+        txn.commit().await.map_err(MergeError::Database)?;
+
+        // Add to runtime cache so it's visible via list_collections/get_collection.
+        // Synced collections are inactive but still need to be in the cache for
+        // GetCollections with IncludeInactive=true to find them.
+        self.db.add_collection_to_cache(schema.clone()).map_err(MergeError::Database)?;
+
+        eprintln!(
+            "[MERGE-HANDLER] Stored synced collection name={} version={} is_active={} is_materialized={} (added to cache)",
+            collection_name, version_id, schema.is_active, schema.is_materialized
+        );
+
+        tracing::info!(
+            collection_name = %collection_name,
+            version_id = %version_id,
+            field_count = schema.fields.len(),
+            "Registered synced collection schema in systemstore and cache (inactive, requires manual activation)"
+        );
+
+        Ok(MergeOutcome::Merged)
+    }
+
+    /// Convert a FieldDefinitionDeltaPayload to a FieldDescription.
+    fn field_definition_to_description(
+        &self,
+        payload: &FieldDefinitionDeltaPayload,
+        field_id: &str,
+    ) -> Result<FieldDescription, MergeError> {
+        let name = payload.name.clone().unwrap_or_else(|| format!("field_{}", field_id));
+
+        // Determine the FieldKind from the payload
+        let kind = if let Some(collection_id) = &payload.collection_id {
+            // Relation field
+            FieldKind::Relation {
+                collection_id: collection_id.clone(),
+                is_array: false, // Default; actual value would need additional info
+            }
+        } else if let Some(relative_id) = payload.relative_id {
+            // Self-referencing field
+            FieldKind::SelfRef {
+                relative_id: relative_id.to_string(),
+                is_array: false,
+            }
+        } else if let Some(scalar_kind_u8) = payload.scalar_kind {
+            // Scalar field - convert u8 to ScalarKind
+            let scalar_kind = match scalar_kind_u8 {
+                0 => ScalarKind::None,
+                1 => ScalarKind::DocID,
+                2 => ScalarKind::Bool,
+                4 => ScalarKind::Int,
+                6 => ScalarKind::Float64,
+                8 => ScalarKind::Float32,
+                10 => ScalarKind::DateTime,
+                11 => ScalarKind::String,
+                13 => ScalarKind::Blob,
+                14 => ScalarKind::Json,
+                _ => ScalarKind::None,
+            };
+            FieldKind::Scalar(scalar_kind)
+        } else {
+            // Default to None scalar
+            FieldKind::Scalar(ScalarKind::None)
+        };
+
+        // Determine CRDT type
+        let crdt_type = payload.crdt.map(CType::from_u8).unwrap_or_default();
+
+        Ok(FieldDescription::new(field_id.to_string(), name, kind).with_crdt_type(crdt_type))
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -1173,15 +1601,18 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                 self.process_composite_delta(cid, &block, payload, &metadata)
                     .await
             }
-            CrdtDelta::Collection(_) => {
-                tracing::debug!(cid = %cid, "Collection delta - skipping (handled at schema level)");
-                Ok(MergeOutcome::skipped(
-                    "collection deltas handled at schema level",
-                ))
+            CrdtDelta::Collection(payload) => {
+                self.process_collection_delta(cid, &block, payload, &metadata)
+                    .await
             }
-            CrdtDelta::FieldDefinition(_) | CrdtDelta::CollectionDefinition(_) => {
-                tracing::debug!(cid = %cid, "Schema definition delta - skipping");
-                Ok(MergeOutcome::skipped("schema definition deltas not merged"))
+            CrdtDelta::FieldDefinition(_) => {
+                // Field definitions are processed as part of CollectionDefinition
+                tracing::debug!(cid = %cid, "FieldDefinition delta - skipping (processed with collection)");
+                Ok(MergeOutcome::skipped("field definition processed with collection"))
+            }
+            CrdtDelta::CollectionDefinition(payload) => {
+                self.process_collection_definition_delta(cid, &block, payload, &metadata)
+                    .await
             }
         }
     }

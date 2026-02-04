@@ -178,6 +178,9 @@ impl Collection {
 
         datastore.set(&key, &data).await.map_err(Error::Storage)?;
 
+        // Update schema version to current collection version
+        self.store_version(datastore, doc_id).await?;
+
         // Update indexes
         index_manager
             .on_document_update(datastore, &old_doc, doc, &self.def)
@@ -329,10 +332,11 @@ impl Collection {
             .to_cbor()
             .map_err(|e| Error::Serialization(e.to_string()))?;
 
-        txn.datastore()?
-            .set(&key, &data)
-            .await
-            .map_err(Error::Storage)?;
+        let datastore = txn.datastore()?;
+        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+
+        // Update schema version to current collection version
+        self.store_version(&datastore, doc_id).await?;
 
         Ok(())
     }
@@ -654,6 +658,9 @@ impl Collection {
             .map_err(|e| Error::Serialization(e.to_string()))?;
 
         datastore.set(&key, &data).await.map_err(Error::Storage)?;
+
+        // Update schema version to current collection version
+        self.store_version(datastore, doc_id).await?;
 
         Ok(())
     }

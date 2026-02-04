@@ -124,30 +124,18 @@ pub unsafe extern "C" fn get_collections(
     };
 
     let result = rt.block_on(async {
-        // Get collection names
-        let names = database
-            .list_collections()
-            .map_err(|e| format!("failed to list collections: {}", e))?;
-
-        // Get schemas for each collection, propagating errors
-        let mut collections = Vec::new();
-        for name in names {
-            match database.get_collection(&name) {
-                Ok(Some(collection)) => {
-                    collections.push(collection.schema().clone());
-                }
-                Ok(None) => {
-                    // Collection was deleted between list and get - skip it
-                }
-                Err(e) => {
-                    return Err(format!("failed to get collection '{}': {}", name, e));
-                }
-            }
-        }
+        // Return all collection versions from the system store (active + inactive + placeholders).
+        // The Go wrapper handles IncludeInactive filtering on its side.
+        let collections = database
+            .get_all_collection_versions()
+            .await
+            .map_err(|e| format!("failed to get collections: {}", e))?;
 
         // Return JSON array
         let json = serde_json::to_string(&collections)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
+
+        eprintln!("[GET-COLLECTIONS] JSON output: {}", json);
 
         Ok::<String, String>(json)
     });

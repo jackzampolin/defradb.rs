@@ -13,6 +13,8 @@ mod subscription;
 pub use bus::Bus;
 #[cfg(feature = "channel")]
 pub use channel_bus::{ChannelBus, ChannelBusConfig};
-pub use event::{EventName, MergeCompleteData, Message, TopicPeerEventData, Update};
+pub use event::{
+    EventName, MergeCompleteData, Message, SEArtifactReceivedData, TopicPeerEventData, Update,
+};
 pub use noop_bus::NoOpBus;
 pub use subscription::Subscription;

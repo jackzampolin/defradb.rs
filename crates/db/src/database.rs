@@ -3,10 +3,12 @@
 /// The DB struct is the main entry point for DefraDB operations.
 /// It manages the root store, creates transactions, and provides
 /// access to collections.
-use crate::collection::Collection;
+use crate::collection::{collection_short_id, Collection};
 use crate::collection_name::CollectionName;
 use crate::collection_snapshot::CollectionSnapshot;
 use crate::error::{Error, Result};
+use crate::index_manager::IndexManager;
+use crate::schema_loader::get_collections_by_collection_id;
 use crate::txn::DbTxn;
 use datastore::BasicTxn;
 use events::Bus;
@@ -15,8 +17,11 @@ use identity::{Identity, RawIdentity};
 use lens::MemoryTransformStore;
 #[cfg(feature = "native")]
 use lens::WasmTransformStore;
-use lens::{LensConfig, TransformId, TransformStore};
-use schema::{CollectionSource, CollectionVersion};
+use lens::{
+    build_targeted_history, CollectionHistoryLink, Lens, LensConfig, LensDoc, TransformId,
+    TransformStore, DOC_ID_FIELD,
+};
+use schema::{CollectionSource, CollectionVersion, FieldKind, ScalarKind, ORPHAN_COLLECTION_ID};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -363,6 +368,103 @@ impl<S: Store> DB<S> {
         let dest_version_id = config.destination_schema_version_id.clone();
         let source_version_id = config.source_schema_version_id.clone();
 
+        let txn = self.new_txn(false).await?;
+
+        // Look up source and destination versions, creating placeholders if needed
+        // (matches Go's setMigration in internal/db/lens.go)
+        let (source_col, mut dst_col) = {
+            let systemstore = txn.systemstore()?;
+
+            // Look up source version
+            let src_key = CollectionKey::new(&source_version_id);
+            let src_data = systemstore
+                .get(&src_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+            let source_col: CollectionVersion = match src_data {
+                Some(data) => serde_json::from_slice(&data).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to deserialize source schema '{}': {}",
+                        source_version_id, e
+                    ))
+                })?,
+                None => {
+                    // Source doesn't exist — create a placeholder
+                    let mut placeholder = CollectionVersion {
+                        version_id: source_version_id.clone(),
+                        collection_id: ORPHAN_COLLECTION_ID.to_string(),
+                        is_materialized: true,
+                        is_placeholder: true,
+                        ..CollectionVersion::new("", "", "", Vec::new())
+                    };
+                    placeholder.is_active = false;
+                    let data = serde_json::to_vec(&placeholder).map_err(|e| {
+                        Error::Serialization(format!(
+                            "failed to serialize source placeholder '{}': {}",
+                            source_version_id, e
+                        ))
+                    })?;
+                    systemstore
+                        .set(&src_key.bytes(), &data)
+                        .await
+                        .map_err(Error::Storage)?;
+                    placeholder
+                }
+            };
+
+            // Look up destination version
+            let dst_key = CollectionKey::new(&dest_version_id);
+            let dst_data = systemstore
+                .get(&dst_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+            let dst_col: CollectionVersion = match dst_data {
+                Some(data) => serde_json::from_slice(&data).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to deserialize destination schema '{}': {}",
+                        dest_version_id, e
+                    ))
+                })?,
+                None => {
+                    // Destination doesn't exist — create a placeholder
+                    let mut placeholder = CollectionVersion {
+                        name: source_col.name.clone(),
+                        version_id: dest_version_id.clone(),
+                        collection_id: source_col.collection_id.clone(),
+                        is_materialized: true,
+                        is_placeholder: true,
+                        ..CollectionVersion::new("", "", "", Vec::new())
+                    };
+                    placeholder.is_active = false;
+                    // Store destination placeholder (same as source placeholder above)
+                    let data = serde_json::to_vec(&placeholder).map_err(|e| {
+                        Error::Serialization(format!(
+                            "failed to serialize destination placeholder '{}': {}",
+                            dest_version_id, e
+                        ))
+                    })?;
+                    systemstore
+                        .set(&dst_key.bytes(), &data)
+                        .await
+                        .map_err(Error::Storage)?;
+                    placeholder
+                }
+            };
+
+            (source_col, dst_col)
+        };
+
+        // Validate version adjacency
+        if let Some(ref prev) = dst_col.previous_version {
+            if prev.source_collection_id != source_col.version_id {
+                return Err(Error::InvalidPatch(format!(
+                    "cannot migrate between non-adjacent collection versions. \
+                     Destination '{}' already has previous version '{}', but migration source is '{}'",
+                    dest_version_id, prev.source_collection_id, source_version_id
+                )));
+            }
+        }
+
         // Register the transform in the lens store
         let transform_id = self
             .lens_store
@@ -370,118 +472,260 @@ impl<S: Store> DB<S> {
             .await
             .map_err(|e| Error::Lens(e.to_string()))?;
 
-        // Update the destination schema's previous_version.transform field
-        // This is needed so that collection_has_migrations() returns true
-        let txn = self.new_txn(false).await?;
+        // Set the destination's previous_version with source and transform
+        dst_col.previous_version = Some(CollectionSource {
+            source_collection_id: source_col.version_id.clone(),
+            transform: Some(transform_id.to_string()),
+        });
 
-        // Prepare updated schema data outside the systemstore scope
-        let (collection_key, updated_data, collection_name) = {
+        tracing::debug!(
+            dest_version_id = %dest_version_id,
+            source_version_id = %source_version_id,
+            is_placeholder = dst_col.is_placeholder,
+            transform_id = %transform_id,
+            "set_migration: storing destination version with transform"
+        );
+
+        // Save the destination version
+        let collection_name = dst_col.name.clone();
+        let dst_key = CollectionKey::new(&dest_version_id);
+        let dst_data = serde_json::to_vec(&dst_col).map_err(|e| {
+            Error::Serialization(format!(
+                "failed to serialize destination schema '{}': {}",
+                dest_version_id, e
+            ))
+        })?;
+
+        {
             let systemstore = txn.systemstore()?;
-
-            // Load the destination schema
-            let collection_key = CollectionKey::new(&dest_version_id);
-            let schema_data = systemstore
-                .get(&collection_key.bytes())
+            systemstore
+                .set(&dst_key.bytes(), &dst_data)
                 .await
                 .map_err(Error::Storage)?;
 
-            match schema_data {
-                Some(data) => {
-                    let mut schema: CollectionVersion =
-                        serde_json::from_slice(&data).map_err(|e| {
-                            Error::Serialization(format!(
-                                "failed to deserialize destination schema '{}': {}",
-                                dest_version_id, e
-                            ))
-                        })?;
-
-                    // Validate version adjacency: if destination already has a previous_version,
-                    // the source must match it (can't skip versions in migration chain)
-                    if let Some(ref prev) = schema.previous_version {
-                        if prev.source_collection_id != source_version_id {
-                            return Err(Error::InvalidPatch(format!(
-                                "cannot configure migration between non-adjacent collection versions. \
-                                 Destination '{}' already has previous version '{}', but migration source is '{}'",
-                                dest_version_id, prev.source_collection_id, source_version_id
-                            )));
-                        }
-                    }
-
-                    // Ensure previous_version exists and set transform
-                    let prev = schema
-                        .previous_version
-                        .get_or_insert_with(|| CollectionSource::new(&source_version_id));
-                    prev.transform = Some(transform_id.to_string());
-
-                    let collection_name = schema.name.clone();
-                    let updated_data = serde_json::to_vec(&schema).map_err(|e| {
-                        Error::Serialization(format!(
-                            "failed to serialize updated schema '{}': {}",
-                            dest_version_id, e
-                        ))
-                    })?;
-
-                    (
-                        collection_key,
-                        Some((updated_data, schema)),
-                        collection_name,
-                    )
-                }
-                None => {
-                    // Destination schema doesn't exist yet (e.g., migration registered
-                    // before patch creates the version). Store as pending so
-                    // patch_collection can link it when the version is created.
-                    tracing::debug!(
-                        dest_version_id = %dest_version_id,
-                        source_version_id = %source_version_id,
-                        "Destination schema not found, storing as pending migration"
-                    );
-                    {
-                        let mut pending = self.pending_migrations.write().map_err(|e| {
-                            tracing::error!(error = ?e, "Pending migrations lock poisoned");
-                            Error::LockPoisoned(
-                                "pending migrations lock poisoned during set_migration".into(),
-                            )
-                        })?;
-                        pending.insert(
-                            dest_version_id.clone(),
-                            (source_version_id.clone(), transform_id.to_string()),
-                        );
-                    }
-                    (collection_key, None, String::new())
-                }
-            }
-        };
-
-        // Write updated schema if we have one
-        if let Some((data, schema)) = updated_data {
-            {
-                let systemstore = txn.systemstore()?;
+            // Write CollectionVersionKey entries so get_collection_version_ids() can
+            // find these versions via prefix scan on /collection/version/{collection_id}/
+            if !source_col.collection_id.is_empty() {
+                let src_version_key = CollectionVersionKey::new(
+                    &source_col.collection_id,
+                    &source_version_id,
+                );
                 systemstore
-                    .set(&collection_key.bytes(), &data)
+                    .set(&src_version_key.bytes(), b"1")
                     .await
                     .map_err(Error::Storage)?;
             }
-            txn.commit().await?;
+            if !dst_col.collection_id.is_empty() {
+                let dst_version_key = CollectionVersionKey::new(
+                    &dst_col.collection_id,
+                    &dest_version_id,
+                );
+                systemstore
+                    .set(&dst_version_key.bytes(), b"1")
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+        }
+        txn.commit().await?;
 
-            // Update in-memory cache if this is the active collection
+        // Update in-memory cache if this is the active collection
+        if !collection_name.is_empty() {
             let mut cache = self.collections.write().map_err(|e| {
                 tracing::error!(error = ?e, "Collection cache lock poisoned during set_migration");
                 Error::LockPoisoned("collection cache lock poisoned during set_migration".into())
             })?;
 
-            // Check if this version is the active version for its collection
             if let Some(cached) = cache.get(&collection_name) {
                 if cached.schema().version_id == dest_version_id {
-                    cache.insert(collection_name, Collection::new(schema));
+                    cache.insert(collection_name.clone(), Collection::new(dst_col));
                 }
             }
+        }
+
+        // Rebuild secondary indexes if the destination version is the active collection
+        // and has indexes (matches Go's behavior of reindexing after migration registration)
+        if !collection_name.is_empty() {
+            if let Err(e) = self
+                .maybe_reindex_after_migration(&collection_name, &dest_version_id)
+                .await
+            {
+            }
         } else {
-            // No schema update needed, just discard the transaction
-            let _ = txn.discard();
         }
 
         Ok(transform_id)
+    }
+
+    /// Rebuild secondary indexes for a collection after a migration is registered.
+    ///
+    /// If the destination version is the currently active version and the collection
+    /// has indexes, this fetches all documents (applying lens migration), drops
+    /// existing index entries, and rebuilds them with migrated values.
+    async fn maybe_reindex_after_migration(
+        &self,
+        collection_name: &str,
+        dest_version_id: &str,
+    ) -> Result<()> {
+        let collection = match self.get_collection(collection_name)? {
+            Some(c) => c,
+            None => {
+                return Ok(());
+            }
+        };
+
+
+        // Only reindex if destination is the current active version
+        if collection.version_id() != dest_version_id {
+            return Ok(());
+        }
+
+        // Only reindex if the collection has indexes
+        if collection.get_indexes().is_empty() {
+            return Ok(());
+        }
+
+
+        let collection_id = collection.collection_id().to_string();
+        let target_version_id = collection.version_id().to_string();
+        let short_id = collection_short_id(&collection_id);
+
+        // Load all versions of this collection to build migration history
+        let read_txn = self.new_txn(true).await?;
+        let systemstore = read_txn.systemstore()?;
+        let versions = get_collections_by_collection_id(&systemstore, &collection_id).await?;
+        let _ = read_txn.discard();
+
+        // Build targeted migration history
+        let history = {
+            let mut full_history: HashMap<String, CollectionHistoryLink> = HashMap::new();
+            for version in &versions {
+                let mut link =
+                    CollectionHistoryLink::new(&version.version_id, &version.collection_id);
+                if let Some(ref prev) = version.previous_version {
+                    link = link.with_previous(&prev.source_collection_id);
+                    if let Some(ref transform_id) = prev.transform {
+                        link = link.with_transform(transform_id);
+                    }
+                }
+                full_history.insert(version.version_id.clone(), link);
+            }
+
+            // Build next links
+            let reverse_links: Vec<(String, String)> = full_history
+                .values()
+                .flat_map(|link| {
+                    link.previous
+                        .iter()
+                        .map(|prev_id| (prev_id.clone(), link.version_id.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            for (parent_id, child_id) in reverse_links {
+                if let Some(parent_link) = full_history.get_mut(&parent_id) {
+                    if !parent_link.next.contains(&child_id) {
+                        parent_link.next.push(child_id);
+                    }
+                }
+            }
+
+            match build_targeted_history(&full_history, &target_version_id) {
+                Some(h) => h,
+                None => return Ok(()),
+            }
+        };
+
+        let has_migrations = history.values().any(|link| link.transform.is_some());
+        if !has_migrations {
+            return Ok(());
+        }
+
+        // Create a write transaction for the reindex
+        let write_txn = self.new_txn(false).await?;
+
+        // Scope the datastore borrow so it's dropped before commit
+        {
+            let datastore = write_txn.datastore()?;
+
+            // Fetch all documents (raw, with their stored schema versions)
+            let raw_docs = collection.get_all_with_datastore(&datastore).await?;
+
+            // Apply lens migration to each document that needs it
+            let mut migrated_docs = Vec::with_capacity(raw_docs.len());
+            for doc in raw_docs {
+                let doc_version = doc
+                    .schema_version_id()
+                    .unwrap_or(&target_version_id)
+                    .to_string();
+
+                if doc_version == target_version_id {
+                    migrated_docs.push(doc);
+                    continue;
+                }
+
+                // Convert to LensDoc
+                if let Ok(map) = doc.to_map() {
+                    let mut lens_doc = LensDoc::new();
+                    for (key, value) in map {
+                        lens_doc.insert(key, value);
+                    }
+
+                    let mut lens =
+                        Lens::new(self.lens_store.clone(), &target_version_id, history.clone());
+
+                    if let Ok(()) = lens.put(&doc_version, lens_doc).await {
+                        if let Some(Ok(migrated_lens_doc)) = lens.next().await {
+                            let mut migrated = document::Document::new();
+                            if let Some(id) = doc.id() {
+                                migrated.set_id(id.clone());
+                            }
+                            for (field_name, value) in migrated_lens_doc {
+                                if field_name != DOC_ID_FIELD {
+                                    // Convert JSON value to native type based on schema field kind
+                                    let native_value = json_to_native_value(&value, &field_name, collection.schema());
+                                    migrated.set(&field_name, native_value);
+                                }
+                            }
+                            migrated.set_schema_version_id(&target_version_id);
+                            migrated_docs.push(migrated);
+                            continue;
+                        }
+                    }
+                }
+
+                // If migration fails for a doc, keep original
+                migrated_docs.push(doc);
+            }
+
+            // Rebuild indexes: drop all entries, re-index from migrated documents
+            let index_manager = IndexManager::from_collection(short_id, collection.schema())
+                .map_err(|e| Error::Other(format!("failed to create index manager: {}", e)))?;
+
+            for index_desc in collection.get_indexes() {
+                // Drop existing entries
+                if let Some(index) = index_manager.get_index(&index_desc.name) {
+                    index
+                        .remove_all(&mut datastore.clone())
+                        .await
+                        .map_err(Error::Storage)?;
+                }
+
+                // Bulk re-index with migrated documents
+                index_manager
+                    .bulk_index(&datastore, &index_desc.name, &migrated_docs, collection.schema())
+                    .await?;
+            }
+
+            tracing::debug!(
+                collection = %collection_name,
+                doc_count = migrated_docs.len(),
+                index_count = collection.get_indexes().len(),
+                "Rebuilt indexes after migration"
+            );
+        } // datastore reference dropped here
+
+        write_txn.commit().await?;
+
+        Ok(())
     }
 
     /// Check if a migration exists between two schema versions.
@@ -793,6 +1037,55 @@ impl<S: Store> DB<S> {
         })?;
         systemstore
             .set(&collection_key.bytes(), &data)
+            .await
+            .map_err(Error::Storage)?;
+
+        // Store field and collection definition blocks in blockstore for Bitswap sync.
+        // Go stores these blocks so peers can fetch them via Bitswap during collection version sync.
+        let blockstore = txn.blockstore()?;
+
+        // Store each field definition block
+        // IMPORTANT: Go uses priority=1 for ALL fields during AddSchema (not incrementing).
+        // This was verified by comparing actual Go AddSchema output with manual CID generation.
+        // Only fields with non-empty FieldID are stored (secondary relations are excluded).
+        // Fields must be sorted: _docID first, then alphabetically by name (matches Go).
+        let mut sorted_fields: Vec<&schema::FieldDescription> = schema
+            .fields
+            .iter()
+            .filter(|f| !f.id.is_empty())
+            .collect();
+        sorted_fields.sort_by(|a, b| {
+            if a.name == "_docID" {
+                std::cmp::Ordering::Less
+            } else if b.name == "_docID" {
+                std::cmp::Ordering::Greater
+            } else {
+                a.name.cmp(&b.name)
+            }
+        });
+
+        let mut field_cids = Vec::with_capacity(sorted_fields.len());
+        for field in &sorted_fields {
+            let block_with_cid =
+                schema::generate_field_block_with_priority_and_heads(field, 1, &[])
+                    .map_err(Error::Schema)?;
+            blockstore
+                .set(&block_with_cid.cid.to_bytes(), &block_with_cid.bytes)
+                .await
+                .map_err(Error::Storage)?;
+            field_cids.push(block_with_cid.cid);
+        }
+
+        // Store collection definition block (links to all field CIDs)
+        let col_block = schema::generate_collection_block_full(
+            Some(&schema.name),
+            &field_cids,
+            1, // Go uses priority=1 for collection blocks during AddSchema
+            &[],
+        )
+        .map_err(Error::Schema)?;
+        blockstore
+            .set(&col_block.cid.to_bytes(), &col_block.bytes)
             .await
             .map_err(Error::Storage)?;
 
@@ -1216,6 +1509,21 @@ impl<S: Store> DB<S> {
         Ok(cache.keys().cloned().collect())
     }
 
+    /// Add a collection to the runtime cache.
+    ///
+    /// This is used by the merge handler to add synced collections received via P2P
+    /// to the cache so they're visible to `list_collections` and `get_collection`.
+    /// The collection can be inactive (synced collections start inactive until manually activated).
+    pub fn add_collection_to_cache(&self, schema: CollectionVersion) -> Result<()> {
+        let name = schema.name.clone();
+        let mut cache = self.collections.write().map_err(|e| {
+            tracing::error!(error = ?e, collection_name = %name, "Collection cache lock poisoned during add_collection_to_cache");
+            Error::LockPoisoned("collection cache lock poisoned during add_collection_to_cache".into())
+        })?;
+        cache.insert(name, Collection::new(schema));
+        Ok(())
+    }
+
     /// Get a collection by name using the transaction's cache.
     ///
     /// This performs lazy loading - the collection is loaded from the store
@@ -1312,9 +1620,7 @@ impl<S: Store> DB<S> {
     /// - `CollectionVersionNotFound` if no collection with the given version ID exists
     pub async fn set_active_collection_version(&self, version_id: &str) -> Result<()> {
         if version_id.is_empty() {
-            return Err(Error::CollectionVersionNotFound(
-                "empty version ID".to_string(),
-            ));
+            return Err(Error::CollectionVersionIDEmpty);
         }
 
         // Load the target collection from persistent store by version_id
@@ -1592,8 +1898,10 @@ impl<S: Store> DB<S> {
         // Go always serializes these as null/empty arrays, but Rust's
         // skip_serializing_if omits them. Patches targeting these paths
         // (e.g., /VectorEmbeddings/-) need the key to exist.
+        // Note: EncryptedIndexes is NOT pre-populated because Go doesn't expose
+        // it in the JSON representation - patches targeting it should fail.
         if let serde_json::Value::Object(ref mut map) = schema_json {
-            for key in &["Indexes", "EncryptedIndexes", "VectorEmbeddings"] {
+            for key in &["Indexes", "VectorEmbeddings"] {
                 map.entry(key.to_string())
                     .or_insert(serde_json::Value::Array(vec![]));
             }
@@ -1756,6 +2064,33 @@ impl<S: Store> DB<S> {
                             }
                         }
 
+                        // Go compatibility: For top-level array fields that don't exist (like
+                        // EncryptedIndexes which isn't exposed in Go's JSON), produce Go-compatible
+                        // error messages.
+                        let is_top_level_path =
+                            path.starts_with('/') && !path[1..].contains('/');
+                        if is_top_level_path {
+                            let key = &path[1..];
+                            let key_exists = schema_json
+                                .as_object()
+                                .map(|m| m.contains_key(key))
+                                .unwrap_or(false);
+                            if !key_exists {
+                                // For add with array value, Go produces unmarshal error
+                                if operation == Some("add") && value.is_array() {
+                                    return Err(Error::InvalidPatch(
+                                        "cannot unmarshal array into Go value".to_string(),
+                                    ));
+                                }
+                                // For replace on non-existent key, Go produces "doc is missing key"
+                                if operation == Some("replace") {
+                                    return Err(Error::InvalidPatch(
+                                        "doc is missing key".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+
                         Self::json_pointer_set(&mut schema_json, path, value)?;
                     }
                     (Some("remove"), Some(path)) => {
@@ -1763,6 +2098,22 @@ impl<S: Store> DB<S> {
                             // Root-level remove = deactivate collection
                             is_deactivation = true;
                         } else {
+                            // Go compatibility: For top-level keys that don't exist (like
+                            // EncryptedIndexes), produce Go-compatible error message.
+                            let is_top_level_path =
+                                path.starts_with('/') && !path[1..].contains('/');
+                            if is_top_level_path {
+                                let key = &path[1..];
+                                let key_exists = schema_json
+                                    .as_object()
+                                    .map(|m| m.contains_key(key))
+                                    .unwrap_or(false);
+                                if !key_exists {
+                                    return Err(Error::InvalidPatch(
+                                        "unable to remove nonexistent key".to_string(),
+                                    ));
+                                }
+                            }
                             Self::json_pointer_remove(&mut schema_json, path)?;
                         }
                     }
@@ -1924,6 +2275,7 @@ impl<S: Store> DB<S> {
                 if let serde_json::Value::Object(ref mut map) = field {
                     if !map.contains_key("FieldID")
                         || map.get("FieldID") == Some(&serde_json::Value::Null)
+                        || map.get("FieldID").and_then(|v| v.as_str()) == Some("")
                     {
                         map.insert("FieldID".to_string(), next_id.to_string().into());
                         next_id += 1;
@@ -1994,19 +2346,51 @@ impl<S: Store> DB<S> {
             }
         }
 
-        // Handle in-place updates (deactivation or IsActive-only changes).
+        // Go compatibility: auto-generate _fieldID for foreign object fields added via patch.
+        // This matches Go's collection_define.go behavior for fields with Kind.IsObject() && !Kind.IsArray().
+        {
+            let max_field_id: u64 = new_schema
+                .fields
+                .iter()
+                .filter_map(|f| f.id.parse::<u64>().ok())
+                .max()
+                .unwrap_or(0);
+            let mut next_id = max_field_id + 1;
+            new_schema
+                .add_relation_id_fields(|| {
+                    let id = next_id.to_string();
+                    next_id += 1;
+                    id
+                })
+                .map_err(|e| Error::InvalidPatch(format!("failed to add relation id fields: {}", e)))?;
+        }
+
+        // Handle in-place updates (deactivation, IsActive-only, or PreviousVersion/Transform-only).
         // These don't create a new schema version - they update the existing one.
         let is_isactive_only_change = is_active_explicitly_set
             && new_schema.fields == old_schema.fields
             && new_schema.name == old_schema.name;
 
-        if is_deactivation || is_isactive_only_change {
+        // Check if only PreviousVersion/Transform changed (lens migration linking).
+        // This is an in-place update that adds a migration transform to an existing version.
+        let is_transform_only_change = !is_deactivation
+            && !is_active_explicitly_set
+            && new_schema.fields == old_schema.fields
+            && new_schema.name == old_schema.name
+            && new_schema.is_active == old_schema.is_active
+            && new_schema.previous_version != old_schema.previous_version;
+
+        if is_deactivation || is_isactive_only_change || is_transform_only_change {
             if is_deactivation {
                 new_schema.is_active = false;
             }
-            // Keep original version_id and previous_version
+            // Keep original version_id
             new_schema.version_id = old_version_id.clone();
-            new_schema.previous_version = old_schema.previous_version.clone();
+            // For IsActive-only or deactivation, restore original previous_version.
+            // For Transform-only changes, keep the new previous_version (contains the transform).
+            if !is_transform_only_change {
+                new_schema.previous_version = old_schema.previous_version.clone();
+            }
 
             // Validate: can't remove a version that is a dependency of another version
             // This check runs always for deactivation (even if already inactive),
@@ -2147,9 +2531,61 @@ impl<S: Store> DB<S> {
 
         // Update new schema with version info
         new_schema.version_id = new_version_id.clone();
-        new_schema.previous_version = Some(CollectionSource::new(&old_version_id));
 
-        // Check for pending migrations targeting this new version
+        // Check if a placeholder version exists with this ID (from pre-registered migration).
+        // When set_migration is called before patch_collection, it creates a placeholder
+        // with previous_version.transform set. We need to copy that transform to preserve
+        // the migration link.
+        let placeholder_transform = {
+            let read_txn = self.new_txn(true).await?;
+            let systemstore = read_txn.systemstore()?;
+            let placeholder_key = CollectionKey::new(&new_version_id);
+            match systemstore
+                .get(&placeholder_key.bytes())
+                .await
+                .map_err(Error::Storage)?
+            {
+                Some(data) => {
+                    let placeholder: CollectionVersion =
+                        serde_json::from_slice(&data).map_err(|e| {
+                            Error::Serialization(format!(
+                                "failed to deserialize placeholder version: {}",
+                                e
+                            ))
+                        })?;
+                    tracing::debug!(
+                        new_version_id = %new_version_id,
+                        is_placeholder = placeholder.is_placeholder,
+                        has_previous_version = placeholder.previous_version.is_some(),
+                        transform = ?placeholder.previous_version.as_ref().and_then(|pv| pv.transform.as_ref()),
+                        "patch_collection: found existing version"
+                    );
+                    if placeholder.is_placeholder {
+                        // Found a placeholder - extract its transform
+                        placeholder.previous_version.and_then(|pv| pv.transform)
+                    } else {
+                        None
+                    }
+                }
+                None => None
+            }
+        };
+
+        // Use placeholder transform if available, otherwise None
+        new_schema.previous_version = Some(CollectionSource {
+            source_collection_id: old_version_id.clone(),
+            transform: placeholder_transform.clone(),
+        });
+
+        if placeholder_transform.is_some() {
+            tracing::debug!(
+                new_version = %new_version_id,
+                transform_id = ?placeholder_transform,
+                "Linked pre-registered migration from placeholder to new schema version"
+            );
+        }
+
+        // Also check for pending migrations targeting this new version (in-memory fallback)
         {
             let pending = self.pending_migrations.read().map_err(|e| {
                 tracing::error!(error = ?e, "Pending migrations lock poisoned");
@@ -2159,21 +2595,32 @@ impl<S: Store> DB<S> {
             })?;
             if let Some((_source_id, transform_id)) = pending.get(&new_version_id) {
                 if let Some(ref mut prev) = new_schema.previous_version {
-                    prev.transform = Some(transform_id.clone());
-                    tracing::debug!(
-                        new_version = %new_version_id,
-                        transform_id = %transform_id,
-                        "Linked pending migration to new schema version"
-                    );
+                    // Only override if we didn't already get a transform from the placeholder
+                    if prev.transform.is_none() {
+                        prev.transform = Some(transform_id.clone());
+                        tracing::debug!(
+                            new_version = %new_version_id,
+                            transform_id = %transform_id,
+                            "Linked pending migration to new schema version"
+                        );
+                    }
                 }
             }
         }
 
-        new_schema.is_active = true;
+        // Go compatibility: respect explicit IsActive=false in the patch, otherwise default to true.
+        // When IsActive was explicitly set to false in the patch, preserve it.
+        // When the new version is inactive, keep the old version active.
+        if !is_active_explicitly_set {
+            new_schema.is_active = true;
+        }
 
-        // Create old schema copy with is_active = false for storage
+        // Create old schema copy for storage. If new schema is active, mark old as inactive.
+        // If new schema is inactive (explicit IsActive=false), old version stays active.
         let mut old_schema_inactive = old_schema.clone();
-        old_schema_inactive.is_active = false;
+        if new_schema.is_active {
+            old_schema_inactive.is_active = false;
+        }
 
         tracing::info!(
             collection = %collection_name,
@@ -2221,11 +2668,14 @@ impl<S: Store> DB<S> {
                 .await
                 .map_err(Error::Storage)?;
 
-            // 3. Update /collection/name/{name} to point to new version (as the version_id string)
-            systemstore
-                .set(&name_key.bytes(), new_version_id.as_bytes())
-                .await
-                .map_err(Error::Storage)?;
+            // 3. Update /collection/name/{name} - only point to new version if it's active.
+            // If new version is inactive, keep name pointing to old version (which stays active).
+            if new_schema.is_active {
+                systemstore
+                    .set(&name_key.bytes(), new_version_id.as_bytes())
+                    .await
+                    .map_err(Error::Storage)?;
+            }
 
             // 4. Add version index at /collection/version/{collection_id}/{new_version_id}
             systemstore
@@ -2251,7 +2701,7 @@ impl<S: Store> DB<S> {
             pending.remove(&new_version_id);
         }
 
-        // Update cache with new schema
+        // Update cache based on which version is active
         let mut cache = self.collections.write().map_err(|e| {
             tracing::error!(
                 error = ?e,
@@ -2260,10 +2710,14 @@ impl<S: Store> DB<S> {
             );
             Error::CacheUpdateFailedAfterCommit(collection_name.to_string())
         })?;
-        cache.insert(
-            collection_name.to_string(),
-            Collection::new(new_schema.clone()),
-        );
+        if new_schema.is_active {
+            // New version is active - cache it
+            cache.insert(
+                collection_name.to_string(),
+                Collection::new(new_schema.clone()),
+            );
+        }
+        // If new version is inactive, old version stays in cache (already there)
 
         Ok(new_schema)
     }
@@ -2455,21 +2909,33 @@ impl<S: Store> DB<S> {
         collection_prefix: &str,
         actual_name_prefix: Option<&str>,
     ) -> String {
+        // Go DefraDB accepts paths with or without leading '/'.
+        // Generate both variants for matching.
+        let no_slash_prefix = collection_prefix.trim_start_matches('/');
+
         if path.starts_with(collection_prefix) {
             format!("/{}", &path[collection_prefix.len()..])
+        } else if path.starts_with(no_slash_prefix) {
+            // Handle paths without leading '/' (e.g., "User/Indexes/-")
+            format!("/{}", &path[no_slash_prefix.len()..])
         } else {
             // Also handle exact match without trailing slash (collection-level operations).
             // E.g., path="/Users" with prefix="/Users/" → "/"
             let exact = collection_prefix.trim_end_matches('/');
-            if path == exact {
+            let exact_no_slash = exact.trim_start_matches('/');
+            if path == exact || path == exact_no_slash {
                 return "/".to_string();
             }
             if let Some(anp) = actual_name_prefix {
+                let anp_no_slash = anp.trim_start_matches('/');
                 if path.starts_with(anp) {
                     format!("/{}", &path[anp.len()..])
+                } else if path.starts_with(anp_no_slash) {
+                    format!("/{}", &path[anp_no_slash.len()..])
                 } else {
                     let anp_exact = anp.trim_end_matches('/');
-                    if path == anp_exact {
+                    let anp_exact_no_slash = anp_exact.trim_start_matches('/');
+                    if path == anp_exact || path == anp_exact_no_slash {
                         return "/".to_string();
                     }
                     path.to_string()
@@ -2482,16 +2948,62 @@ impl<S: Store> DB<S> {
 
     /// Handle patches targeting a collection that doesn't exist by name or version ID.
     ///
-    /// This handles two cases:
-    /// 1. Collection-level copy where the "path" targets a new collection name
+    /// This handles several cases:
+    /// 1. Schema field names (EncryptedIndexes, Indexes, etc.) - produce JSON patch errors
+    ///    because these fields don't exist in Go's JSON representation
+    /// 2. Collection-level copy where the "path" targets a new collection name
     ///    (e.g., copy from /Users to /Book) → returns "adding collections not supported"
-    /// 2. Collection-level move to a new name (no-op in Go) → finds source via "from"
+    /// 3. Collection-level move to a new name (no-op in Go) → finds source via "from"
     ///    and returns the original schema unchanged
     async fn handle_unknown_collection_patch(
         &self,
         collection_name: &str,
         patch_ops: &serde_json::Value,
     ) -> Result<CollectionVersion> {
+        // Schema field names that don't exist in Go's JSON representation
+        // When the "collection name" is actually one of these, produce Go-compatible
+        // JSON patch errors instead of "adding collections" errors.
+        const SCHEMA_FIELDS: &[&str] = &[
+            "EncryptedIndexes",
+            "VectorEmbeddings",
+            "Indexes",
+            "Fields",
+            "Policy",
+        ];
+
+        // Check if the "collection name" is actually a schema field
+        if SCHEMA_FIELDS.contains(&collection_name) {
+            if let serde_json::Value::Array(ops) = patch_ops {
+                for op in ops {
+                    let operation = op.get("op").and_then(|v| v.as_str());
+                    let value = op.get("value");
+
+                    match operation {
+                        Some("add") => {
+                            // For add with array value, Go produces unmarshal error
+                            if value.map(|v| v.is_array()).unwrap_or(false) {
+                                return Err(Error::InvalidPatch(
+                                    "cannot unmarshal array into Go value".to_string(),
+                                ));
+                            }
+                            return Err(Error::InvalidPatch(
+                                "cannot unmarshal array into Go value".to_string(),
+                            ));
+                        }
+                        Some("remove") => {
+                            return Err(Error::InvalidPatch(
+                                "unable to remove nonexistent key".to_string(),
+                            ));
+                        }
+                        Some("replace") => {
+                            return Err(Error::InvalidPatch("doc is missing key".to_string()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         // Try to extract the actual collection name from the patch value's Name field.
         // This handles cases like path "/-" where the collection name in the path is "-"
         // but the actual name is in the value object.
@@ -2879,4 +3391,76 @@ fn extract_last_path_segment_str(key: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// Convert a JSON value to a native NormalValue based on the field's schema type.
+///
+/// When documents are migrated through lens transforms, they come back as JSON values.
+/// This function converts them to the appropriate native type (Int, Float, String, etc.)
+/// based on the field's declared type in the schema.
+fn json_to_native_value(
+    value: &serde_json::Value,
+    field_name: &str,
+    schema: &schema::CollectionVersion,
+) -> document::NormalValue {
+    // Handle null values
+    if value.is_null() {
+        return document::NormalValue::Null;
+    }
+
+    // Find the field definition in the schema
+    let field_kind = schema
+        .fields
+        .iter()
+        .find(|f| f.name == field_name)
+        .map(|f| &f.kind);
+
+    match field_kind {
+        Some(FieldKind::Scalar(scalar)) => match scalar {
+            ScalarKind::Int => {
+                if let Some(n) = value.as_i64() {
+                    return document::NormalValue::Int(n);
+                }
+            }
+            ScalarKind::Float64 => {
+                if let Some(n) = value.as_f64() {
+                    return document::NormalValue::Float64(n);
+                }
+            }
+            ScalarKind::Float32 => {
+                if let Some(n) = value.as_f64() {
+                    return document::NormalValue::Float32(n as f32);
+                }
+            }
+            ScalarKind::Bool => {
+                if let Some(b) = value.as_bool() {
+                    return document::NormalValue::Bool(b);
+                }
+            }
+            ScalarKind::String | ScalarKind::DocID => {
+                if let Some(s) = value.as_str() {
+                    return document::NormalValue::String(s.to_string());
+                }
+            }
+            ScalarKind::Blob => {
+                // Blobs may be base64 encoded strings in JSON
+                if let Some(s) = value.as_str() {
+                    return document::NormalValue::Bytes(s.as_bytes().to_vec());
+                }
+            }
+            ScalarKind::DateTime => {
+                // DateTime as string - keep as string for now, the document layer handles parsing
+                if let Some(s) = value.as_str() {
+                    return document::NormalValue::String(s.to_string());
+                }
+            }
+            ScalarKind::Json | ScalarKind::None => {
+                // Keep as JSON
+            }
+        },
+        _ => {}
+    }
+
+    // Fallback: keep as JSON (this preserves the original behavior for unknown types)
+    document::NormalValue::Json(value.clone())
 }

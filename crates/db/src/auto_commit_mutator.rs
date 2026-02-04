@@ -98,7 +98,17 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
             collection
                 .create_with_indexes(&datastore, &doc, &index_manager)
                 .await
-                .map_err(|e| query::error::QueryError::execution(format!("create error: {}", e)))
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    // If this is a unique constraint violation, return the core message without wrapping
+                    if msg.contains("can not index a doc's field(s) that violates unique index") {
+                        query::error::QueryError::execution(
+                            "can not index a doc's field(s) that violates unique index.".to_string(),
+                        )
+                    } else {
+                        query::error::QueryError::execution(format!("create error: {}", e))
+                    }
+                })
         };
 
         match result {
@@ -205,11 +215,26 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         doc_id.to_string(),
                         cid,
                         collection.collection_id().to_string(),
-                        block,
+                        block.clone(),
                         false, // is_retry
                         false, // is_relay (local mutation)
                     );
                     bus.publish(Message::update(update));
+
+                    // For branchable collections, emit a second Update event for the
+                    // collection-level DAG. The test framework uses this to track
+                    // collection heads separately from document heads.
+                    if collection.schema().is_branchable {
+                        let col_update = Update::new(
+                            String::new(), // empty doc_id → keyed by collection_id
+                            cid,
+                            collection.collection_id().to_string(),
+                            block,
+                            false, // is_retry
+                            false, // is_relay
+                        );
+                        bus.publish(Message::update(col_update));
+                    }
                 }
 
                 // Return result with commit CID if available
@@ -278,7 +303,15 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         query::error::QueryError::document_not_found(id)
                     }
                     other => {
-                        query::error::QueryError::execution(format!("update error: {}", other))
+                        let msg = other.to_string();
+                        // If this is a unique constraint violation, return the core message without wrapping
+                        if msg.contains("can not index a doc's field(s) that violates unique index") {
+                            query::error::QueryError::execution(
+                                "can not index a doc's field(s) that violates unique index.".to_string(),
+                            )
+                        } else {
+                            query::error::QueryError::execution(format!("update error: {}", other))
+                        }
                     }
                 })
         };
@@ -383,11 +416,25 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                             doc_id.to_string(),
                             cid,
                             collection.collection_id().to_string(),
-                            block,
+                            block.clone(),
                             false, // is_retry
                             false, // is_relay (local mutation)
                         );
                         bus.publish(Message::update(update));
+
+                        // For branchable collections, emit a second Update event for the
+                        // collection-level DAG.
+                        if collection.schema().is_branchable {
+                            let col_update = Update::new(
+                                String::new(), // empty doc_id → keyed by collection_id
+                                cid,
+                                collection.collection_id().to_string(),
+                                block,
+                                false,
+                                false,
+                            );
+                            bus.publish(Message::update(col_update));
+                        }
                     }
                 }
 
@@ -542,11 +589,25 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         doc_id.to_string(),
                         cid,
                         collection.collection_id().to_string(),
-                        block,
+                        block.clone(),
                         false, // is_retry
                         false, // is_relay (local mutation)
                     );
                     bus.publish(Message::update(update));
+
+                    // For branchable collections, emit a second Update event for the
+                    // collection-level DAG.
+                    if collection.schema().is_branchable {
+                        let col_update = Update::new(
+                            String::new(), // empty doc_id → keyed by collection_id
+                            cid,
+                            collection.collection_id().to_string(),
+                            block,
+                            false,
+                            false,
+                        );
+                        bus.publish(Message::update(col_update));
+                    }
                 }
 
                 Ok(DeleteResult::new(doc_id.clone(), existed))

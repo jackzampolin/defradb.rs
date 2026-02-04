@@ -53,8 +53,6 @@ pub struct IndexScanNode {
     index_fetches: u64,
     /// Execution statistics for explain execute mode
     exec_info: ExecInfo,
-    /// Number of fields per document (for fieldFetches calculation)
-    fields_per_doc: usize,
 }
 
 impl IndexScanNode {
@@ -64,12 +62,6 @@ impl IndexScanNode {
         document_mapping: DocumentMapping,
         index_params: IndexScanParams,
     ) -> Self {
-        // Count storable fields from the collection schema (matches Go's field fetch counting).
-        let fields_per_doc = collection
-            .fields
-            .iter()
-            .filter(|f| !f.id.is_empty())
-            .count();
         Self {
             collection,
             document_mapping,
@@ -84,7 +76,6 @@ impl IndexScanNode {
             docs_provided: false,
             index_fetches: 0,
             exec_info: ExecInfo::default(),
-            fields_per_doc,
         }
     }
 
@@ -150,16 +141,18 @@ impl PlanNode for IndexScanNode {
         if !self.docs_provided {
             if let Some(ref fetcher) = self.fetcher {
                 // Use index scan to get document IDs
-                let doc_ids = fetcher
+                let scan_result = fetcher
                     .get_by_index_scan(&self.collection.name, &self.index_params)
                     .await?;
 
                 // Track number of index key lookups (matches Go's IndexesFetched)
-                self.index_fetches = doc_ids.len() as u64;
+                // Uses raw_fetches which is the count BEFORE deduplication
+                self.index_fetches = scan_result.raw_fetches();
 
+                let doc_ids = scan_result.doc_ids();
                 if !doc_ids.is_empty() {
                     // Fetch the actual documents by their IDs
-                    let result = fetcher.get_by_ids(&self.collection.name, &doc_ids).await?;
+                    let result = fetcher.get_by_ids(&self.collection.name, doc_ids).await?;
                     self.docs = documents_to_plan_docs(result.docs(), &self.document_mapping)?;
                 }
             }
@@ -195,8 +188,8 @@ impl PlanNode for IndexScanNode {
 
             // Track document fetch
             self.exec_info.docs_fetched += 1;
-            // Track field fetches (each field in the document)
-            self.exec_info.fields_fetched += self.fields_per_doc as u64;
+            // Track field fetches (actual stored fields in this document)
+            self.exec_info.fields_fetched += doc.stored_field_count as u64;
 
             // Skip deleted docs if not showing deleted
             if !self.show_deleted && doc.is_deleted() {
@@ -276,7 +269,9 @@ impl PlanNode for IndexScanNode {
     }
 
     fn exec_info(&self) -> ExecInfo {
-        self.exec_info.clone()
+        let mut info = self.exec_info.clone();
+        info.indexes_fetched = self.index_fetches;
+        info
     }
 
     fn explain_execute_inner(&self) -> serde_json::Value {

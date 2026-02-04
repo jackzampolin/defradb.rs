@@ -13,6 +13,17 @@ use sha2::{Digest, Sha256};
 
 use crate::{FieldDescription, FieldKind};
 
+/// Block with its CID and serialized DAG-CBOR bytes.
+///
+/// Used when blocks need to be stored in the blockstore, not just have their CID computed.
+#[derive(Debug, Clone)]
+pub struct BlockWithCid {
+    /// The content identifier for this block.
+    pub cid: Cid,
+    /// The DAG-CBOR serialized bytes of the block.
+    pub bytes: Vec<u8>,
+}
+
 /// Generates a CID for a field definition with priority=1.
 ///
 /// This matches Go's field definition block structure using defra-core's Block type.
@@ -121,14 +132,26 @@ pub fn generate_collection_cid_full(
 
 /// Generates a CID from a Block using DAG-CBOR encoding.
 fn generate_block_cid(block: &Block) -> crate::Result<Cid> {
+    let (cid, _bytes) = generate_block_cid_and_bytes(block)?;
+    Ok(cid)
+}
+
+/// Generates a CID and serialized bytes from a Block using DAG-CBOR encoding.
+fn generate_block_cid_and_bytes(block: &Block) -> crate::Result<(Cid, Vec<u8>)> {
     // Serialize to DAG-CBOR using serde_ipld_dagcbor
     let cbor_bytes = block
         .to_dag_cbor()
         .map_err(|e| crate::SchemaError::CidGeneration(e.to_string()))?;
 
+    let cid = generate_cid_from_bytes(&cbor_bytes)?;
+    Ok((cid, cbor_bytes))
+}
+
+/// Generates a CID from already-serialized DAG-CBOR bytes.
+fn generate_cid_from_bytes(cbor_bytes: &[u8]) -> crate::Result<Cid> {
     // Hash with SHA2-256
     let mut hasher = Sha256::new();
-    hasher.update(&cbor_bytes);
+    hasher.update(cbor_bytes);
     let hash_bytes = hasher.finalize();
 
     // Create multihash (CID crate uses MultihashGeneric<64>)
@@ -136,9 +159,52 @@ fn generate_block_cid(block: &Block) -> crate::Result<Cid> {
         .map_err(|e| crate::SchemaError::CidGeneration(e.to_string()))?;
 
     // Create CIDv1 with DAG-CBOR codec
-    let cid = Cid::new_v1(DAG_CBOR_CODEC, mh);
+    Ok(Cid::new_v1(DAG_CBOR_CODEC, mh))
+}
 
-    Ok(cid)
+/// Generate a field definition block with CID and bytes for storage.
+///
+/// Unlike `generate_field_cid_with_priority_and_heads`, this returns the serialized block
+/// bytes so they can be stored in the blockstore for Bitswap retrieval.
+pub fn generate_field_block_with_priority_and_heads(
+    field: &FieldDescription,
+    priority: u64,
+    heads: &[Cid],
+) -> crate::Result<BlockWithCid> {
+    let delta = field_to_delta_with_priority(field, priority)?;
+    let block = Block::new(CrdtDelta::FieldDefinition(delta), heads.to_vec(), vec![]);
+    let (cid, bytes) = generate_block_cid_and_bytes(&block)?;
+    Ok(BlockWithCid { cid, bytes })
+}
+
+/// Generate a collection definition block with CID and bytes for storage.
+///
+/// Unlike `generate_collection_cid_full`, this returns the serialized block bytes
+/// so they can be stored in the blockstore for Bitswap retrieval.
+pub fn generate_collection_block_full(
+    name: Option<&str>,
+    field_cids: &[Cid],
+    priority: u64,
+    heads: &[Cid],
+) -> crate::Result<BlockWithCid> {
+    let mut delta = CollectionDefinitionDeltaPayload::new(priority);
+    if let Some(n) = name {
+        delta = delta.with_name(n);
+    }
+
+    // Convert field CIDs to DAGLinks (Go uses empty string as the link name for field definitions)
+    let links: Vec<DAGLink> = field_cids
+        .iter()
+        .map(|cid| DAGLink::new("", *cid))
+        .collect();
+
+    let block = Block::new(
+        CrdtDelta::CollectionDefinition(delta),
+        heads.to_vec(),
+        links,
+    );
+    let (cid, bytes) = generate_block_cid_and_bytes(&block)?;
+    Ok(BlockWithCid { cid, bytes })
 }
 
 /// Convert a FieldDescription to a FieldDefinitionDeltaPayload with a specific priority

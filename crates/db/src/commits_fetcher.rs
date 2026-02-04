@@ -257,18 +257,18 @@ impl<S: Store> CommitsFetcher<S> {
         options: &CommitsQueryOptions,
     ) -> Result<Vec<Cid>> {
         let headstore = txn.headstore()?;
+        let mut cids = Vec::new();
 
-        let prefix = if let Some(ref doc_id) = options.doc_id {
+        // Query document-level heads
+        let doc_prefix = if let Some(ref doc_id) = options.doc_id {
             format!("/d/{}/", doc_id).into_bytes()
         } else {
             // All document heads start with /d/
             b"/d/".to_vec()
         };
 
-        let opts = IterOptions::new().with_prefix(prefix);
+        let opts = IterOptions::new().with_prefix(doc_prefix);
         let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
-
-        let mut cids = Vec::new();
 
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
             // Parse CID from key: /d/{doc_id}/{field_id}/{cid}
@@ -281,8 +281,28 @@ impl<S: Store> CommitsFetcher<S> {
                 }
             }
         }
-
         iter.close().await.map_err(Error::Storage)?;
+
+        // Also query collection-level heads when no specific doc_id filter
+        // (branchable collections have collection-level commits at /c/{collection_id}/{cid})
+        if options.doc_id.is_none() {
+            let col_opts = IterOptions::new().with_prefix(b"/c/".to_vec());
+            let mut col_iter = headstore.iterator(col_opts).await.map_err(Error::Storage)?;
+
+            while let Some(pair) = col_iter.next().await.map_err(Error::Storage)? {
+                // Parse CID from key: /c/{collection_id}/{cid}
+                let key_str = String::from_utf8_lossy(&pair.key);
+                let parts: Vec<&str> = key_str.split('/').collect();
+                if parts.len() >= 4 {
+                    // parts: ["", "c", collection_id, cid]
+                    if let Ok(cid) = Cid::from_str(parts[3]) {
+                        cids.push(cid);
+                    }
+                }
+            }
+            col_iter.close().await.map_err(Error::Storage)?;
+        }
+
         Ok(cids)
     }
 
@@ -380,37 +400,81 @@ impl<S: Store> CommitsFetcher<S> {
                 .unwrap_or(JsonValue::Null),
         );
 
-        // links - array of {cid, fieldName, height}
-        // Load each linked block to get its priority/height
+        // links - array with full commit data for nested queries
+        // Load each linked block to get all fields (supports queries like links { docID, heads { ... } })
         let mut links: Vec<JsonValue> = Vec::new();
         if let Some(block_links) = &block.links {
             for link in block_links {
-                let height = match self.load_block(txn, &link.link).await {
-                    Ok(linked_block) => json!(linked_block.delta.priority() as i64),
-                    Err(_) => JsonValue::Null,
+                match self.load_block(txn, &link.link).await {
+                    Ok(linked_block) => {
+                        let height = linked_block.delta.priority() as i64;
+                        // Get fieldName from linked block's delta (not from DAGLink's name)
+                        let fn_from_delta = self.get_field_name(&linked_block.delta);
+                        let field_name = if link.name.is_empty() {
+                            fn_from_delta.clone().unwrap_or_default()
+                        } else {
+                            link.name.clone()
+                        };
+                        let doc_id = self.get_doc_id(&linked_block.delta);
+
+                        // Build nested links (one level deep)
+                        let nested_links = self.build_simple_links(txn, &linked_block).await;
+                        // Build nested heads (one level deep)
+                        let nested_heads = self.build_simple_heads(txn, &linked_block).await;
+
+                        links.push(json!({
+                            "cid": link.link.to_string(),
+                            "fieldName": field_name,
+                            "height": height,
+                            "docID": doc_id,
+                            "links": nested_links,
+                            "heads": nested_heads,
+                        }));
+                    }
+                    Err(_) => {
+                        links.push(json!({
+                            "cid": link.link.to_string(),
+                            "fieldName": link.name,
+                            "height": JsonValue::Null,
+                        }));
+                    }
                 };
-                links.push(json!({
-                    "cid": link.link.to_string(),
-                    "fieldName": link.name,
-                    "height": height,
-                }));
             }
         }
         map.insert("links".to_string(), json!(links));
 
-        // heads - array of {cid, height}
-        // Load each head block to get its priority/height
+        // heads - array with full commit data for nested queries
+        // Load each head block to get all fields (supports queries like heads { docID, links { ... } })
         let mut heads: Vec<JsonValue> = Vec::new();
         if let Some(block_heads) = &block.heads {
             for head_cid in block_heads {
-                let height = match self.load_block(txn, head_cid).await {
-                    Ok(head_block) => json!(head_block.delta.priority() as i64),
-                    Err(_) => JsonValue::Null,
+                match self.load_block(txn, head_cid).await {
+                    Ok(head_block) => {
+                        let height = head_block.delta.priority() as i64;
+                        let field_name = self.get_field_name(&head_block.delta);
+                        let doc_id = self.get_doc_id(&head_block.delta);
+
+                        // Build nested links (one level deep)
+                        let nested_links = self.build_simple_links(txn, &head_block).await;
+                        // Build nested heads (one level deep)
+                        let nested_heads = self.build_simple_heads(txn, &head_block).await;
+
+                        heads.push(json!({
+                            "cid": head_cid.to_string(),
+                            "height": height,
+                            "fieldName": field_name,
+                            "docID": doc_id,
+                            "links": nested_links,
+                            "heads": nested_heads,
+                        }));
+                    }
+                    Err(_) => {
+                        heads.push(json!({
+                            "cid": head_cid.to_string(),
+                            "height": JsonValue::Null,
+                        }));
+                    }
                 };
-                heads.push(json!({
-                    "cid": head_cid.to_string(),
-                    "height": height,
-                }));
             }
         }
         map.insert("heads".to_string(), json!(heads));
@@ -465,6 +529,63 @@ impl<S: Store> CommitsFetcher<S> {
         delta
             .doc_id()
             .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+    }
+
+    /// Build simple links array (without recursive nesting) for nested queries.
+    /// Returns array of {cid, fieldName, height} for each link.
+    async fn build_simple_links(&self, txn: &mut DbTxn<S>, block: &Block) -> Vec<JsonValue> {
+        let mut links = Vec::new();
+        if let Some(block_links) = &block.links {
+            for link in block_links {
+                let (height, field_name) = match self.load_block(txn, &link.link).await {
+                    Ok(linked_block) => {
+                        let h = linked_block.delta.priority() as i64;
+                        let fn_from_delta = self.get_field_name(&linked_block.delta);
+                        let fn_val = if link.name.is_empty() {
+                            fn_from_delta.unwrap_or_default()
+                        } else {
+                            link.name.clone()
+                        };
+                        (json!(h), fn_val)
+                    }
+                    Err(_) => (JsonValue::Null, link.name.clone()),
+                };
+                links.push(json!({
+                    "cid": link.link.to_string(),
+                    "fieldName": field_name,
+                    "height": height,
+                }));
+            }
+        }
+        links
+    }
+
+    /// Build simple heads array (without recursive nesting) for nested queries.
+    /// Returns array of {cid, fieldName, height} for each head.
+    async fn build_simple_heads(&self, txn: &mut DbTxn<S>, block: &Block) -> Vec<JsonValue> {
+        let mut heads = Vec::new();
+        if let Some(block_heads) = &block.heads {
+            for head_cid in block_heads {
+                match self.load_block(txn, head_cid).await {
+                    Ok(head_block) => {
+                        let height = head_block.delta.priority() as i64;
+                        let field_name = self.get_field_name(&head_block.delta);
+                        heads.push(json!({
+                            "cid": head_cid.to_string(),
+                            "height": height,
+                            "fieldName": field_name,
+                        }));
+                    }
+                    Err(_) => {
+                        heads.push(json!({
+                            "cid": head_cid.to_string(),
+                            "height": JsonValue::Null,
+                        }));
+                    }
+                };
+            }
+        }
+        heads
     }
 
     /// Get delta data from delta

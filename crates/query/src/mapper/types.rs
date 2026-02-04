@@ -343,6 +343,9 @@ pub struct AggregateTarget {
     pub limit: Option<Limit>,
     /// Order for the target
     pub order: Option<OrderBy>,
+    /// Internal key for looking up relation data when there's a collision
+    /// (e.g., when both a relation selection and an aggregate use the same relation)
+    pub internal_key: Option<String>,
 }
 
 impl AggregateTarget {
@@ -353,6 +356,7 @@ impl AggregateTarget {
             filter: None,
             limit: None,
             order: None,
+            internal_key: None,
         }
     }
 
@@ -363,7 +367,13 @@ impl AggregateTarget {
             filter: None,
             limit: None,
             order: None,
+            internal_key: None,
         }
+    }
+
+    pub fn with_internal_key(mut self, key: impl Into<String>) -> Self {
+        self.internal_key = Some(key.into());
+        self
     }
 }
 

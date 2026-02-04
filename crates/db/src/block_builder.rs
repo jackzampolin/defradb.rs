@@ -873,6 +873,7 @@ pub async fn write_collection_block(
     };
 
     // The collection block links to the document composite block
+    // Go uses empty string for link name here, fieldName comes from linked block's delta
     let links = vec![DAGLink::new(String::new(), doc_composite_cid)];
 
     // Create the collection block

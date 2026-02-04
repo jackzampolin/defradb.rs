@@ -480,6 +480,8 @@ struct IndexFieldInput {
     descending: bool,
 }
 
+// ============================================================================
+// Encrypted Index Stubs
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,3 +671,6 @@ mod tests {
         node_close(node);
     }
 }
+
+// Stub implementations for encrypted index operations (not yet supported)
+
