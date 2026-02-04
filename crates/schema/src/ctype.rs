@@ -107,6 +107,19 @@ impl CType {
         }
     }
 
+    /// Convert from u8 representation
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0 => CType::None,
+            1 => CType::LwwRegister,
+            2 => CType::Object,
+            3 => CType::Composite,
+            4 => CType::PnCounter,
+            5 => CType::PCounter,
+            v => CType::Unknown(v),
+        }
+    }
+
     /// Check if this CRDT type is compatible with a field kind
     pub fn is_compatible_with(&self, kind: &FieldKind) -> bool {
         match self {

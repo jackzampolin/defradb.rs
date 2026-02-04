@@ -11,13 +11,16 @@ use cid::Cid;
 use crdt::traits::{Context, ReplicatedData, ValueReader};
 use crdt::{Counter, CounterDelta, Lww, LwwDelta, NumericKind};
 use datastore::NamespaceView;
-use defra_core::block::{Block, CrdtDelta};
+use defra_core::block::{
+    Block, CollectionDefinitionDeltaPayload, CrdtDelta, FieldDefinitionDeltaPayload,
+};
 use defra_core::types::DocId;
 use document::{DocID, Document, NormalValue};
 use events::{MergeCompleteData, Message, Update};
 use p2p::sync::{BlockMetadata, MergeHandler, MergeOutcome};
-use schema;
-use storage::corekv::Store;
+use schema::{self, CType, CollectionVersion, FieldDescription, FieldKind, ScalarKind};
+use storage::corekv::{Key, Store};
+use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
 
 use crate::collection::collection_short_id;
 use crate::database::DB;
@@ -1353,6 +1356,166 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
     }
+
+    /// Process a CollectionDefinition delta - register synced collection schema in systemstore.
+    ///
+    /// When a peer receives collection definition blocks via Bitswap sync, this method
+    /// reconstructs the `CollectionVersion` from the definition deltas and stores it
+    /// in systemstore so `set_active_collection_version` can find and activate it.
+    async fn process_collection_definition_delta(
+        &self,
+        cid: &Cid,
+        block: &Block,
+        payload: &CollectionDefinitionDeltaPayload,
+        _metadata: &BlockMetadata<'_>,
+    ) -> Result<MergeOutcome, MergeError> {
+        let collection_name = match &payload.name {
+            Some(name) => name.clone(),
+            None => {
+                tracing::debug!(cid = %cid, "CollectionDefinition has no name - skipping");
+                return Ok(MergeOutcome::skipped("collection definition has no name"));
+            }
+        };
+
+        // The version_id is the CID of this collection definition block
+        let version_id = cid.to_string();
+
+        tracing::info!(
+            cid = %cid,
+            collection_name = %collection_name,
+            version_id = %version_id,
+            "Processing collection definition delta"
+        );
+
+        // Load and decode all linked field definition blocks
+        let mut fields = Vec::new();
+        if let Some(links) = &block.links {
+            for (idx, link) in links.iter().enumerate() {
+                let field_cid = &link.link;
+                let field_bytes = self
+                    .blockstore
+                    .get(field_cid)
+                    .await
+                    .map_err(|e| MergeError::Storage(format!("Failed to load field block: {}", e)))?
+                    .ok_or_else(|| {
+                        MergeError::Storage(format!("Field block not found: {}", field_cid))
+                    })?;
+
+                let field_block = Block::from_dag_cbor(&field_bytes)
+                    .map_err(|e| MergeError::BlockDecode(format!("Failed to decode field block: {}", e)))?;
+
+                if let CrdtDelta::FieldDefinition(field_payload) = &field_block.delta {
+                    let field_desc = self.field_definition_to_description(field_payload, idx + 1)?;
+                    fields.push(field_desc);
+                } else {
+                    tracing::warn!(
+                        field_cid = %field_cid,
+                        "Linked block is not a FieldDefinition - skipping"
+                    );
+                }
+            }
+        }
+
+        // For initial collection creation, collection_id equals the name
+        // For patched versions, we'd need to look up the existing collection
+        let collection_id = collection_name.clone();
+
+        // Build the CollectionVersion
+        let schema = CollectionVersion::new(
+            &collection_name,
+            &version_id,
+            &collection_id,
+            fields,
+        );
+
+        // Store in systemstore
+        let txn = self.db.new_txn(false).await.map_err(MergeError::Database)?;
+        {
+            let systemstore = txn.systemstore().map_err(MergeError::Database)?;
+
+            // 1. Store full schema at /collection/id/{version_id}
+            let collection_key = CollectionKey::new(&version_id);
+            let data = serde_json::to_vec(&schema).map_err(|e| {
+                MergeError::Storage(format!("Failed to serialize collection schema: {}", e))
+            })?;
+            systemstore
+                .set(&collection_key.bytes(), &data)
+                .await
+                .map_err(|e| MergeError::Storage(format!("Failed to store collection: {}", e)))?;
+
+            // 2. Store version index at /collection/version/{collection_id}/{version_id}
+            let version_key = CollectionVersionKey::new(&collection_id, &version_id);
+            systemstore
+                .set(&version_key.bytes(), b"1")
+                .await
+                .map_err(|e| MergeError::Storage(format!("Failed to store version index: {}", e)))?;
+
+            // Note: We don't set the name mapping or short ID here because:
+            // - The name mapping should only point to the active version
+            // - Short ID assignment happens during set_active_collection_version
+        }
+        txn.commit().await.map_err(MergeError::Database)?;
+
+        tracing::info!(
+            collection_name = %collection_name,
+            version_id = %version_id,
+            field_count = schema.fields.len(),
+            "Registered synced collection schema in systemstore"
+        );
+
+        Ok(MergeOutcome::Merged)
+    }
+
+    /// Convert a FieldDefinitionDeltaPayload to a FieldDescription.
+    fn field_definition_to_description(
+        &self,
+        payload: &FieldDefinitionDeltaPayload,
+        field_index: usize,
+    ) -> Result<FieldDescription, MergeError> {
+        let name = payload.name.clone().unwrap_or_else(|| format!("field_{}", field_index));
+
+        // Determine the FieldKind from the payload
+        let kind = if let Some(collection_id) = &payload.collection_id {
+            // Relation field
+            FieldKind::Relation {
+                collection_id: collection_id.clone(),
+                is_array: false, // Default; actual value would need additional info
+            }
+        } else if let Some(relative_id) = payload.relative_id {
+            // Self-referencing field
+            FieldKind::SelfRef {
+                relative_id: relative_id.to_string(),
+                is_array: false,
+            }
+        } else if let Some(scalar_kind_u8) = payload.scalar_kind {
+            // Scalar field - convert u8 to ScalarKind
+            let scalar_kind = match scalar_kind_u8 {
+                0 => ScalarKind::None,
+                1 => ScalarKind::DocID,
+                2 => ScalarKind::Bool,
+                4 => ScalarKind::Int,
+                6 => ScalarKind::Float64,
+                8 => ScalarKind::Float32,
+                10 => ScalarKind::DateTime,
+                11 => ScalarKind::String,
+                13 => ScalarKind::Blob,
+                14 => ScalarKind::Json,
+                _ => ScalarKind::None,
+            };
+            FieldKind::Scalar(scalar_kind)
+        } else {
+            // Default to None scalar
+            FieldKind::Scalar(ScalarKind::None)
+        };
+
+        // Determine CRDT type
+        let crdt_type = payload.crdt.map(CType::from_u8).unwrap_or_default();
+
+        // Field ID is the index as a string (matches Go's sequential assignment)
+        let field_id = field_index.to_string();
+
+        Ok(FieldDescription::new(field_id, name, kind).with_crdt_type(crdt_type))
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -1401,9 +1564,14 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                 self.process_collection_delta(cid, &block, payload, &metadata)
                     .await
             }
-            CrdtDelta::FieldDefinition(_) | CrdtDelta::CollectionDefinition(_) => {
-                tracing::debug!(cid = %cid, "Schema definition delta - skipping");
-                Ok(MergeOutcome::skipped("schema definition deltas not merged"))
+            CrdtDelta::FieldDefinition(_) => {
+                // Field definitions are processed as part of CollectionDefinition
+                tracing::debug!(cid = %cid, "FieldDefinition delta - skipping (processed with collection)");
+                Ok(MergeOutcome::skipped("field definition processed with collection"))
+            }
+            CrdtDelta::CollectionDefinition(payload) => {
+                self.process_collection_definition_delta(cid, &block, payload, &metadata)
+                    .await
             }
         }
     }
