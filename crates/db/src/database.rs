@@ -2207,8 +2207,27 @@ impl<S: Store> DB<S> {
                         let from_path =
                             Self::strip_collection_prefix(&from_path, &strip_prefixes);
 
-                        // Get the value to copy
+                        // Get the value to copy. First try current schema, then
+                        // cross-collection: Go applies patches against a global dict
+                        // of all collections, so "from" can reference other collections.
                         let value_to_copy = Self::json_pointer_get(&schema_json, &from_path)
+                            .or_else(|| {
+                                let trimmed = from_path.trim_start_matches('/');
+                                let first_slash = trimmed.find('/');
+                                if let Some(pos) = first_slash {
+                                    let other_name = &trimmed[..pos];
+                                    let rest = &trimmed[pos..];
+                                    if let Ok(Some(other_col)) = self.get_collection(other_name) {
+                                        let other_schema = other_col.schema();
+                                        if let Ok(other_json) =
+                                            serde_json::to_value(other_schema)
+                                        {
+                                            return Self::json_pointer_get(&other_json, rest);
+                                        }
+                                    }
+                                }
+                                None
+                            })
                             .ok_or_else(|| {
                                 Error::InvalidPatch(format!("path not found: {}", from_path))
                             })?;
@@ -2364,22 +2383,72 @@ impl<S: Store> DB<S> {
                         }
                     }
                 } else {
-                    // New field validations
-                    if matches!(
-                        field.kind,
-                        schema::FieldKind::Scalar(schema::ScalarKind::None)
-                    ) && field.name != "_docID"
-                    {
-                        field_errors.push(format!(
-                            "no type found for given name. Type: {}",
-                            schema::ScalarKind::None as u8
-                        ));
-                    }
-                    if field.name.is_empty() {
-                        field_errors.push(
-                            "Names must match /^[_a-zA-Z][_a-zA-Z0-9]*$/ but \"\" does not."
-                                .to_string(),
-                        );
+                    // Check if this is a relational ID field (_<name>ID pattern)
+                    // A field is a relational ID if:
+                    // 1. Its name matches _<base>ID where <base> is another field name
+                    // 2. That base field has a relation-like Kind (Named, Relation, or SelfRef)
+                    // Note: we use is_relation() which checks the Kind variant directly
+                    let is_relational_id = field
+                        .name
+                        .strip_prefix('_')
+                        .and_then(|s| s.strip_suffix("ID"))
+                        .map(|base_name| {
+                            new_schema.fields.iter().any(|f| {
+                                f.name == base_name
+                                    && matches!(
+                                        f.kind,
+                                        schema::FieldKind::Named { .. }
+                                            | schema::FieldKind::Relation { .. }
+                                            | schema::FieldKind::SelfRef { .. }
+                                    )
+                            })
+                        })
+                        .unwrap_or(false);
+
+                    if is_relational_id {
+                        // Relational ID fields must have Kind = DocID (1)
+                        if !matches!(
+                            field.kind,
+                            schema::FieldKind::Scalar(schema::ScalarKind::DocID)
+                        ) {
+                            let kind_display = match &field.kind {
+                                schema::FieldKind::Scalar(k) => match k {
+                                    schema::ScalarKind::None => "0".to_string(),
+                                    schema::ScalarKind::DocID => "ID".to_string(),
+                                    schema::ScalarKind::Bool => "Boolean".to_string(),
+                                    schema::ScalarKind::Int => "Integer".to_string(),
+                                    schema::ScalarKind::Float64 => "Float".to_string(),
+                                    schema::ScalarKind::Float32 => "Float32".to_string(),
+                                    schema::ScalarKind::DateTime => "DateTime".to_string(),
+                                    schema::ScalarKind::String => "String".to_string(),
+                                    schema::ScalarKind::Blob => "Blob".to_string(),
+                                    schema::ScalarKind::Json => "JSON".to_string(),
+                                },
+                                other => format!("{:?}", other),
+                            };
+                            field_errors.push(format!(
+                                "relational id field of invalid kind. Field: {}, Expected: ID, Actual: {}",
+                                field.name, kind_display
+                            ));
+                        }
+                    } else {
+                        // Standard new field validations
+                        if matches!(
+                            field.kind,
+                            schema::FieldKind::Scalar(schema::ScalarKind::None)
+                        ) && field.name != "_docID"
+                        {
+                            field_errors.push(format!(
+                                "no type found for given name. Type: {}",
+                                schema::ScalarKind::None as u8
+                            ));
+                        }
+                        if field.name.is_empty() {
+                            field_errors.push(
+                                "Names must match /^[_a-zA-Z][_a-zA-Z0-9]*$/ but \"\" does not."
+                                    .to_string(),
+                            );
+                        }
                     }
                 }
             }
@@ -2408,6 +2477,55 @@ impl<S: Store> DB<S> {
                 .map_err(|e| {
                     Error::InvalidPatch(format!("failed to add relation id fields: {}", e))
                 })?;
+        }
+
+        // Go compatibility: validate self-referential relation field completeness.
+        // For self-references (where field.Kind references the same collection), the schema
+        // must have another field with the same RelationName (the other side of the relation).
+        // This only applies to self-references; cross-collection relations are validated
+        // at a later stage after all patches have been applied.
+        {
+            let mut rel_errors = Vec::new();
+            for field in &new_schema.fields {
+                if !field.kind.is_relation() {
+                    continue;
+                }
+                let relation_name = match &field.relation_name {
+                    Some(rn) => rn.clone(),
+                    None => continue,
+                };
+
+                // Get the referenced collection name from the Kind
+                let ref_name = match &field.kind {
+                    schema::FieldKind::Named { name, .. } => name.clone(),
+                    schema::FieldKind::Relation { collection_id, .. } => collection_id.clone(),
+                    schema::FieldKind::SelfRef { .. } => new_schema.name.clone(),
+                    _ => continue,
+                };
+
+                // Only check self-references (where the Kind references this same collection)
+                let is_self_ref = ref_name == new_schema.name || ref_name == actual_name;
+                if !is_self_ref {
+                    continue;
+                }
+
+                // Check if there's another field with the same relation name
+                let has_counterpart = new_schema.fields.iter().any(|f| {
+                    f.name != field.name
+                        && f.relation_name.as_deref() == Some(relation_name.as_str())
+                });
+
+                if !has_counterpart {
+                    rel_errors.push(format!(
+                        "relation missing field. Object: {}, RelationName: {}",
+                        ref_name, relation_name
+                    ));
+                }
+            }
+
+            if !rel_errors.is_empty() {
+                return Err(Error::InvalidPatch(rel_errors.join("\n")));
+            }
         }
 
         // Handle in-place updates (deactivation, IsActive-only, or PreviousVersion/Transform-only).
