@@ -551,6 +551,190 @@ impl<S: Store> DB<S> {
         Ok(transform_id)
     }
 
+    /// Set a migration within an existing transaction context.
+    ///
+    /// This performs the same operations as `set_migration` but uses the provided
+    /// transaction instead of creating a new one. The caller is responsible for
+    /// committing or rolling back the transaction.
+    ///
+    /// This is used for transaction-aware migration configuration via the FFI.
+    pub async fn set_migration_in_txn(&self, txn: &DbTxn<S>, config: LensConfig) -> Result<TransformId> {
+        let dest_version_id = config.destination_schema_version_id.clone();
+        let source_version_id = config.source_schema_version_id.clone();
+
+        // Look up source and destination versions, creating placeholders if needed
+        let (source_col, mut dst_col) = {
+            let systemstore = txn.systemstore()?;
+
+            // Look up source version
+            let src_key = CollectionKey::new(&source_version_id);
+            let src_data = systemstore
+                .get(&src_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+            let source_col: CollectionVersion = match src_data {
+                Some(data) => serde_json::from_slice(&data).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to deserialize source schema '{}': {}",
+                        source_version_id, e
+                    ))
+                })?,
+                None => {
+                    // Source doesn't exist — create a placeholder
+                    let mut placeholder = CollectionVersion {
+                        version_id: source_version_id.clone(),
+                        collection_id: ORPHAN_COLLECTION_ID.to_string(),
+                        is_materialized: true,
+                        is_placeholder: true,
+                        ..CollectionVersion::new("", "", "", Vec::new())
+                    };
+                    placeholder.is_active = false;
+                    let data = serde_json::to_vec(&placeholder).map_err(|e| {
+                        Error::Serialization(format!(
+                            "failed to serialize source placeholder '{}': {}",
+                            source_version_id, e
+                        ))
+                    })?;
+                    systemstore
+                        .set(&src_key.bytes(), &data)
+                        .await
+                        .map_err(Error::Storage)?;
+                    placeholder
+                }
+            };
+
+            // Look up destination version
+            let dst_key = CollectionKey::new(&dest_version_id);
+            let dst_data = systemstore
+                .get(&dst_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+            let dst_col: CollectionVersion = match dst_data {
+                Some(data) => serde_json::from_slice(&data).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to deserialize destination schema '{}': {}",
+                        dest_version_id, e
+                    ))
+                })?,
+                None => {
+                    // Destination doesn't exist — create a placeholder
+                    let mut placeholder = CollectionVersion {
+                        name: source_col.name.clone(),
+                        version_id: dest_version_id.clone(),
+                        collection_id: source_col.collection_id.clone(),
+                        is_materialized: true,
+                        is_placeholder: true,
+                        ..CollectionVersion::new("", "", "", Vec::new())
+                    };
+                    placeholder.is_active = false;
+                    let data = serde_json::to_vec(&placeholder).map_err(|e| {
+                        Error::Serialization(format!(
+                            "failed to serialize destination placeholder '{}': {}",
+                            dest_version_id, e
+                        ))
+                    })?;
+                    systemstore
+                        .set(&dst_key.bytes(), &data)
+                        .await
+                        .map_err(Error::Storage)?;
+                    placeholder
+                }
+            };
+
+            (source_col, dst_col)
+        };
+
+        // Validate version adjacency
+        if let Some(ref prev) = dst_col.previous_version {
+            if prev.source_collection_id != source_col.version_id {
+                return Err(Error::InvalidPatch(format!(
+                    "cannot migrate between non-adjacent collection versions. \
+                     Destination '{}' already has previous version '{}', but migration source is '{}'",
+                    dest_version_id, prev.source_collection_id, source_version_id
+                )));
+            }
+        }
+
+        // Register the transform in the lens store
+        let transform_id = self
+            .lens_store
+            .add(config)
+            .await
+            .map_err(|e| Error::Lens(e.to_string()))?;
+
+        // Set the destination's previous_version with source and transform
+        dst_col.previous_version = Some(CollectionSource {
+            source_collection_id: source_col.version_id.clone(),
+            transform: Some(transform_id.to_string()),
+        });
+
+        tracing::debug!(
+            dest_version_id = %dest_version_id,
+            source_version_id = %source_version_id,
+            is_placeholder = dst_col.is_placeholder,
+            transform_id = %transform_id,
+            "set_migration_in_txn: storing destination version with transform"
+        );
+
+        // Save the destination version
+        let collection_name = dst_col.name.clone();
+        let dst_key = CollectionKey::new(&dest_version_id);
+        let dst_data = serde_json::to_vec(&dst_col).map_err(|e| {
+            Error::Serialization(format!(
+                "failed to serialize destination schema '{}': {}",
+                dest_version_id, e
+            ))
+        })?;
+
+        {
+            let systemstore = txn.systemstore()?;
+            systemstore
+                .set(&dst_key.bytes(), &dst_data)
+                .await
+                .map_err(Error::Storage)?;
+
+            // Write CollectionVersionKey entries
+            if !source_col.collection_id.is_empty() {
+                let src_version_key = CollectionVersionKey::new(
+                    &source_col.collection_id,
+                    &source_version_id,
+                );
+                systemstore
+                    .set(&src_version_key.bytes(), b"1")
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+            if !dst_col.collection_id.is_empty() {
+                let dst_version_key = CollectionVersionKey::new(
+                    &dst_col.collection_id,
+                    &dest_version_id,
+                );
+                systemstore
+                    .set(&dst_version_key.bytes(), b"1")
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+        }
+
+        // NOTE: We don't commit here - caller is responsible for transaction lifecycle
+
+        // Update in-memory cache if this is the active collection
+        if !collection_name.is_empty() {
+            let mut cache = self.collections.write().map_err(|e| {
+                tracing::error!(error = ?e, "Collection cache lock poisoned during set_migration_in_txn");
+                Error::LockPoisoned("collection cache lock poisoned during set_migration_in_txn".into())
+            })?;
+
+            if let Some(cached) = cache.get(&collection_name) {
+                if cached.schema().version_id == dest_version_id {
+                    cache.insert(collection_name.clone(), Collection::new(dst_col));
+                }
+            }
+        }
+
+        Ok(transform_id)
+    }
+
     /// Rebuild secondary indexes for a collection after a migration is registered.
     ///
     /// If the destination version is the currently active version and the collection

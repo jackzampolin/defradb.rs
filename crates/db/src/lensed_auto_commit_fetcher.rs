@@ -17,7 +17,7 @@ use query::planner::index_selection::{IndexScanParams, IndexScanType};
 use query::runner::{DocFetcher, FetchByIdsResult};
 use storage::corekv::Store;
 use storage::index::IndexIterator;
-use tracing::{debug, trace};
+use tracing::{debug, info, trace, warn};
 
 use crate::collection::{collection_short_id, Collection};
 use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
@@ -50,19 +50,73 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         &self,
         collection: &Collection,
     ) -> query::error::Result<(bool, Option<HashMap<String, TargetedHistoryLink>>)> {
+        let collection_id = &collection.schema().collection_id;
+        let target_version_id = &collection.schema().version_id;
+
+        info!(
+            collection_name = %collection.name(),
+            collection_id = %collection_id,
+            target_version_id = %target_version_id,
+            "Loading migration context"
+        );
+
         let history = self.load_collection_history(collection).await.ok();
+
+        // Log detailed history information
+        if let Some(ref h) = history {
+            info!(
+                collection_name = %collection.name(),
+                version_count = h.len(),
+                "Loaded version history"
+            );
+            for (version_id, link) in h.iter() {
+                info!(
+                    version_id = %version_id,
+                    transform = ?link.transform,
+                    previous = ?link.previous,
+                    next = ?link.next,
+                    "Version history link"
+                );
+            }
+        } else {
+            warn!(
+                collection_name = %collection.name(),
+                "Failed to load collection history"
+            );
+        }
+
         let has_migrations = history
             .as_ref()
             .is_some_and(|h| h.values().any(|link| link.transform.is_some()));
+
+        info!(
+            collection_name = %collection.name(),
+            has_migrations = has_migrations,
+            "Migration context loaded"
+        );
+
         Ok((has_migrations, if has_migrations { history } else { None }))
     }
 
     /// Check if a document needs migration.
     fn doc_needs_migration(doc: &Document, target_version_id: &str, has_migrations: bool) -> bool {
-        if !has_migrations {
-            return false;
-        }
-        doc.needs_migration(target_version_id)
+        let doc_version = doc.schema_version_id();
+        let needs = if !has_migrations {
+            false
+        } else {
+            doc.needs_migration(target_version_id)
+        };
+
+        debug!(
+            doc_id = ?doc.id(),
+            doc_version = ?doc_version,
+            target_version = %target_version_id,
+            has_migrations = has_migrations,
+            needs_migration = needs,
+            "Checking if document needs migration"
+        );
+
+        needs
     }
 
     /// Convert a Document to a LensDoc.
@@ -94,7 +148,14 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         versions: &[schema::CollectionVersion],
         target_version_id: &str,
     ) -> Option<HashMap<String, TargetedHistoryLink>> {
+        info!(
+            version_count = versions.len(),
+            target_version_id = %target_version_id,
+            "Building collection history"
+        );
+
         if versions.is_empty() {
+            warn!("No versions provided, cannot build history");
             return None;
         }
 
@@ -102,13 +163,29 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         for version in versions {
             let mut link = CollectionHistoryLink::new(&version.version_id, &version.collection_id);
             if let Some(ref prev) = version.previous_version {
+                info!(
+                    version_id = %version.version_id,
+                    previous_source_collection_id = %prev.source_collection_id,
+                    transform = ?prev.transform,
+                    "Version has previous_version"
+                );
                 link = link.with_previous(&prev.source_collection_id);
                 if let Some(ref transform_id) = prev.transform {
                     link = link.with_transform(transform_id);
                 }
+            } else {
+                debug!(
+                    version_id = %version.version_id,
+                    "Version has no previous_version (root version)"
+                );
             }
             full_history.insert(version.version_id.clone(), link);
         }
+
+        info!(
+            full_history_size = full_history.len(),
+            "Built initial history graph"
+        );
 
         // Build `next` links by reverse-indexing `previous` links.
         // Each version's `previous` points to its parent; the parent's `next` should point back.
@@ -122,15 +199,56 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
             })
             .collect();
 
-        for (parent_id, child_id) in reverse_links {
-            if let Some(parent_link) = full_history.get_mut(&parent_id) {
-                if !parent_link.next.contains(&child_id) {
-                    parent_link.next.push(child_id);
+        info!(
+            reverse_links_count = reverse_links.len(),
+            "Building reverse links"
+        );
+
+        for (parent_id, child_id) in &reverse_links {
+            debug!(
+                parent_id = %parent_id,
+                child_id = %child_id,
+                "Adding next link"
+            );
+            if let Some(parent_link) = full_history.get_mut(parent_id) {
+                if !parent_link.next.contains(child_id) {
+                    parent_link.next.push(child_id.clone());
                 }
+            } else {
+                warn!(
+                    parent_id = %parent_id,
+                    "Parent version not found in history when adding next link"
+                );
             }
         }
 
-        build_targeted_history(&full_history, target_version_id)
+        // Log the final full history before targeting
+        for (vid, link) in &full_history {
+            info!(
+                version_id = %vid,
+                transform = ?link.transform,
+                previous = ?link.previous,
+                next = ?link.next,
+                "Full history link"
+            );
+        }
+
+        let result = build_targeted_history(&full_history, target_version_id);
+
+        if result.is_none() {
+            warn!(
+                target_version_id = %target_version_id,
+                "build_targeted_history returned None"
+            );
+        } else {
+            info!(
+                target_version_id = %target_version_id,
+                targeted_history_size = result.as_ref().map_or(0, |h| h.len()),
+                "Successfully built targeted history"
+            );
+        }
+
+        result
     }
 
     /// Load collection history from database.
@@ -184,16 +302,22 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         let target_version_id = &collection.schema().version_id;
 
         if !Self::doc_needs_migration(&doc, target_version_id, has_migrations) {
+            trace!(
+                doc_id = ?doc.id(),
+                doc_version = ?doc.schema_version_id(),
+                target_version = %target_version_id,
+                "Document does not need migration, returning as-is"
+            );
             return Ok(doc);
         }
 
         let doc_version = doc.schema_version_id().unwrap_or("unknown").to_string();
         let doc_id_str = doc.id().map(|id| id.to_string()).unwrap_or_default();
-        debug!(
-            doc_id = ?doc.id(),
+        info!(
+            doc_id = %doc_id_str,
             from_version = %doc_version,
             to_version = %target_version_id,
-            "Document needs migration"
+            "Document needs migration - starting lens pipeline"
         );
 
         // Use pre-loaded history or load on demand

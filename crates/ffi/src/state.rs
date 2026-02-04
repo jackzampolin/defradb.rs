@@ -281,10 +281,15 @@ pub type FfiNacManager = db::NacManager<acp::MemoryZanzibarStore>;
 /// Type alias for subscription handles (opaque to FFI callers).
 pub type SubscriptionHandle = usize;
 
+/// Type alias for the transaction registry type used in FFI.
+pub type FfiTransactionRegistry = db::DbTransactionRegistry<FfiStore>;
+
 /// State held for each FFI node.
 pub struct NodeState {
     /// The database instance.
     pub database: Arc<FfiDatabase>,
+    /// The transaction registry for managing explicit transactions.
+    pub txn_registry: Arc<FfiTransactionRegistry>,
     /// The query runner for executing GraphQL queries.
     pub query_runner: Arc<dyn query::QueryExecutor>,
     /// The NAC manager for node-level access control.

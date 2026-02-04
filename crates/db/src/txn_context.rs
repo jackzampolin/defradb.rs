@@ -71,6 +71,14 @@ impl<S: Store + 'static> DbTransactionContext<S> {
     pub fn doc_mutator(&self) -> Arc<dyn DocMutator> {
         Arc::new(DbDocMutator::from_shared_txn(self.fetcher.shared_txn()))
     }
+
+    /// Get the underlying fetcher's shared transaction.
+    ///
+    /// This is used by `DbTransactionRegistry::set_migration_in_txn` to perform
+    /// migration configuration within the transaction context.
+    pub(crate) fn fetcher_shared_txn(&self) -> Arc<async_lock::Mutex<Option<DbTxn<S>>>> {
+        self.fetcher.shared_txn()
+    }
 }
 
 impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {

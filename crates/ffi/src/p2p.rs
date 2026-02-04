@@ -491,7 +491,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
             db::DbCollectionProvider::new_arc(database.clone());
 
         // Create transaction registry
-        let registry = db::DbTransactionRegistry::new(database.clone());
+        let registry = Arc::new(db::DbTransactionRegistry::new(database.clone()));
 
         // Create mutator
         let mutator: Arc<dyn query::DocMutator> =
@@ -511,12 +511,15 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let encryption_key = b"examplekey1234567890examplekey12".to_vec();
 
         // Create query runner with lens and encryption support
-        let query_runner =
-            query::QueryRunner::with_registry_and_provider(fetcher, collection_provider, registry)
-                .with_mutator(mutator)
-                .with_acp(document_acp.clone())
-                .with_encryption_key(encryption_key)
-                .with_lens_store(database.lens_store().clone());
+        let query_runner = query::QueryRunner::with_arc_registry_and_provider(
+            fetcher,
+            collection_provider,
+            registry.clone(),
+        )
+        .with_mutator(mutator)
+        .with_acp(document_acp.clone())
+        .with_encryption_key(encryption_key)
+        .with_lens_store(database.lens_store().clone());
 
         let runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
 
@@ -526,6 +529,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
         // Create node state with P2P
         let state = NodeState {
             database,
+            txn_registry: registry,
             query_runner: runner,
             nac_manager,
             document_acp,

@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
+use tracing::{debug, info, trace, warn};
+
 use crate::store::TransformStore;
 use crate::{Error, LensDoc, Result, TargetedHistoryLink, TransformId};
 
@@ -196,13 +198,27 @@ async fn transform_to_target(
     collection_history: &HashMap<String, TargetedHistoryLink>,
     input: LensInput,
 ) -> Result<LensDoc> {
+    info!(
+        from_version = %input.schema_version_id,
+        to_version = %target_version_id,
+        history_size = collection_history.len(),
+        "Starting transform_to_target"
+    );
+
     if input.schema_version_id == target_version_id {
+        debug!("Document already at target version, no transform needed");
         return Ok(input.doc);
     }
 
     let _history_link = collection_history
         .get(&input.schema_version_id)
-        .ok_or_else(|| Error::SchemaVersionNotFound(input.schema_version_id.clone()))?;
+        .ok_or_else(|| {
+            warn!(
+                version = %input.schema_version_id,
+                "Schema version not found in history"
+            );
+            Error::SchemaVersionNotFound(input.schema_version_id.clone())
+        })?;
 
     let mut current_doc = input.doc;
     let mut current_version = input.schema_version_id.clone();
@@ -210,14 +226,35 @@ async fn transform_to_target(
     let mut visited = HashSet::new();
     visited.insert(current_version.clone());
 
+    let mut iteration = 0;
     loop {
+        iteration += 1;
+        debug!(
+            iteration = iteration,
+            current_version = %current_version,
+            target_version = %target_version_id,
+            "Migration loop iteration"
+        );
+
         if current_version == target_version_id {
+            info!(
+                iterations = iteration,
+                "Migration complete, reached target version"
+            );
             return Ok(current_doc);
         }
 
         let current_link = collection_history
             .get(&current_version)
             .ok_or_else(|| Error::SchemaVersionNotFound(current_version.clone()))?;
+
+        debug!(
+            current_version = %current_version,
+            transform = ?current_link.transform,
+            previous = ?current_link.previous,
+            next = ?current_link.next,
+            "Current link in history"
+        );
 
         // Try forward (next) first, then backward (previous).
         // If the forward direction was already visited, fall through to backward.
@@ -230,6 +267,13 @@ async fn transform_to_target(
             .as_ref()
             .is_some_and(|v| !visited.contains(v));
 
+        debug!(
+            can_go_next = can_go_next,
+            can_go_prev = can_go_prev,
+            visited = ?visited,
+            "Navigation options"
+        );
+
         if can_go_next {
             let next_version = current_link.next.as_ref().unwrap();
 
@@ -237,10 +281,25 @@ async fn transform_to_target(
                 .get(next_version)
                 .ok_or_else(|| Error::SchemaVersionNotFound(next_version.clone()))?;
 
+            info!(
+                direction = "forward",
+                from = %current_version,
+                to = %next_version,
+                transform = ?next_link.transform,
+                "Moving forward in version history"
+            );
+
             if let Some(ref transform_id) = next_link.transform {
+                info!(
+                    transform_id = %transform_id,
+                    "Applying forward transform"
+                );
                 current_doc =
                     apply_transform(store, &TransformId::new(transform_id), current_doc, false)
                         .await?;
+                info!("Forward transform applied successfully");
+            } else {
+                debug!("No transform defined for this version transition");
             }
 
             current_version = next_version.clone();
@@ -248,15 +307,36 @@ async fn transform_to_target(
         } else if can_go_prev {
             let prev_version = current_link.previous.as_ref().unwrap();
 
+            info!(
+                direction = "backward",
+                from = %current_version,
+                to = %prev_version,
+                transform = ?current_link.transform,
+                "Moving backward in version history"
+            );
+
             if let Some(ref transform_id) = current_link.transform {
+                info!(
+                    transform_id = %transform_id,
+                    "Applying inverse transform"
+                );
                 current_doc =
                     apply_transform(store, &TransformId::new(transform_id), current_doc, true)
                         .await?;
+                info!("Inverse transform applied successfully");
+            } else {
+                debug!("No transform defined for this version transition");
             }
 
             current_version = prev_version.clone();
             visited.insert(current_version.clone());
         } else {
+            warn!(
+                from = %input.schema_version_id,
+                to = %target_version_id,
+                current = %current_version,
+                "No migration path found"
+            );
             return Err(Error::Pipeline(format!(
                 "no migration path from {} to {}",
                 input.schema_version_id, target_version_id
@@ -271,6 +351,30 @@ async fn apply_transform(
     doc: LensDoc,
     inverse: bool,
 ) -> Result<LensDoc> {
+    let direction = if inverse { "inverse" } else { "forward" };
+    info!(
+        transform_id = %transform_id,
+        direction = direction,
+        doc_keys = ?doc.keys().collect::<Vec<_>>(),
+        "Applying transform"
+    );
+
+    // Check if transform exists in store
+    let has_transform = store.has_transform(transform_id);
+    info!(
+        transform_id = %transform_id,
+        has_transform = has_transform,
+        "Transform lookup result"
+    );
+
+    if !has_transform {
+        warn!(
+            transform_id = %transform_id,
+            "Transform not found in store"
+        );
+        return Err(Error::TransformNotFound(transform_id.to_string()));
+    }
+
     let input_stream = Box::pin(futures::stream::once(async move { doc }));
 
     let mut output_stream = if inverse {
@@ -279,10 +383,35 @@ async fn apply_transform(
         store.transform(transform_id, input_stream)?
     };
 
-    output_stream
+    let result = output_stream
         .next()
         .await
-        .ok_or_else(|| Error::Pipeline("transform produced no output".to_string()))?
+        .ok_or_else(|| {
+            warn!(
+                transform_id = %transform_id,
+                "Transform produced no output"
+            );
+            Error::Pipeline("transform produced no output".to_string())
+        })?;
+
+    match &result {
+        Ok(output_doc) => {
+            info!(
+                transform_id = %transform_id,
+                output_keys = ?output_doc.keys().collect::<Vec<_>>(),
+                "Transform completed successfully"
+            );
+        }
+        Err(e) => {
+            warn!(
+                transform_id = %transform_id,
+                error = %e,
+                "Transform failed"
+            );
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]

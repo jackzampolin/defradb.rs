@@ -136,7 +136,7 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
             db::DbCollectionProvider::new_arc(database.clone());
 
         // Create transaction registry for explicit transaction support
-        let registry = db::DbTransactionRegistry::new(database.clone());
+        let registry = Arc::new(db::DbTransactionRegistry::new(database.clone()));
 
         // Create mutator for mutations
         let mutator: Arc<dyn query::DocMutator> =
@@ -156,12 +156,15 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
         let encryption_key = b"examplekey1234567890examplekey12".to_vec();
 
         // Create query runner with transaction, mutation, ACP, lens, and encryption support
-        let query_runner =
-            query::QueryRunner::with_registry_and_provider(fetcher, collection_provider, registry)
-                .with_mutator(mutator)
-                .with_acp(document_acp.clone())
-                .with_encryption_key(encryption_key)
-                .with_lens_store(database.lens_store().clone());
+        let query_runner = query::QueryRunner::with_arc_registry_and_provider(
+            fetcher,
+            collection_provider,
+            registry.clone(),
+        )
+        .with_mutator(mutator)
+        .with_acp(document_acp.clone())
+        .with_encryption_key(encryption_key)
+        .with_lens_store(database.lens_store().clone());
 
         let runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
 
@@ -172,6 +175,7 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
         // P2P is disabled by default in FFI - use new_node_with_p2p for P2P-enabled nodes
         let state = NodeState {
             database,
+            txn_registry: registry,
             query_runner: runner,
             nac_manager,
             document_acp,

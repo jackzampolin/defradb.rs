@@ -844,6 +844,76 @@ pub unsafe extern "C" fn set_migration(
     }
 }
 
+/// Set a migration within an existing transaction.
+///
+/// This registers a lens migration configuration within the specified transaction.
+/// The migration will only be visible after the transaction is committed.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `txn_id` - Transaction ID from `begin_txn`
+/// * `identity_did` - Optional DID for permission checks (null for anonymous)
+/// * `config` - JSON string containing the lens configuration
+///
+/// # Returns
+///
+/// - Status 0: Success (value contains the transform ID)
+/// - Status 1: Error (error field contains message)
+///
+/// # Safety
+///
+/// `txn_id` and `config` must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn set_migration_in_txn(
+    node_ptr: usize,
+    txn_id: *const c_char,
+    identity_did: *const c_char,
+    config: *const c_char,
+) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
+        return e;
+    }
+
+    let txn_str = match c_str_to_string(txn_id) {
+        Some(s) => s,
+        None => return FfiResult::error("txn_id is null"),
+    };
+
+    let config_str = match c_str_to_string(config) {
+        Some(s) => s,
+        None => return FfiResult::error("config is null"),
+    };
+
+    // Get the transaction registry
+    let registry = match NODES.get(node_ptr, |state| state.txn_registry.clone()) {
+        Some(r) => r,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
+
+    let result = rt.block_on(async {
+        // Parse the LensConfig from JSON
+        let lens_config: lens::LensConfig = serde_json::from_str(&config_str)
+            .map_err(|e| format!("failed to parse lens config: {}", e))?;
+
+        // Register the migration within the transaction
+        let transform_id = registry
+            .set_migration_in_txn(&txn_str, lens_config)
+            .await
+            .map_err(|e| format!("failed to set migration in txn: {}", e))?;
+
+        Ok::<String, String>(transform_id.to_string())
+    });
+
+    match result {
+        Ok(transform_id) => FfiResult::success(&transform_id),
+        Err(e) => FfiResult::error(&e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

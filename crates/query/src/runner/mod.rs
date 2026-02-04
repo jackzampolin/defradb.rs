@@ -132,6 +132,27 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
     }
 
+    /// Create a new query runner with a shared transaction registry.
+    ///
+    /// Use this when you need to share the registry with other components
+    /// (e.g., for transaction-aware migration configuration).
+    pub fn with_arc_registry_and_provider(
+        fetcher: F,
+        provider: Arc<dyn CollectionProvider>,
+        registry: Arc<R>,
+    ) -> Self {
+        Self {
+            fetcher: Arc::new(fetcher),
+            collection_provider: provider,
+            registry,
+            mutator: None,
+            acp: None,
+            default_identity: None,
+            encryption_key: None,
+            lens_store: None,
+        }
+    }
+
     /// Set the document mutator for mutation operations.
     ///
     /// This enables support for CREATE, UPDATE, and DELETE mutations.

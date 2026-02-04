@@ -201,11 +201,17 @@ pub async fn get_collections_by_collection_id(
     // Get all version IDs for this collection
     let version_ids = get_collection_version_ids(systemstore, collection_id).await?;
 
+    tracing::info!(
+        collection_id = %collection_id,
+        version_ids = ?version_ids,
+        "Loading collection versions from systemstore"
+    );
+
     let mut collections = Vec::with_capacity(version_ids.len());
 
     // Load each version
-    for version_id in version_ids {
-        let collection_key = CollectionKey::new(&version_id);
+    for version_id in &version_ids {
+        let collection_key = CollectionKey::new(version_id);
         match systemstore.get(&collection_key.bytes()).await {
             Ok(Some(json)) => {
                 let collection: CollectionVersion = serde_json::from_slice(&json).map_err(|e| {
@@ -214,6 +220,17 @@ pub async fn get_collections_by_collection_id(
                         version_id, e
                     ))
                 })?;
+
+                // Log the version with transform information
+                tracing::info!(
+                    version_id = %collection.version_id,
+                    collection_id = %collection.collection_id,
+                    name = %collection.name,
+                    has_previous = collection.previous_version.is_some(),
+                    previous_transform = ?collection.previous_version.as_ref().and_then(|p| p.transform.as_ref()),
+                    "Loaded collection version"
+                );
+
                 collections.push(collection);
             }
             Ok(None) => {
@@ -230,10 +247,10 @@ pub async fn get_collections_by_collection_id(
         }
     }
 
-    tracing::debug!(
+    tracing::info!(
         collection_id = %collection_id,
         loaded_count = collections.len(),
-        "Loaded collection versions"
+        "Finished loading collection versions"
     );
 
     Ok(collections)

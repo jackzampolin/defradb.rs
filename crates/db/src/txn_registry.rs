@@ -245,6 +245,39 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             .map(|guard| guard.len())
             .map_err(|_| Error::LockPoisoned("failed to acquire read lock for count".to_string()))
     }
+
+    /// Set a migration within an existing transaction.
+    ///
+    /// This registers a lens migration configuration within the specified transaction.
+    /// The migration will only be visible after the transaction is committed.
+    ///
+    /// # Arguments
+    ///
+    /// * `txn_id` - The transaction ID from `begin_txn`
+    /// * `config` - The lens configuration
+    ///
+    /// # Returns
+    ///
+    /// The transform ID that was registered.
+    pub async fn set_migration_in_txn(
+        &self,
+        txn_id: &str,
+        config: lens::LensConfig,
+    ) -> Result<lens::TransformId> {
+        let ctx = self
+            .get_ctx(txn_id)?
+            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+
+        // Get the shared transaction from the fetcher
+        let shared_txn = ctx.fetcher_shared_txn();
+        let txn_guard = shared_txn.lock().await;
+        let txn = txn_guard
+            .as_ref()
+            .ok_or_else(|| Error::TxnNotActive)?;
+
+        // Call the database's transaction-aware set_migration
+        self.db.set_migration_in_txn(txn, config).await
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

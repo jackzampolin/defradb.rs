@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use wasmtime::{AsContext, AsContextMut, Engine, Linker, Module, Store as WasmStore, TypedFunc};
 
+use tracing::{debug, info, trace, warn};
+
 use crate::store::{LensDocResultStream, LensDocStream, TransformId, TransformStore};
 use crate::{Error, LensConfig, LensDoc, LensModule, Result};
 
@@ -98,6 +100,13 @@ impl TransformStore for WasmTransformStore {
     async fn add(&self, config: LensConfig) -> Result<TransformId> {
         use sha2::{Digest, Sha256};
 
+        info!(
+            source_version = %config.source_schema_version_id,
+            dest_version = %config.destination_schema_version_id,
+            lenses_count = config.lenses.len(),
+            "Adding transform to WASM store"
+        );
+
         // Compute content-based ID for deduplication (matches Go's IPLD CID approach)
         // Hash only the lens modules, not the version IDs, so identical lens content
         // produces the same ID regardless of which versions it's associated with.
@@ -109,17 +118,37 @@ impl TransformStore for WasmTransformStore {
         // Use "baf" prefix to mimic CID format, then 16 bytes of hash for uniqueness
         let id = TransformId::new(format!("baf{}", hex::encode(&hash[..16])));
 
+        info!(
+            transform_id = %id,
+            "Computed transform ID"
+        );
+
         // Check if this transform already exists (deduplication)
         {
             let modules = self.modules.read();
             if modules.contains_key(&id) {
+                info!(
+                    transform_id = %id,
+                    "Transform already exists, returning existing ID"
+                );
                 return Ok(id);
             }
         }
 
         // Load and compile the WASM module
         let first_lens = config.lens().cloned().unwrap_or_default();
+        info!(
+            path = ?first_lens.path,
+            has_module_bytes = first_lens.module.is_some(),
+            has_arguments = first_lens.arguments.is_some(),
+            "Loading WASM module"
+        );
+
         let module = self.load_module(&first_lens)?;
+        info!(
+            transform_id = %id,
+            "WASM module compiled successfully"
+        );
 
         let compiled = CompiledModule {
             module,
@@ -128,6 +157,11 @@ impl TransformStore for WasmTransformStore {
 
         self.modules.write().insert(id.clone(), compiled);
         self.configs.write().insert(id.clone(), config);
+
+        info!(
+            transform_id = %id,
+            "Transform added to store"
+        );
 
         Ok(id)
     }
@@ -142,15 +176,37 @@ impl TransformStore for WasmTransformStore {
     }
 
     fn transform(&self, id: &TransformId, docs: LensDocStream) -> Result<LensDocResultStream> {
+        info!(
+            transform_id = %id,
+            "WasmTransformStore::transform called"
+        );
+
         let modules = self.modules.read();
-        let compiled = modules
-            .get(id)
-            .ok_or_else(|| Error::TransformNotFound(id.to_string()))?;
+        let compiled = modules.get(id).ok_or_else(|| {
+            warn!(
+                transform_id = %id,
+                stored_ids = ?modules.keys().map(|k| k.to_string()).collect::<Vec<_>>(),
+                "Transform not found in WASM store"
+            );
+            Error::TransformNotFound(id.to_string())
+        })?;
         let module = compiled.module.clone();
         let arguments = compiled.arguments.clone();
         drop(modules);
 
+        info!(
+            transform_id = %id,
+            has_arguments = arguments.is_some(),
+            "Transform found, creating execution stream"
+        );
+
         let engine = self.engine.clone();
+        let transform_id_str = id.to_string();
+
+        info!(
+            transform_id = %transform_id_str,
+            "Executing forward WASM transform (batch mode)"
+        );
 
         // Batch mode: collect all inputs, run in a single WASM instance, yield all outputs.
         // This supports transforms that aggregate (N→1) or multiply (1→N) documents.
