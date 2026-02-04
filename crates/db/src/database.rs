@@ -478,6 +478,14 @@ impl<S: Store> DB<S> {
             transform: Some(transform_id.to_string()),
         });
 
+        tracing::debug!(
+            dest_version_id = %dest_version_id,
+            source_version_id = %source_version_id,
+            is_placeholder = dst_col.is_placeholder,
+            transform_id = %transform_id,
+            "set_migration: storing destination version with transform"
+        );
+
         // Save the destination version
         let collection_name = dst_col.name.clone();
         let dst_key = CollectionKey::new(&dest_version_id);
@@ -2508,9 +2516,61 @@ impl<S: Store> DB<S> {
 
         // Update new schema with version info
         new_schema.version_id = new_version_id.clone();
-        new_schema.previous_version = Some(CollectionSource::new(&old_version_id));
 
-        // Check for pending migrations targeting this new version
+        // Check if a placeholder version exists with this ID (from pre-registered migration).
+        // When set_migration is called before patch_collection, it creates a placeholder
+        // with previous_version.transform set. We need to copy that transform to preserve
+        // the migration link.
+        let placeholder_transform = {
+            let read_txn = self.new_txn(true).await?;
+            let systemstore = read_txn.systemstore()?;
+            let placeholder_key = CollectionKey::new(&new_version_id);
+            match systemstore
+                .get(&placeholder_key.bytes())
+                .await
+                .map_err(Error::Storage)?
+            {
+                Some(data) => {
+                    let placeholder: CollectionVersion =
+                        serde_json::from_slice(&data).map_err(|e| {
+                            Error::Serialization(format!(
+                                "failed to deserialize placeholder version: {}",
+                                e
+                            ))
+                        })?;
+                    tracing::debug!(
+                        new_version_id = %new_version_id,
+                        is_placeholder = placeholder.is_placeholder,
+                        has_previous_version = placeholder.previous_version.is_some(),
+                        transform = ?placeholder.previous_version.as_ref().and_then(|pv| pv.transform.as_ref()),
+                        "patch_collection: found existing version"
+                    );
+                    if placeholder.is_placeholder {
+                        // Found a placeholder - extract its transform
+                        placeholder.previous_version.and_then(|pv| pv.transform)
+                    } else {
+                        None
+                    }
+                }
+                None => None
+            }
+        };
+
+        // Use placeholder transform if available, otherwise None
+        new_schema.previous_version = Some(CollectionSource {
+            source_collection_id: old_version_id.clone(),
+            transform: placeholder_transform.clone(),
+        });
+
+        if placeholder_transform.is_some() {
+            tracing::debug!(
+                new_version = %new_version_id,
+                transform_id = ?placeholder_transform,
+                "Linked pre-registered migration from placeholder to new schema version"
+            );
+        }
+
+        // Also check for pending migrations targeting this new version (in-memory fallback)
         {
             let pending = self.pending_migrations.read().map_err(|e| {
                 tracing::error!(error = ?e, "Pending migrations lock poisoned");
@@ -2520,12 +2580,15 @@ impl<S: Store> DB<S> {
             })?;
             if let Some((_source_id, transform_id)) = pending.get(&new_version_id) {
                 if let Some(ref mut prev) = new_schema.previous_version {
-                    prev.transform = Some(transform_id.clone());
-                    tracing::debug!(
-                        new_version = %new_version_id,
-                        transform_id = %transform_id,
-                        "Linked pending migration to new schema version"
-                    );
+                    // Only override if we didn't already get a transform from the placeholder
+                    if prev.transform.is_none() {
+                        prev.transform = Some(transform_id.clone());
+                        tracing::debug!(
+                            new_version = %new_version_id,
+                            transform_id = %transform_id,
+                            "Linked pending migration to new schema version"
+                        );
+                    }
                 }
             }
         }
