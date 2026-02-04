@@ -1388,9 +1388,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         );
 
         // Load and decode all linked field definition blocks
+        // Note: _docID is already included in the linked blocks from the source node,
+        // so we don't need to add it implicitly.
         let mut fields = Vec::new();
         if let Some(links) = &block.links {
-            for (idx, link) in links.iter().enumerate() {
+            for link in links.iter() {
                 let field_cid = &link.link;
                 let field_bytes = self
                     .blockstore
@@ -1405,7 +1407,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     .map_err(|e| MergeError::BlockDecode(format!("Failed to decode field block: {}", e)))?;
 
                 if let CrdtDelta::FieldDefinition(field_payload) = &field_block.delta {
-                    let field_desc = self.field_definition_to_description(field_payload, idx + 1)?;
+                    // Use the field block CID as the field ID (matches Go's behavior)
+                    let field_desc = self.field_definition_to_description(field_payload, &field_cid.to_string())?;
                     fields.push(field_desc);
                 } else {
                     tracing::warn!(
@@ -1416,17 +1419,29 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
-        // For initial collection creation, collection_id equals the name
+        // Ensure _docID is first in the fields list (Go expects this ordering)
+        if let Some(docid_pos) = fields.iter().position(|f| f.name == "_docID") {
+            if docid_pos > 0 {
+                let docid_field = fields.remove(docid_pos);
+                fields.insert(0, docid_field);
+            }
+        }
+
+        // For initial collection creation, collection_id equals version_id (the CID)
         // For patched versions, we'd need to look up the existing collection
-        let collection_id = collection_name.clone();
+        let collection_id = version_id.clone();
 
         // Build the CollectionVersion
-        let schema = CollectionVersion::new(
+        // Synced collections come in as inactive (user must activate manually via SetActiveCollectionVersion)
+        // and materialized (matching Go's behavior)
+        let mut schema = CollectionVersion::new(
             &collection_name,
             &version_id,
             &collection_id,
             fields,
         );
+        schema.is_active = false;
+        schema.is_materialized = true;
 
         // Store in systemstore
         let txn = self.db.new_txn(false).await.map_err(MergeError::Database)?;
@@ -1450,17 +1465,24 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 .await
                 .map_err(|e| MergeError::Storage(format!("Failed to store version index: {}", e)))?;
 
-            // Note: We don't set the name mapping or short ID here because:
-            // - The name mapping should only point to the active version
-            // - Short ID assignment happens during set_active_collection_version
         }
         txn.commit().await.map_err(MergeError::Database)?;
+
+        // Add to runtime cache so it's visible via list_collections/get_collection.
+        // Synced collections are inactive but still need to be in the cache for
+        // GetCollections with IncludeInactive=true to find them.
+        self.db.add_collection_to_cache(schema.clone()).map_err(MergeError::Database)?;
+
+        eprintln!(
+            "[MERGE-HANDLER] Stored synced collection name={} version={} is_active={} is_materialized={} (added to cache)",
+            collection_name, version_id, schema.is_active, schema.is_materialized
+        );
 
         tracing::info!(
             collection_name = %collection_name,
             version_id = %version_id,
             field_count = schema.fields.len(),
-            "Registered synced collection schema in systemstore"
+            "Registered synced collection schema in systemstore and cache (inactive, requires manual activation)"
         );
 
         Ok(MergeOutcome::Merged)
@@ -1470,9 +1492,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     fn field_definition_to_description(
         &self,
         payload: &FieldDefinitionDeltaPayload,
-        field_index: usize,
+        field_id: &str,
     ) -> Result<FieldDescription, MergeError> {
-        let name = payload.name.clone().unwrap_or_else(|| format!("field_{}", field_index));
+        let name = payload.name.clone().unwrap_or_else(|| format!("field_{}", field_id));
 
         // Determine the FieldKind from the payload
         let kind = if let Some(collection_id) = &payload.collection_id {
@@ -1511,10 +1533,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Determine CRDT type
         let crdt_type = payload.crdt.map(CType::from_u8).unwrap_or_default();
 
-        // Field ID is the index as a string (matches Go's sequential assignment)
-        let field_id = field_index.to_string();
-
-        Ok(FieldDescription::new(field_id, name, kind).with_crdt_type(crdt_type))
+        Ok(FieldDescription::new(field_id.to_string(), name, kind).with_crdt_type(crdt_type))
     }
 }
 

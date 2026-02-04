@@ -135,6 +135,8 @@ pub unsafe extern "C" fn get_collections(
         let json = serde_json::to_string(&collections)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
 
+        eprintln!("[GET-COLLECTIONS] JSON output: {}", json);
+
         Ok::<String, String>(json)
     });
 
