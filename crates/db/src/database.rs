@@ -2518,6 +2518,54 @@ impl<S: Store> DB<S> {
         // (e.g., relation field requires relation_name, policy format validation)
         new_schema.validate()?;
 
+        // Auto-create unique indexes for one-to-one relations added via patch.
+        // This runs AFTER validation (which rejects index mutations on existing schemas)
+        // but BEFORE CID generation (since indexes are part of the schema content).
+        {
+            // Go uses sequential IDs starting from the next available for this collection
+            let schema_max_index_id =
+                new_schema.indexes.iter().map(|idx| idx.id).max().unwrap_or(0);
+            let mut next_index_id = schema_max_index_id;
+
+            let mut indexes_to_add = Vec::new();
+            for field in &new_schema.fields {
+                if !field.kind.is_relation() || field.kind.is_array() {
+                    continue;
+                }
+                let rel_name = match field.relation_name.as_ref() {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let other_col_id = match field.kind.relation_collection_id() {
+                    Some(id) => id,
+                    None => continue,
+                };
+                // Look up the other collection (may be the same collection for self-ref)
+                let other_col = all_existing.iter().find(|c| {
+                    (c.name == other_col_id || c.collection_id == other_col_id) && c.is_active
+                });
+                if let Some(other_col) = other_col {
+                    let other_field =
+                        other_col.field_by_relation(rel_name, &new_schema.name, &field.name);
+                    let other_is_array = other_field.map(|f| f.kind.is_array()).unwrap_or(false);
+                    // One-to-one: other side exists and is non-array, this field is primary
+                    if !other_is_array && field.is_primary {
+                        match new_schema.ensure_one_to_one_unique_index(&field.name, &mut || {
+                            next_index_id += 1;
+                            next_index_id
+                        }) {
+                            Ok(Some(index)) => indexes_to_add.push(index),
+                            Ok(None) => {} // existing unique index is fine
+                            Err(e) => return Err(Error::InvalidPatch(e.to_string())),
+                        }
+                    }
+                }
+            }
+            for index in indexes_to_add {
+                new_schema.indexes.push(index);
+            }
+        }
+
         // Compute version depth: count existing versions for this collection_id
         let version_depth = all_existing
             .iter()
