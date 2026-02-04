@@ -55,6 +55,9 @@ pub enum SchemaError {
 
     #[error("one-to-one relation must have a unique index. Object: {object}, Field: {field}")]
     OneToOneRequiresUniqueIndex { object: String, field: String },
+
+    #[error("index with name already exists. Name: {0}")]
+    DuplicateIndexName(String),
 }
 
 impl From<serde_json::Error> for SchemaError {

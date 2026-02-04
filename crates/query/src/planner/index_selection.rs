@@ -696,8 +696,16 @@ pub fn filter_to_index_scan(
             let mut values = vec![wrapped_value];
             values.extend(subsequent_eq_values);
             IndexScanType::ExactMatch { values }
+        } else if is_composite && !subsequent_eq_values.is_empty() {
+            // Multiple consecutive fields matched but not all - use PrefixScan with all eq values
+            let mut values = vec![wrapped_value];
+            values.extend(subsequent_eq_values);
+            IndexScanType::PrefixScan {
+                prefix_values: values,
+                reverse,
+            }
         } else if is_composite {
-            // Only first field matched - use PrefixScan
+            // Only first field matched - use PrefixScan with just first value
             IndexScanType::PrefixScan {
                 prefix_values: vec![wrapped_value],
                 reverse,

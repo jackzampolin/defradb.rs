@@ -260,8 +260,19 @@ impl CollectionVersion {
     /// Validate the collection schema
     pub fn validate(&self) -> Result<()> {
         self.validate_no_duplicate_names()?;
+        self.validate_no_duplicate_index_names()?;
         self.validate_fields()?;
         self.validate_policy()?;
+        Ok(())
+    }
+
+    fn validate_no_duplicate_index_names(&self) -> Result<()> {
+        let mut seen = HashSet::new();
+        for index in &self.indexes {
+            if !seen.insert(&index.name) {
+                return Err(SchemaError::DuplicateIndexName(index.name.clone()));
+            }
+        }
         Ok(())
     }
 
