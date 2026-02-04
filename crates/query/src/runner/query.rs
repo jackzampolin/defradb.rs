@@ -2966,7 +2966,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             for nested_select in &nested_selects {
                 let relation_name = &nested_select.field.name;
                 let output_name = nested_select.field.output_name();
-                let related_collection = &nested_select.collection_name;
+
+                // Resolve the actual collection name from the relation field.
+                // nested_select.collection_name is the field name (e.g., "author"),
+                // but we need the collection type name (e.g., "Author").
+                let related_collection =
+                    self.resolve_relation_target_name(&collection, relation_name).await
+                        .unwrap_or_else(|| nested_select.collection_name.clone());
 
                 // Many-to-one: parent has FK field (e.g., Book._authorID → Author)
                 let fk_field_name = CollectionVersion::relation_id_field_name(relation_name);
@@ -2977,7 +2983,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         .unwrap_or_default();
 
                     if !fk_doc_id.is_empty() {
-                        let result = fetcher.get_by_ids(related_collection, &[fk_doc_id]).await?;
+                        let result = fetcher.get_by_ids(&related_collection, &[fk_doc_id]).await?;
 
                         if let Some(related_doc) = result.docs().first() {
                             let related_obj =
@@ -3149,6 +3155,38 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         Ok(JsonValue::Array(enriched_results))
+    }
+
+    /// Resolve the actual collection name for a relation field on a parent collection.
+    ///
+    /// Nested selects have collection_name set to the field name (e.g., "author"),
+    /// but fetcher operations need the collection type name (e.g., "Author").
+    /// This method resolves the target collection name by looking at the parent
+    /// collection's relation field metadata.
+    async fn resolve_relation_target_name(
+        &self,
+        parent_collection: &CollectionVersion,
+        relation_field_name: &str,
+    ) -> Option<String> {
+        let field = parent_collection.field_by_name(relation_field_name)?;
+        let target_id = field.kind.relation_collection_id()?;
+
+        // For Named fields, target_id is the collection name directly
+        if let Ok(Some(coll)) = self.collection_provider.get_collection(target_id).await {
+            return Some(coll.name.clone());
+        }
+
+        // For Relation fields, target_id is a collection_id/version_id — search by ID
+        if let Ok(names) = self.collection_provider.list_collections().await {
+            for name in names {
+                if let Ok(Some(coll)) = self.collection_provider.get_collection(&name).await {
+                    if coll.collection_id == target_id || coll.version_id == target_id {
+                        return Some(coll.name.clone());
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Render a Document's fields as a JSON object using only the fields requested by a Select.
