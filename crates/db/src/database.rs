@@ -2333,47 +2333,49 @@ impl<S: Store> DB<S> {
             ));
         }
 
-        // Go compatibility: validate field Kind values for ALL fields after replace/copy
-        // operations. The per-field kind check (validate_patch_field_kind) only runs for
-        // individual "add" operations. When the entire Fields array is replaced, we need
-        // to check all fields here.
-        {
-            let mut kind_errors = Vec::new();
-            for field in &new_schema.fields {
-                if matches!(field.kind, schema::FieldKind::Scalar(schema::ScalarKind::None))
-                    && field.name != "_docID"
-                {
-                    kind_errors.push(format!(
-                        "no type found for given name. Type: {}",
-                        schema::ScalarKind::None as u8
-                    ));
-                }
-            }
-            if !kind_errors.is_empty() {
-                return Err(Error::InvalidPatch(kind_errors.join("\n")));
-            }
-        }
-
-        // Check for field-level corruption from patches (empty names from removed fields)
+        // Go compatibility: validate field Kind and Name after patching.
+        // Existing fields (matched by FieldID) that were modified are "mutations"
+        // which is not supported. New fields with Kind:0 or empty Name are separate errors.
         {
             let old_field_ids: std::collections::HashSet<&str> =
                 old_schema.fields.iter().map(|f| f.id.as_str()).collect();
+            let old_field_map: std::collections::HashMap<&str, &schema::FieldDescription> =
+                old_schema
+                    .fields
+                    .iter()
+                    .map(|f| (f.id.as_str(), f))
+                    .collect();
             let mut field_errors = Vec::new();
 
             for field in &new_schema.fields {
-                if field.name.is_empty() {
-                    // Determine if this is an existing field whose name was removed
-                    // vs a new field that never had a name.
-                    let is_old_field =
-                        !field.id.is_empty() && old_field_ids.contains(field.id.as_str());
-                    if is_old_field {
-                        // An existing field's name was removed by the patch
-                        field_errors.push(
-                            "mutating an existing field is not supported. ProposedName: "
-                                .to_string(),
-                        );
-                    } else {
-                        // A new field was added without a valid name
+                let is_old_field =
+                    !field.id.is_empty() && old_field_ids.contains(field.id.as_str());
+
+                if is_old_field {
+                    // Check if an existing field was mutated (Kind changed, Name removed, etc.)
+                    if let Some(old_field) = old_field_map.get(field.id.as_str()) {
+                        let kind_changed = field.kind != old_field.kind;
+                        let name_empty = field.name.is_empty();
+                        if kind_changed || name_empty {
+                            field_errors.push(
+                                "mutating an existing field is not supported. ProposedName: "
+                                    .to_string(),
+                            );
+                        }
+                    }
+                } else {
+                    // New field validations
+                    if matches!(
+                        field.kind,
+                        schema::FieldKind::Scalar(schema::ScalarKind::None)
+                    ) && field.name != "_docID"
+                    {
+                        field_errors.push(format!(
+                            "no type found for given name. Type: {}",
+                            schema::ScalarKind::None as u8
+                        ));
+                    }
+                    if field.name.is_empty() {
                         field_errors.push(
                             "Names must match /^[_a-zA-Z][_a-zA-Z0-9]*$/ but \"\" does not."
                                 .to_string(),
