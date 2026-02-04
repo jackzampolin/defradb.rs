@@ -480,6 +480,8 @@ struct IndexFieldInput {
     descending: bool,
 }
 
+// ============================================================================
+// Encrypted Index Stubs
 #[cfg(test)]
 mod tests {
     use super::*;

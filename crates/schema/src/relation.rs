@@ -24,14 +24,25 @@ impl CollectionVersion {
         self.fields.iter().any(|f| f.name == id_field_name)
     }
 
-    /// Check if a unique index exists with the given field as its first field.
+    /// Check if an index exists with one of the given field names as its first field.
+    ///
+    /// Go DefraDB checks for indexes by either the relation field name (e.g., `address`)
+    /// or the ID field name (e.g., `_addressID`). This allows users to define indexes
+    /// on either the relation field or its backing ID field.
     ///
     /// Returns `Some(true)` if a unique index exists, `Some(false)` if a non-unique
-    /// index exists, or `None` if no index exists on this field.
-    fn has_unique_index_on_field(&self, field_name: &str) -> Option<bool> {
+    /// index exists, or `None` if no index exists on either field.
+    fn has_unique_index_on_relation_field(
+        &self,
+        id_field_name: &str,
+        relation_field_name: &str,
+    ) -> Option<bool> {
         for index in &self.indexes {
-            if !index.fields.is_empty() && index.fields[0].name == field_name {
-                return Some(index.unique);
+            if !index.fields.is_empty() {
+                let first_field = &index.fields[0].name;
+                if first_field == id_field_name || first_field == relation_field_name {
+                    return Some(index.unique);
+                }
             }
         }
         None
@@ -49,8 +60,11 @@ impl CollectionVersion {
     ) -> Result<Option<IndexDescription>> {
         let id_field_name = Self::relation_id_field_name(relation_field_name);
 
-        // Check for existing index on the _id field
-        if let Some(is_unique) = self.has_unique_index_on_field(&id_field_name) {
+        // Check for existing index on the _id field or the relation field.
+        // Go DefraDB allows users to define indexes on either, so we check both.
+        if let Some(is_unique) =
+            self.has_unique_index_on_relation_field(&id_field_name, relation_field_name)
+        {
             return if is_unique {
                 Ok(None) // User's unique index is sufficient
             } else {

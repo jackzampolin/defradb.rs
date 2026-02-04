@@ -28,6 +28,9 @@ mod document;
 mod encoding;
 mod error;
 mod field;
+mod json_leaf;
+mod json_path;
+mod json_traverse;
 mod normal;
 mod value;
 
@@ -35,6 +38,9 @@ pub use doc_id::{DocID, DOC_ID_V0, SDN_NAMESPACE_V0};
 pub use document::Document;
 pub use error::{Error, Result};
 pub use field::{special, Field};
+pub use json_leaf::{JsonLeafValue, JsonScalarValue};
+pub use json_path::{JsonPath, JsonPathPart};
+pub use json_traverse::{index_traverse_options, traverse_json, TraverseOptions};
 pub use normal::NormalValue;
 pub use value::FieldValue;
 

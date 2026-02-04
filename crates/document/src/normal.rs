@@ -6,6 +6,9 @@
 use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 
+use crate::json_leaf::{JsonLeafValue, JsonScalarValue};
+use crate::json_traverse::{index_traverse_options, traverse_json};
+
 /// Normalized value type representing all possible field values.
 ///
 /// This enum provides a type-safe way to handle document field values,
@@ -109,6 +112,11 @@ pub enum NormalValue {
     NillableTimeElementArray(Vec<Option<DateTime<FixedOffset>>>),
     /// Array of nillable documents
     NillableDocumentElementArray(Vec<Option<crate::Document>>),
+
+    // === JSON indexing types ===
+    /// JSON leaf value with path for indexing.
+    /// Internal type used during index key generation.
+    JsonLeaf(JsonLeafValue),
 }
 
 impl NormalValue {
@@ -289,6 +297,60 @@ impl NormalValue {
             _ => None,
         }
     }
+
+    /// Get as JsonLeafValue if this is a JsonLeaf variant.
+    pub fn as_json_leaf(&self) -> Option<&JsonLeafValue> {
+        match self {
+            NormalValue::JsonLeaf(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Extract all indexable leaf values from a JSON value.
+    ///
+    /// JSON values are traversed to find all leaf scalars (null, bool, number, string).
+    /// Each leaf is returned as a JsonLeaf variant with its path through the JSON structure.
+    ///
+    /// # Behavior
+    ///
+    /// - Scalar JSON (null, bool, number, string): Returns single JsonLeaf with empty path
+    /// - Nested objects: Returns JsonLeaf for each leaf with path through properties
+    /// - Arrays: Returns JsonLeaf for each element with Index marker in path
+    /// - Empty objects/arrays: Returns empty vec (no index entries)
+    /// - Null JSON field: Returns single Null entry
+    pub fn json_leaves(&self) -> Vec<NormalValue> {
+        match self {
+            NormalValue::Json(json) => {
+                if json.is_null() {
+                    return vec![NormalValue::Null];
+                }
+                extract_json_leaves(json)
+            }
+            _ => vec![],
+        }
+    }
+}
+
+/// Extract all leaf values from a JSON value for indexing.
+fn extract_json_leaves(json: &serde_json::Value) -> Vec<NormalValue> {
+    let mut leaves = Vec::new();
+    let options = index_traverse_options();
+
+    let _ = traverse_json(
+        json,
+        |path, value| {
+            if let Some(scalar) = JsonScalarValue::from_json_value(value) {
+                leaves.push(NormalValue::JsonLeaf(JsonLeafValue::new(
+                    path.clone(),
+                    scalar,
+                )));
+            }
+            Ok(())
+        },
+        &options,
+    );
+
+    leaves
 }
 
 // === From implementations for convenient construction ===
@@ -377,6 +439,12 @@ impl From<Vec<f64>> for NormalValue {
     }
 }
 
+impl From<JsonLeafValue> for NormalValue {
+    fn from(v: JsonLeafValue) -> Self {
+        NormalValue::JsonLeaf(v)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,5 +518,90 @@ mod tests {
     #[test]
     fn test_default() {
         assert_eq!(NormalValue::default(), NormalValue::Null);
+    }
+
+    #[test]
+    fn test_json_leaves_null() {
+        let json = NormalValue::Json(serde_json::Value::Null);
+        let leaves = json.json_leaves();
+        assert_eq!(leaves.len(), 1);
+        assert!(matches!(leaves[0], NormalValue::Null));
+    }
+
+    #[test]
+    fn test_json_leaves_scalar() {
+        let json = NormalValue::Json(serde_json::json!(42));
+        let leaves = json.json_leaves();
+        assert_eq!(leaves.len(), 1);
+        if let NormalValue::JsonLeaf(leaf) = &leaves[0] {
+            assert!(leaf.path.is_empty());
+            assert_eq!(leaf.value, JsonScalarValue::Number(42.0));
+        } else {
+            panic!("expected JsonLeaf");
+        }
+    }
+
+    #[test]
+    fn test_json_leaves_simple_object() {
+        let json = NormalValue::Json(serde_json::json!({"height": 168, "weight": 70}));
+        let leaves = json.json_leaves();
+        assert_eq!(leaves.len(), 2);
+        // Both should be JsonLeaf with single-part paths
+        for leaf in &leaves {
+            if let NormalValue::JsonLeaf(l) = leaf {
+                assert_eq!(l.path.len(), 1);
+            } else {
+                panic!("expected JsonLeaf");
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_leaves_nested_object() {
+        let json = NormalValue::Json(serde_json::json!({"custom": {"height": 168}}));
+        let leaves = json.json_leaves();
+        assert_eq!(leaves.len(), 1);
+        if let NormalValue::JsonLeaf(leaf) = &leaves[0] {
+            assert_eq!(leaf.path.len(), 2);
+            assert_eq!(leaf.value, JsonScalarValue::Number(168.0));
+        } else {
+            panic!("expected JsonLeaf");
+        }
+    }
+
+    #[test]
+    fn test_json_leaves_array() {
+        let json = NormalValue::Json(serde_json::json!({"tags": ["a", "b", "c"]}));
+        let leaves = json.json_leaves();
+        assert_eq!(leaves.len(), 3);
+        // Each leaf should have path [Property("tags"), Index]
+        for leaf in &leaves {
+            if let NormalValue::JsonLeaf(l) = leaf {
+                assert_eq!(l.path.len(), 2);
+            } else {
+                panic!("expected JsonLeaf");
+            }
+        }
+    }
+
+    #[test]
+    fn test_json_leaves_empty_object() {
+        let json = NormalValue::Json(serde_json::json!({}));
+        let leaves = json.json_leaves();
+        assert!(leaves.is_empty());
+    }
+
+    #[test]
+    fn test_json_leaves_empty_array() {
+        let json = NormalValue::Json(serde_json::json!([]));
+        let leaves = json.json_leaves();
+        assert!(leaves.is_empty());
+    }
+
+    #[test]
+    fn test_json_leaves_non_json() {
+        let val = NormalValue::Int(42);
+        let leaves = val.json_leaves();
+        assert!(leaves.is_empty());
     }
 }

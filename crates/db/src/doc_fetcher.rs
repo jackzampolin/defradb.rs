@@ -204,7 +204,8 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         &self,
         collection_name: &str,
         params: &IndexScanParams,
-    ) -> query::error::Result<Vec<String>> {
+    ) -> query::error::Result<query::fetcher::IndexScanResult> {
+        use std::collections::HashSet;
         use storage::index::IndexIterator;
 
         let (_collection, datastore, index_manager) =
@@ -218,19 +219,52 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             ))
         })?;
 
+        // Extract limit/offset for early termination optimization
+        let limit = params.limit;
+        let offset = params.offset;
+
+        // Helper to collect entries with optional early termination
+        async fn collect_with_limit<I: IndexIterator>(
+            iter: &mut I,
+            limit: Option<u64>,
+            offset: u64,
+        ) -> Result<Vec<String>, query::error::QueryError> {
+            let mut entries = Vec::new();
+            let mut skipped = 0u64;
+
+            while let Some(entry) = iter.next().await.map_err(|e| {
+                query::error::QueryError::execution(format!("index iteration error: {}", e))
+            })? {
+                // Skip offset entries
+                if skipped < offset {
+                    skipped += 1;
+                    continue;
+                }
+
+                entries.push(entry.doc_id);
+
+                // Early termination when limit reached
+                if let Some(lim) = limit {
+                    if entries.len() >= lim as usize {
+                        break;
+                    }
+                }
+            }
+
+            Ok(entries)
+        }
+
         // Execute the appropriate scan based on scan type
-        let doc_ids = match &params.scan_type {
+        let raw_doc_ids: Vec<String> = match &params.scan_type {
             IndexScanType::ExactMatch { values } => {
                 let mut iter = index.get(&datastore, values).await.map_err(|e| {
                     query::error::QueryError::execution(format!("index error: {}", e))
                 })?;
-                let entries = iter.collect_all().await.map_err(|e| {
-                    query::error::QueryError::execution(format!("index iteration error: {}", e))
-                })?;
-                entries.into_iter().map(|e| e.doc_id).collect()
+                collect_with_limit(&mut iter, limit, offset).await?
             }
             IndexScanType::InScan { values } => {
                 // For IN operator, we need to collect results for each value
+                // Note: limit/offset doesn't apply cleanly to InScan since order is arbitrary
                 let mut all_doc_ids = Vec::new();
                 for value in values {
                     let mut iter = index.get(&datastore, &[value.clone()]).await.map_err(|e| {
@@ -253,10 +287,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
-                let entries = iter.collect_all().await.map_err(|e| {
-                    query::error::QueryError::execution(format!("index iteration error: {}", e))
-                })?;
-                entries.into_iter().map(|e| e.doc_id).collect()
+                collect_with_limit(&mut iter, limit, offset).await?
             }
             IndexScanType::RangeScan {
                 prefix_values,
@@ -276,14 +307,22 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
-                let entries = iter.collect_all().await.map_err(|e| {
-                    query::error::QueryError::execution(format!("index iteration error: {}", e))
-                })?;
-                entries.into_iter().map(|e| e.doc_id).collect()
+                collect_with_limit(&mut iter, limit, offset).await?
             }
         };
 
-        Ok(doc_ids)
+        // Track raw fetch count before deduplication (for explain metrics)
+        let raw_fetches = raw_doc_ids.len() as u64;
+
+        // Deduplicate doc_ids while preserving order.
+        // Array indexes can return the same document multiple times (once per array element).
+        let mut seen = HashSet::new();
+        let doc_ids: Vec<String> = raw_doc_ids
+            .into_iter()
+            .filter(|id| seen.insert(id.clone()))
+            .collect();
+
+        Ok(query::fetcher::IndexScanResult::with_raw_count(doc_ids, raw_fetches))
     }
 
     fn supports_index_queries(&self) -> bool {

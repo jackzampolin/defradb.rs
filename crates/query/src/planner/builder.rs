@@ -635,6 +635,12 @@ impl Planner {
             if let Some(ref fetcher) = self.fetcher {
                 index_scan_node = index_scan_node.with_fetcher(fetcher.clone());
             }
+            // Apply scalar filter as residual filter on IndexScanNode.
+            // The index may only cover part of the filter (e.g., first field of composite index),
+            // so remaining conditions are applied as post-filtering on the fetched documents.
+            if let Some(ref filter) = scalar_filter {
+                index_scan_node = index_scan_node.with_residual_filter(filter.clone());
+            }
             Box::new(index_scan_node)
         } else {
             let mut scan = ScanNode::new((*collection).clone(), scan_mapping.clone())
@@ -1572,12 +1578,21 @@ impl Planner {
             return None;
         }
 
+        // Extract limit/offset from select for passing to index scan
+        let limit = select.limit.as_ref().and_then(|l| l.limit);
+        let offset = select.limit.as_ref().map(|l| l.offset).unwrap_or(0);
+
         // Try filter-based index selection first
         if let Some(filter) = select.filter.as_ref() {
             if let Some(best_index) = select_best_index(filter, &collection.indexes) {
-                if let Some(params) =
-                    filter_to_index_scan(filter, best_index, select.order_by.as_ref())
-                {
+                if let Some(params) = filter_to_index_scan(
+                    filter,
+                    best_index,
+                    select.order_by.as_ref(),
+                    &collection.fields,
+                    limit,
+                    offset,
+                ) {
                     // Check if this index also provides ordering
                     let provides_ordering = select
                         .order_by
@@ -1600,6 +1615,9 @@ impl Planner {
                             prefix_values: vec![],
                             reverse: needs_reverse,
                         },
+                        // Pass limit/offset for early termination (index provides ordering)
+                        limit,
+                        offset,
                     };
                     return Some((params, true));
                 }
@@ -1607,6 +1625,29 @@ impl Planner {
         }
 
         None
+    }
+
+    /// Try to select an index for a child collection scan.
+    ///
+    /// Returns `Some(IndexScanParams)` if an index can service the filter,
+    /// `None` otherwise. Unlike `try_select_index`, this does not consider
+    /// ordering (child ordering is handled by TypeJoin).
+    fn try_select_child_index(
+        &self,
+        filter: &Filter,
+        collection: &CollectionVersion,
+    ) -> Option<IndexScanParams> {
+        if collection.indexes.is_empty() {
+            return None;
+        }
+        // Require a fetcher that supports index queries (matches top-level logic)
+        match self.fetcher {
+            Some(ref fetcher) if fetcher.supports_index_queries() => {}
+            _ => return None,
+        }
+        let best_index = select_best_index(filter, &collection.indexes)?;
+        // Child scans don't use limit optimization (limit is handled at parent level)
+        filter_to_index_scan(filter, best_index, None, &collection.fields, None, 0)
     }
 
     /// Apply join nodes for nested selects (relation fields)
@@ -1961,15 +2002,7 @@ impl Planner {
             // have fields at schema indices, and render_keys need to match those indices.
             mapping.set_child_at(relation_field_index, child_scan_mapping.clone());
 
-            // Create the child scan plan with scan_mapping (includes FK fields for joins)
-            let mut child_scan =
-                ScanNode::new((*target_collection).clone(), child_scan_mapping.clone())
-                    .with_show_deleted(select.show_deleted);
-            if let Some(ref fetcher) = self.fetcher {
-                child_scan = child_scan.with_fetcher(fetcher.clone());
-            }
-
-            // Apply aggregate target filters to the scan node.
+            // Collect aggregate target filters for the child scan.
             // For example, _avg(books: {field: pages, filter: {pages: {_neq: null}}})
             // should apply the filter {pages: {_neq: null}} to the books scan node.
             // Go places these filters on the scanNode (not a wrapping SelectNode).
@@ -1992,9 +2025,45 @@ impl Planner {
                     }
                 }
             }
-            if let Some(filter) = agg_scan_filter {
-                child_scan = child_scan.with_filter(filter);
-            }
+
+            // Determine if the child scan can use an index.
+            // Only nested_select.filter is eligible here. Parent-level relation
+            // filters (e.g., User(filter: {devices: {model: ...}})) need the
+            // full child set because TypeJoin uses check_relation_filter to gate
+            // the *parent*, but all children of matching parents must appear.
+            let child_index_params = nested_select
+                .filter
+                .as_ref()
+                .and_then(|f| self.try_select_child_index(f, &target_collection));
+
+
+            // Create the child scan plan with scan_mapping (includes FK fields for joins)
+            let mut child_plan: Box<dyn PlanNode> = if let Some(params) = child_index_params {
+                let mut index_scan = IndexScanNode::new(
+                    (*target_collection).clone(),
+                    child_scan_mapping.clone(),
+                    params,
+                )
+                .with_show_deleted(select.show_deleted);
+                if let Some(ref fetcher) = self.fetcher {
+                    index_scan = index_scan.with_fetcher(fetcher.clone());
+                }
+                if let Some(filter) = agg_scan_filter {
+                    index_scan = index_scan.with_residual_filter(filter);
+                }
+                Box::new(index_scan)
+            } else {
+                let mut child_scan =
+                    ScanNode::new((*target_collection).clone(), child_scan_mapping.clone())
+                        .with_show_deleted(select.show_deleted);
+                if let Some(ref fetcher) = self.fetcher {
+                    child_scan = child_scan.with_fetcher(fetcher.clone());
+                }
+                if let Some(filter) = agg_scan_filter {
+                    child_scan = child_scan.with_filter(filter);
+                }
+                Box::new(child_scan)
+            };
 
             // Extract nested limit/offset and order_by for per-parent application in TypeJoin.
             let nested_limit = nested_select.limit.as_ref().and_then(|l| l.limit);
@@ -2041,12 +2110,6 @@ impl Planner {
                     }
                 }
             }
-
-            // Create child plan without SelectNode yet.
-            // The SelectNode is deferred until after relation sub-joins so that
-            // filters referencing relations (e.g., {publisher: {yearOpened: ...}})
-            // can evaluate on docs with joined relation data.
-            let mut child_plan: Box<dyn PlanNode> = Box::new(child_scan);
 
             // Recursively apply joins for any nested selections within this nested select.
             // This handles multi-level nesting like Users -> Posts -> Comments.
@@ -2527,13 +2590,27 @@ impl Planner {
                     }
                 }
 
-                // Build child scan (with fetcher for data access)
-                let mut child_scan =
-                    ScanNode::new((*target_collection).clone(), child_mapping.clone());
-                if let Some(ref fetcher) = self.fetcher {
-                    child_scan = child_scan.with_fetcher(fetcher.clone());
-                }
-                let child_plan: Box<dyn PlanNode> = Box::new(child_scan);
+                // Build child scan, using an index if the filter is index-eligible.
+                let child_index_params =
+                    self.try_select_child_index(&nested_conditions, &target_collection);
+                let child_plan: Box<dyn PlanNode> = if let Some(params) = child_index_params {
+                    let mut index_scan = IndexScanNode::new(
+                        (*target_collection).clone(),
+                        child_mapping.clone(),
+                        params,
+                    );
+                    if let Some(ref fetcher) = self.fetcher {
+                        index_scan = index_scan.with_fetcher(fetcher.clone());
+                    }
+                    Box::new(index_scan)
+                } else {
+                    let mut child_scan =
+                        ScanNode::new((*target_collection).clone(), child_mapping.clone());
+                    if let Some(ref fetcher) = self.fetcher {
+                        child_scan = child_scan.with_fetcher(fetcher.clone());
+                    }
+                    Box::new(child_scan)
+                };
 
                 // Get field indices
                 let relation_field_index = mapping

@@ -126,11 +126,21 @@ pub fn encode_field_value(buf: Vec<u8>, val: &NormalValue, descending: bool) -> 
                 encoding::encode_time_ascending(buf, nanos)
             })
         }
+        // JSON leaf values with path+value encoding
+        NormalValue::JsonLeaf(leaf) => Ok(if descending {
+            encoding::json::encode_json_descending(buf, leaf)
+        } else {
+            encoding::json::encode_json_ascending(buf, leaf)
+        }),
+        // Raw Json values must be expanded to JsonLeaf via IndexManager before encoding
+        NormalValue::Json(_) => Err(crate::corekv::Error::Other(
+            "Json values must be expanded to JsonLeaf via IndexManager before encoding".into(),
+        )),
         // Nillable None variants are handled by is_nil() check above
         // Unsupported types return an error with helpful context
         _ => Err(crate::corekv::Error::Other(format!(
             "unsupported field type for indexing: {:?}. Supported types: Bool, Int, Float32, \
-             Float64, String, Bytes, Time (and their Nillable variants). Arrays and nested \
+             Float64, String, Bytes, Time, JsonLeaf (and their Nillable variants). Arrays and nested \
              objects cannot be indexed.",
             val
         ))),
@@ -227,6 +237,14 @@ pub fn decode_field_value<'a>(
             let utc_offset = FixedOffset::east_opt(0).unwrap();
             let dt = dt_utc.with_timezone(&utc_offset);
             Ok((rest, NormalValue::Time(dt)))
+        }
+        EncodedType::Json => {
+            let (rest, leaf) = if descending {
+                encoding::json::decode_json_descending(buf)?
+            } else {
+                encoding::json::decode_json_ascending(buf)?
+            };
+            Ok((rest, NormalValue::JsonLeaf(leaf)))
         }
         _ => Err(crate::corekv::Error::Other(format!(
             "cannot decode field value: unknown type {:?} (marker byte: 0x{:02x}, buffer len: {})",
