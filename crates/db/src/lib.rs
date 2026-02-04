@@ -73,6 +73,7 @@ pub mod nac;
 #[cfg(feature = "p2p")]
 pub mod peer_identity;
 pub mod schema_loader;
+pub mod se;
 pub mod txn;
 pub mod txn_context;
 pub mod txn_registry;
@@ -126,6 +127,12 @@ pub use versioned_fetcher::VersionedFetcher;
 
 // NAC exports
 pub use nac::{create_memory_nac_manager, NacConfig, NacInfo, NacManager};
+
+// SE (Searchable Encryption) exports
+pub use se::{
+    fetch_doc_ids, generate_doc_artifacts, generate_field_artifact, store_artifacts,
+    FieldQuery, FieldValueQuery, SECoordinator,
+};
 
 // Re-export related crate types for convenience
 pub use datastore::{BasicTxn, NamespaceView};

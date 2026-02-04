@@ -186,6 +186,7 @@ pub extern "C" fn create_merge_complete_subscription(node_ptr: usize) -> CreateS
             events::EventName::MergeComplete,
             events::EventName::ReplicatorCompleted,
             events::EventName::TopicPeerEvent,
+            events::EventName::SEArtifactReceived,
         ])
     }) {
         Some(sub) => sub,
@@ -294,30 +295,39 @@ pub extern "C" fn close_subscription(subscription_handle: usize) -> CloseSubscri
     CloseSubscriptionResult::success()
 }
 
-/// Poll a GraphQL subscription for results (stub - not yet implemented).
+// ============================================================================
+// GraphQL Subscription Stubs (for compatibility with other worktrees)
+// ============================================================================
+
+/// Poll a GraphQL subscription for the next result (stub).
+///
+/// This is a stub function for compatibility with worktrees that have
+/// GraphQL subscription support. Returns an error indicating the feature
+/// is not available.
 ///
 /// # Safety
 ///
-/// `subscription_id` must be a valid null-terminated UTF-8 string.
+/// The subscription_id must be a valid null-terminated C string or null.
 #[no_mangle]
 pub unsafe extern "C" fn poll_graphql_subscription(
-    _subscription_id: *const c_char,
+    _subscription_id: *const std::ffi::c_char,
 ) -> PollSubscriptionResult {
-    // GraphQL subscriptions are not yet implemented
-    PollSubscriptionResult::error("GraphQL subscriptions not yet implemented in Rust FFI")
+    PollSubscriptionResult::error("GraphQL subscriptions not implemented in this build")
 }
 
-/// Close a GraphQL subscription (stub - not yet implemented).
+/// Close a GraphQL subscription (stub).
+///
+/// This is a stub function for compatibility with worktrees that have
+/// GraphQL subscription support.
 ///
 /// # Safety
 ///
-/// `subscription_id` must be a valid null-terminated UTF-8 string.
+/// The subscription_id must be a valid null-terminated C string or null.
 #[no_mangle]
 pub unsafe extern "C" fn close_graphql_subscription(
-    _subscription_id: *const c_char,
+    _subscription_id: *const std::ffi::c_char,
 ) -> CloseSubscriptionResult {
-    // GraphQL subscriptions are not yet implemented
-    CloseSubscriptionResult::error("GraphQL subscriptions not yet implemented in Rust FFI")
+    CloseSubscriptionResult::error("GraphQL subscriptions not implemented in this build")
 }
 
 /// Convert an event message to JSON.
@@ -366,6 +376,15 @@ fn message_to_json(message: &events::Message) -> String {
         .to_string();
     }
 
+    // Check if this is an SEArtifactReceived event
+    if let Some(se) = message.as_se_artifact_received() {
+        return serde_json::json!({
+            "type": "se_artifact_received",
+            "doc_id": se.doc_id
+        })
+        .to_string();
+    }
+
     // Signal event without data
     let event_type = match message.name {
         events::EventName::Merge => "merge",
@@ -373,6 +392,7 @@ fn message_to_json(message: &events::Message) -> String {
         events::EventName::Update => "update",
         events::EventName::ReplicatorCompleted => "replicator_completed",
         events::EventName::TopicPeerEvent => "topic_peer_event",
+        events::EventName::SEArtifactReceived => "se_artifact_received",
         events::EventName::WildCard => "wildcard",
     };
     serde_json::json!({

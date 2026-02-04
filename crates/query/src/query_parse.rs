@@ -505,10 +505,19 @@ fn parse_field_to_select(
     fragments: &FragmentMap<'_>,
     visiting: &mut HashSet<String>,
 ) -> Result<Select> {
-    let collection_name = field.name.clone();
+    let (collection_name, is_encrypted) = if field.name.starts_with("encrypted_") {
+        (field.name["encrypted_".len()..].to_string(), true)
+    } else {
+        (field.name.clone(), false)
+    };
     let alias = field.alias.clone();
 
     let mut select = Select::new(&collection_name);
+    select.is_encrypted = is_encrypted;
+    // Preserve original field name (e.g. "encrypted_User") as the response key
+    if is_encrypted {
+        select.field = SelectField::with_alias(&collection_name, field.name.clone());
+    }
     if let Some(a) = alias {
         select.field = SelectField::with_alias(&collection_name, a);
     }
