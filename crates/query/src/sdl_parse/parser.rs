@@ -1660,6 +1660,11 @@ impl<'a> SdlParser<'a> {
                         // pointing back to this type. No back-reference (join tables)
                         // or array back-reference (one-to-many) means no unique index.
                         // See Go's ensureOneToOneUniqueIndex() in collection_define.go
+                        //
+                        // Skip auto-index creation if the user has defined their own @index
+                        // directive on this field - they take responsibility for the index.
+                        let has_user_index = parsed_field.directives.index.is_some();
+
                         let is_one_to_one = self
                             .type_defs
                             .get(&parsed_field.field_type.base_type)
@@ -1671,7 +1676,18 @@ impl<'a> SdlParser<'a> {
                             })
                             .unwrap_or(false);
 
+                        // Validate user-defined index on one-to-one relation must be unique
                         if is_one_to_one {
+                            if let Some(ref idx) = parsed_field.directives.index {
+                                if !idx.unique {
+                                    return Err(QueryError::parse(
+                                        "one-to-one relation must have a unique index",
+                                    ));
+                                }
+                            }
+                        }
+
+                        if is_one_to_one && !has_user_index {
                             let idx_name = generate_index_name(
                                 &type_def.name,
                                 &id_field_name,
@@ -1698,18 +1714,39 @@ impl<'a> SdlParser<'a> {
             // Handle field-level @index directive
             if let Some(ref idx_config) = parsed_field.directives.index {
                 // Build fields list based on includes
-                let primary_field_name = &parsed_field.name;
+                // For relation fields (non-array), Go DefraDB stores indexes on the FK field
+                // (_fieldID) rather than the relation field name.
+                let is_relation_field = !parsed_field.field_type.is_list
+                    && self.type_defs.contains_key(&parsed_field.field_type.base_type);
+
+                let primary_field_name = if is_relation_field {
+                    // Use FK field name for relation fields (e.g., "address" -> "_addressID")
+                    format!("_{}ID", parsed_field.name)
+                } else {
+                    parsed_field.name.clone()
+                };
                 let primary_descending = matches!(idx_config.direction, IndexDirection::Desc);
 
                 let index_fields: Vec<IndexedFieldDescription> =
-                    if idx_config.includes.iter().any(|(name, _)| name == primary_field_name) {
+                    if idx_config.includes.iter().any(|(name, _)| {
+                        name == &parsed_field.name || name == &primary_field_name
+                    }) {
                         // includes explicitly contains the primary field - use includes order
+                        // Transform relation field names to FK field names
                         idx_config
                             .includes
                             .iter()
-                            .map(|(name, descending)| IndexedFieldDescription {
-                                name: name.clone(),
-                                descending: *descending,
+                            .map(|(name, descending)| {
+                                let final_name =
+                                    if *name == parsed_field.name && is_relation_field {
+                                        format!("_{}ID", parsed_field.name)
+                                    } else {
+                                        name.clone()
+                                    };
+                                IndexedFieldDescription {
+                                    name: final_name,
+                                    descending: *descending,
+                                }
                             })
                             .collect()
                     } else if idx_config.includes.is_empty() {
@@ -1737,7 +1774,7 @@ impl<'a> SdlParser<'a> {
                 let first_field_name = index_fields
                     .first()
                     .map(|f| f.name.as_str())
-                    .unwrap_or(primary_field_name);
+                    .unwrap_or(&primary_field_name);
                 let idx_name = idx_config.name.clone().unwrap_or_else(|| {
                     generate_index_name(&type_def.name, first_field_name, &existing_index_names)
                 });
@@ -1756,9 +1793,11 @@ impl<'a> SdlParser<'a> {
         }
 
         // Handle type-level @index directives (composite indexes)
-        // Build a set of valid field names for validation
+        // Build a set of valid field names for validation.
+        // Use the `fields` vector (not type_def.fields) because it includes auto-generated
+        // FK fields like `_addressID` that may be referenced in type-level indexes.
         let valid_field_names: std::collections::HashSet<_> =
-            type_def.fields.iter().map(|f| f.name.as_str()).collect();
+            fields.iter().map(|f| f.name.as_str()).collect();
 
         for composite_idx in &type_def.directives.indexes {
             // Validate that all referenced fields exist

@@ -2831,21 +2831,33 @@ impl<S: Store> DB<S> {
         collection_prefix: &str,
         actual_name_prefix: Option<&str>,
     ) -> String {
+        // Go DefraDB accepts paths with or without leading '/'.
+        // Generate both variants for matching.
+        let no_slash_prefix = collection_prefix.trim_start_matches('/');
+
         if path.starts_with(collection_prefix) {
             format!("/{}", &path[collection_prefix.len()..])
+        } else if path.starts_with(no_slash_prefix) {
+            // Handle paths without leading '/' (e.g., "User/Indexes/-")
+            format!("/{}", &path[no_slash_prefix.len()..])
         } else {
             // Also handle exact match without trailing slash (collection-level operations).
             // E.g., path="/Users" with prefix="/Users/" → "/"
             let exact = collection_prefix.trim_end_matches('/');
-            if path == exact {
+            let exact_no_slash = exact.trim_start_matches('/');
+            if path == exact || path == exact_no_slash {
                 return "/".to_string();
             }
             if let Some(anp) = actual_name_prefix {
+                let anp_no_slash = anp.trim_start_matches('/');
                 if path.starts_with(anp) {
                     format!("/{}", &path[anp.len()..])
+                } else if path.starts_with(anp_no_slash) {
+                    format!("/{}", &path[anp_no_slash.len()..])
                 } else {
                     let anp_exact = anp.trim_end_matches('/');
-                    if path == anp_exact {
+                    let anp_exact_no_slash = anp_exact.trim_start_matches('/');
+                    if path == anp_exact || path == anp_exact_no_slash {
                         return "/".to_string();
                     }
                     path.to_string()

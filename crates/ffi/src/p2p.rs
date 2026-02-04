@@ -1969,21 +1969,3 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
         Err(e) => FfiResult::error(e),
     }
 }
-
-/// Sync collection versions by their CIDs.
-///
-/// Stub function for compatibility with the Go FFI client.
-///
-/// # Safety
-///
-/// `identity_did` and `version_ids_json` must be valid null-terminated UTF-8 strings.
-/// `version_ids_json` should be a JSON array of CID strings: `["bafyrei...", "bafyrei..."]`
-#[no_mangle]
-pub unsafe extern "C" fn p2p_sync_collection_versions(
-    _node_ptr: usize,
-    _identity_did: *const c_char,
-    _version_ids_json: *const c_char,
-) -> FfiResult {
-    // Stub: not implemented in this worktree
-    FfiResult::ok()
-}
