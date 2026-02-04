@@ -801,11 +801,29 @@ impl<S: Store> DB<S> {
         let blockstore = txn.blockstore()?;
 
         // Store each field definition block
-        let mut field_cids = Vec::with_capacity(schema.fields.len());
-        for (i, field) in schema.fields.iter().enumerate() {
-            let priority = (i as u64) + 1; // Go uses incrementing priorities starting at 1
+        // IMPORTANT: Go uses priority=1 for ALL fields during AddSchema (not incrementing).
+        // This was verified by comparing actual Go AddSchema output with manual CID generation.
+        // Only fields with non-empty FieldID are stored (secondary relations are excluded).
+        // Fields must be sorted: _docID first, then alphabetically by name (matches Go).
+        let mut sorted_fields: Vec<&schema::FieldDescription> = schema
+            .fields
+            .iter()
+            .filter(|f| !f.id.is_empty())
+            .collect();
+        sorted_fields.sort_by(|a, b| {
+            if a.name == "_docID" {
+                std::cmp::Ordering::Less
+            } else if b.name == "_docID" {
+                std::cmp::Ordering::Greater
+            } else {
+                a.name.cmp(&b.name)
+            }
+        });
+
+        let mut field_cids = Vec::with_capacity(sorted_fields.len());
+        for field in &sorted_fields {
             let block_with_cid =
-                schema::generate_field_block_with_priority_and_heads(field, priority, &[])
+                schema::generate_field_block_with_priority_and_heads(field, 1, &[])
                     .map_err(Error::Schema)?;
             blockstore
                 .set(&block_with_cid.cid.to_bytes(), &block_with_cid.bytes)

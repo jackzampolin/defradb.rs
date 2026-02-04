@@ -294,6 +294,32 @@ pub extern "C" fn close_subscription(subscription_handle: usize) -> CloseSubscri
     CloseSubscriptionResult::success()
 }
 
+/// Poll a GraphQL subscription for results (stub - not yet implemented).
+///
+/// # Safety
+///
+/// `subscription_id` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn poll_graphql_subscription(
+    _subscription_id: *const c_char,
+) -> PollSubscriptionResult {
+    // GraphQL subscriptions are not yet implemented
+    PollSubscriptionResult::error("GraphQL subscriptions not yet implemented in Rust FFI")
+}
+
+/// Close a GraphQL subscription (stub - not yet implemented).
+///
+/// # Safety
+///
+/// `subscription_id` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn close_graphql_subscription(
+    _subscription_id: *const c_char,
+) -> CloseSubscriptionResult {
+    // GraphQL subscriptions are not yet implemented
+    CloseSubscriptionResult::error("GraphQL subscriptions not yet implemented in Rust FFI")
+}
+
 /// Convert an event message to JSON.
 fn message_to_json(message: &events::Message) -> String {
     // Check if this is an Update event with data
