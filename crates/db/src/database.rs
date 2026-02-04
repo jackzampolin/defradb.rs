@@ -1892,10 +1892,11 @@ impl<S: Store> DB<S> {
             Error::Serialization(format!("failed to serialize schema to JSON: {}", e))
         })?;
 
-        // Ensure optional array fields are present in JSON even when empty.
-        // Go always serializes these as null/empty arrays, but Rust's
-        // skip_serializing_if omits them. Patches targeting these paths
-        // (e.g., /VectorEmbeddings/-) need the key to exist.
+        // Normalize JSON to match Go's serialization format before applying patches.
+        // Go always serializes struct fields (null for nil pointers, [] for nil slices),
+        // but Rust's skip_serializing_if omits them. Patches targeting these paths
+        // need the keys to exist for replace/remove operations to work correctly,
+        // and for validators to run instead of json_pointer errors.
         // Note: EncryptedIndexes is NOT pre-populated because Go doesn't expose
         // it in the JSON representation - patches targeting it should fail.
         if let serde_json::Value::Object(ref mut map) = schema_json {
@@ -1903,18 +1904,24 @@ impl<S: Store> DB<S> {
                 map.entry(key.to_string())
                     .or_insert(serde_json::Value::Array(vec![]));
             }
+            for key in &["CollectionSet", "Query", "PreviousVersion", "Policy"] {
+                map.entry(key.to_string())
+                    .or_insert(serde_json::Value::Null);
+            }
         }
 
         // Apply JSON patch operations
         // Go DefraDB embeds collection name in patch paths: /CollectionName/Fields/-
-        // We need to strip the collection name prefix to get paths relative to schema
-        // Use both the passed-in name and the actual collection name for prefix matching
-        let collection_prefix = format!("/{}/", collection_name);
-        let actual_name_prefix = if actual_name != collection_name {
-            Some(format!("/{}/", actual_name))
-        } else {
-            None
-        };
+        // We need to strip the collection name prefix to get paths relative to schema.
+        // Patches may use the collection name, actual name, or version ID as prefix.
+        // Build a list of all recognized prefixes to try stripping.
+        let mut strip_prefixes: Vec<String> = vec![format!("/{}/", collection_name)];
+        if actual_name != collection_name {
+            strip_prefixes.push(format!("/{}/", actual_name));
+        }
+        if old_version_id != collection_name && old_version_id != actual_name {
+            strip_prefixes.push(format!("/{}/", old_version_id));
+        }
 
         // Track whether the patch deactivates this collection or explicitly changes IsActive.
         // These require in-place updates rather than new version creation.
@@ -1929,11 +1936,7 @@ impl<S: Store> DB<S> {
 
                 // Strip collection name/version prefix from path if present (Go compatibility)
                 let stripped_path = raw_path.map(|p| {
-                    Self::strip_collection_prefix(
-                        p,
-                        &collection_prefix,
-                        actual_name_prefix.as_deref(),
-                    )
+                    Self::strip_collection_prefix(p, &strip_prefixes)
                 });
 
                 // Extract field name from path before substitution (for name mismatch validation)
@@ -2079,6 +2082,14 @@ impl<S: Store> DB<S> {
                                         "cannot unmarshal array into Go value".to_string(),
                                     ));
                                 }
+                                // The "-" key is the JSON Patch append operator. When used
+                                // on an object (not array), Go applies it then fails during
+                                // unmarshalling because "-" is not a valid struct field.
+                                if operation == Some("add") && key == "-" {
+                                    return Err(Error::InvalidPatch(
+                                        "json: unknown field \"-\"".to_string(),
+                                    ));
+                                }
                                 // For replace on non-existent key, Go produces "doc is missing key"
                                 if operation == Some("replace") {
                                     return Err(Error::InvalidPatch(
@@ -2088,7 +2099,21 @@ impl<S: Store> DB<S> {
                             }
                         }
 
-                        Self::json_pointer_set(&mut schema_json, path, value)?;
+                        if let Err(e) = Self::json_pointer_set(&mut schema_json, path, value) {
+                            match &e {
+                                Error::InvalidPatch(msg)
+                                    if msg.starts_with("path not found:")
+                                        || msg.starts_with("cannot set value")
+                                        || msg.starts_with("cannot navigate") =>
+                                {
+                                    return Err(Error::InvalidPatch(
+                                        "add operation does not apply: doc is missing path"
+                                            .to_string(),
+                                    ));
+                                }
+                                _ => return Err(e),
+                            }
+                        }
                     }
                     (Some("remove"), Some(path)) => {
                         if path == "/" {
@@ -2179,11 +2204,8 @@ impl<S: Store> DB<S> {
                         let from_path =
                             Self::substitute_field_name_in_path(from_path, &schema_json);
                         // Strip collection prefix from "from" path if present
-                        let from_path = Self::strip_collection_prefix(
-                            &from_path,
-                            &collection_prefix,
-                            actual_name_prefix.as_deref(),
-                        );
+                        let from_path =
+                            Self::strip_collection_prefix(&from_path, &strip_prefixes);
 
                         // Get the value to copy
                         let value_to_copy = Self::json_pointer_get(&schema_json, &from_path)
@@ -2220,11 +2242,8 @@ impl<S: Store> DB<S> {
                         let from_path =
                             Self::substitute_field_name_in_path(from_path, &schema_json);
                         // Strip collection prefix from "from" path if present
-                        let from_path = Self::strip_collection_prefix(
-                            &from_path,
-                            &collection_prefix,
-                            actual_name_prefix.as_deref(),
-                        );
+                        let from_path =
+                            Self::strip_collection_prefix(&from_path, &strip_prefixes);
 
                         // Get the value to move
                         let value_to_move = Self::json_pointer_get(&schema_json, &from_path)
@@ -2314,24 +2333,49 @@ impl<S: Store> DB<S> {
             ));
         }
 
+        // Go compatibility: validate field Kind values for ALL fields after replace/copy
+        // operations. The per-field kind check (validate_patch_field_kind) only runs for
+        // individual "add" operations. When the entire Fields array is replaced, we need
+        // to check all fields here.
+        {
+            let mut kind_errors = Vec::new();
+            for field in &new_schema.fields {
+                if matches!(field.kind, schema::FieldKind::Scalar(schema::ScalarKind::None))
+                    && field.name != "_docID"
+                {
+                    kind_errors.push(format!(
+                        "no type found for given name. Type: {}",
+                        schema::ScalarKind::None as u8
+                    ));
+                }
+            }
+            if !kind_errors.is_empty() {
+                return Err(Error::InvalidPatch(kind_errors.join("\n")));
+            }
+        }
+
         // Check for field-level corruption from patches (empty names from removed fields)
         {
-            let old_field_names: std::collections::HashSet<&str> =
-                old_schema.fields.iter().map(|f| f.name.as_str()).collect();
+            let old_field_ids: std::collections::HashSet<&str> =
+                old_schema.fields.iter().map(|f| f.id.as_str()).collect();
             let mut field_errors = Vec::new();
 
             for field in &new_schema.fields {
                 if field.name.is_empty() {
-                    if old_field_names.contains("") {
-                        // This shouldn't happen - old field shouldn't have empty name
+                    // Determine if this is an existing field whose name was removed
+                    // vs a new field that never had a name.
+                    let is_old_field =
+                        !field.id.is_empty() && old_field_ids.contains(field.id.as_str());
+                    if is_old_field {
+                        // An existing field's name was removed by the patch
                         field_errors.push(
-                            "Names must match /^[_a-zA-Z][_a-zA-Z0-9]*$/ but '' was found"
+                            "mutating an existing field is not supported. ProposedName: "
                                 .to_string(),
                         );
                     } else {
-                        // A field name was removed by the patch
+                        // A new field was added without a valid name
                         field_errors.push(
-                            "mutating an existing field is not supported. ProposedName: "
+                            "Names must match /^[_a-zA-Z][_a-zA-Z0-9]*$/ but \"\" does not."
                                 .to_string(),
                         );
                     }
@@ -2566,11 +2610,32 @@ impl<S: Store> DB<S> {
             }
         }
 
-        // Compute version depth: count existing versions for this collection_id
-        let version_depth = all_existing
-            .iter()
-            .filter(|c| c.collection_id == collection_id)
-            .count() as u64;
+        // Compute version depth by following the previous_version chain from old_schema to root.
+        // This ensures branching schemas get the correct priority (based on chain depth,
+        // not total version count). Both branches from the same parent get the same priority.
+        let version_depth = {
+            let versions_map: std::collections::HashMap<&str, &CollectionVersion> = all_existing
+                .iter()
+                .map(|v| (v.version_id.as_str(), v))
+                .collect();
+            let mut depth = 0u64;
+            let mut current_id = old_schema.version_id.as_str();
+            loop {
+                match versions_map.get(current_id) {
+                    Some(v) => match &v.previous_version {
+                        Some(prev) => {
+                            depth += 1;
+                            current_id = prev.source_collection_id.as_str();
+                        }
+                        None => break,
+                    },
+                    None => break,
+                }
+            }
+            // depth = chain length from old_schema to root
+            // version_depth = depth + 1 (the old version's "height" in the DAG)
+            depth + 1
+        };
 
         // Generate new version_id from schema content with proper priorities
         let new_version_id =
@@ -2695,7 +2760,7 @@ impl<S: Store> DB<S> {
                 new_version_id, e
             ))
         })?;
-        let name_key = CollectionNameKey::new(collection_name);
+        let name_key = CollectionNameKey::new(&actual_name);
         let version_index_key = CollectionVersionKey::new(&collection_id, &new_version_id);
         let old_version_index_key = CollectionVersionKey::new(&collection_id, &old_version_id);
 
@@ -2758,9 +2823,10 @@ impl<S: Store> DB<S> {
             Error::CacheUpdateFailedAfterCommit(collection_name.to_string())
         })?;
         if new_schema.is_active {
-            // New version is active - cache it
+            // New version is active - cache it under the actual collection name
+            // (not collection_name, which might be a version_id for branching patches)
             cache.insert(
-                collection_name.to_string(),
+                actual_name.clone(),
                 Collection::new(new_schema.clone()),
             );
         }
@@ -2951,46 +3017,27 @@ impl<S: Store> DB<S> {
         }
     }
 
-    fn strip_collection_prefix(
-        path: &str,
-        collection_prefix: &str,
-        actual_name_prefix: Option<&str>,
-    ) -> String {
+    fn strip_collection_prefix(path: &str, prefixes: &[String]) -> String {
         // Go DefraDB accepts paths with or without leading '/'.
-        // Generate both variants for matching.
-        let no_slash_prefix = collection_prefix.trim_start_matches('/');
+        // Try each prefix (collection name, actual name, version ID) in order.
+        for prefix in prefixes {
+            let no_slash_prefix = prefix.trim_start_matches('/');
 
-        if path.starts_with(collection_prefix) {
-            format!("/{}", &path[collection_prefix.len()..])
-        } else if path.starts_with(no_slash_prefix) {
-            // Handle paths without leading '/' (e.g., "User/Indexes/-")
-            format!("/{}", &path[no_slash_prefix.len()..])
-        } else {
-            // Also handle exact match without trailing slash (collection-level operations).
+            if path.starts_with(prefix.as_str()) {
+                return format!("/{}", &path[prefix.len()..]);
+            }
+            if path.starts_with(no_slash_prefix) {
+                return format!("/{}", &path[no_slash_prefix.len()..]);
+            }
+            // Exact match without trailing slash (collection-level operations).
             // E.g., path="/Users" with prefix="/Users/" → "/"
-            let exact = collection_prefix.trim_end_matches('/');
+            let exact = prefix.trim_end_matches('/');
             let exact_no_slash = exact.trim_start_matches('/');
             if path == exact || path == exact_no_slash {
                 return "/".to_string();
             }
-            if let Some(anp) = actual_name_prefix {
-                let anp_no_slash = anp.trim_start_matches('/');
-                if path.starts_with(anp) {
-                    format!("/{}", &path[anp.len()..])
-                } else if path.starts_with(anp_no_slash) {
-                    format!("/{}", &path[anp_no_slash.len()..])
-                } else {
-                    let anp_exact = anp.trim_end_matches('/');
-                    let anp_exact_no_slash = anp_exact.trim_start_matches('/');
-                    if path == anp_exact || path == anp_exact_no_slash {
-                        return "/".to_string();
-                    }
-                    path.to_string()
-                }
-            } else {
-                path.to_string()
-            }
         }
+        path.to_string()
     }
 
     /// Handle patches targeting a collection that doesn't exist by name or version ID.
@@ -3074,8 +3121,24 @@ impl<S: Store> DB<S> {
                 let from_raw = op.get("from").and_then(|v| v.as_str());
 
                 match operation {
-                    Some("copy") | Some("add") | Some("replace") => {
-                        // Adding/replacing collections via patch is not supported
+                    Some("add") => {
+                        // Check if the patch targets a sub-path within the unknown collection.
+                        // If so, it's "doc is missing path" (the collection doesn't exist).
+                        // If it targets the root (no sub-path), it's "adding collections not supported".
+                        let raw_path = op.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        let trimmed = raw_path.trim_start_matches('/');
+                        let has_subpath = trimmed.contains('/');
+                        if has_subpath {
+                            return Err(Error::InvalidPatch(
+                                "add operation does not apply: doc is missing path".to_string(),
+                            ));
+                        }
+                        return Err(Error::InvalidPatch(format!(
+                            "adding collections via patch is not supported. Name: {}",
+                            effective_name,
+                        )));
+                    }
+                    Some("copy") | Some("replace") => {
                         return Err(Error::InvalidPatch(format!(
                             "adding collections via patch is not supported. Name: {}",
                             effective_name,

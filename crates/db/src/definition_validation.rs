@@ -52,6 +52,7 @@ const UPDATE_VALIDATORS: &[Validator] = &[
     validate_policy_not_modified,
     validate_indexes_not_modified,
     validate_sources_not_redefined,
+    validate_source_belongs_to_host,
     validate_branchable_not_mutated,
 ];
 
@@ -367,10 +368,7 @@ fn validate_policy_not_modified(
         }
 
         if new_col.policy != old_col.policy {
-            errs.push(format!(
-                "collection policy cannot be mutated. CollectionID: {}",
-                new_col.version_id
-            ));
+            errs.push("collection policy cannot be mutated.".to_string());
         }
     }
     errs
@@ -432,10 +430,7 @@ fn validate_sources_not_redefined(
             let old_has_prev = old_col.previous_version.is_some();
             let new_has_prev = new_col.previous_version.is_some();
             if old_has_prev != new_has_prev {
-                errs.push(format!(
-                    "collection sources cannot be added or removed. CollectionID: {}",
-                    new_col.version_id
-                ));
+                errs.push("collection sources cannot be added or removed.".to_string());
             }
 
             // Check if source collection ID was mutated
@@ -455,10 +450,32 @@ fn validate_sources_not_redefined(
         let old_has_query = old_col.query.is_some();
         let new_has_query = new_col.query.is_some();
         if old_has_query != new_has_query {
-            errs.push(format!(
-                "collection sources cannot be added or removed. CollectionID: {}",
-                new_col.version_id
-            ));
+            errs.push("collection sources cannot be added or removed.".to_string());
+        }
+    }
+    errs
+}
+
+/// Matches Go's validateSourceBelongsToHost.
+/// The PreviousVersion source must point to a version belonging to the same root collection.
+fn validate_source_belongs_to_host(
+    new_state: &DefinitionState,
+    _old_state: &DefinitionState,
+) -> Vec<String> {
+    let mut errs = Vec::new();
+    for col in &new_state.collections {
+        if let Some(ref prev) = col.previous_version {
+            if !prev.source_collection_id.is_empty() {
+                // Look up the source version to check its collection_id
+                if let Some(source_col) = new_state.collections_by_id.get(&prev.source_collection_id)
+                {
+                    if source_col.collection_id != col.collection_id {
+                        errs.push(
+                            "collection source must belong to host collection.".to_string(),
+                        );
+                    }
+                }
+            }
         }
     }
     errs
