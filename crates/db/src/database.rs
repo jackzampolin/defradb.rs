@@ -3,10 +3,12 @@
 /// The DB struct is the main entry point for DefraDB operations.
 /// It manages the root store, creates transactions, and provides
 /// access to collections.
-use crate::collection::Collection;
+use crate::collection::{collection_short_id, Collection};
 use crate::collection_name::CollectionName;
 use crate::collection_snapshot::CollectionSnapshot;
 use crate::error::{Error, Result};
+use crate::index_manager::IndexManager;
+use crate::schema_loader::get_collections_by_collection_id;
 use crate::txn::DbTxn;
 use datastore::BasicTxn;
 use events::Bus;
@@ -15,8 +17,11 @@ use identity::{Identity, RawIdentity};
 use lens::MemoryTransformStore;
 #[cfg(feature = "native")]
 use lens::WasmTransformStore;
-use lens::{LensConfig, TransformId, TransformStore};
-use schema::{CollectionSource, CollectionVersion, ORPHAN_COLLECTION_ID};
+use lens::{
+    build_targeted_history, CollectionHistoryLink, Lens, LensConfig, LensDoc, TransformId,
+    TransformStore, DOC_ID_FIELD,
+};
+use schema::{CollectionSource, CollectionVersion, FieldKind, ScalarKind, ORPHAN_COLLECTION_ID};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -478,6 +483,29 @@ impl<S: Store> DB<S> {
                 .set(&dst_key.bytes(), &dst_data)
                 .await
                 .map_err(Error::Storage)?;
+
+            // Write CollectionVersionKey entries so get_collection_version_ids() can
+            // find these versions via prefix scan on /collection/version/{collection_id}/
+            if !source_col.collection_id.is_empty() {
+                let src_version_key = CollectionVersionKey::new(
+                    &source_col.collection_id,
+                    &source_version_id,
+                );
+                systemstore
+                    .set(&src_version_key.bytes(), b"1")
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+            if !dst_col.collection_id.is_empty() {
+                let dst_version_key = CollectionVersionKey::new(
+                    &dst_col.collection_id,
+                    &dest_version_id,
+                );
+                systemstore
+                    .set(&dst_version_key.bytes(), b"1")
+                    .await
+                    .map_err(Error::Storage)?;
+            }
         }
         txn.commit().await?;
 
@@ -490,12 +518,195 @@ impl<S: Store> DB<S> {
 
             if let Some(cached) = cache.get(&collection_name) {
                 if cached.schema().version_id == dest_version_id {
-                    cache.insert(collection_name, Collection::new(dst_col));
+                    cache.insert(collection_name.clone(), Collection::new(dst_col));
                 }
             }
         }
 
+        // Rebuild secondary indexes if the destination version is the active collection
+        // and has indexes (matches Go's behavior of reindexing after migration registration)
+        if !collection_name.is_empty() {
+            if let Err(e) = self
+                .maybe_reindex_after_migration(&collection_name, &dest_version_id)
+                .await
+            {
+            }
+        } else {
+        }
+
         Ok(transform_id)
+    }
+
+    /// Rebuild secondary indexes for a collection after a migration is registered.
+    ///
+    /// If the destination version is the currently active version and the collection
+    /// has indexes, this fetches all documents (applying lens migration), drops
+    /// existing index entries, and rebuilds them with migrated values.
+    async fn maybe_reindex_after_migration(
+        &self,
+        collection_name: &str,
+        dest_version_id: &str,
+    ) -> Result<()> {
+        let collection = match self.get_collection(collection_name)? {
+            Some(c) => c,
+            None => {
+                return Ok(());
+            }
+        };
+
+
+        // Only reindex if destination is the current active version
+        if collection.version_id() != dest_version_id {
+            return Ok(());
+        }
+
+        // Only reindex if the collection has indexes
+        if collection.get_indexes().is_empty() {
+            return Ok(());
+        }
+
+
+        let collection_id = collection.collection_id().to_string();
+        let target_version_id = collection.version_id().to_string();
+        let short_id = collection_short_id(&collection_id);
+
+        // Load all versions of this collection to build migration history
+        let read_txn = self.new_txn(true).await?;
+        let systemstore = read_txn.systemstore()?;
+        let versions = get_collections_by_collection_id(&systemstore, &collection_id).await?;
+        let _ = read_txn.discard();
+
+        // Build targeted migration history
+        let history = {
+            let mut full_history: HashMap<String, CollectionHistoryLink> = HashMap::new();
+            for version in &versions {
+                let mut link =
+                    CollectionHistoryLink::new(&version.version_id, &version.collection_id);
+                if let Some(ref prev) = version.previous_version {
+                    link = link.with_previous(&prev.source_collection_id);
+                    if let Some(ref transform_id) = prev.transform {
+                        link = link.with_transform(transform_id);
+                    }
+                }
+                full_history.insert(version.version_id.clone(), link);
+            }
+
+            // Build next links
+            let reverse_links: Vec<(String, String)> = full_history
+                .values()
+                .flat_map(|link| {
+                    link.previous
+                        .iter()
+                        .map(|prev_id| (prev_id.clone(), link.version_id.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            for (parent_id, child_id) in reverse_links {
+                if let Some(parent_link) = full_history.get_mut(&parent_id) {
+                    if !parent_link.next.contains(&child_id) {
+                        parent_link.next.push(child_id);
+                    }
+                }
+            }
+
+            match build_targeted_history(&full_history, &target_version_id) {
+                Some(h) => h,
+                None => return Ok(()),
+            }
+        };
+
+        let has_migrations = history.values().any(|link| link.transform.is_some());
+        if !has_migrations {
+            return Ok(());
+        }
+
+        // Create a write transaction for the reindex
+        let write_txn = self.new_txn(false).await?;
+
+        // Scope the datastore borrow so it's dropped before commit
+        {
+            let datastore = write_txn.datastore()?;
+
+            // Fetch all documents (raw, with their stored schema versions)
+            let raw_docs = collection.get_all_with_datastore(&datastore).await?;
+
+            // Apply lens migration to each document that needs it
+            let mut migrated_docs = Vec::with_capacity(raw_docs.len());
+            for doc in raw_docs {
+                let doc_version = doc
+                    .schema_version_id()
+                    .unwrap_or(&target_version_id)
+                    .to_string();
+
+                if doc_version == target_version_id {
+                    migrated_docs.push(doc);
+                    continue;
+                }
+
+                // Convert to LensDoc
+                if let Ok(map) = doc.to_map() {
+                    let mut lens_doc = LensDoc::new();
+                    for (key, value) in map {
+                        lens_doc.insert(key, value);
+                    }
+
+                    let mut lens =
+                        Lens::new(self.lens_store.clone(), &target_version_id, history.clone());
+
+                    if let Ok(()) = lens.put(&doc_version, lens_doc).await {
+                        if let Some(Ok(migrated_lens_doc)) = lens.next().await {
+                            let mut migrated = document::Document::new();
+                            if let Some(id) = doc.id() {
+                                migrated.set_id(id.clone());
+                            }
+                            for (field_name, value) in migrated_lens_doc {
+                                if field_name != DOC_ID_FIELD {
+                                    // Convert JSON value to native type based on schema field kind
+                                    let native_value = json_to_native_value(&value, &field_name, collection.schema());
+                                    migrated.set(&field_name, native_value);
+                                }
+                            }
+                            migrated.set_schema_version_id(&target_version_id);
+                            migrated_docs.push(migrated);
+                            continue;
+                        }
+                    }
+                }
+
+                // If migration fails for a doc, keep original
+                migrated_docs.push(doc);
+            }
+
+            // Rebuild indexes: drop all entries, re-index from migrated documents
+            let index_manager = IndexManager::from_collection(short_id, collection.schema())
+                .map_err(|e| Error::Other(format!("failed to create index manager: {}", e)))?;
+
+            for index_desc in collection.get_indexes() {
+                // Drop existing entries
+                if let Some(index) = index_manager.get_index(&index_desc.name) {
+                    index
+                        .remove_all(&mut datastore.clone())
+                        .await
+                        .map_err(Error::Storage)?;
+                }
+
+                // Bulk re-index with migrated documents
+                index_manager
+                    .bulk_index(&datastore, &index_desc.name, &migrated_docs, collection.schema())
+                    .await?;
+            }
+
+            tracing::debug!(
+                collection = %collection_name,
+                doc_count = migrated_docs.len(),
+                index_count = collection.get_indexes().len(),
+                "Rebuilt indexes after migration"
+            );
+        } // datastore reference dropped here
+
+        write_txn.commit().await?;
+
+        Ok(())
     }
 
     /// Check if a migration exists between two schema versions.
@@ -3044,4 +3255,76 @@ fn extract_last_path_segment_str(key: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// Convert a JSON value to a native NormalValue based on the field's schema type.
+///
+/// When documents are migrated through lens transforms, they come back as JSON values.
+/// This function converts them to the appropriate native type (Int, Float, String, etc.)
+/// based on the field's declared type in the schema.
+fn json_to_native_value(
+    value: &serde_json::Value,
+    field_name: &str,
+    schema: &schema::CollectionVersion,
+) -> document::NormalValue {
+    // Handle null values
+    if value.is_null() {
+        return document::NormalValue::Null;
+    }
+
+    // Find the field definition in the schema
+    let field_kind = schema
+        .fields
+        .iter()
+        .find(|f| f.name == field_name)
+        .map(|f| &f.kind);
+
+    match field_kind {
+        Some(FieldKind::Scalar(scalar)) => match scalar {
+            ScalarKind::Int => {
+                if let Some(n) = value.as_i64() {
+                    return document::NormalValue::Int(n);
+                }
+            }
+            ScalarKind::Float64 => {
+                if let Some(n) = value.as_f64() {
+                    return document::NormalValue::Float64(n);
+                }
+            }
+            ScalarKind::Float32 => {
+                if let Some(n) = value.as_f64() {
+                    return document::NormalValue::Float32(n as f32);
+                }
+            }
+            ScalarKind::Bool => {
+                if let Some(b) = value.as_bool() {
+                    return document::NormalValue::Bool(b);
+                }
+            }
+            ScalarKind::String | ScalarKind::DocID => {
+                if let Some(s) = value.as_str() {
+                    return document::NormalValue::String(s.to_string());
+                }
+            }
+            ScalarKind::Blob => {
+                // Blobs may be base64 encoded strings in JSON
+                if let Some(s) = value.as_str() {
+                    return document::NormalValue::Bytes(s.as_bytes().to_vec());
+                }
+            }
+            ScalarKind::DateTime => {
+                // DateTime as string - keep as string for now, the document layer handles parsing
+                if let Some(s) = value.as_str() {
+                    return document::NormalValue::String(s.to_string());
+                }
+            }
+            ScalarKind::Json | ScalarKind::None => {
+                // Keep as JSON
+            }
+        },
+        _ => {}
+    }
+
+    // Fallback: keep as JSON (this preserves the original behavior for unknown types)
+    document::NormalValue::Json(value.clone())
 }
