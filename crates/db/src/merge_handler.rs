@@ -18,7 +18,7 @@ use defra_core::types::DocId;
 use document::{DocID, Document, NormalValue};
 use events::{MergeCompleteData, Message, Update};
 use p2p::sync::{BlockMetadata, MergeHandler, MergeOutcome};
-use schema::{self, CType, CollectionVersion, FieldDescription, FieldKind, ScalarKind};
+use schema::{self, CType, CollectionVersion, FieldDescription, FieldKind, QuerySource, ScalarKind};
 use storage::corekv::{Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
 
@@ -1564,7 +1564,26 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let mut schema =
             CollectionVersion::new(&collection_name, &version_id, &collection_id, fields);
         schema.is_active = false;
-        schema.is_materialized = true;
+
+        // Views (collections with a query_select) are non-materialized and carry query metadata.
+        // Regular collections are materialized.
+        if let Some(ref query_bytes) = payload.query_select {
+            schema.is_materialized = false;
+            if let Ok(query_value) = serde_cbor::from_slice::<serde_json::Value>(query_bytes) {
+                let mut source = QuerySource::new(query_value);
+                if let Some(ref transform_cid) = payload.query_transform {
+                    source.transform = Some(transform_cid.to_string());
+                }
+                schema.query = Some(source);
+            } else {
+                tracing::warn!(
+                    cid = %cid,
+                    "Failed to decode query_select CBOR bytes for view collection"
+                );
+            }
+        } else {
+            schema.is_materialized = true;
+        }
 
         // Store in systemstore
         let txn = self.db.new_txn(false).await.map_err(MergeError::Database)?;

@@ -374,6 +374,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 topic,
                 ..
             } => {
+                eprintln!(
+                    "[COORD] GossipMessage from={} doc_id={} collection={} topic={}",
+                    propagation_source, message.doc_id, message.collection_id, topic
+                );
                 tracing::debug!(
                     doc_id = %message.doc_id,
                     collection_id = %message.collection_id,
@@ -419,6 +423,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 request,
                 channel,
             } => {
+                eprintln!(
+                    "[COORD] PushLogRequest from={} doc_id={} collection={}",
+                    peer_id, request.doc_id, request.collection_id
+                );
                 tracing::debug!(
                     peer_id = %peer_id,
                     doc_id = %request.doc_id,
@@ -510,6 +518,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             }
             HostEvent::TwoStreamRequest { peer_id, request } => {
                 // Handle request via Go's two-stream protocol
+                eprintln!(
+                    "[COORD] TwoStreamRequest from={} doc_id={} collection={}",
+                    peer_id, request.doc_id, request.collection_id
+                );
                 tracing::debug!(
                     peer_id = %peer_id,
                     doc_id = %request.doc_id,

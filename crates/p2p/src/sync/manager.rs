@@ -294,6 +294,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         // Check if already merged
         match self.blockstore.is_merged(cid).await {
             Ok(true) => {
+                eprintln!("[SYNC-MGR] Block already merged cid={} doc_id={}", cid, msg.doc_id);
                 tracing::debug!(?cid, "Block already merged, skipping");
                 if self
                     .event_tx
@@ -376,6 +377,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         if missing.is_empty() {
             // DAG is complete - emit BlockReceived for merge
+            eprintln!("[SYNC-MGR] DAG complete cid={} doc_id={} — emitting BlockReceived", cid, msg.doc_id);
             tracing::info!(
                 ?cid,
                 doc_id = %msg.doc_id,
@@ -403,6 +405,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
         } else {
             // DAG has missing blocks - track as pending and request Bitswap fetch
+            eprintln!(
+                "[SYNC-MGR] DAG incomplete cid={} doc_id={} missing={} — requesting Bitswap",
+                cid, msg.doc_id, missing.len()
+            );
             tracing::info!(
                 ?cid,
                 missing_count = missing.len(),

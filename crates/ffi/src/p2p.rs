@@ -415,28 +415,21 @@ pub unsafe extern "C" fn new_node_with_p2p(
             let mut sub = event_bus_for_broadcast.subscribe(&[events::EventName::Update]);
             while let Some(msg) = sub.recv().await {
                 if let Some(update) = msg.as_update() {
-                    // Skip relay updates (already from P2P)
-                    if update.is_relay {
-                        eprintln!(
-                            "[BROADCAST] Skipping relay update cid={} doc_id={}",
-                            update.cid, update.doc_id
-                        );
-                        continue;
-                    }
                     let cid = update.cid;
-                    let block = update.block.clone();
                     let doc_id = update.doc_id.clone();
                     let collection_id = update.collection_id.clone();
 
-                    eprintln!(
-                        "[BROADCAST] Got local update cid={} doc_id={} collection={} block_len={}",
-                        cid,
-                        doc_id,
-                        collection_id,
-                        block.len()
-                    );
+                    // Skip relay updates (already from P2P) - these don't need re-broadcast
+                    // since the originating node already broadcast to GossipSub.
+                    if update.is_relay {
+                        eprintln!("[BROADCAST] Skipping relay update cid={} doc_id={}", cid, doc_id);
+                        continue;
+                    }
 
-                    // Push to replicator peers via direct PushLog.
+                    // Local update: push to replicators + GossipSub broadcast.
+                    let block = update.block.clone();
+                    eprintln!("[BROADCAST] Local update cid={} doc_id={} collection={} block_len={}", cid, doc_id, collection_id, block.len());
+
                     coord_for_broadcast
                         .push_to_replicators(&cid, &block, &doc_id, &collection_id)
                         .await;
@@ -619,33 +612,53 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Err("no p2p system configured".to_string()),
             };
 
             rt.block_on(async {
-                // Get connected peers with addresses from the P2P host
-                // (populated by ConnectionEstablished events).
-                let host_addrs = p2p
-                    .handle
-                    .peer_addresses()
-                    .await
-                    .map_err(|e| format!("failed to get peer addresses: {}", e))?;
-
-                // Also get the full connected peer list so we can merge in
-                // FFI-stored addresses for peers the host hasn't resolved yet.
+                // Get connected peers from the host first (authoritative list).
                 let connected = p2p
                     .handle
                     .connected_peers()
                     .await
                     .map_err(|e| format!("failed to get connected peers: {}", e))?;
 
+                // Get host-resolved addresses (populated by ConnectionEstablished events).
+                let mut host_addrs = p2p
+                    .handle
+                    .peer_addresses()
+                    .await
+                    .map_err(|e| format!("failed to get peer addresses: {}", e))?;
+
                 // Build a set of peer IDs already covered by host_addrs
                 let mut covered: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
                 for addr_str in &host_addrs {
-                    // Extract peer ID from the /p2p/<id> component
                     if let Some(pid) = addr_str.rsplit("/p2p/").next() {
                         covered.insert(pid.to_string());
+                    }
+                }
+
+                // Check if any connected peers are missing from host_addrs.
+                // This can happen when incoming ConnectionEstablished events
+                // haven't been processed yet by the host event loop.
+                let has_missing = connected.iter().any(|pid| {
+                    let pid_str = pid.to_string();
+                    !covered.contains(&pid_str) && p2p.get_peer_address(&pid_str).is_none()
+                });
+
+                if has_missing {
+                    // Brief yield to let the host process pending events
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    // Retry peer_addresses
+                    if let Ok(retry) = p2p.handle.peer_addresses().await {
+                        covered.clear();
+                        for addr_str in &retry {
+                            if let Some(pid) = addr_str.rsplit("/p2p/").next() {
+                                covered.insert(pid.to_string());
+                            }
+                        }
+                        host_addrs = retry;
                     }
                 }
 
@@ -704,7 +717,7 @@ pub unsafe extern "C" fn p2p_connect(
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Err("no p2p system configured".to_string()),
             };
 
             rt.block_on(async {
@@ -795,7 +808,7 @@ pub unsafe extern "C" fn p2p_set_replicator(
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Err("no p2p system configured".to_string()),
             };
             let db = &state.database;
 
@@ -937,6 +950,9 @@ async fn push_existing_docs(
         .datastore()
         .map_err(|e| format!("failed to get datastore: {}", e))?;
 
+    // Collect JoinHandles so we can await all pushes before signaling completion.
+    let mut push_handles = Vec::new();
+
     for col_name in collections {
         let collection = match db
             .get_collection(col_name)
@@ -1021,13 +1037,12 @@ async fn push_existing_docs(
                     continue;
                 }
 
-                // Fire-and-forget: spawn each push so we don't block.
-                // Go's pushHeadsForAllDocs does the same (each push is a goroutine).
-                // The receiver's sync manager handles missing DAG links via Bitswap.
+                // Spawn each push concurrently but track the handle so we can
+                // await completion before emitting ReplicatorCompleted.
                 let push_h = handle.clone();
-                tokio::spawn(async move {
+                push_handles.push(tokio::spawn(async move {
                     let _ = push_h.send_two_stream_request(peer_id, request).await;
-                });
+                }));
             }
 
             iter.close()
@@ -1035,6 +1050,18 @@ async fn push_existing_docs(
                 .map_err(|e| format!("headstore close error: {}", e))?;
         }
     }
+
+    // Await all push tasks so ReplicatorCompleted isn't emitted prematurely.
+    // The Go test framework copies expected heads on ReplicatorCompleted, then
+    // waits for merge events — if pushes haven't landed yet, we get timeouts.
+    eprintln!(
+        "[PUSH-EXISTING] Awaiting {} push tasks to complete",
+        push_handles.len()
+    );
+    for handle in push_handles {
+        let _ = handle.await;
+    }
+    eprintln!("[PUSH-EXISTING] All push tasks completed");
 
     Ok(())
 }
@@ -1086,7 +1113,7 @@ pub unsafe extern "C" fn p2p_delete_replicator(
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Err("no p2p system configured".to_string()),
             };
 
             rt.block_on(async {
@@ -1153,7 +1180,7 @@ pub unsafe extern "C" fn p2p_get_all_replicators(
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Err("no p2p system configured".to_string()),
             };
 
             rt.block_on(async {
@@ -1236,7 +1263,7 @@ pub unsafe extern "C" fn p2p_add_collections(
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Err("no p2p system configured".to_string()),
             };
             let db = &state.database;
 
@@ -1313,7 +1340,7 @@ pub unsafe extern "C" fn p2p_remove_collections(
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Err("no p2p system configured".to_string()),
             };
             let db = &state.database;
 
@@ -1375,7 +1402,7 @@ pub unsafe extern "C" fn p2p_get_all_collections(
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Err("no p2p system configured".to_string()),
             };
 
             let collections = p2p.get_collections();
@@ -1432,7 +1459,7 @@ pub unsafe extern "C" fn p2p_add_documents(
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Err("no p2p system configured".to_string()),
             };
 
             rt.block_on(async {
@@ -1505,7 +1532,7 @@ pub unsafe extern "C" fn p2p_remove_documents(
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Err("no p2p system configured".to_string()),
             };
 
             rt.block_on(async {
@@ -1560,7 +1587,7 @@ pub unsafe extern "C" fn p2p_get_all_documents(
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Err("no p2p system configured".to_string()),
             };
 
             let mut documents = p2p.get_documents();
@@ -1635,7 +1662,7 @@ pub unsafe extern "C" fn p2p_sync_documents(
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Err("no p2p system configured".to_string()),
             };
             let db = &state.database;
 
@@ -1751,7 +1778,7 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Err("no p2p system configured".to_string()),
             };
             let db = &state.database;
 
@@ -1912,7 +1939,7 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
         .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
-                None => return Err("P2P not enabled for this node".to_string()),
+                None => return Err("no p2p system configured".to_string()),
             };
             let db = &state.database;
 
