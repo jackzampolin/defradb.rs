@@ -1514,6 +1514,11 @@ impl<'a> SdlParser<'a> {
         let mut existing_index_names: Vec<String> = Vec::new();
         let mut field_id_counter = 1u32;
 
+        // Track one-to-one FK fields that may need auto-created unique indexes.
+        // We defer auto-index creation until after type-level indexes are processed
+        // so we can check if the user defined a covering index.
+        let mut one_to_one_fk_fields: Vec<String> = Vec::new();
+
         // Add implicit _docID field
         // NOTE: Go uses CType::None (0) for _docID, not LwwRegister (1)
         let doc_id_kind = FieldKind::doc_id();
@@ -1691,23 +1696,11 @@ impl<'a> SdlParser<'a> {
                             }
                         }
 
+                        // Track one-to-one FK fields for potential auto-index creation.
+                        // We defer until after type-level indexes are processed.
+                        // Don't add if user has field-level @index (they take responsibility).
                         if is_one_to_one && !has_user_index {
-                            let idx_name = generate_index_name(
-                                &type_def.name,
-                                &id_field_name,
-                                &existing_index_names,
-                            );
-                            existing_index_names.push(idx_name.clone());
-                            indexes.push(IndexDescription {
-                                name: idx_name,
-                                id: field_id_counter,
-                                fields: vec![IndexedFieldDescription {
-                                    name: id_field_name.clone(),
-                                    descending: false,
-                                }],
-                                unique: true,
-                            });
-                            field_id_counter += 1;
+                            one_to_one_fk_fields.push(id_field_name.clone());
                         }
                     }
                     fields.push(id_field);
@@ -1841,6 +1834,56 @@ impl<'a> SdlParser<'a> {
                 fields: indexed_fields,
                 unique: composite_idx.unique,
             });
+        }
+
+        // Create auto-indexes for one-to-one FK fields that aren't covered by user indexes.
+        // We deferred this until after type-level indexes so we can check coverage.
+        // Go's behavior: if user defines ANY index with FK field as first field (unique or not),
+        // that determines uniqueness - auto-index isn't created.
+        for fk_field_name in &one_to_one_fk_fields {
+            // Check if any existing index has this FK field as its first field
+            let has_covering_index = indexes.iter().any(|idx| {
+                idx.fields
+                    .first()
+                    .map(|f| f.name == *fk_field_name)
+                    .unwrap_or(false)
+            });
+
+            if has_covering_index {
+                // User defined an index - validate it's unique for one-to-one
+                let user_index_is_unique = indexes
+                    .iter()
+                    .find(|idx| {
+                        idx.fields
+                            .first()
+                            .map(|f| f.name == *fk_field_name)
+                            .unwrap_or(false)
+                    })
+                    .map(|idx| idx.unique)
+                    .unwrap_or(false);
+
+                if !user_index_is_unique {
+                    return Err(QueryError::parse(
+                        "one-to-one relation must have a unique index",
+                    ));
+                }
+                // User's unique index is sufficient, skip auto-creation
+                continue;
+            }
+
+            // No user index - create auto unique index
+            let idx_name = generate_index_name(&type_def.name, fk_field_name, &existing_index_names);
+            existing_index_names.push(idx_name.clone());
+            indexes.push(IndexDescription {
+                name: idx_name,
+                id: field_id_counter,
+                fields: vec![IndexedFieldDescription {
+                    name: fk_field_name.clone(),
+                    descending: false,
+                }],
+                unique: true,
+            });
+            field_id_counter += 1;
         }
 
         // INTEROP CRITICAL: Sort fields alphabetically after _docID (like Go does).

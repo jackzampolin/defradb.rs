@@ -53,7 +53,7 @@ impl CollectionVersion {
     /// Returns `Ok(Some(index))` if a new index should be added.
     /// Returns `Ok(None)` if an existing unique index is sufficient.
     /// Returns `Err` if an existing non-unique index violates the constraint.
-    fn ensure_one_to_one_unique_index(
+    pub fn ensure_one_to_one_unique_index(
         &self,
         relation_field_name: &str,
         next_index_id: &mut impl FnMut() -> u32,
