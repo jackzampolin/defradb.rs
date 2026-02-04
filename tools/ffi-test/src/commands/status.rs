@@ -86,30 +86,49 @@ async fn show_current_worktree() -> Result<()> {
             let fail_str = format!("{:>4} {}", report.summary.failed, fail_pct);
             let skip_str = format!("{:>4} {}", report.summary.skipped, skip_pct);
 
-            let pass_colored = pass_str.green();
-            let fail_colored = if report.summary.failed > 0 {
-                fail_str.red()
-            } else {
-                fail_str.normal()
-            };
-            let skip_colored = if report.summary.skipped > 0 {
-                skip_str.yellow()
-            } else {
-                skip_str.normal()
-            };
-
             let timestamp = report.timestamp.format("%m-%d %H:%M").to_string();
 
-            println!(
-                "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
-                package,
-                report.commit.dimmed(),
-                timestamp.dimmed(),
-                pass_colored,
-                fail_colored,
-                skip_colored,
-                report.summary.total
-            );
+            // Color based on pass rate: green=100%, yellow=90%+, red=<90%
+            let pass_rate = if report.summary.total > 0 {
+                report.summary.passed * 100 / report.summary.total
+            } else {
+                100
+            };
+
+            if pass_rate == 100 {
+                println!(
+                    "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
+                    package.green(),
+                    report.commit.dimmed(),
+                    timestamp.dimmed(),
+                    pass_str.green(),
+                    fail_str.green(),
+                    skip_str.green(),
+                    report.summary.total.to_string().green()
+                );
+            } else if pass_rate >= 90 {
+                println!(
+                    "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
+                    package.yellow(),
+                    report.commit.dimmed(),
+                    timestamp.dimmed(),
+                    pass_str.yellow(),
+                    fail_str.yellow(),
+                    skip_str.yellow(),
+                    report.summary.total.to_string().yellow()
+                );
+            } else {
+                println!(
+                    "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
+                    package.red(),
+                    report.commit.dimmed(),
+                    timestamp.dimmed(),
+                    pass_str.red(),
+                    fail_str.red(),
+                    skip_str.red(),
+                    report.summary.total.to_string().red()
+                );
+            }
 
             // Accumulate totals
             grand_total += report.summary.total;
@@ -170,28 +189,48 @@ async fn show_current_worktree() -> Result<()> {
         let fail_str = format!("{:>4} {}", root_fail, fail_pct);
         let skip_str = format!("{:>4} {}", root_skip, skip_pct);
 
-        let pass_colored = pass_str.green().bold();
-        let fail_colored = if root_fail > 0 {
-            fail_str.red().bold()
+        // Color based on pass rate: green=100%, yellow=90%+, red=<90%
+        let pass_rate = if root_total > 0 {
+            root_pass * 100 / root_total
         } else {
-            fail_str.bold()
-        };
-        let skip_colored = if root_skip > 0 {
-            skip_str.yellow().bold()
-        } else {
-            skip_str.bold()
+            100
         };
 
-        println!(
-            "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
-            format!("TOTAL ({} root packages)", root_count).bold(),
-            "",
-            "",
-            pass_colored,
-            fail_colored,
-            skip_colored,
-            root_total.to_string().bold()
-        );
+        let label = format!("TOTAL ({} root packages)", root_count);
+        if pass_rate == 100 {
+            println!(
+                "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
+                label.green().bold(),
+                "",
+                "",
+                pass_str.green().bold(),
+                fail_str.green().bold(),
+                skip_str.green().bold(),
+                root_total.to_string().green().bold()
+            );
+        } else if pass_rate >= 90 {
+            println!(
+                "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
+                label.yellow().bold(),
+                "",
+                "",
+                pass_str.yellow().bold(),
+                fail_str.yellow().bold(),
+                skip_str.yellow().bold(),
+                root_total.to_string().yellow().bold()
+            );
+        } else {
+            println!(
+                "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
+                label.red().bold(),
+                "",
+                "",
+                pass_str.red().bold(),
+                fail_str.red().bold(),
+                skip_str.red().bold(),
+                root_total.to_string().red().bold()
+            );
+        }
     }
 
     if packages.is_empty() {
