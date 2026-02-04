@@ -2759,9 +2759,11 @@ impl Planner {
                     None
                 };
 
-                // Build a minimal child mapping (just _docID for the reverse lookup)
+                // Build a minimal child mapping (just _docID for the reverse lookup).
+                // Include render_key so the merged child renders with _docID for groupBy.
                 let mut child_mapping = DocumentMapping::new();
                 child_mapping.add(0, "_docID");
+                child_mapping.add_render_key(0, "_docID");
 
                 // Build scan mapping for the child
                 let child_scan_mapping =
