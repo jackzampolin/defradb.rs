@@ -796,6 +796,37 @@ impl<S: Store> DB<S> {
             .await
             .map_err(Error::Storage)?;
 
+        // Store field and collection definition blocks in blockstore for Bitswap sync.
+        // Go stores these blocks so peers can fetch them via Bitswap during collection version sync.
+        let blockstore = txn.blockstore()?;
+
+        // Store each field definition block
+        let mut field_cids = Vec::with_capacity(schema.fields.len());
+        for (i, field) in schema.fields.iter().enumerate() {
+            let priority = (i as u64) + 1; // Go uses incrementing priorities starting at 1
+            let block_with_cid =
+                schema::generate_field_block_with_priority_and_heads(field, priority, &[])
+                    .map_err(Error::Schema)?;
+            blockstore
+                .set(&block_with_cid.cid.to_bytes(), &block_with_cid.bytes)
+                .await
+                .map_err(Error::Storage)?;
+            field_cids.push(block_with_cid.cid);
+        }
+
+        // Store collection definition block (links to all field CIDs)
+        let col_block = schema::generate_collection_block_full(
+            Some(&schema.name),
+            &field_cids,
+            1, // Go uses priority=1 for collection blocks during AddSchema
+            &[],
+        )
+        .map_err(Error::Schema)?;
+        blockstore
+            .set(&col_block.cid.to_bytes(), &col_block.bytes)
+            .await
+            .map_err(Error::Storage)?;
+
         // 2. Store name → version_id mapping at /collection/name/{name}
         let name_key = CollectionNameKey::new(&name);
         systemstore
