@@ -165,6 +165,30 @@ pub unsafe extern "C" fn exec_request(
     // Check if identity has DAC bypass (NAC admin/owner can read all documents)
     check_and_set_dac_bypass(rt, node_ptr, identity_did);
 
+    // Check if this is an encrypted query (encrypted_<Collection>) and validate P2P is enabled
+    // Go only generates the encrypted_<Collection> GraphQL field when P2P is enabled,
+    // so we need to return a schema validation error if P2P is disabled
+    if query_str.contains("encrypted_") {
+        let has_p2p = NODES.get(node_ptr, |state| state.p2p.is_some()).unwrap_or(false);
+        if !has_p2p {
+            // Extract the collection name from the query to generate Go-compatible error
+            // e.g., "encrypted_User" -> "Cannot query field \"encrypted_User\" on type \"Query\"."
+            if let Some(start) = query_str.find("encrypted_") {
+                let rest = &query_str[start..];
+                // Find the end of the field name (next non-alphanumeric/underscore)
+                let end = rest
+                    .find(|c: char| !c.is_alphanumeric() && c != '_')
+                    .unwrap_or(rest.len());
+                let field_name = &rest[..end];
+                return FfiResult::error(format!(
+                    "Cannot query field \"{}\" on type \"Query\".",
+                    field_name
+                ));
+            }
+            return FfiResult::error("Cannot query encrypted fields when P2P is disabled.");
+        }
+    }
+
     // Validate node handle before entering async block
     let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
         Some(r) => r,
