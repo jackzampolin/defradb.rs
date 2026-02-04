@@ -43,7 +43,34 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
         None => return FfiResult::error("lens_json is null"),
     };
 
-    // Validate node handle before entering async block
+    // If the JSON contains version IDs, this is a full migration config — delegate to
+    // set_migration on the database so the transform gets linked to schema versions.
+    if let Ok(full_config) = serde_json::from_str::<LensConfig>(&lens_str) {
+        if !full_config.source_schema_version_id.is_empty()
+            && !full_config.destination_schema_version_id.is_empty()
+        {
+            let database =
+                match NODES.get(node_ptr, |state| state.database.clone()) {
+                    Some(db) => db,
+                    None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+                };
+
+            let result = rt.block_on(async {
+                let transform_id = database
+                    .set_migration(full_config)
+                    .await
+                    .map_err(|e| format!("failed to set migration: {}", e))?;
+                Ok::<String, String>(transform_id.to_string())
+            });
+
+            return match result {
+                Ok(id) => FfiResult::success(&id),
+                Err(e) => FfiResult::error(&e),
+            };
+        }
+    }
+
+    // No version IDs — register as standalone lens module(s)
     let lens_store = match NODES.get(node_ptr, |state| state.database.lens_store().clone()) {
         Some(store) => store,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
