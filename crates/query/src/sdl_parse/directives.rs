@@ -131,6 +131,8 @@ pub struct IndexConfig {
     pub name: Option<String>,
     pub unique: bool,
     pub direction: IndexDirection,
+    /// Additional fields to include in a composite index (field_name, descending)
+    pub includes: Vec<(String, bool)>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
