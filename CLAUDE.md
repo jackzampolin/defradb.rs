@@ -434,6 +434,30 @@ git branch
 git worktree remove ../defradb.rs-crdt
 ```
 
+### FFI Testing
+
+The `ffi-test` tool runs Go integration tests against the Rust FFI implementation.
+
+```bash
+# Install the tool (once)
+cargo install --path tools/ffi-test
+
+# Run tests from any worktree
+cd /path/to/defradb.rs-index
+ffi-test run query/simple                    # All tests in package
+ffi-test run query/simple -t TestFilter      # Specific test
+ffi-test run query/simple --verbose          # Full output
+
+# View status
+ffi-test status                              # Current worktree
+ffi-test status --all                        # All worktrees
+
+# Manage worktrees
+ffi-test worktree create foo                 # Create paired worktrees
+ffi-test worktree list                       # List all pairs
+ffi-test worktree remove foo                 # Remove both
+```
+
 ## Goal
 
 **New contributor feels "cozy and right inside their workshop, ready to do very productive work."**

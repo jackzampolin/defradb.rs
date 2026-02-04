@@ -21,6 +21,7 @@ members = [
     "crates/ffi",
     "crates/lens",
     "crates/wasm",
+    "tools/ffi-test",
 ]
 
 [workspace.package]
