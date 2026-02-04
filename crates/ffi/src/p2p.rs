@@ -1969,20 +1969,3 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
         Err(e) => FfiResult::error(e),
     }
 }
-
-/// Sync specific collection versions with peers.
-///
-/// This is a stub - collection version syncing follows the standard document sync path.
-///
-/// # Safety
-///
-/// `identity_did` and `version_ids_json` must be valid null-terminated UTF-8 strings.
-#[no_mangle]
-pub unsafe extern "C" fn p2p_sync_collection_versions(
-    _node_ptr: usize,
-    _identity_did: *const c_char,
-    _version_ids_json: *const c_char,
-) -> FfiResult {
-    // Collection version syncing is handled automatically through the regular P2P sync
-    FfiResult::ok()
-}

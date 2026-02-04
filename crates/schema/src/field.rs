@@ -3,6 +3,11 @@
 use crate::{CType, FieldKind, Result, SchemaError};
 use serde::{Deserialize, Serialize};
 
+/// Default function for serde to return CType::None (matches Go's zero value).
+fn default_ctype_none() -> CType {
+    CType::None
+}
+
 /// Describes a field within a collection schema.
 ///
 /// This matches Go's CollectionFieldDescription struct.
