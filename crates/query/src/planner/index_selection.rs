@@ -44,8 +44,13 @@ pub enum IndexScanType {
         upper: Bound,
         reverse: bool,
     },
-    /// Multiple exact match values (IN operator)
-    InScan { values: Vec<NormalValue> },
+    /// Multiple exact match values (IN operator).
+    /// For composite indexes, `suffix_values` holds Eq values for subsequent fields,
+    /// enabling exact-match lookups instead of prefix scans.
+    InScan {
+        values: Vec<NormalValue>,
+        suffix_values: Vec<NormalValue>,
+    },
 }
 
 /// A parsed filter condition on a single field.
@@ -249,6 +254,41 @@ fn wrap_values_for_json_path(
     }
 }
 
+/// Normalize a NormalValue to match the schema field's encoding type.
+/// This ensures filter values use the same encoding as stored index values.
+/// For example, a Float32 field stores values with `encode_float32_ascending`,
+/// so lookup values must also be Float32 (not Float64 or Int).
+fn normalize_value_for_field(value: NormalValue, field_kind: &FieldKind) -> NormalValue {
+    match (&value, field_kind) {
+        // Float64 → Float32 when schema says Float32
+        (NormalValue::Float64(f), FieldKind::Scalar(ScalarKind::Float32)) => {
+            NormalValue::Float32(*f as f32)
+        }
+        // Int → Float32 when schema says Float32
+        (NormalValue::Int(i), FieldKind::Scalar(ScalarKind::Float32)) => {
+            NormalValue::Float32(*i as f32)
+        }
+        // Int → Float64 when schema says Float64
+        (NormalValue::Int(i), FieldKind::Scalar(ScalarKind::Float64)) => {
+            NormalValue::Float64(*i as f64)
+        }
+        _ => value,
+    }
+}
+
+/// Normalize a NormalValue for a named index field using collection field metadata.
+fn normalize_for_index_field(
+    value: NormalValue,
+    field_name: &str,
+    collection_fields: &[schema::FieldDescription],
+) -> NormalValue {
+    if let Some(field) = collection_fields.iter().find(|f| f.name == field_name) {
+        normalize_value_for_field(value, &field.kind)
+    } else {
+        value
+    }
+}
+
 /// Extract field conditions from a filter.
 pub fn extract_field_conditions(filter: &Filter) -> Vec<FieldCondition> {
     let mut conditions = Vec::new();
@@ -337,6 +377,7 @@ pub fn can_use_index(filter: &Filter, index: &IndexDescription) -> bool {
                 | FilterOp::Lt
                 | FilterOp::Lte
                 | FilterOp::In
+                | FilterOp::Nin
                 | FilterOp::Ne
                 | FilterOp::Like
                 | FilterOp::Nlike
@@ -607,6 +648,41 @@ pub fn filter_to_index_scan(
     let all_fields_matched =
         is_composite && has_eq && subsequent_eq_values.len() == index.fields.len() - 1;
 
+    // Normalize filter values to match schema field encoding types.
+    // e.g., a Float32 field stores with encode_float32, so lookup values must be Float32.
+    if let Some(ref mut v) = eq_value {
+        *v = normalize_for_index_field(v.clone(), first_field, collection_fields);
+    }
+    if let Some(ref mut vs) = in_values {
+        *vs = vs
+            .iter()
+            .map(|v| normalize_for_index_field(v.clone(), first_field, collection_fields))
+            .collect();
+    }
+    lower_bound = match lower_bound {
+        Bound::Inclusive(v) => {
+            Bound::Inclusive(normalize_for_index_field(v, first_field, collection_fields))
+        }
+        Bound::Exclusive(v) => {
+            Bound::Exclusive(normalize_for_index_field(v, first_field, collection_fields))
+        }
+        Bound::Unbounded => Bound::Unbounded,
+    };
+    upper_bound = match upper_bound {
+        Bound::Inclusive(v) => {
+            Bound::Inclusive(normalize_for_index_field(v, first_field, collection_fields))
+        }
+        Bound::Exclusive(v) => {
+            Bound::Exclusive(normalize_for_index_field(v, first_field, collection_fields))
+        }
+        Bound::Unbounded => Bound::Unbounded,
+    };
+    for (i, v) in subsequent_eq_values.iter_mut().enumerate() {
+        if let Some(field_desc) = index.fields.get(i + 1) {
+            *v = normalize_for_index_field(v.clone(), &field_desc.name, collection_fields);
+        }
+    }
+
     // Determine scan type (narrowing scans take priority over full scans)
     // Wrap values in JsonLeafValue when JSON path is present
     //
@@ -633,8 +709,35 @@ pub fn filter_to_index_scan(
         }
     } else if has_in {
         let wrapped_values = wrap_values_for_json_path(in_values.unwrap(), in_json_path.as_ref());
+        // For composite indexes, check if subsequent fields have Eq conditions.
+        // If so, attach them as suffix_values to enable exact-match lookups
+        // instead of prefix scans (e.g., _in on first field + _eq on second).
+        let mut in_suffix_values: Vec<NormalValue> = Vec::new();
+        if is_composite {
+            for field_desc in index.fields.iter().skip(1) {
+                let field_cond = conditions.iter().find(|c| {
+                    c.field_name == field_desc.name
+                        && c.op == FilterOp::Eq
+                        && c.array_op != Some(FilterOp::None)
+                        && c.array_op != Some(FilterOp::All)
+                });
+                if let Some(cond) = field_cond {
+                    if let ConditionValue::Single(v) = &cond.value {
+                        let normalized =
+                            normalize_for_index_field(v.clone(), &field_desc.name, collection_fields);
+                        in_suffix_values
+                            .push(wrap_value_for_json_path(normalized, cond.json_path.as_ref()));
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
         IndexScanType::InScan {
             values: wrapped_values,
+            suffix_values: in_suffix_values,
         }
     } else if !lower_bound.is_unbounded() || !upper_bound.is_unbounded() {
         // Wrap range bounds for JSON paths
@@ -935,7 +1038,7 @@ mod tests {
         let params = filter_to_index_scan(&filter, &index, None, &[], None, 0).unwrap();
 
         match params.scan_type {
-            IndexScanType::InScan { values } => {
+            IndexScanType::InScan { values, .. } => {
                 assert_eq!(values.len(), 2);
             }
             _ => panic!("expected InScan scan type"),
@@ -1355,7 +1458,7 @@ mod tests {
         assert_eq!(params.index_name, "custom_idx");
 
         match params.scan_type {
-            IndexScanType::InScan { values } => {
+            IndexScanType::InScan { values, .. } => {
                 assert_eq!(values.len(), 2);
                 // All values should be wrapped in JsonLeaf with the path
                 for value in &values {

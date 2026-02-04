@@ -149,54 +149,19 @@ impl IndexMatcher for NinMatcher {
     }
 }
 
-/// Matcher for _like conditions (pattern matching).
+/// Matcher for _like conditions (SQL LIKE pattern matching).
 ///
-/// Supports simple patterns:
-/// - `prefix%` (starts with)
-/// - `%suffix` (ends with)
-/// - `%contains%` (contains)
-/// - `exact` (exact match)
+/// `%` matches zero or more characters. `_` is treated as literal
+/// (matches Go DefraDB behavior). Supports arbitrary patterns.
 pub struct LikeMatcher {
-    pattern: LikePattern,
-}
-
-enum LikePattern {
-    StartsWith(String),
-    EndsWith(String),
-    Contains(String),
-    Exact(String),
+    pattern: String,
 }
 
 impl LikeMatcher {
-    /// Create a new LIKE matcher from a pattern string.
-    ///
-    /// Returns None if the pattern is invalid or unsupported.
     pub fn new(pattern: &str) -> Option<Self> {
-        // Check for unsupported patterns
-        if pattern.contains('_') {
-            return None;
-        }
-
-        let percent_count = pattern.matches('%').count();
-        if percent_count > 2 {
-            return None;
-        }
-        if percent_count == 2 && !(pattern.starts_with('%') && pattern.ends_with('%')) {
-            return None;
-        }
-
-        let pattern =
-            if let Some(inner) = pattern.strip_prefix('%').and_then(|s| s.strip_suffix('%')) {
-                LikePattern::Contains(inner.to_string())
-            } else if let Some(suffix) = pattern.strip_prefix('%') {
-                LikePattern::EndsWith(suffix.to_string())
-            } else if let Some(prefix) = pattern.strip_suffix('%') {
-                LikePattern::StartsWith(prefix.to_string())
-            } else {
-                LikePattern::Exact(pattern.to_string())
-            };
-
-        Some(Self { pattern })
+        Some(Self {
+            pattern: pattern.to_string(),
+        })
     }
 }
 
@@ -206,13 +171,7 @@ impl IndexMatcher for LikeMatcher {
             Some(s) => s,
             None => return false,
         };
-
-        match &self.pattern {
-            LikePattern::StartsWith(prefix) => s.starts_with(prefix),
-            LikePattern::EndsWith(suffix) => s.ends_with(suffix),
-            LikePattern::Contains(inner) => s.contains(inner),
-            LikePattern::Exact(exact) => s == exact,
-        }
+        like_match(s, &self.pattern)
     }
 }
 
@@ -231,6 +190,44 @@ impl IndexMatcher for NlikeMatcher {
     fn matches(&self, value: &NormalValue) -> bool {
         !self.inner.matches(value)
     }
+}
+
+/// SQL LIKE pattern matching with `%` as wildcard for zero or more characters.
+/// `_` is treated as a literal character (matches Go DefraDB behavior).
+fn like_match(text: &str, pattern: &str) -> bool {
+    let text_bytes = text.as_bytes();
+    let pattern_bytes = pattern.as_bytes();
+    let t_len = text_bytes.len();
+    let p_len = pattern_bytes.len();
+
+    let mut dp = vec![false; p_len + 1];
+    dp[0] = true;
+
+    for j in 0..p_len {
+        if pattern_bytes[j] == b'%' {
+            dp[j + 1] = dp[j];
+        } else {
+            break;
+        }
+    }
+
+    for i in 0..t_len {
+        let mut prev = dp[0];
+        dp[0] = false;
+        for j in 0..p_len {
+            let temp = dp[j + 1];
+            if pattern_bytes[j] == b'%' {
+                dp[j + 1] = prev || dp[j + 1];
+            } else if text_bytes[i] == pattern_bytes[j] {
+                dp[j + 1] = prev;
+            } else {
+                dp[j + 1] = false;
+            }
+            prev = temp;
+        }
+    }
+
+    dp[p_len]
 }
 
 /// Compare two NormalValue instances for equality.
@@ -443,9 +440,19 @@ mod tests {
     }
 
     #[test]
-    fn test_like_matcher_invalid_patterns() {
-        assert!(LikeMatcher::new("Al_ce").is_none()); // underscore not supported
-        assert!(LikeMatcher::new("%a%b%").is_none()); // too many percent signs
+    fn test_like_matcher_multi_wildcard() {
+        let matcher = LikeMatcher::new("%a%b%").unwrap();
+        assert!(matcher.matches(&NormalValue::String("a_b".to_string())));
+        assert!(matcher.matches(&NormalValue::String("xaxbx".to_string())));
+        assert!(!matcher.matches(&NormalValue::String("xyz".to_string())));
+    }
+
+    #[test]
+    fn test_like_matcher_underscore_literal() {
+        // '_' is treated as literal character (Go behavior)
+        let matcher = LikeMatcher::new("Al_ce").unwrap();
+        assert!(matcher.matches(&NormalValue::String("Al_ce".to_string())));
+        assert!(!matcher.matches(&NormalValue::String("Alice".to_string())));
     }
 
     #[test]

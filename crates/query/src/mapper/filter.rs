@@ -1346,60 +1346,11 @@ impl Filter {
                 (actual_str.into(), pattern_str.into())
             };
 
-        // Pattern matching following Go DefraDB behavior:
-        // - 'prefix%' (starts with)
-        // - '%suffix' (ends with)
-        // - '%contains%' (contains)
-        // - 'prefix%suffix' (starts with AND ends with)
-        // - 'exact' (exact match)
-        // Note: '_' wildcard is treated as literal character (matches Go behavior)
-        let matches = if let Some(inner) = pattern_cmp
-            .strip_prefix('%')
-            .and_then(|s| s.strip_suffix('%'))
-        {
-            // %contains%
-            actual_cmp.contains(inner)
-        } else if let Some(suffix) = pattern_cmp.strip_prefix('%') {
-            // %suffix (and suffix has no %)
-            if suffix.contains('%') {
-                // Invalid: multiple % not at edges
-                return Err(QueryError::invalid_filter(format!(
-                    "{} does not support multiple wildcards except '%contains%'",
-                    op_name
-                )));
-            }
-            actual_cmp.ends_with(suffix)
-        } else if let Some(prefix) = pattern_cmp.strip_suffix('%') {
-            // prefix% (and prefix has no %)
-            if prefix.contains('%') {
-                // Invalid: multiple % not at edges
-                return Err(QueryError::invalid_filter(format!(
-                    "{} does not support multiple wildcards except '%contains%'",
-                    op_name
-                )));
-            }
-            actual_cmp.starts_with(prefix)
-        } else if pattern_cmp.contains('%') {
-            // prefix%suffix pattern (single % in the middle)
-            let parts: Vec<&str> = pattern_cmp.splitn(2, '%').collect();
-            if parts.len() == 2 {
-                let prefix = parts[0];
-                let suffix = parts[1];
-                // Suffix should not contain more %
-                if suffix.contains('%') {
-                    return Err(QueryError::invalid_filter(format!(
-                        "{} does not support multiple wildcards except '%contains%'",
-                        op_name
-                    )));
-                }
-                actual_cmp.starts_with(prefix) && actual_cmp.ends_with(suffix)
-            } else {
-                false
-            }
-        } else {
-            // Exact match
-            actual_cmp == pattern_cmp
-        };
+        // SQL LIKE pattern matching following Go DefraDB behavior:
+        // - '%' matches zero or more characters
+        // - '_' is treated as literal (matches Go behavior)
+        // - Supports arbitrary combinations of '%' wildcards
+        let matches = like_match(&actual_cmp, &pattern_cmp);
 
         Ok(if negate { !matches } else { matches })
     }
@@ -1792,6 +1743,47 @@ impl Filter {
         }
         Ok(true)
     }
+}
+
+/// SQL LIKE pattern matching with `%` as wildcard for zero or more characters.
+/// `_` is treated as a literal character (matches Go DefraDB behavior).
+fn like_match(text: &str, pattern: &str) -> bool {
+    let text_bytes = text.as_bytes();
+    let pattern_bytes = pattern.as_bytes();
+    let t_len = text_bytes.len();
+    let p_len = pattern_bytes.len();
+
+    // dp[j] = true means text[0..i] matches pattern[0..j]
+    let mut dp = vec![false; p_len + 1];
+    dp[0] = true;
+
+    // Initialize: leading '%' can match empty string
+    for j in 0..p_len {
+        if pattern_bytes[j] == b'%' {
+            dp[j + 1] = dp[j];
+        } else {
+            break;
+        }
+    }
+
+    for i in 0..t_len {
+        let mut prev = dp[0];
+        dp[0] = false;
+        for j in 0..p_len {
+            let temp = dp[j + 1];
+            if pattern_bytes[j] == b'%' {
+                // '%' matches zero or more chars: either skip '%' (prev) or extend match (dp[j+1])
+                dp[j + 1] = prev || dp[j + 1];
+            } else if text_bytes[i] == pattern_bytes[j] {
+                dp[j + 1] = prev;
+            } else {
+                dp[j + 1] = false;
+            }
+            prev = temp;
+        }
+    }
+
+    dp[p_len]
 }
 
 #[cfg(test)]
