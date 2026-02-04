@@ -635,6 +635,12 @@ impl Planner {
             if let Some(ref fetcher) = self.fetcher {
                 index_scan_node = index_scan_node.with_fetcher(fetcher.clone());
             }
+            // Apply scalar filter as residual filter on IndexScanNode.
+            // The index may only cover part of the filter (e.g., first field of composite index),
+            // so remaining conditions are applied as post-filtering on the fetched documents.
+            if let Some(ref filter) = scalar_filter {
+                index_scan_node = index_scan_node.with_residual_filter(filter.clone());
+            }
             Box::new(index_scan_node)
         } else {
             let mut scan = ScanNode::new((*collection).clone(), scan_mapping.clone())
