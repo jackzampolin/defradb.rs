@@ -81,6 +81,10 @@ pub struct TypeJoinMany {
     total_children_in_cache: u64,
     /// Total field fetches per full collection scan
     total_fields_per_scan: u64,
+    /// When true, re-run the child plan per parent instead of caching all children.
+    /// Used when the child plan uses an index for ordering, matching Go's per-parent
+    /// scan behavior for correct metrics and limit support.
+    per_parent_child_scan: bool,
 }
 
 impl std::fmt::Debug for TypeJoinMany {
@@ -155,6 +159,7 @@ impl TypeJoinMany {
             go_child_index_fetches: 0,
             total_children_in_cache: 0,
             total_fields_per_scan: 0,
+            per_parent_child_scan: false,
         })
     }
 
@@ -206,6 +211,17 @@ impl TypeJoinMany {
     /// Only used when child_group_by is set.
     pub fn with_group_mapping(mut self, mapping: DocumentMapping) -> Self {
         self.group_mapping = Some(mapping);
+        self
+    }
+
+    /// Enable per-parent child scanning.
+    ///
+    /// When enabled, the child plan is re-run for each parent instead of caching
+    /// all children up front. This matches Go's behavior when using an index for
+    /// ordering: each parent triggers a fresh index scan, with FK filtering and
+    /// per-parent limit applied during the scan.
+    pub fn with_per_parent_child_scan(mut self) -> Self {
+        self.per_parent_child_scan = true;
         self
     }
 
@@ -532,6 +548,136 @@ impl TypeJoinMany {
         Ok(false)
     }
 
+    /// Per-parent child scanning: re-run child plan for each parent.
+    /// Matches Go's behavior where each parent triggers a fresh index scan.
+    async fn next_per_parent(&mut self) -> Result<bool> {
+        loop {
+            self.exec_info.iterations += 1;
+
+            if !self.parent_plan.next().await? {
+                return Ok(false);
+            }
+
+            let mut parent_doc = self.parent_plan.value().deep_clone();
+
+            let parent_doc_id = match parent_doc.doc_id() {
+                Some(id) => id.to_string(),
+                None => {
+                    if self.relation_filter.is_some() {
+                        continue;
+                    }
+                    self.merge_children(&mut parent_doc, Vec::new());
+                    self.current_doc = parent_doc;
+                    return Ok(true);
+                }
+            };
+
+            // Re-run child plan for this parent
+            self.child_plan.init().await?;
+            self.child_plan.start().await?;
+
+            let mut all_children = Vec::new();
+            let mut matching_count = 0u64;
+            let mut total_scanned = 0u64;
+            let mut limit_reached = false;
+
+            while self.child_plan.next().await? {
+                total_scanned += 1;
+                let child_doc = self.child_plan.value();
+                let child_fk_value = child_doc.get(self.child_fk_index);
+
+                // Check FK match with parent
+                let fk_matches = child_fk_value
+                    .and_then(|v| v.as_str())
+                    .map(|fk| fk == parent_doc_id)
+                    .unwrap_or(false);
+
+                if fk_matches {
+                    matching_count += 1;
+                    all_children.push(child_doc.deep_clone());
+
+                    // Early termination: if no relation filter and limit reached
+                    if self.relation_filter.is_none() {
+                        if let Some(limit) = self.child_limit {
+                            let effective_needed = self.child_offset + limit;
+                            if matching_count >= effective_needed {
+                                limit_reached = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Capture child plan metrics for this parent scan
+            let child_info = self.child_plan.exec_info();
+            self.go_child_iterations += total_scanned + 1; // scanned entries + 1 false
+            self.go_child_doc_fetches += child_info.docs_fetched;
+            self.go_child_field_fetches += child_info.fields_fetched;
+            self.go_child_index_fetches += child_info.indexes_fetched;
+
+            // If limit was reached early, add the partial index fetches
+            // (Go stops scanning when limit reached, so indexFetches = entries scanned)
+            if limit_reached {
+                // Override: Go counts only the entries actually scanned, not all
+                // The child plan may have fetched all from index, but Go would have stopped.
+                // We approximate with matching_count since Go scans until limit matches.
+                self.go_child_index_fetches -= child_info.indexes_fetched;
+                self.go_child_index_fetches += total_scanned;
+            }
+
+            self.child_plan.close().await?;
+
+            // Apply relation filter if present
+            if let Some(ref rel_filter) = self.relation_filter {
+                if !self.check_relation_filter(&all_children, rel_filter)? {
+                    continue;
+                }
+            }
+
+            // Apply ordering if specified (needed when filter index != ordering index)
+            if let Some(ref order_by) = self.child_order_by {
+                let child_mapping = self.child_plan.document_map();
+                all_children.sort_by(|a, b| {
+                    for condition in &order_by.conditions {
+                        let field_name =
+                            condition.fields.first().map(|s| s.as_str()).unwrap_or("");
+                        let field_idx = child_mapping.first_index_of_name(field_name);
+                        if let Some(idx) = field_idx {
+                            let cmp =
+                                compare_json_values(a.get(idx), b.get(idx));
+                            let cmp = match condition.direction {
+                                OrderDirection::Asc => cmp,
+                                OrderDirection::Desc => cmp.reverse(),
+                            };
+                            if cmp != std::cmp::Ordering::Equal {
+                                return cmp;
+                            }
+                        }
+                    }
+                    std::cmp::Ordering::Equal
+                });
+            }
+
+            // Apply offset and limit.
+            let offset = self.child_offset as usize;
+            let children: Vec<Doc> = if offset > 0 || self.child_limit.is_some() {
+                let after_offset: Vec<Doc> = all_children.into_iter().skip(offset).collect();
+                if let Some(limit) = self.child_limit {
+                    after_offset.into_iter().take(limit as usize).collect()
+                } else {
+                    after_offset
+                }
+            } else {
+                all_children
+            };
+
+            self.merge_children(&mut parent_doc, children);
+            self.current_doc = parent_doc;
+            return Ok(true);
+        }
+    }
+
     /// Get all children for a parent (unfiltered, for filter checking).
     /// This returns all children before limit/offset is applied.
     fn get_all_children(&self, parent_doc_id: &str) -> Vec<Doc> {
@@ -556,10 +702,15 @@ impl PlanNode for TypeJoinMany {
         self.total_children_in_cache = 0;
         self.total_fields_per_scan = 0;
 
-        // Build child cache first (scans child_plan once)
-        self.build_child_cache().await?;
-        // Then init parent plan
-        self.parent_plan.init().await?;
+        if self.per_parent_child_scan {
+            // Per-parent mode: don't cache, we'll re-scan per parent in next()
+            self.parent_plan.init().await?;
+        } else {
+            // Build child cache first (scans child_plan once)
+            self.build_child_cache().await?;
+            // Then init parent plan
+            self.parent_plan.init().await?;
+        }
         self.initialized = true;
         Ok(())
     }
@@ -573,6 +724,10 @@ impl PlanNode for TypeJoinMany {
             return Err(QueryError::execution(
                 "TypeJoinMany.next() called before init()",
             ));
+        }
+
+        if self.per_parent_child_scan {
+            return self.next_per_parent().await;
         }
 
         // Loop to skip parents that don't pass relation filter

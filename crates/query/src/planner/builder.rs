@@ -13,7 +13,7 @@ use tracing::{debug, warn};
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
-use crate::mapper::{AggregateType, Filter, Requestable, Select};
+use crate::mapper::{AggregateType, Filter, OrderBy, Requestable, Select};
 use crate::plan::groupby::ChildSelectMeta;
 use crate::plan::{
     AllDocsNode, AverageNode, AvgSourceMeta, CountNode, CountSourceMeta, GroupAlias, GroupByNode,
@@ -1658,14 +1658,15 @@ impl Planner {
 
     /// Try to select an index for a child collection scan.
     ///
-    /// Returns `Some(IndexScanParams)` if an index can service the filter,
-    /// `None` otherwise. Unlike `try_select_index`, this does not consider
-    /// ordering (child ordering is handled by TypeJoin).
+    /// Returns `Some((IndexScanParams, per_parent_scan))` if an index can service
+    /// the filter or ordering, `None` otherwise. `per_parent_scan` is true when
+    /// the index is used (enabling per-parent re-scanning for correct Go metrics).
     fn try_select_child_index(
         &self,
-        filter: &Filter,
+        filter: Option<&Filter>,
+        order_by: Option<&OrderBy>,
         collection: &CollectionVersion,
-    ) -> Option<IndexScanParams> {
+    ) -> Option<(IndexScanParams, bool)> {
         if collection.indexes.is_empty() {
             return None;
         }
@@ -1674,9 +1675,37 @@ impl Planner {
             Some(ref fetcher) if fetcher.supports_index_queries() => {}
             _ => return None,
         }
-        let best_index = select_best_index(filter, &collection.indexes)?;
-        // Child scans don't use limit optimization (limit is handled at parent level)
-        filter_to_index_scan(filter, best_index, None, &collection.fields, None, 0)
+        // Try filter-based index first
+        if let Some(filter) = filter {
+            if let Some(best_index) = select_best_index(filter, &collection.indexes) {
+                if let Some(params) =
+                    filter_to_index_scan(filter, best_index, None, &collection.fields, None, 0)
+                {
+                    return Some((params, true));
+                }
+            }
+        }
+        // Fallback: try ordering-based index selection (scan all in index order)
+        if let Some(order_by) = order_by {
+            for index in &collection.indexes {
+                let (can_order, needs_reverse) = can_be_ordered_by_index(order_by, index);
+                if can_order {
+                    return Some((
+                        IndexScanParams {
+                            index_name: index.name.clone(),
+                            scan_type: IndexScanType::PrefixScan {
+                                prefix_values: vec![],
+                                reverse: needs_reverse,
+                            },
+                            limit: None,
+                            offset: 0,
+                        },
+                        true,
+                    ));
+                }
+            }
+        }
+        None
     }
 
     /// Apply join nodes for nested selects (relation fields)
@@ -2074,13 +2103,15 @@ impl Planner {
             // filters (e.g., User(filter: {devices: {model: ...}})) need the
             // full child set because TypeJoin uses check_relation_filter to gate
             // the *parent*, but all children of matching parents must appear.
-            let child_index_params = nested_select
-                .filter
-                .as_ref()
-                .and_then(|f| self.try_select_child_index(f, &target_collection));
+            let child_index_result = self.try_select_child_index(
+                nested_select.filter.as_ref(),
+                nested_select.order_by.as_ref(),
+                &target_collection,
+            );
+            let child_uses_index = child_index_result.is_some();
 
             // Create the child scan plan with scan_mapping (includes FK fields for joins)
-            let mut child_plan: Box<dyn PlanNode> = if let Some(params) = child_index_params {
+            let mut child_plan: Box<dyn PlanNode> = if let Some((params, _)) = child_index_result {
                 let mut index_scan = IndexScanNode::new(
                     (*target_collection).clone(),
                     child_scan_mapping.clone(),
@@ -2518,6 +2549,9 @@ impl Planner {
                 if let Some(order_by) = nested_order_by.clone() {
                     join_many = join_many.with_order_by(order_by);
                 }
+                if child_uses_index {
+                    join_many = join_many.with_per_parent_child_scan();
+                }
 
                 // Apply nested groupBy if present
                 if let Some(ref group_by) = nested_select.group_by {
@@ -2645,9 +2679,9 @@ impl Planner {
                 }
 
                 // Build child scan, using an index if the filter is index-eligible.
-                let child_index_params =
-                    self.try_select_child_index(&nested_conditions, &target_collection);
-                let child_plan: Box<dyn PlanNode> = if let Some(params) = child_index_params {
+                let child_index_result =
+                    self.try_select_child_index(Some(&nested_conditions), None, &target_collection);
+                let child_plan: Box<dyn PlanNode> = if let Some((params, _)) = child_index_result {
                     let mut index_scan = IndexScanNode::new(
                         (*target_collection).clone(),
                         child_mapping.clone(),
