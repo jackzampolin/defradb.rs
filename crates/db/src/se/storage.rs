@@ -6,7 +6,7 @@
 //! Matches Go's internal/se/se.go storeArtifacts and fetchDocIDs.
 
 use crypto::se::Artifact;
-use storage::corekv::{Key, IterOptions, Reader, Writer, Result, Iterator};
+use storage::corekv::{IterOptions, Iterator, Key, Reader, Result, Writer};
 use storage::keys::DatastoreSE;
 
 /// A field query for SE artifact lookup.
@@ -22,7 +22,11 @@ pub struct FieldQuery {
 
 impl FieldQuery {
     /// Create a new field query.
-    pub fn new(field_name: impl Into<String>, index_id: impl Into<String>, search_tag: Vec<u8>) -> Self {
+    pub fn new(
+        field_name: impl Into<String>,
+        index_id: impl Into<String>,
+        search_tag: Vec<u8>,
+    ) -> Self {
         Self {
             field_name: field_name.into(),
             index_id: index_id.into(),
@@ -40,10 +44,7 @@ impl FieldQuery {
 ///
 /// * `store` - The datastore to write to
 /// * `artifacts` - Artifacts to store
-pub async fn store_artifacts<S: Writer>(
-    store: &mut S,
-    artifacts: &[Artifact],
-) -> Result<()> {
+pub async fn store_artifacts<S: Writer>(store: &mut S, artifacts: &[Artifact]) -> Result<()> {
     for artifact in artifacts {
         let key = DatastoreSE::new(
             &artifact.collection_id,

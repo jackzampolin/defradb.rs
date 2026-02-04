@@ -16,7 +16,7 @@ use crate::fetcher::DocFetcher;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::groupby::ChildSelectMeta;
 use crate::plan::{
-    AllDocsNode, AvgSourceMeta, AverageNode, CountNode, CountSourceMeta, GroupAlias, GroupByNode,
+    AllDocsNode, AverageNode, AvgSourceMeta, CountNode, CountSourceMeta, GroupAlias, GroupByNode,
     IndexScanNode, InnerAggregateDef, JoinSide, LimitNode, MaxNode, MaxSourceMeta, MinNode,
     MinSourceMeta, OrderByNode, PermissionFilterNode, RelationFilter, ScanNode, SelectNode,
     SimilarityNode, SumNode, SumSourceMeta, TypeJoinMany, TypeJoinOne,
@@ -1147,10 +1147,7 @@ impl Planner {
                                 .entry(field_name.clone())
                                 .and_modify(|v| {
                                     if let serde_json::Value::Object(ref mut ops) = v {
-                                        ops.insert(
-                                            "_neq".to_string(),
-                                            serde_json::Value::Null,
-                                        );
+                                        ops.insert("_neq".to_string(), serde_json::Value::Null);
                                     }
                                 })
                                 .or_insert(serde_json::json!({
@@ -1440,8 +1437,7 @@ impl Planner {
                                     select.collection_name.clone()
                                 },
                                 filter: target.filter.clone(),
-                                is_inline_array: is_array_aggregate
-                                    && target.field_name.is_none(),
+                                is_inline_array: is_array_aggregate && target.field_name.is_none(),
                             })
                             .collect();
                         node = node.with_sources(sources);
@@ -1472,8 +1468,7 @@ impl Planner {
                                 },
                                 child_field_name: target.field_name.clone(),
                                 filter: target.filter.clone(),
-                                is_inline_array: is_array_aggregate
-                                    && target.field_name.is_none(),
+                                is_inline_array: is_array_aggregate && target.field_name.is_none(),
                             })
                             .collect();
                         node = node.with_sources(sources);
@@ -1505,8 +1500,7 @@ impl Planner {
                                 },
                                 child_field_name: target.field_name.clone(),
                                 filter: target.filter.clone(),
-                                is_inline_array: is_array_aggregate
-                                    && target.field_name.is_none(),
+                                is_inline_array: is_array_aggregate && target.field_name.is_none(),
                             })
                             .collect();
                         node = node.with_sources(sources);
@@ -1537,8 +1531,7 @@ impl Planner {
                                 },
                                 child_field_name: target.field_name.clone(),
                                 filter: target.filter.clone(),
-                                is_inline_array: is_array_aggregate
-                                    && target.field_name.is_none(),
+                                is_inline_array: is_array_aggregate && target.field_name.is_none(),
                             })
                             .collect();
                         node = node.with_sources(sources);
@@ -1569,8 +1562,7 @@ impl Planner {
                                 },
                                 child_field_name: target.field_name.clone(),
                                 filter: target.filter.clone(),
-                                is_inline_array: is_array_aggregate
-                                    && target.field_name.is_none(),
+                                is_inline_array: is_array_aggregate && target.field_name.is_none(),
                             })
                             .collect();
                         node = node.with_sources(sources);
@@ -1683,7 +1675,11 @@ impl Planner {
         mut mapping: DocumentMapping,
         depth: usize,
         parent_filter: Option<&crate::mapper::Filter>,
-    ) -> Result<(Box<dyn PlanNode>, DocumentMapping, HashMap<String, (String, String)>)> {
+    ) -> Result<(
+        Box<dyn PlanNode>,
+        DocumentMapping,
+        HashMap<String, (String, String)>,
+    )> {
         // Internal keys for aggregate relation data when there's a collision with a relation selection.
         let mut aggregate_internal_keys: HashMap<String, (String, String)> = HashMap::new();
 
@@ -1731,11 +1727,18 @@ impl Planner {
             selects_to_process
                 .iter()
                 .map(|(s, _)| {
-                    let filter_json = s.filter.as_ref().map(|f| {
-                        serde_json::to_string(f.conditions()).unwrap_or_default()
-                    });
+                    let filter_json = s
+                        .filter
+                        .as_ref()
+                        .map(|f| serde_json::to_string(f.conditions()).unwrap_or_default());
                     let has_limit = s.limit.as_ref().map_or(false, |l| l.limit.is_some());
-                    (s.field.name.clone(), SelectionJoinInfo { filter_json, has_limit })
+                    (
+                        s.field.name.clone(),
+                        SelectionJoinInfo {
+                            filter_json,
+                            has_limit,
+                        },
+                    )
                 })
                 .collect();
 
@@ -2056,7 +2059,6 @@ impl Planner {
                 .filter
                 .as_ref()
                 .and_then(|f| self.try_select_child_index(f, &target_collection));
-
 
             // Create the child scan plan with scan_mapping (includes FK fields for joins)
             let mut child_plan: Box<dyn PlanNode> = if let Some(params) = child_index_params {
@@ -2881,9 +2883,11 @@ impl Planner {
                     // limit/offset/order in post-processing.
                     // Go also shares joins between selections and aggregates targeting
                     // the same relation (e.g., books(filter: X) + _count(books: {filter: X})).
-                    let already_joined =
-                        aggregate_joined_relations.contains(relation_field_name.as_str())
-                            || selection_join_info.get(relation_field_name.as_str()).map_or(false, |info| {
+                    let already_joined = aggregate_joined_relations
+                        .contains(relation_field_name.as_str())
+                        || selection_join_info
+                            .get(relation_field_name.as_str())
+                            .map_or(false, |info| {
                                 if info.has_limit {
                                     return false;
                                 }
@@ -4080,6 +4084,40 @@ impl Planner {
         self.collections.get(name)
     }
 
+    /// Validate that all nested select fields exist in the target collection's schema.
+    ///
+    /// This catches invalid field references in view queries, e.g. querying
+    /// `books { author { name } }` when `BookView` only defines `name`.
+    /// In Go, this is caught by the GraphQL schema validator. In Rust, we
+    /// do it here during plan building.
+    fn validate_nested_select_fields(
+        &self,
+        select: &Select,
+        collection: &CollectionVersion,
+    ) -> Result<()> {
+        for requestable in &select.fields {
+            if let Requestable::Select(nested) = requestable {
+                let field_name = &nested.field.name;
+                if field_name == "_group" || field_name == "_version" {
+                    continue;
+                }
+                let field = collection.field_by_name(field_name).ok_or_else(|| {
+                    QueryError::unknown_field(format!(
+                        "Cannot query field \"{}\" on type \"{}\".",
+                        field_name, collection.name
+                    ))
+                })?;
+                // Recurse into the target collection for deeper validation
+                if let Some(target_id) = field.kind.relation_collection_id() {
+                    if let Some(target) = self.get_collection(target_id) {
+                        self.validate_nested_select_fields(nested, &target)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Build a plan for a non-materialized view.
     ///
     /// Instead of scanning storage (which is empty for views), this parses the
@@ -4091,6 +4129,11 @@ impl Planner {
         collection: &CollectionVersion,
         query_source: &schema::QuerySource,
     ) -> Result<PlanResult> {
+        // Validate user's query fields against the view's schema types.
+        // This catches references to fields that don't exist in the view's SDL,
+        // e.g. circular view references where an embedded type omits a relation.
+        self.validate_nested_select_fields(select, collection)?;
+
         // Extract the source collection name from the stored Select JSON
         let source_name = query_source
             .query

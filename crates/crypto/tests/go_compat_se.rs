@@ -97,9 +97,18 @@ fn test_domain_separator_format() {
     let tag3 = generate_equality_tag_str(&key, "", "a:b", "c", b"v");
 
     // These should all be different because the domain separator string differs
-    assert_ne!(tag1, tag2, "Different identity/collection split should differ");
-    assert_ne!(tag1, tag3, "Different identity/collection split should differ");
-    assert_ne!(tag2, tag3, "Different identity/collection split should differ");
+    assert_ne!(
+        tag1, tag2,
+        "Different identity/collection split should differ"
+    );
+    assert_ne!(
+        tag1, tag3,
+        "Different identity/collection split should differ"
+    );
+    assert_ne!(
+        tag2, tag3,
+        "Different identity/collection split should differ"
+    );
 }
 
 /// Test that value bytes are appended after domain separator

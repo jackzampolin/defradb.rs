@@ -665,7 +665,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 success,
                 error,
             } => {
-                eprintln!("[DOCSYNC] BitswapComplete query_id={} success={} error={:?}", query_id.0, success, error);
+                eprintln!(
+                    "[DOCSYNC] BitswapComplete query_id={} success={} error={:?}",
+                    query_id.0, success, error
+                );
                 tracing::info!(
                     query_id = query_id.0,
                     success = success,
@@ -678,7 +681,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     // If a DAG still has missing links after this fetch, initiate
                     // additional Bitswap fetches for the missing child blocks.
                     let pending_dags: Vec<Cid> = self.manager.pending_dag_cids();
-                    eprintln!("[DOCSYNC] BitswapComplete: pending_dags count={}", pending_dags.len());
+                    eprintln!(
+                        "[DOCSYNC] BitswapComplete: pending_dags count={}",
+                        pending_dags.len()
+                    );
 
                     for root_cid in pending_dags {
                         eprintln!("[DOCSYNC] Retrying pending DAG root_cid={}", root_cid);
@@ -697,11 +703,13 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                                 let missing = self.manager.pending_dag_missing(&root_cid);
                                 if !missing.is_empty() {
                                     eprintln!("[DOCSYNC] Pending DAG has {} missing child blocks, fetching via Bitswap root_cid={}", missing.len(), root_cid);
-                                    let providers = self.peer_state.connected_peers().into_iter().collect::<Vec<_>>();
-                                    if let Err(e) = self
-                                        .host
-                                        .bitswap_sync(root_cid, providers, missing)
-                                        .await
+                                    let providers = self
+                                        .peer_state
+                                        .connected_peers()
+                                        .into_iter()
+                                        .collect::<Vec<_>>();
+                                    if let Err(e) =
+                                        self.host.bitswap_sync(root_cid, providers, missing).await
                                     {
                                         eprintln!("[DOCSYNC] Failed to start Bitswap for child blocks: {}", e);
                                         tracing::warn!(
@@ -720,7 +728,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                                 );
                             }
                             Err(e) => {
-                                eprintln!("[DOCSYNC] Failed to retry pending DAG root_cid={}: {}", root_cid, e);
+                                eprintln!(
+                                    "[DOCSYNC] Failed to retry pending DAG root_cid={}: {}",
+                                    root_cid, e
+                                );
                                 tracing::warn!(
                                     query_id = query_id.0,
                                     root_cid = %root_cid,
@@ -741,7 +752,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             }
             HostEvent::DocSyncRequest { peer_id, request } => {
                 // Handle DocSync request - respond with document head CIDs
-                eprintln!("[DOCSYNC] Received DocSyncRequest from peer={} doc_ids={:?}", peer_id, request.doc_ids);
+                eprintln!(
+                    "[DOCSYNC] Received DocSyncRequest from peer={} doc_ids={:?}",
+                    peer_id, request.doc_ids
+                );
                 tracing::debug!(
                     peer_id = %peer_id,
                     doc_ids = ?request.doc_ids,
@@ -755,7 +769,11 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     eprintln!("[DOCSYNC] Looking up heads for doc_id={}", doc_id);
                     match self.head_provider.get_document_heads(doc_id).await {
                         Ok(heads) => {
-                            eprintln!("[DOCSYNC] Found {} heads for doc_id={}", heads.len(), doc_id);
+                            eprintln!(
+                                "[DOCSYNC] Found {} heads for doc_id={}",
+                                heads.len(),
+                                doc_id
+                            );
                             if !heads.is_empty() {
                                 tracing::debug!(
                                     doc_id = %doc_id,
@@ -779,7 +797,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     }
                 }
 
-                eprintln!("[DOCSYNC] Sending DocSync response with {} results", results.len());
+                eprintln!(
+                    "[DOCSYNC] Sending DocSync response with {} results",
+                    results.len()
+                );
                 tracing::debug!(
                     peer_id = %peer_id,
                     result_count = results.len(),
@@ -817,7 +838,12 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             }
             HostEvent::DocSyncReply { peer_id, reply } => {
                 // Handle incoming DocSync reply - fetch missing blocks via Bitswap
-                eprintln!("[DOCSYNC] Received DocSyncReply from peer={} message_id={} results_count={}", peer_id, reply.message_id, reply.results.len());
+                eprintln!(
+                    "[DOCSYNC] Received DocSyncReply from peer={} message_id={} results_count={}",
+                    peer_id,
+                    reply.message_id,
+                    reply.results.len()
+                );
                 tracing::info!(
                     peer_id = %peer_id,
                     message_id = %reply.message_id,
@@ -872,7 +898,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 }
 
                 if !cids_to_fetch.is_empty() {
-                    eprintln!("[DOCSYNC] Initiating Bitswap fetch for {} CIDs", cids_to_fetch.len());
+                    eprintln!(
+                        "[DOCSYNC] Initiating Bitswap fetch for {} CIDs",
+                        cids_to_fetch.len()
+                    );
                     tracing::info!(
                         cid_count = cids_to_fetch.len(),
                         "Initiating Bitswap fetch for DocSync blocks"
@@ -883,7 +912,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     // emit DagReady events which flow through the replication loop
                     // and produce merge_complete events.
                     for (root_cid, doc_id) in &cids_to_fetch {
-                        eprintln!("[DOCSYNC] Registering pending DAG cid={} doc_id={}", root_cid, doc_id);
+                        eprintln!(
+                            "[DOCSYNC] Registering pending DAG cid={} doc_id={}",
+                            root_cid, doc_id
+                        );
                         // Register as pending DAG so BitswapComplete triggers merge
                         self.manager.register_docsync_dag(*root_cid, doc_id.clone());
 
@@ -895,7 +927,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                             .bitswap_sync(*root_cid, vec![peer_id], vec![*root_cid])
                             .await
                         {
-                            eprintln!("[DOCSYNC] Failed to start Bitswap sync for cid={}: {}", root_cid, e);
+                            eprintln!(
+                                "[DOCSYNC] Failed to start Bitswap sync for cid={}: {}",
+                                root_cid, e
+                            );
                             tracing::warn!(
                                 error = %e,
                                 cid = %root_cid,
@@ -925,7 +960,8 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     Ok(heads) => {
                         eprintln!(
                             "[BRANCHABLE] Found {} collection heads for {}",
-                            heads.len(), request.collection_id
+                            heads.len(),
+                            request.collection_id
                         );
                         for h in &heads {
                             eprintln!("[BRANCHABLE]   head CID: {}", h);
@@ -933,10 +969,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                         heads.iter().map(|cid| cid.to_bytes()).collect()
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[BRANCHABLE] Failed to get collection heads: {}",
-                            e
-                        );
+                        eprintln!("[BRANCHABLE] Failed to get collection heads: {}", e);
                         Vec::new()
                     }
                 };
@@ -973,11 +1006,16 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 // Handle incoming BranchableSync reply - fetch missing blocks via Bitswap
                 eprintln!(
                     "[BRANCHABLE] Received BranchableSyncReply from peer={} collection={} heads={}",
-                    peer_id, reply.collection_id, reply.heads.len()
+                    peer_id,
+                    reply.collection_id,
+                    reply.heads.len()
                 );
 
                 if reply.heads.is_empty() {
-                    eprintln!("[BRANCHABLE] Peer has no heads for collection {}", reply.collection_id);
+                    eprintln!(
+                        "[BRANCHABLE] Peer has no heads for collection {}",
+                        reply.collection_id
+                    );
                     return Ok(());
                 }
 
@@ -1248,14 +1286,23 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             }
         };
 
-        eprintln!("[PUSH-REPLICATORS] cid={} doc_id={} collection={} replicator_count={}", cid, doc_id, collection_id, replicators.len());
+        eprintln!(
+            "[PUSH-REPLICATORS] cid={} doc_id={} collection={} replicator_count={}",
+            cid,
+            doc_id,
+            collection_id,
+            replicators.len()
+        );
 
         for rep in &replicators {
             // Check if this replicator is registered for the collection
             // Empty collections means "all collections" in Go semantics
             if !rep.collections.is_empty() && !rep.collections.contains(&collection_id.to_string())
             {
-                eprintln!("[PUSH-REPLICATORS] Skipping replicator (collection mismatch): {:?}", rep.collections);
+                eprintln!(
+                    "[PUSH-REPLICATORS] Skipping replicator (collection mismatch): {:?}",
+                    rep.collections
+                );
                 continue;
             }
 

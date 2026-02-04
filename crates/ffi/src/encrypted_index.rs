@@ -601,11 +601,17 @@ mod tests {
         }
 
         let result = unsafe { list_all_encrypted_indexes(node, std::ptr::null()) };
-        assert_eq!(result.status, 0, "list_all_encrypted_indexes should succeed");
+        assert_eq!(
+            result.status, 0,
+            "list_all_encrypted_indexes should succeed"
+        );
 
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Person"), "should contain Person collection");
-        assert!(value.contains("Company"), "should contain Company collection");
+        assert!(
+            value.contains("Company"),
+            "should contain Company collection"
+        );
         assert!(value.contains("ssn"), "should contain ssn field");
         assert!(value.contains("taxId"), "should contain taxId field");
         unsafe { crate::types::defra_free_string(result.value) };

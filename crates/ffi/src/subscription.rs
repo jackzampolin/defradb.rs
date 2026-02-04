@@ -274,7 +274,9 @@ pub extern "C" fn poll_graphql_subscription(
 ) -> PollSubscriptionResult {
     let id_str = match unsafe { c_str_to_string(subscription_id) } {
         Some(s) => s,
-        None => return PollSubscriptionResult::error("invalid subscription id: null or invalid UTF-8"),
+        None => {
+            return PollSubscriptionResult::error("invalid subscription id: null or invalid UTF-8")
+        }
     };
     let handle = match id_str.parse::<usize>() {
         Ok(h) => h,
@@ -321,16 +323,12 @@ pub extern "C" fn close_graphql_subscription(
     let id_str = match unsafe { c_str_to_string(subscription_id) } {
         Some(s) => s,
         None => {
-            return CloseSubscriptionResult::error(
-                "invalid subscription id: null or invalid UTF-8",
-            )
+            return CloseSubscriptionResult::error("invalid subscription id: null or invalid UTF-8")
         }
     };
     let handle = match id_str.parse::<usize>() {
         Ok(h) => h,
-        Err(_) => {
-            return CloseSubscriptionResult::error("invalid subscription id: not a number")
-        }
+        Err(_) => return CloseSubscriptionResult::error("invalid subscription id: not a number"),
     };
     close_subscription(handle)
 }

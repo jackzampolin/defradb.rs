@@ -60,16 +60,14 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
 
                 match key_type.as_str() {
                     "secp256k1" => {
-                        let private_key =
-                            crypto::Secp256k1PrivateKey::from_bytes(key_bytes)
-                                .map_err(|e| format!("failed to load secp256k1 key: {}", e))?;
+                        let private_key = crypto::Secp256k1PrivateKey::from_bytes(key_bytes)
+                            .map_err(|e| format!("failed to load secp256k1 key: {}", e))?;
                         identity::RawIdentity::from_secp256k1(private_key)
                             .map_err(|e| format!("failed to create node identity: {}", e))?
                     }
                     "ed25519" => {
-                        let private_key =
-                            crypto::Ed25519PrivateKey::from_bytes(key_bytes)
-                                .map_err(|e| format!("failed to load ed25519 key: {}", e))?;
+                        let private_key = crypto::Ed25519PrivateKey::from_bytes(key_bytes)
+                            .map_err(|e| format!("failed to load ed25519 key: {}", e))?;
                         identity::RawIdentity::from_ed25519(private_key)
                             .map_err(|e| format!("failed to create node identity: {}", e))?
                     }

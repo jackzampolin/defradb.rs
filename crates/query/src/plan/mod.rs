@@ -20,7 +20,7 @@ mod type_join;
 pub mod view;
 
 pub use alldocs::AllDocsNode;
-pub use average::{AvgSourceMeta, AverageNode};
+pub use average::{AverageNode, AvgSourceMeta};
 pub use count::{CountNode, CountSourceMeta};
 pub use groupby::{ChildSelectMeta, DocumentGroup, GroupAlias, GroupByNode, InnerAggregateDef};
 pub use index_scan::IndexScanNode;
@@ -70,10 +70,7 @@ fn strip_docid_value(value: &serde_json::Value) -> serde_json::Value {
                             .map(|item| strip_docid_value(item))
                             .filter(|item| {
                                 !item.is_null()
-                                    && !item
-                                        .as_object()
-                                        .map(|o| o.is_empty())
-                                        .unwrap_or(false)
+                                    && !item.as_object().map(|o| o.is_empty()).unwrap_or(false)
                             })
                             .collect();
                         match filtered.len() {
@@ -89,10 +86,7 @@ fn strip_docid_value(value: &serde_json::Value) -> serde_json::Value {
                                 }
                             }
                             _ => {
-                                result.insert(
-                                    key.clone(),
-                                    serde_json::Value::Array(filtered),
-                                );
+                                result.insert(key.clone(), serde_json::Value::Array(filtered));
                             }
                         }
                     } else {

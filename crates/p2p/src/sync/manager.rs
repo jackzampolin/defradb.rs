@@ -219,7 +219,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         // Parse CID from message
         let cid = Cid::try_from(msg.cid.as_slice())
             .map_err(|e| Error::InvalidCid(format!("Failed to parse CID: {}", e)))?;
-        eprintln!("[SYNC-MGR] process_pushlog cid={} doc_id={} collection={} block_len={}", cid, msg.doc_id, msg.collection_id, msg.block.len());
+        eprintln!(
+            "[SYNC-MGR] process_pushlog cid={} doc_id={} collection={} block_len={}",
+            cid,
+            msg.doc_id,
+            msg.collection_id,
+            msg.block.len()
+        );
 
         // Try to acquire exclusive processing rights for this CID
         match self.process_queue.try_acquire(&cid).await {
@@ -547,10 +553,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         }
                     }
                     Ok(false) => {
-                        eprintln!(
-                            "[DAG-WALK] Missing block at depth: cid={}",
-                            link_cid
-                        );
+                        eprintln!("[DAG-WALK] Missing block at depth: cid={}", link_cid);
                         missing.push(link_cid);
                     }
                     Err(e) => {
@@ -902,7 +905,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         eprintln!(
             "[DAG-RETRY] root_cid={} doc_id={} missing_count={}",
-            root_cid, info.doc_id, missing.len()
+            root_cid,
+            info.doc_id,
+            missing.len()
         );
 
         if !missing.is_empty() {

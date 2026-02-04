@@ -85,8 +85,7 @@ pub fn generate_equality_tag(
     let domain_separator = format!("eq:{}:{}:{}", identity_str, collection_id, field_name);
 
     // Create HMAC-SHA256 instance
-    let mut mac = HmacSha256::new_from_slice(key)
-        .expect("HMAC can take key of any size");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
 
     // Feed domain separator and value
     mac.update(domain_separator.as_bytes());
@@ -111,7 +110,13 @@ pub fn generate_equality_tag_str(
     field_name: &str,
     value: &[u8],
 ) -> [u8; SEARCH_TAG_SIZE] {
-    generate_equality_tag(key, identity_id.as_bytes(), collection_id, field_name, value)
+    generate_equality_tag(
+        key,
+        identity_id.as_bytes(),
+        collection_id,
+        field_name,
+        value,
+    )
 }
 
 #[cfg(test)]

@@ -410,9 +410,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     // Recursive call — the parent will in turn merge its own parents.
                     // Each composite opens its own transaction so ordering is safe.
                     // Box::pin is required because recursive async fns are unsized.
-                    let _ = Box::pin(
-                        self.process_composite_delta(head_cid, &head_block, head_payload, metadata),
-                    )
+                    let _ = Box::pin(self.process_composite_delta(
+                        head_cid,
+                        &head_block,
+                        head_payload,
+                        metadata,
+                    ))
                     .await;
                 }
             }
@@ -584,17 +587,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             // exclude this document (or show _deleted:true).
                             // The delete composite has no field links, so field_values
                             // is empty — but we still need to mark the doc as deleted.
-                            let deleted_key = build_deleted_key(
-                                collection.collection_id(),
-                                &doc_id_str,
-                            );
-                            if let Err(e) = datastore
-                                .set(&deleted_key, &[DELETED_MARKER])
-                                .await
-                            {
-                                process_error = Some(MergeError::Database(
-                                    crate::error::Error::Storage(e),
-                                ));
+                            let deleted_key =
+                                build_deleted_key(collection.collection_id(), &doc_id_str);
+                            if let Err(e) = datastore.set(&deleted_key, &[DELETED_MARKER]).await {
+                                process_error =
+                                    Some(MergeError::Database(crate::error::Error::Storage(e)));
                             } else {
                                 tracing::info!(
                                     doc_id = %doc_id_str,
@@ -688,9 +685,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
                 // Delete any existing composite head for this doc before
                 // writing the new one (replace, not accumulate).
-                let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(
-                    &doc_id_str, "C",
-                );
+                let prefix =
+                    storage::keys::headstore::HeadstoreDocKey::field_prefix(&doc_id_str, "C");
                 if let Ok(mut iter) = headstore
                     .iterator(datastore::IterOptions::new().with_prefix(prefix))
                     .await
@@ -723,11 +719,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         );
 
                         // Delete existing field head entries for this field
-                        let field_prefix =
-                            storage::keys::headstore::HeadstoreDocKey::field_prefix(
-                                &doc_id_str,
-                                &dag_link.name,
-                            );
+                        let field_prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(
+                            &doc_id_str,
+                            &dag_link.name,
+                        );
                         if let Ok(mut iter) = headstore
                             .iterator(datastore::IterOptions::new().with_prefix(field_prefix))
                             .await
@@ -784,10 +779,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     // event so the test framework (and Go event system) can track
                     // collection DAG heads separately from document DAG heads.
                     if is_branchable {
-                        let by_peer = metadata
-                            .creator
-                            .unwrap_or("")
-                            .to_string();
+                        let by_peer = metadata.creator.unwrap_or("").to_string();
                         let mc = MergeCompleteData {
                             doc_id: String::new(), // empty → keyed by collection_id
                             cid: *cid,
@@ -999,20 +991,15 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // in CRDT accumulation storage, so we must seed before merging remote deltas.
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
         if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
-            if let Ok(Some(existing_doc)) =
-                collection.get_with_datastore(datastore, &doc_id).await
+            if let Ok(Some(existing_doc)) = collection.get_with_datastore(datastore, &doc_id).await
             {
                 if let Some(field_value) = existing_doc.get(&payload.field_name) {
                     match (numeric_kind, field_value) {
                         (NumericKind::Int64, NormalValue::Int(v)) => {
-                            let _ = counter
-                                .seed_if_uninitialized_int64(datastore, *v)
-                                .await;
+                            let _ = counter.seed_if_uninitialized_int64(datastore, *v).await;
                         }
                         (NumericKind::Float64, NormalValue::Float64(v)) => {
-                            let _ = counter
-                                .seed_if_uninitialized_float64(datastore, *v)
-                                .await;
+                            let _ = counter.seed_if_uninitialized_float64(datastore, *v).await;
                         }
                         _ => {}
                     }
@@ -1169,9 +1156,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         child_cid = %cid,
                         "Recursively merging parent collection block"
                     );
-                    let _ = Box::pin(
-                        self.process_collection_delta(head_cid, &head_block, head_payload, metadata),
-                    )
+                    let _ = Box::pin(self.process_collection_delta(
+                        head_cid,
+                        &head_block,
+                        head_payload,
+                        metadata,
+                    ))
                     .await;
                 }
             }
@@ -1229,13 +1219,19 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
                 match &linked_block.delta {
                     CrdtDelta::Composite(composite_payload) => {
-                        let doc_id_str = String::from_utf8_lossy(&composite_payload.doc_id).to_string();
+                        let doc_id_str =
+                            String::from_utf8_lossy(&composite_payload.doc_id).to_string();
                         eprintln!(
                             "[MERGE-COL] Processing linked composite {} doc_id={}",
                             link_cid, doc_id_str
                         );
                         match self
-                            .process_composite_delta(link_cid, &linked_block, composite_payload, metadata)
+                            .process_composite_delta(
+                                link_cid,
+                                &linked_block,
+                                composite_payload,
+                                metadata,
+                            )
                             .await
                         {
                             Ok(MergeOutcome::Merged) => {
@@ -1258,7 +1254,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                 }
                             }
                             Ok(outcome) => {
-                                eprintln!("[MERGE-COL] Composite {} skipped: {:?}", link_cid, outcome);
+                                eprintln!(
+                                    "[MERGE-COL] Composite {} skipped: {:?}",
+                                    link_cid, outcome
+                                );
                             }
                             Err(e) => {
                                 eprintln!("[MERGE-COL] Composite {} FAILED: {}", link_cid, e);
@@ -1278,9 +1277,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
         // Update collection headstore: write the new collection head CID
         // and delete any previous heads that this block supersedes.
-        let collection_id = metadata
-            .collection_id
-            .unwrap_or(&payload.schema_version_id);
+        let collection_id = metadata.collection_id.unwrap_or(&payload.schema_version_id);
         let short_id = collection_short_id(collection_id);
 
         let txn = self.db.new_txn(false).await?;
@@ -1425,12 +1422,14 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         MergeError::Storage(format!("Field block not found: {}", field_cid))
                     })?;
 
-                let field_block = Block::from_dag_cbor(&field_bytes)
-                    .map_err(|e| MergeError::BlockDecode(format!("Failed to decode field block: {}", e)))?;
+                let field_block = Block::from_dag_cbor(&field_bytes).map_err(|e| {
+                    MergeError::BlockDecode(format!("Failed to decode field block: {}", e))
+                })?;
 
                 if let CrdtDelta::FieldDefinition(field_payload) = &field_block.delta {
                     // Use the field block CID as the field ID (matches Go's behavior)
-                    let field_desc = self.field_definition_to_description(field_payload, &field_cid.to_string())?;
+                    let field_desc = self
+                        .field_definition_to_description(field_payload, &field_cid.to_string())?;
                     fields.push(field_desc);
                 } else {
                     tracing::warn!(
@@ -1456,12 +1455,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Build the CollectionVersion
         // Synced collections come in as inactive (user must activate manually via SetActiveCollectionVersion)
         // and materialized (matching Go's behavior)
-        let mut schema = CollectionVersion::new(
-            &collection_name,
-            &version_id,
-            &collection_id,
-            fields,
-        );
+        let mut schema =
+            CollectionVersion::new(&collection_name, &version_id, &collection_id, fields);
         schema.is_active = false;
         schema.is_materialized = true;
 
@@ -1485,15 +1480,18 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             systemstore
                 .set(&version_key.bytes(), b"1")
                 .await
-                .map_err(|e| MergeError::Storage(format!("Failed to store version index: {}", e)))?;
-
+                .map_err(|e| {
+                    MergeError::Storage(format!("Failed to store version index: {}", e))
+                })?;
         }
         txn.commit().await.map_err(MergeError::Database)?;
 
         // Add to runtime cache so it's visible via list_collections/get_collection.
         // Synced collections are inactive but still need to be in the cache for
         // GetCollections with IncludeInactive=true to find them.
-        self.db.add_collection_to_cache(schema.clone()).map_err(MergeError::Database)?;
+        self.db
+            .add_collection_to_cache(schema.clone())
+            .map_err(MergeError::Database)?;
 
         eprintln!(
             "[MERGE-HANDLER] Stored synced collection name={} version={} is_active={} is_materialized={} (added to cache)",
@@ -1516,7 +1514,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         payload: &FieldDefinitionDeltaPayload,
         field_id: &str,
     ) -> Result<FieldDescription, MergeError> {
-        let name = payload.name.clone().unwrap_or_else(|| format!("field_{}", field_id));
+        let name = payload
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("field_{}", field_id));
 
         // Determine the FieldKind from the payload
         let kind = if let Some(collection_id) = &payload.collection_id {
@@ -1608,7 +1609,9 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
             CrdtDelta::FieldDefinition(_) => {
                 // Field definitions are processed as part of CollectionDefinition
                 tracing::debug!(cid = %cid, "FieldDefinition delta - skipping (processed with collection)");
-                Ok(MergeOutcome::skipped("field definition processed with collection"))
+                Ok(MergeOutcome::skipped(
+                    "field definition processed with collection",
+                ))
             }
             CrdtDelta::CollectionDefinition(payload) => {
                 self.process_collection_definition_delta(cid, &block, payload, &metadata)

@@ -139,7 +139,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                     // If this is a unique constraint violation, return the core message without wrapping
                     if msg.contains("can not index a doc's field(s) that violates unique index") {
                         query::error::QueryError::execution(
-                            "can not index a doc's field(s) that violates unique index.".to_string(),
+                            "can not index a doc's field(s) that violates unique index."
+                                .to_string(),
                         )
                     } else {
                         query::error::QueryError::execution(format!("update error: {}", other))

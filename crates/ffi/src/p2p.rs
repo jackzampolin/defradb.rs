@@ -22,7 +22,9 @@ use blockstore::{Blockstore, DefraBlockstore};
 use defra_core::Block;
 use p2p::bitswap::BitswapStoreAdapter;
 use p2p::message::PushLogRequest;
-use p2p::sync::{ReplicationConfig, ReplicationLoop, ReplicationResult, SyncConfig, SyncCoordinator};
+use p2p::sync::{
+    ReplicationConfig, ReplicationLoop, ReplicationResult, SyncConfig, SyncCoordinator,
+};
 use p2p::topics::DefraTopic;
 use p2p::P2PHost;
 use storage::corekv::IterOptions;
@@ -146,16 +148,14 @@ pub unsafe extern "C" fn new_node_with_p2p(
 
                 match key_type.as_str() {
                     "secp256k1" => {
-                        let private_key =
-                            crypto::Secp256k1PrivateKey::from_bytes(key_bytes)
-                                .map_err(|e| format!("failed to load secp256k1 key: {}", e))?;
+                        let private_key = crypto::Secp256k1PrivateKey::from_bytes(key_bytes)
+                            .map_err(|e| format!("failed to load secp256k1 key: {}", e))?;
                         identity::RawIdentity::from_secp256k1(private_key)
                             .map_err(|e| format!("failed to create node identity: {}", e))?
                     }
                     "ed25519" => {
-                        let private_key =
-                            crypto::Ed25519PrivateKey::from_bytes(key_bytes)
-                                .map_err(|e| format!("failed to load ed25519 key: {}", e))?;
+                        let private_key = crypto::Ed25519PrivateKey::from_bytes(key_bytes)
+                            .map_err(|e| format!("failed to load ed25519 key: {}", e))?;
                         identity::RawIdentity::from_ed25519(private_key)
                             .map_err(|e| format!("failed to create node identity: {}", e))?
                     }
@@ -194,7 +194,10 @@ pub unsafe extern "C" fn new_node_with_p2p(
                 },
             );
 
-            eprintln!("[SIGN-DEBUG] new_node_with_p2p: node identity DID={}", did_str);
+            eprintln!(
+                "[SIGN-DEBUG] new_node_with_p2p: node identity DID={}",
+                did_str
+            );
             (Some(raw_identity), Some(did_str))
         } else {
             (None, None)
@@ -242,7 +245,11 @@ pub unsafe extern "C" fn new_node_with_p2p(
             .map_err(|e| format!("failed to start listening: {}", e))?;
 
         // Subscribe to default GossipSub topics (matches Go's p2p.New behavior)
-        for topic in &[DefraTopic::DocSync, DefraTopic::Encryption, DefraTopic::Custom("sync-branchable".to_string())] {
+        for topic in &[
+            DefraTopic::DocSync,
+            DefraTopic::Encryption,
+            DefraTopic::Custom("sync-branchable".to_string()),
+        ] {
             if let Err(e) = handle.subscribe(topic.clone()).await {
                 tracing::warn!(topic = %topic, error = %e, "Failed to subscribe to default topic");
             }
@@ -329,7 +336,10 @@ pub unsafe extern "C" fn new_node_with_p2p(
                         doc_id,
                         collection_id,
                     } => {
-                        eprintln!("[REPL-LOOP] Publishing merge_complete cid={} doc_id={} collection={}", cid, doc_id, collection_id);
+                        eprintln!(
+                            "[REPL-LOOP] Publishing merge_complete cid={} doc_id={} collection={}",
+                            cid, doc_id, collection_id
+                        );
                         let mc = events::MergeCompleteData {
                             doc_id: doc_id.clone(),
                             cid: *cid,
@@ -343,7 +353,10 @@ pub unsafe extern "C" fn new_node_with_p2p(
                         // bridge picks it up. The Go test framework uses this to know
                         // when encrypted index data is available after replication.
                         if !doc_id.is_empty() {
-                            eprintln!("[REPL-LOOP] Publishing se_artifact_received for doc_id={}", doc_id);
+                            eprintln!(
+                                "[REPL-LOOP] Publishing se_artifact_received for doc_id={}",
+                                doc_id
+                            );
                             event_bus_for_repl.publish(events::Message::se_artifact_received(
                                 events::SEArtifactReceivedData {
                                     doc_id: doc_id.clone(),
@@ -404,7 +417,10 @@ pub unsafe extern "C" fn new_node_with_p2p(
                 if let Some(update) = msg.as_update() {
                     // Skip relay updates (already from P2P)
                     if update.is_relay {
-                        eprintln!("[BROADCAST] Skipping relay update cid={} doc_id={}", update.cid, update.doc_id);
+                        eprintln!(
+                            "[BROADCAST] Skipping relay update cid={} doc_id={}",
+                            update.cid, update.doc_id
+                        );
                         continue;
                     }
                     let cid = update.cid;
@@ -412,7 +428,13 @@ pub unsafe extern "C" fn new_node_with_p2p(
                     let doc_id = update.doc_id.clone();
                     let collection_id = update.collection_id.clone();
 
-                    eprintln!("[BROADCAST] Got local update cid={} doc_id={} collection={} block_len={}", cid, doc_id, collection_id, block.len());
+                    eprintln!(
+                        "[BROADCAST] Got local update cid={} doc_id={} collection={} block_len={}",
+                        cid,
+                        doc_id,
+                        collection_id,
+                        block.len()
+                    );
 
                     // Push to replicator peers via direct PushLog.
                     coord_for_broadcast
@@ -438,9 +460,9 @@ pub unsafe extern "C" fn new_node_with_p2p(
                                         && attempt <= max_retries
                                     {
                                         let delay_ms = 100 * (1u64 << attempt.min(5));
-                                        tokio::time::sleep(
-                                            std::time::Duration::from_millis(delay_ms),
-                                        )
+                                        tokio::time::sleep(std::time::Duration::from_millis(
+                                            delay_ms,
+                                        ))
                                         .await;
                                         continue;
                                     }
@@ -693,8 +715,7 @@ pub unsafe extern "C" fn p2p_connect(
 
                 // Wait until the connection is established so that
                 // p2p_active_peers returns the peer immediately after connect.
-                let deadline =
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
                 loop {
                     if let Ok(connected) = p2p.handle.connected_peers().await {
                         if connected.contains(&parsed.peer_id) {
@@ -742,7 +763,12 @@ pub unsafe extern "C" fn p2p_set_replicator(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pReplicatorCreate) {
+    if let Err(e) = check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::P2pReplicatorCreate,
+    ) {
         return e;
     }
 
@@ -948,8 +974,7 @@ async fn push_existing_docs(
 
         // For each document, push composite head blocks to the replicator.
         for doc_id in &doc_ids {
-            let prefix =
-                storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
+            let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
             let opts = IterOptions::new().with_prefix(prefix);
             let mut iter = headstore
                 .iterator(opts)
@@ -987,9 +1012,7 @@ async fn push_existing_docs(
                     block_data,
                 );
 
-                if let Err(e) =
-                    p2p::signing::sign_message(handle.keypair(), &mut request)
-                {
+                if let Err(e) = p2p::signing::sign_message(handle.keypair(), &mut request) {
                     tracing::warn!(error = %e, "Failed to sign PushLog request");
                     continue;
                 }
@@ -1031,7 +1054,12 @@ pub unsafe extern "C" fn p2p_delete_replicator(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pReplicatorDelete) {
+    if let Err(e) = check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::P2pReplicatorDelete,
+    ) {
         return e;
     }
 
@@ -1043,9 +1071,7 @@ pub unsafe extern "C" fn p2p_delete_replicator(
     // Parse optional collections filter
     let collections: Vec<String> = if !collections_json.is_null() {
         match c_str_to_string(collections_json) {
-            Some(s) if !s.is_empty() && s != "[]" => {
-                serde_json::from_str(&s).unwrap_or_default()
-            }
+            Some(s) if !s.is_empty() && s != "[]" => serde_json::from_str(&s).unwrap_or_default(),
             _ => Vec::new(),
         }
     } else {
@@ -1071,7 +1097,9 @@ pub unsafe extern "C" fn p2p_delete_replicator(
 
                 // Signal that the replicator deletion is complete.
                 // The Go test framework waits for this event before proceeding.
-                state.event_bus.publish(events::Message::replicator_completed());
+                state
+                    .event_bus
+                    .publish(events::Message::replicator_completed());
 
                 Ok(())
             })
@@ -1108,7 +1136,12 @@ pub unsafe extern "C" fn p2p_get_all_replicators(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pReplicatorList) {
+    if let Err(e) = check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::P2pReplicatorList,
+    ) {
         return e;
     }
 
@@ -1176,7 +1209,12 @@ pub unsafe extern "C" fn p2p_add_collections(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pCollectionCreate) {
+    if let Err(e) = check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::P2pCollectionCreate,
+    ) {
         return e;
     }
 
@@ -1248,7 +1286,12 @@ pub unsafe extern "C" fn p2p_remove_collections(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pCollectionDelete) {
+    if let Err(e) = check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::P2pCollectionDelete,
+    ) {
         return e;
     }
 
@@ -1315,7 +1358,12 @@ pub unsafe extern "C" fn p2p_get_all_collections(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pCollectionList) {
+    if let Err(e) = check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::P2pCollectionList,
+    ) {
         return e;
     }
 
@@ -1357,7 +1405,12 @@ pub unsafe extern "C" fn p2p_add_documents(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pDocumentCreate) {
+    if let Err(e) = check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::P2pDocumentCreate,
+    ) {
         return e;
     }
 
@@ -1425,7 +1478,12 @@ pub unsafe extern "C" fn p2p_remove_documents(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pDocumentDelete) {
+    if let Err(e) = check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::P2pDocumentDelete,
+    ) {
         return e;
     }
 
@@ -1489,7 +1547,8 @@ pub unsafe extern "C" fn p2p_get_all_documents(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pDocumentList) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pDocumentList)
+    {
         return e;
     }
 
@@ -1539,7 +1598,12 @@ pub unsafe extern "C" fn p2p_sync_documents(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pDocumentCreate) {
+    if let Err(e) = check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::P2pDocumentCreate,
+    ) {
         return e;
     }
 
@@ -1558,7 +1622,10 @@ pub unsafe extern "C" fn p2p_sync_documents(
         Err(e) => return FfiResult::error(e),
     };
 
-    eprintln!("[DOCSYNC] p2p_sync_documents called: collection={} doc_ids={:?}", collection_name_str, doc_ids);
+    eprintln!(
+        "[DOCSYNC] p2p_sync_documents called: collection={} doc_ids={:?}",
+        collection_name_str, doc_ids
+    );
 
     let result = NODES
         .get(node_ptr, |state| {
@@ -1589,7 +1656,11 @@ pub unsafe extern "C" fn p2p_sync_documents(
                     return Ok(());
                 }
 
-                eprintln!("[DOCSYNC] Starting DocSync for {} documents to {} peers", doc_ids.len(), connected_peers.len());
+                eprintln!(
+                    "[DOCSYNC] Starting DocSync for {} documents to {} peers",
+                    doc_ids.len(),
+                    connected_peers.len()
+                );
 
                 // Create DocSync request
                 let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
@@ -1614,8 +1685,13 @@ pub unsafe extern "C" fn p2p_sync_documents(
                     tokio::spawn(async move {
                         eprintln!("[DOCSYNC] Spawned task sending to peer={}", peer_id);
                         match handle.send_doc_sync_request(peer_id, request_clone).await {
-                            Ok(()) => eprintln!("[DOCSYNC] Sent DocSync request to peer={}", peer_id),
-                            Err(e) => eprintln!("[DOCSYNC] Failed to send DocSync request to peer={}: {}", peer_id, e),
+                            Ok(()) => {
+                                eprintln!("[DOCSYNC] Sent DocSync request to peer={}", peer_id)
+                            }
+                            Err(e) => eprintln!(
+                                "[DOCSYNC] Failed to send DocSync request to peer={}: {}",
+                                peer_id, e
+                            ),
                         }
                     });
                 }
@@ -1648,7 +1724,12 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pCollectionCreate) {
+    if let Err(e) = check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::P2pCollectionCreate,
+    ) {
         return e;
     }
 
@@ -1685,10 +1766,7 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
                         ));
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[FFI-BRANCHABLE] find_collection_by_id error: {}",
-                            e
-                        );
+                        eprintln!("[FFI-BRANCHABLE] find_collection_by_id error: {}", e);
                         return Err(format!("failed to find collection: {}", e));
                     }
                 };
@@ -1791,7 +1869,12 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
 ) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pCollectionCreate) {
+    if let Err(e) = check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::P2pCollectionCreate,
+    ) {
         return e;
     }
 
@@ -1808,12 +1891,7 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
     // Parse the JSON array of version IDs
     let version_ids: Vec<String> = match serde_json::from_str(&version_ids_str) {
         Ok(ids) => ids,
-        Err(e) => {
-            return FfiResult::error(format!(
-                "failed to parse version_ids_json: {}",
-                e
-            ))
-        }
+        Err(e) => return FfiResult::error(format!("failed to parse version_ids_json: {}", e)),
     };
 
     if version_ids.is_empty() {
@@ -2109,4 +2187,3 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
         Err(e) => FfiResult::error(e),
     }
 }
-

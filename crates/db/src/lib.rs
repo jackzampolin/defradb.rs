@@ -44,8 +44,6 @@
 /// ```
 #[cfg(feature = "p2p")]
 pub mod acp_merge_handler;
-#[cfg(feature = "p2p")]
-pub mod head_provider;
 pub mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
 pub mod block_builder;
@@ -64,6 +62,8 @@ pub mod definition_validation;
 pub mod doc_fetcher;
 pub mod doc_mutator;
 pub mod error;
+#[cfg(feature = "p2p")]
+pub mod head_provider;
 pub mod index_manager;
 pub mod lensed_auto_commit_fetcher;
 pub mod lensed_fetcher;
@@ -105,11 +105,11 @@ pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
 pub use doc_fetcher::DbDocFetcher;
 pub use doc_mutator::DbDocMutator;
 pub use error::{Error, Result};
+#[cfg(feature = "p2p")]
+pub use head_provider::DbHeadProvider;
 pub use index_manager::{BulkIndexResult, IndexManager};
 pub use lensed_auto_commit_fetcher::LensedAutoCommitFetcher;
 pub use lensed_fetcher::LensedDocFetcher;
-#[cfg(feature = "p2p")]
-pub use head_provider::DbHeadProvider;
 #[cfg(feature = "p2p")]
 pub use merge_handler::{DbMergeHandler, MergeError};
 #[cfg(feature = "p2p")]
@@ -130,8 +130,8 @@ pub use nac::{create_memory_nac_manager, NacConfig, NacInfo, NacManager};
 
 // SE (Searchable Encryption) exports
 pub use se::{
-    fetch_doc_ids, generate_doc_artifacts, generate_field_artifact, store_artifacts,
-    FieldQuery, FieldValueQuery, SECoordinator,
+    fetch_doc_ids, generate_doc_artifacts, generate_field_artifact, store_artifacts, FieldQuery,
+    FieldValueQuery, SECoordinator,
 };
 
 // Re-export related crate types for convenience

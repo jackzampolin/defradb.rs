@@ -49,11 +49,10 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
         if !full_config.source_schema_version_id.is_empty()
             && !full_config.destination_schema_version_id.is_empty()
         {
-            let database =
-                match NODES.get(node_ptr, |state| state.database.clone()) {
-                    Some(db) => db,
-                    None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-                };
+            let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+                Some(db) => db,
+                None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+            };
 
             let result = rt.block_on(async {
                 let transform_id = database

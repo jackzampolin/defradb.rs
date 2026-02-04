@@ -673,4 +673,3 @@ mod tests {
 }
 
 // Stub implementations for encrypted index operations (not yet supported)
-

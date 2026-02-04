@@ -1024,7 +1024,9 @@ impl<S: Store> P2PHost<S> {
                         "Failed to send DocSyncReply event - receiver dropped"
                     );
                 } else {
-                    eprintln!("[DOCSYNC] Forwarded DocSyncReply to coordinator via HostEvent channel");
+                    eprintln!(
+                        "[DOCSYNC] Forwarded DocSyncReply to coordinator via HostEvent channel"
+                    );
                     info!(peer_id = %peer_id, "Forwarded DocSyncReply event to coordinator");
                 }
             }
@@ -1567,13 +1569,9 @@ impl<S: Store> P2PHost<S> {
                 let addrs: Vec<String> = connected
                     .iter()
                     .filter_map(|pid| {
-                        self.peer_addrs.get(pid).map(|addr| {
-                            format!(
-                                "{}/p2p/{}",
-                                addr,
-                                pid
-                            )
-                        })
+                        self.peer_addrs
+                            .get(pid)
+                            .map(|addr| format!("{}/p2p/{}", addr, pid))
                     })
                     .collect();
                 if response.send(addrs).is_err() {
@@ -1624,9 +1622,9 @@ impl<S: Store> P2PHost<S> {
                 // For listener: store send_back_addr temporarily; identify will update it.
                 let remote_addr = match &endpoint {
                     libp2p::core::ConnectedPoint::Dialer { address, .. } => address.clone(),
-                    libp2p::core::ConnectedPoint::Listener {
-                        send_back_addr, ..
-                    } => send_back_addr.clone(),
+                    libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } => {
+                        send_back_addr.clone()
+                    }
                 };
                 self.peer_addrs.insert(peer_id, remote_addr);
 
@@ -1899,12 +1897,10 @@ impl<S: Store> P2PHost<S> {
                 // Go-to-Rust sends PushLogRequest (with MetaData).
                 // Try PushLogBroadcast first, then fall back to PushLogRequest.
                 let broadcast =
-                    serde_cbor::from_slice::<PushLogBroadcast>(&message.data).or_else(
-                        |_| {
-                            serde_cbor::from_slice::<PushLogRequest>(&message.data)
-                                .map(|req| PushLogBroadcast::from_request(&req))
-                        },
-                    );
+                    serde_cbor::from_slice::<PushLogBroadcast>(&message.data).or_else(|_| {
+                        serde_cbor::from_slice::<PushLogRequest>(&message.data)
+                            .map(|req| PushLogBroadcast::from_request(&req))
+                    });
 
                 match broadcast {
                     Ok(broadcast) => {

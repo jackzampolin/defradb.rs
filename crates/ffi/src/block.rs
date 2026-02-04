@@ -40,7 +40,8 @@ pub unsafe extern "C" fn block_verify_signature(
     let rt = get_runtime!(FfiResult);
 
     // Check NAC permission for signature verification
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::SignatureVerify) {
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::SignatureVerify)
+    {
         return e;
     }
 
@@ -113,9 +114,7 @@ pub unsafe extern "C" fn block_verify_signature(
                 .map_err(|e| format!("failed to decode block: {}", e))?;
 
             // Check that the block has a signature
-            let sig_cid = block
-                .signature
-                .ok_or("block has no signature")?;
+            let sig_cid = block.signature.ok_or("block has no signature")?;
 
             // Load the signature block from blockstore
             let sig_bytes = blockstore

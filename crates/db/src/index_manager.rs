@@ -26,7 +26,11 @@ pub struct BulkIndexResult {
 /// Generate an index name matching Go's `{Col}_{firstField}_ASC` pattern.
 ///
 /// If the base name already exists, appends `_2`, `_3`, etc. to avoid collisions.
-fn generate_index_name(collection_name: &str, first_field: &str, existing_names: &[String]) -> String {
+fn generate_index_name(
+    collection_name: &str,
+    first_field: &str,
+    existing_names: &[String],
+) -> String {
     let base = format!("{}_{}_ASC", collection_name, first_field);
     if !existing_names.contains(&base) {
         return base;
@@ -135,10 +139,7 @@ impl IndexManager {
     ) -> Result<IndexDescription> {
         // Auto-generate name if empty (matches Go behavior)
         let name = if name.is_empty() {
-            let first_field = fields
-                .first()
-                .map(|f| f.name.as_str())
-                .unwrap_or("unknown");
+            let first_field = fields.first().map(|f| f.name.as_str()).unwrap_or("unknown");
             let existing: Vec<String> = self.indexes.keys().cloned().collect();
             generate_index_name(collection_name, first_field, &existing)
         } else {

@@ -343,10 +343,7 @@ impl PlanNode for MinNode {
                         );
                     }
                     None => {
-                        source_obj.insert(
-                            "childFieldName".to_string(),
-                            serde_json::Value::Null,
-                        );
+                        source_obj.insert("childFieldName".to_string(), serde_json::Value::Null);
                     }
                 }
                 if let Some(ref filter) = s.filter {

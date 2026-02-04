@@ -47,10 +47,7 @@ async fn sign_block(
     // Only sign first field blocks (priority <= 1) and composite blocks.
     // Higher-priority field blocks are not signed — their integrity is
     // guaranteed by the signature on the parent composite block.
-    let is_field = matches!(
-        &block.delta,
-        CrdtDelta::Lww(_) | CrdtDelta::Counter(_)
-    );
+    let is_field = matches!(&block.delta, CrdtDelta::Lww(_) | CrdtDelta::Counter(_));
     if is_field && block.delta.priority() > 1 {
         return Ok(None);
     }
@@ -71,9 +68,8 @@ async fn sign_block(
             (SignatureType::EdDSA, sig)
         }
         "secp256k1" => {
-            let private_key =
-                crypto::Secp256k1PrivateKey::from_bytes(&signer.private_key_bytes)
-                    .map_err(|e| format!("Failed to load secp256k1 private key: {}", e))?;
+            let private_key = crypto::Secp256k1PrivateKey::from_bytes(&signer.private_key_bytes)
+                .map_err(|e| format!("Failed to load secp256k1 private key: {}", e))?;
             let sig = private_key
                 .sign(&block_bytes)
                 .map_err(|e| format!("Failed to sign block: {}", e))?;
@@ -549,19 +545,28 @@ pub async fn write_document_blocks(
                 eprintln!("[SIGN-DEBUG] write_document_blocks: signing field block for field={}, priority={}", field_name, priority);
                 match sign_block(&field_block, signer, blockstore).await {
                     Ok(Some(sig_cid)) => {
-                        eprintln!("[SIGN-DEBUG] write_document_blocks: signed! sig_cid={}", sig_cid);
+                        eprintln!(
+                            "[SIGN-DEBUG] write_document_blocks: signed! sig_cid={}",
+                            sig_cid
+                        );
                         field_block.signature = Some(sig_cid);
                     }
                     Ok(None) => {
                         eprintln!("[SIGN-DEBUG] write_document_blocks: sign_block returned None (priority too high?)");
                     }
                     Err(e) => {
-                        eprintln!("[SIGN-DEBUG] write_document_blocks: sign_block ERROR: {}", e);
+                        eprintln!(
+                            "[SIGN-DEBUG] write_document_blocks: sign_block ERROR: {}",
+                            e
+                        );
                         return Err(e);
                     }
                 }
             } else {
-                eprintln!("[SIGN-DEBUG] write_document_blocks: no signing_config for field={}", field_name);
+                eprintln!(
+                    "[SIGN-DEBUG] write_document_blocks: no signing_config for field={}",
+                    field_name
+                );
             }
 
             // Serialize and generate CID (includes signature CID if signed)
@@ -577,8 +582,14 @@ pub async fn write_document_blocks(
             {
                 let rt_block = Block::from_dag_cbor(&field_block_bytes);
                 match rt_block {
-                    Ok(b) => eprintln!("[SIGN-DEBUG] write_document_blocks: roundtrip signature={:?}", b.signature),
-                    Err(e) => eprintln!("[SIGN-DEBUG] write_document_blocks: roundtrip FAILED: {}", e),
+                    Ok(b) => eprintln!(
+                        "[SIGN-DEBUG] write_document_blocks: roundtrip signature={:?}",
+                        b.signature
+                    ),
+                    Err(e) => eprintln!(
+                        "[SIGN-DEBUG] write_document_blocks: roundtrip FAILED: {}",
+                        e
+                    ),
                 }
             }
 

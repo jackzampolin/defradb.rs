@@ -322,7 +322,10 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .filter(|id| seen.insert(id.clone()))
             .collect();
 
-        Ok(query::fetcher::IndexScanResult::with_raw_count(doc_ids, raw_fetches))
+        Ok(query::fetcher::IndexScanResult::with_raw_count(
+            doc_ids,
+            raw_fetches,
+        ))
     }
 
     fn supports_index_queries(&self) -> bool {

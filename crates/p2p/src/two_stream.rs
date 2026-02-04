@@ -182,8 +182,18 @@ impl TwoStreamHandler {
             .map_err(|e| Error::CborDeserialization(format!("failed to read response: {}", e)))?;
 
         // Debug: hex dump first 200 bytes of response for troubleshooting deserialization
-        let hex_preview: String = buf.iter().take(200).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-        eprintln!("[TWO-STREAM-DESER] Response from peer={} len={} hex={}", peer_id, buf.len(), hex_preview);
+        let hex_preview: String = buf
+            .iter()
+            .take(200)
+            .map(|b| format!("{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(" ");
+        eprintln!(
+            "[TWO-STREAM-DESER] Response from peer={} len={} hex={}",
+            peer_id,
+            buf.len(),
+            hex_preview
+        );
 
         // Also try to parse as generic CBOR value for debugging
         if let Ok(value) = serde_cbor::from_slice::<serde_cbor::Value>(&buf) {
@@ -487,9 +497,9 @@ impl TwoStreamHandler {
             .await
             .map_err(|e| Error::Transport(format!("failed to open stream: {}", e)))?;
 
-        write_message(&mut stream, &request).await.map_err(|e| {
-            Error::CborSerialization(format!("failed to write request: {}", e))
-        })?;
+        write_message(&mut stream, &request)
+            .await
+            .map_err(|e| Error::CborSerialization(format!("failed to write request: {}", e)))?;
 
         tracing::info!(
             peer_id = %peer_id,
@@ -517,9 +527,9 @@ impl TwoStreamHandler {
             .await
             .map_err(|e| Error::Transport(format!("failed to open stream: {}", e)))?;
 
-        write_message(&mut stream, &request).await.map_err(|e| {
-            Error::CborSerialization(format!("failed to write request: {}", e))
-        })?;
+        write_message(&mut stream, &request)
+            .await
+            .map_err(|e| Error::CborSerialization(format!("failed to write request: {}", e)))?;
 
         tracing::info!(
             peer_id = %peer_id,
