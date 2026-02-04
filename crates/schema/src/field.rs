@@ -22,9 +22,10 @@ pub struct FieldDescription {
     #[serde(rename = "Kind", default)]
     pub kind: FieldKind,
 
-    /// Which CRDT to use (defaults to LwwRegister).
+    /// Which CRDT to use.
     /// Go uses "Typ" as the JSON key.
-    #[serde(rename = "Typ", default)]
+    /// Defaults to CType::None to match Go's zero value behavior when deserializing.
+    #[serde(rename = "Typ", default = "default_ctype_none")]
     pub crdt_type: CType,
 
     /// Name of the relation (for relation fields).
