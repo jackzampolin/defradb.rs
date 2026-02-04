@@ -14,6 +14,8 @@ use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 use storage::MemoryStore;
 
+use blockstore::DefraBlockstore;
+use p2p::sync::MergeHandler;
 use p2p::P2PHostHandle;
 
 use crate::policy_yaml::ParsedPolicy;
@@ -128,6 +130,10 @@ fn hash_policy_fields(policy: &ParsedPolicy) -> Vec<u8> {
 pub struct P2PState {
     /// Handle to communicate with the P2P host.
     pub handle: P2PHostHandle,
+    /// Blockstore for accessing IPLD blocks.
+    pub blockstore: Arc<DefraBlockstore<FfiStore>>,
+    /// Merge handler for processing incoming blocks.
+    pub merge_handler: Arc<db::DbMergeHandler<FfiStore, DefraBlockstore<FfiStore>>>,
     /// Collections subscribed for P2P replication (insertion-ordered).
     pub collections: RwLock<Vec<String>>,
     /// Documents subscribed for P2P replication (by doc ID).
@@ -144,28 +150,19 @@ pub struct P2PState {
 }
 
 impl P2PState {
-    /// Create new P2P state with the given host handle.
-    pub fn new(handle: P2PHostHandle) -> Self {
-        Self {
-            handle,
-            collections: RwLock::new(Vec::new()),
-            documents: RwLock::new(HashSet::new()),
-            peer_addresses: RwLock::new(HashMap::new()),
-            host_event_handle: None,
-            replication_handle: None,
-            broadcast_handle: None,
-        }
-    }
-
-    /// Create new P2P state with sync pipeline abort handles.
-    pub fn with_sync_pipeline(
+    /// Create new P2P state with sync pipeline components and abort handles.
+    pub fn new(
         handle: P2PHostHandle,
+        blockstore: Arc<DefraBlockstore<FfiStore>>,
+        merge_handler: Arc<db::DbMergeHandler<FfiStore, DefraBlockstore<FfiStore>>>,
         host_event_handle: tokio::task::AbortHandle,
         replication_handle: tokio::task::AbortHandle,
         broadcast_handle: tokio::task::AbortHandle,
     ) -> Self {
         Self {
             handle,
+            blockstore,
+            merge_handler,
             collections: RwLock::new(Vec::new()),
             documents: RwLock::new(HashSet::new()),
             peer_addresses: RwLock::new(HashMap::new()),
@@ -268,6 +265,12 @@ impl storage::Store for FfiStore {
 
 /// Type alias for the database type used in FFI.
 pub type FfiDatabase = db::DB<FfiStore>;
+
+/// Type alias for the blockstore type used in FFI.
+pub type FfiBlockstore = DefraBlockstore<FfiStore>;
+
+/// Type alias for the merge handler used in FFI.
+pub type FfiMergeHandler = db::DbMergeHandler<FfiStore, FfiBlockstore>;
 
 /// Type alias for node handles (opaque to FFI callers).
 pub type NodeHandle = usize;

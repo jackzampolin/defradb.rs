@@ -18,7 +18,8 @@ use crate::state::{FfiStore, NodeState, P2PState, PolicyStore, NODES};
 use crate::types::{c_str_to_string, FfiResult, NewNodeResult, NodeInitOptions};
 use crate::ERR_INVALID_NODE_HANDLE;
 
-use blockstore::DefraBlockstore;
+use blockstore::{Blockstore, DefraBlockstore};
+use defra_core::Block;
 use p2p::bitswap::BitswapStoreAdapter;
 use p2p::message::PushLogRequest;
 use p2p::sync::{ReplicationConfig, ReplicationLoop, ReplicationResult, SyncConfig, SyncCoordinator};
@@ -457,9 +458,11 @@ pub unsafe extern "C" fn new_node_with_p2p(
             }
         });
 
-        // Create P2P state with sync pipeline abort handles
-        let p2p_state = Arc::new(P2PState::with_sync_pipeline(
+        // Create P2P state with sync pipeline components and abort handles
+        let p2p_state = Arc::new(P2PState::new(
             handle.clone(),
+            blockstore.clone(),
+            merge_handler.clone(),
             host_event_task.abort_handle(),
             replication_task.abort_handle(),
             broadcast_task.abort_handle(),
@@ -1947,10 +1950,148 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                         continue;
                     }
 
-                    // Block was fetched. The actual collection version reconstruction
-                    // and saving would require parsing the CollectionDefinition delta
-                    // and building a CollectionVersion struct. For now, we've successfully
-                    // synced the raw blocks which is the core functionality.
+                    eprintln!(
+                        "[FFI-COLLECTION-VERSION] Block fetched, extracting linked field blocks"
+                    );
+
+                    // Read block data from blockstore
+                    let block_data = match p2p.blockstore.get(&version_cid).await {
+                        Ok(Some(data)) => data,
+                        Ok(None) => {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Block {} not found in blockstore after fetch",
+                                version_cid
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Failed to read block {}: {}",
+                                version_cid, e
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Decode block to extract linked field CIDs
+                    let linked_cids = match Block::from_dag_cbor(&block_data) {
+                        Ok(block) => {
+                            let links = block.all_links();
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Collection block has {} linked CIDs",
+                                links.len()
+                            );
+                            links
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Failed to decode block {}: {}",
+                                version_cid, e
+                            );
+                            vec![]
+                        }
+                    };
+
+                    // Fetch all linked field blocks
+                    for link_cid in &linked_cids {
+                        // Check if we already have this block
+                        match p2p.blockstore.get(link_cid).await {
+                            Ok(Some(_)) => {
+                                eprintln!(
+                                    "[FFI-COLLECTION-VERSION] Link {} already present",
+                                    link_cid
+                                );
+                                continue;
+                            }
+                            Ok(None) => {
+                                // Need to fetch
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[FFI-COLLECTION-VERSION] Error checking link {}: {}",
+                                    link_cid, e
+                                );
+                                continue;
+                            }
+                        }
+
+                        eprintln!(
+                            "[FFI-COLLECTION-VERSION] Fetching linked block {}",
+                            link_cid
+                        );
+
+                        // Start Bitswap sync for linked block
+                        if let Err(e) = p2p.handle
+                            .bitswap_sync(*link_cid, connected_peers.clone(), vec![*link_cid])
+                            .await
+                        {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Bitswap sync failed for link {}: {}",
+                                link_cid, e
+                            );
+                            continue;
+                        }
+
+                        // Wait for linked block
+                        let link_timeout = std::time::Duration::from_secs(10);
+                        let link_start = std::time::Instant::now();
+                        let mut link_found = false;
+
+                        while link_start.elapsed() < link_timeout {
+                            match p2p.blockstore.get(link_cid).await {
+                                Ok(Some(_)) => {
+                                    link_found = true;
+                                    eprintln!(
+                                        "[FFI-COLLECTION-VERSION] Linked block {} fetched",
+                                        link_cid
+                                    );
+                                    break;
+                                }
+                                Ok(None) => {
+                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[FFI-COLLECTION-VERSION] Error waiting for link {}: {}",
+                                        link_cid, e
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+
+                        if !link_found {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Timeout waiting for linked block {}",
+                                link_cid
+                            );
+                        }
+                    }
+
+                    eprintln!(
+                        "[FFI-COLLECTION-VERSION] All linked blocks fetched, processing through merge handler"
+                    );
+
+                    // Process through merge handler with recovery metadata
+                    // (collection definitions don't have doc_id/collection_id in the traditional sense)
+                    use p2p::sync::{BlockMetadata, MergeHandler};
+                    let metadata = BlockMetadata::recovery();
+
+                    match p2p.merge_handler.handle_block(&version_cid, &block_data, metadata).await {
+                        Ok(outcome) => {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Merge handler result for {}: {:?}",
+                                version_cid, outcome
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[FFI-COLLECTION-VERSION] Merge handler error for {}: {}",
+                                version_cid, e
+                            );
+                        }
+                    }
+
                     eprintln!(
                         "[FFI-COLLECTION-VERSION] Successfully synced version {}",
                         version_id_str
