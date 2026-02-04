@@ -65,6 +65,58 @@ impl FetchByIdsResult {
     }
 }
 
+/// Result of an index scan, including raw fetch count and deduplicated document IDs.
+///
+/// For array-indexed fields, the same document can appear multiple times in the index
+/// (once per array element). This struct tracks both:
+/// - `raw_fetches`: Total index entries scanned (for explain metrics)
+/// - `doc_ids`: Deduplicated document IDs (for actual document fetching)
+#[derive(Debug, Clone)]
+pub struct IndexScanResult {
+    /// Deduplicated document IDs matching the index scan
+    doc_ids: Vec<String>,
+    /// Raw number of index entries fetched (before deduplication)
+    raw_fetches: u64,
+}
+
+impl IndexScanResult {
+    /// Create a new index scan result with raw count equal to doc_ids length.
+    pub fn new(doc_ids: Vec<String>) -> Self {
+        let raw_fetches = doc_ids.len() as u64;
+        Self {
+            doc_ids,
+            raw_fetches,
+        }
+    }
+
+    /// Create a new index scan result with explicit raw fetch count.
+    ///
+    /// Use this when deduplication was applied and raw_fetches != doc_ids.len()
+    pub fn with_raw_count(doc_ids: Vec<String>, raw_fetches: u64) -> Self {
+        Self {
+            doc_ids,
+            raw_fetches,
+        }
+    }
+
+    /// Get the deduplicated document IDs.
+    pub fn doc_ids(&self) -> &[String] {
+        &self.doc_ids
+    }
+
+    /// Take ownership of the document IDs.
+    pub fn into_doc_ids(self) -> Vec<String> {
+        self.doc_ids
+    }
+
+    /// Get the raw number of index entries fetched (before deduplication).
+    ///
+    /// This is used for explain metrics (indexFetches count).
+    pub fn raw_fetches(&self) -> u64 {
+        self.raw_fetches
+    }
+}
+
 /// Storage abstraction for fetching documents.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -144,8 +196,8 @@ pub trait DocFetcher: MaybeSendSync {
     /// Get documents using an index scan.
     ///
     /// This method uses a secondary index to efficiently fetch documents matching
-    /// the index scan parameters. It returns the document IDs found via the index,
-    /// and optionally the full documents if the fetcher supports it.
+    /// the index scan parameters. It returns deduplicated document IDs and the
+    /// raw fetch count (for explain metrics).
     ///
     /// # Arguments
     ///
@@ -154,8 +206,11 @@ pub trait DocFetcher: MaybeSendSync {
     ///
     /// # Returns
     ///
-    /// A list of document IDs matching the index scan. The caller can then
-    /// use `get_by_ids` to fetch the full documents.
+    /// An `IndexScanResult` containing:
+    /// - Deduplicated document IDs matching the index scan
+    /// - Raw fetch count (total index entries scanned, before deduplication)
+    ///
+    /// The caller can then use `get_by_ids` to fetch the full documents.
     ///
     /// Default implementation returns an error - implementations that support
     /// index queries should override this.
@@ -163,7 +218,7 @@ pub trait DocFetcher: MaybeSendSync {
         &self,
         collection_name: &str,
         params: &IndexScanParams,
-    ) -> Result<Vec<String>> {
+    ) -> Result<IndexScanResult> {
         let _ = (collection_name, params);
         Err(crate::error::QueryError::execution(
             "Index-based queries are not supported by this fetcher".to_string(),

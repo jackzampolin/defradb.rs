@@ -306,11 +306,20 @@ pub fn can_use_index(filter: &Filter, index: &IndexDescription) -> bool {
     // Check if any condition matches the first field of the index
     let first_field = &index.fields[0].name;
 
-    conditions.iter().any(|cond| {
-        if &cond.field_name != first_field {
-            return false;
-        }
+    // For composite indexes, we can use the index if:
+    // 1. The first field has a compatible condition (not _none)
+    // 2. Other fields with _none are handled via residual filter
+    //
+    // Example: {name: {_eq: "X"}, numbers: {_none: {_eq: 3}}}
+    // - first field "name" has _eq (compatible) → use index
+    // - second field "numbers" has _none → handled by residual filter
+    let first_field_conditions: Vec<_> = conditions
+        .iter()
+        .filter(|c| &c.field_name == first_field)
+        .collect();
 
+    // Check if any first-field condition can use the index
+    first_field_conditions.iter().any(|cond| {
         // Check if the operator is index-compatible.
         // Go DefraDB uses indexes for _ne/_like too (full scan + matcher),
         // not just narrowing operators. This matches Go's behavior.
@@ -329,18 +338,20 @@ pub fn can_use_index(filter: &Filter, index: &IndexDescription) -> bool {
                 | FilterOp::Nilike
         );
 
-        // For array operators, check if the combination is index-friendly
+        // For array operators on the FIRST field, check if the combination is index-friendly
+        // _none on first field cannot use index; _none on OTHER fields is fine (residual filter)
         match cond.array_op {
             Some(FilterOp::Any) => {
                 // _any with comparison ops can use index
                 base_op_compatible
             }
             Some(FilterOp::All) => {
-                // _all with _eq can use index (with post-filtering)
-                matches!(cond.op, FilterOp::Eq | FilterOp::In)
+                // _all can use index with any narrowing operator.
+                // Index provides candidates, residual filter verifies ALL match.
+                base_op_compatible
             }
             Some(FilterOp::None) => {
-                // _none cannot efficiently use index (requires full scan)
+                // _none on FIRST field cannot efficiently use index (requires full scan)
                 false
             }
             Some(_) => false,
@@ -552,12 +563,20 @@ pub fn filter_to_index_scan(
 
     // For composite indexes, check if subsequent fields also have eq conditions.
     // If all fields are matched exactly, use ExactMatch; otherwise use PrefixScan.
+    //
+    // Note: We exclude _none and _all array operators here because they should be
+    // handled as residual filters, not used to narrow the index scan.
+    // - _none: cannot narrow scan (requires checking ALL elements don't match)
+    // - _all: index provides candidates but residual filter verifies ALL match
     let is_composite = index.fields.len() > 1;
     let mut subsequent_eq_values: Vec<NormalValue> = Vec::new();
     if is_composite && has_eq {
         for field_desc in index.fields.iter().skip(1) {
             let field_cond = conditions.iter().find(|c| {
-                c.field_name == field_desc.name && c.op == FilterOp::Eq
+                c.field_name == field_desc.name
+                    && c.op == FilterOp::Eq
+                    && c.array_op != Some(FilterOp::None)
+                    && c.array_op != Some(FilterOp::All)
             });
             if let Some(cond) = field_cond {
                 if let ConditionValue::Single(v) = &cond.value {
@@ -1084,6 +1103,47 @@ mod tests {
             json!({"_none": {"_eq": 30}}),
         )]));
         let index = single_field_index("numbers");
+
+        assert!(!can_use_index(&filter, &index));
+    }
+
+    #[test]
+    fn test_can_use_index_array_all_with_range_op() {
+        // Filter: {numbers: {_all: {_geq: 33}}}
+        // _all with range operators (not just _eq/_in) should use index
+        // Index provides candidates, residual filter verifies ALL match
+        let filter = make_filter(HashMap::from([(
+            "numbers".to_string(),
+            json!({"_all": {"_gte": 33}}),
+        )]));
+        let index = single_field_index("numbers");
+
+        assert!(can_use_index(&filter, &index));
+    }
+
+    #[test]
+    fn test_can_use_composite_index_with_none_on_second_field() {
+        // Filter: {name: {_eq: "Shahzad"}, numbers: {_none: {_eq: 3}}}
+        // Composite index [name, numbers] should be usable because first field has _eq
+        // _none on second field is handled by residual filter
+        let filter = make_filter(HashMap::from([
+            ("name".to_string(), json!({"_eq": "Shahzad"})),
+            ("numbers".to_string(), json!({"_none": {"_eq": 3}})),
+        ]));
+        let index = composite_index(&["name", "numbers"]);
+
+        assert!(can_use_index(&filter, &index));
+    }
+
+    #[test]
+    fn test_cannot_use_composite_index_with_none_on_first_field() {
+        // Filter: {numbers: {_none: {_eq: 3}}, name: {_eq: "Shahzad"}}
+        // Composite index [numbers, name] cannot be used because first field has _none
+        let filter = make_filter(HashMap::from([
+            ("numbers".to_string(), json!({"_none": {"_eq": 3}})),
+            ("name".to_string(), json!({"_eq": "Shahzad"})),
+        ]));
+        let index = composite_index(&["numbers", "name"]);
 
         assert!(!can_use_index(&filter, &index));
     }

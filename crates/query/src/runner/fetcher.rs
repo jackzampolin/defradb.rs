@@ -142,7 +142,7 @@ impl DocFetcher for FetcherWrapper {
         &self,
         collection_name: &str,
         params: &IndexScanParams,
-    ) -> Result<Vec<String>> {
+    ) -> Result<crate::fetcher::IndexScanResult> {
         self.get_fetcher()
             .get_by_index_scan(collection_name, params)
             .await

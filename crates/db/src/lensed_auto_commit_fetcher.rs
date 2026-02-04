@@ -533,7 +533,9 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         &self,
         collection_name: &str,
         params: &IndexScanParams,
-    ) -> query::error::Result<Vec<String>> {
+    ) -> query::error::Result<query::fetcher::IndexScanResult> {
+        use std::collections::HashSet;
+
         let collection = self
             .db
             .get_collection(collection_name)
@@ -568,7 +570,7 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         })?;
 
         // Execute the appropriate scan based on scan type
-        let doc_ids = match &params.scan_type {
+        let raw_doc_ids: Vec<String> = match &params.scan_type {
             IndexScanType::ExactMatch { values } => {
                 let mut iter = index.get(&datastore, values).await.map_err(|e| {
                     query::error::QueryError::execution(format!("index error: {}", e))
@@ -634,7 +636,18 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
 
         let _ = txn.discard();
 
-        Ok(doc_ids)
+        // Track raw fetch count before deduplication (for explain metrics)
+        let raw_fetches = raw_doc_ids.len() as u64;
+
+        // Deduplicate doc_ids while preserving order.
+        // Array indexes can return the same document multiple times (once per array element).
+        let mut seen = HashSet::new();
+        let doc_ids: Vec<String> = raw_doc_ids
+            .into_iter()
+            .filter(|id| seen.insert(id.clone()))
+            .collect();
+
+        Ok(query::fetcher::IndexScanResult::with_raw_count(doc_ids, raw_fetches))
     }
 
     fn supports_index_queries(&self) -> bool {
