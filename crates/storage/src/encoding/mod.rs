@@ -10,6 +10,7 @@ mod bool;
 mod bytes;
 mod fixed;
 mod float;
+pub mod json;
 mod null;
 mod time;
 mod varint;
@@ -34,7 +35,6 @@ pub(crate) const BYTES_DESC_MARKER: u8 = 7;
 pub(crate) const TIME_MARKER: u8 = 8;
 pub(crate) const FALSE_MARKER: u8 = 9;
 pub(crate) const TRUE_MARKER: u8 = 10;
-#[allow(dead_code)]
 pub(crate) const JSON_MARKER: u8 = 11;
 pub(crate) const FLOAT32_NAN: u8 = 12;
 pub(crate) const FLOAT32_NEG: u8 = 13;

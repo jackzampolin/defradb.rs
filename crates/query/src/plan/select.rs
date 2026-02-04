@@ -346,7 +346,11 @@ impl PlanNode for SelectNode {
     }
 
     fn exec_info(&self) -> ExecInfo {
-        self.exec_info.clone()
+        let mut info = self.exec_info.clone();
+        // Propagate indexes_fetched from source (e.g., IndexScanNode wrapped by this SelectNode)
+        let source_info = self.source.exec_info();
+        info.indexes_fetched = source_info.indexes_fetched;
+        info
     }
 
     fn explain_execute_inner(&self) -> serde_json::Value {

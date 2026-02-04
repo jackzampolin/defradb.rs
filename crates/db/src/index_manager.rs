@@ -518,6 +518,17 @@ impl IndexManager {
         }
 
         match value {
+            // JSON values are expanded via leaf traversal
+            NormalValue::Json(_) => {
+                let leaves = value.json_leaves();
+                if leaves.is_empty() {
+                    // Empty JSON object/array produces single NULL entry
+                    vec![NormalValue::Null]
+                } else {
+                    leaves
+                }
+            }
+
             // Non-array scalar types - single element
             NormalValue::Null
             | NormalValue::Bool(_)
@@ -528,7 +539,7 @@ impl IndexManager {
             | NormalValue::Bytes(_)
             | NormalValue::Time(_)
             | NormalValue::Document(_)
-            | NormalValue::Json(_)
+            | NormalValue::JsonLeaf(_)
             | NormalValue::NillableBool(_)
             | NormalValue::NillableInt(_)
             | NormalValue::NillableFloat64(_)

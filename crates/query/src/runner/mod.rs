@@ -31,7 +31,7 @@ use crate::planner::Doc;
 use crate::txn::{NoOpTransactionRegistry, TransactionRegistry};
 
 // Re-export for backwards compatibility
-pub use crate::fetcher::{DocFetcher, FetchByIdsResult};
+pub use crate::fetcher::{DocFetcher, FetchByIdsResult, IndexScanResult};
 
 /// Query runner that executes GraphQL queries against storage.
 pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRegistry> {

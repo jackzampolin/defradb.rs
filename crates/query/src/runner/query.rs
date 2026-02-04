@@ -2746,21 +2746,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 // Try to use an index if available
                 if fetcher.supports_index_queries() && !collection.indexes.is_empty() {
                     if let Some(best_index) = select_best_index(filter, &collection.indexes) {
-                        if let Some(params) =
-                            filter_to_index_scan(filter, best_index, select.order_by.as_ref())
-                        {
+                        // Extract limit/offset for index optimization
+                        let limit = select.limit.as_ref().and_then(|l| l.limit);
+                        let offset = select.limit.as_ref().map(|l| l.offset).unwrap_or(0);
+                        if let Some(params) = filter_to_index_scan(
+                            filter,
+                            best_index,
+                            select.order_by.as_ref(),
+                            &collection.fields,
+                            limit,
+                            offset,
+                        ) {
                             debug!(
                                 collection = %select.collection_name,
                                 index = %params.index_name,
                                 "Using index for query"
                             );
                             // Get doc IDs from index
-                            let doc_ids = fetcher
+                            let scan_result = fetcher
                                 .get_by_index_scan(&select.collection_name, &params)
                                 .await?;
                             // Fetch the actual documents by ID
                             let result = fetcher
-                                .get_by_ids(&select.collection_name, &doc_ids)
+                                .get_by_ids(&select.collection_name, scan_result.doc_ids())
                                 .await?;
                             result.into_docs()
                         } else {
