@@ -436,6 +436,17 @@ impl<S: Store> DB<S> {
                         ..CollectionVersion::new("", "", "", Vec::new())
                     };
                     placeholder.is_active = false;
+                    // Store destination placeholder (same as source placeholder above)
+                    let data = serde_json::to_vec(&placeholder).map_err(|e| {
+                        Error::Serialization(format!(
+                            "failed to serialize destination placeholder '{}': {}",
+                            dest_version_id, e
+                        ))
+                    })?;
+                    systemstore
+                        .set(&dst_key.bytes(), &data)
+                        .await
+                        .map_err(Error::Storage)?;
                     placeholder
                 }
             };
@@ -2519,11 +2530,19 @@ impl<S: Store> DB<S> {
             }
         }
 
-        new_schema.is_active = true;
+        // Go compatibility: respect explicit IsActive=false in the patch, otherwise default to true.
+        // When IsActive was explicitly set to false in the patch, preserve it.
+        // When the new version is inactive, keep the old version active.
+        if !is_active_explicitly_set {
+            new_schema.is_active = true;
+        }
 
-        // Create old schema copy with is_active = false for storage
+        // Create old schema copy for storage. If new schema is active, mark old as inactive.
+        // If new schema is inactive (explicit IsActive=false), old version stays active.
         let mut old_schema_inactive = old_schema.clone();
-        old_schema_inactive.is_active = false;
+        if new_schema.is_active {
+            old_schema_inactive.is_active = false;
+        }
 
         tracing::info!(
             collection = %collection_name,
@@ -2571,11 +2590,14 @@ impl<S: Store> DB<S> {
                 .await
                 .map_err(Error::Storage)?;
 
-            // 3. Update /collection/name/{name} to point to new version (as the version_id string)
-            systemstore
-                .set(&name_key.bytes(), new_version_id.as_bytes())
-                .await
-                .map_err(Error::Storage)?;
+            // 3. Update /collection/name/{name} - only point to new version if it's active.
+            // If new version is inactive, keep name pointing to old version (which stays active).
+            if new_schema.is_active {
+                systemstore
+                    .set(&name_key.bytes(), new_version_id.as_bytes())
+                    .await
+                    .map_err(Error::Storage)?;
+            }
 
             // 4. Add version index at /collection/version/{collection_id}/{new_version_id}
             systemstore
@@ -2601,7 +2623,7 @@ impl<S: Store> DB<S> {
             pending.remove(&new_version_id);
         }
 
-        // Update cache with new schema
+        // Update cache based on which version is active
         let mut cache = self.collections.write().map_err(|e| {
             tracing::error!(
                 error = ?e,
@@ -2610,10 +2632,14 @@ impl<S: Store> DB<S> {
             );
             Error::CacheUpdateFailedAfterCommit(collection_name.to_string())
         })?;
-        cache.insert(
-            collection_name.to_string(),
-            Collection::new(new_schema.clone()),
-        );
+        if new_schema.is_active {
+            // New version is active - cache it
+            cache.insert(
+                collection_name.to_string(),
+                Collection::new(new_schema.clone()),
+            );
+        }
+        // If new version is inactive, old version stays in cache (already there)
 
         Ok(new_schema)
     }

@@ -85,15 +85,22 @@ pub fn get_directive_string_list(directive: &Directive<'_, String>, arg_name: &s
     }
 }
 
-/// Create a type mismatch error for @default directive
+/// Create a type mismatch error for @default directive.
+/// Error format matches Go's graphql-parser error: `Argument "name" has invalid value value`
 pub fn default_type_error(
     arg_name: &str,
-    expected: &str,
+    _expected: &str,
     actual: &graphql_parser::schema::Value<'_, String>,
 ) -> QueryError {
+    // Format the value for display (strip enum/string wrappers)
+    let value_str = match actual {
+        graphql_parser::schema::Value::Enum(s) => s.clone(),
+        graphql_parser::schema::Value::String(s) => format!("\"{}\"", s),
+        other => format!("{:?}", other),
+    };
     QueryError::parse(format!(
-        "@default '{}' argument must be a {}, got {:?}",
-        arg_name, expected, actual
+        "Argument \"{}\" has invalid value {}",
+        arg_name, value_str
     ))
 }
 
