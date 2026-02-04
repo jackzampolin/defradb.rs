@@ -266,6 +266,23 @@ pub extern "C" fn poll_subscription(subscription_handle: usize) -> PollSubscript
     result.unwrap_or_else(|| PollSubscriptionResult::error("invalid subscription handle"))
 }
 
+/// Alias for poll_subscription (for Go compatibility)
+/// Accepts a string subscription ID and parses it as a numeric handle.
+#[no_mangle]
+pub extern "C" fn poll_graphql_subscription(
+    subscription_id: *const c_char,
+) -> PollSubscriptionResult {
+    let id_str = match unsafe { c_str_to_string(subscription_id) } {
+        Some(s) => s,
+        None => return PollSubscriptionResult::error("invalid subscription id: null or invalid UTF-8"),
+    };
+    let handle = match id_str.parse::<usize>() {
+        Ok(h) => h,
+        Err(_) => return PollSubscriptionResult::error("invalid subscription id: not a number"),
+    };
+    poll_subscription(handle)
+}
+
 /// Close a subscription and release resources.
 ///
 /// # Arguments
@@ -315,19 +332,21 @@ pub unsafe extern "C" fn poll_graphql_subscription(
     PollSubscriptionResult::error("GraphQL subscriptions not implemented in this build")
 }
 
-/// Close a GraphQL subscription (stub).
-///
-/// This is a stub function for compatibility with worktrees that have
-/// GraphQL subscription support.
-///
-/// # Safety
-///
-/// The subscription_id must be a valid null-terminated C string or null.
+/// Alias for close_subscription (for Go compatibility)
+/// Accepts a string subscription ID and parses it as a numeric handle.
 #[no_mangle]
-pub unsafe extern "C" fn close_graphql_subscription(
-    _subscription_id: *const std::ffi::c_char,
+pub extern "C" fn close_graphql_subscription(
+    subscription_id: *const c_char,
 ) -> CloseSubscriptionResult {
-    CloseSubscriptionResult::error("GraphQL subscriptions not implemented in this build")
+    let id_str = match unsafe { c_str_to_string(subscription_id) } {
+        Some(s) => s,
+        None => return CloseSubscriptionResult::error("invalid subscription id: null or invalid UTF-8"),
+    };
+    let handle = match id_str.parse::<usize>() {
+        Ok(h) => h,
+        Err(_) => return CloseSubscriptionResult::error("invalid subscription id: not a number"),
+    };
+    close_subscription(handle)
 }
 
 /// Convert an event message to JSON.
