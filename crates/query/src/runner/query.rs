@@ -2755,12 +2755,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 "Using index for query"
                             );
                             // Get doc IDs from index
-                            let doc_ids = fetcher
+                            let scan_result = fetcher
                                 .get_by_index_scan(&select.collection_name, &params)
                                 .await?;
                             // Fetch the actual documents by ID
                             let result = fetcher
-                                .get_by_ids(&select.collection_name, &doc_ids)
+                                .get_by_ids(&select.collection_name, scan_result.doc_ids())
                                 .await?;
                             result.into_docs()
                         } else {

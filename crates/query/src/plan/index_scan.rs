@@ -141,16 +141,18 @@ impl PlanNode for IndexScanNode {
         if !self.docs_provided {
             if let Some(ref fetcher) = self.fetcher {
                 // Use index scan to get document IDs
-                let doc_ids = fetcher
+                let scan_result = fetcher
                     .get_by_index_scan(&self.collection.name, &self.index_params)
                     .await?;
 
                 // Track number of index key lookups (matches Go's IndexesFetched)
-                self.index_fetches = doc_ids.len() as u64;
+                // Uses raw_fetches which is the count BEFORE deduplication
+                self.index_fetches = scan_result.raw_fetches();
 
+                let doc_ids = scan_result.doc_ids();
                 if !doc_ids.is_empty() {
                     // Fetch the actual documents by their IDs
-                    let result = fetcher.get_by_ids(&self.collection.name, &doc_ids).await?;
+                    let result = fetcher.get_by_ids(&self.collection.name, doc_ids).await?;
                     self.docs = documents_to_plan_docs(result.docs(), &self.document_mapping)?;
                 }
             }
