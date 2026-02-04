@@ -93,6 +93,38 @@ fn graphql_schema_value_to_json(
     }
 }
 
+/// Normalize a datetime string to RFC3339 format to match Go's time.Time serialization.
+/// Go's time.Time drops trailing zeros in fractional seconds, so:
+/// - "2000-07-23T03:00:00.000Z" becomes "2000-07-23T03:00:00Z"
+/// - "2000-07-23T03:00:00.123Z" stays "2000-07-23T03:00:00.123Z"
+/// If parsing fails, returns the original string (e.g., for special values).
+fn normalize_datetime_string(s: &str) -> String {
+    // Try to parse as RFC3339 variant (ISO 8601)
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        // Format back using RFC3339 which drops trailing zeros in nanoseconds
+        // Go uses time.RFC3339Nano which behaves this way
+        let nanos = dt.timestamp_subsec_nanos();
+        if nanos == 0 {
+            // No fractional seconds - output without them
+            dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+        } else {
+            // Has fractional seconds - output with them, but trim trailing zeros
+            let s = dt.format("%Y-%m-%dT%H:%M:%S%.9fZ").to_string();
+            // Remove trailing zeros after decimal point (but keep at least one digit)
+            let trimmed = s.trim_end_matches('0');
+            // If we trimmed all digits after the decimal, we need to handle that
+            if trimmed.ends_with('.') {
+                format!("{}Z", trimmed.trim_end_matches('.'))
+            } else {
+                format!("{}Z", trimmed.trim_end_matches('Z'))
+            }
+        }
+    } else {
+        // Not a parseable datetime - return as-is (could be a special value)
+        s.to_string()
+    }
+}
+
 /// Parse @policy directive arguments with Go-compatible error messages.
 fn parse_policy_directive(directive: &Directive<'_, String>) -> Result<PolicyConfig> {
     let id_raw = get_directive_arg(directive, "id");
@@ -817,7 +849,14 @@ impl<'a> SdlParser<'a> {
                 other => Err(default_type_error("float32", "float", other)),
             },
             "dateTime" => match value {
-                graphql_parser::schema::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+                graphql_parser::schema::Value::String(s) => {
+                    // Normalize to RFC3339 format to match Go's time.Time serialization.
+                    // Go parses the datetime string into time.Time then formats it back,
+                    // which drops trailing zeros in the fractional seconds.
+                    // Parse as DateTime and re-format, or pass through if it's a special value.
+                    let normalized = normalize_datetime_string(s);
+                    Ok(serde_json::Value::String(normalized))
+                }
                 // Accept Enum for special values like UTC_NOW
                 graphql_parser::schema::Value::Enum(s) => Ok(serde_json::Value::String(s.clone())),
                 other => Err(default_type_error("dateTime", "string", other)),
