@@ -132,51 +132,51 @@ async fn show_current_worktree() -> Result<()> {
     }
 
     // Print totals if we have any data
-    // For totals, only count leaf packages (packages that aren't prefixes of other packages)
-    // to avoid double counting when both parent and child packages have been run
+    // For totals, only count packages where no parent package has a report
+    // (parent packages include child package tests, so we avoid double counting)
     if packages_run > 0 {
         println!("{}", "─".repeat(114));
 
         // Get list of packages with reports
         let reported_packages: Vec<&String> = latest_by_package.keys().collect();
 
-        // Calculate totals excluding packages that are prefixes of other packages
-        let mut leaf_total = 0;
-        let mut leaf_pass = 0;
-        let mut leaf_fail = 0;
-        let mut leaf_skip = 0;
-        let mut leaf_count = 0;
+        // Calculate totals excluding packages whose parent has a report
+        let mut root_total = 0;
+        let mut root_pass = 0;
+        let mut root_fail = 0;
+        let mut root_skip = 0;
+        let mut root_count = 0;
 
         for (pkg, report) in &latest_by_package {
-            // Check if this package is a prefix of any other package
-            let is_prefix = reported_packages.iter().any(|other| {
-                *other != pkg && other.starts_with(&format!("{}/", pkg))
+            // Check if any parent of this package has a report
+            let has_parent_report = reported_packages.iter().any(|other| {
+                *other != pkg && pkg.starts_with(&format!("{}/", other))
             });
 
-            if !is_prefix {
-                leaf_total += report.summary.total;
-                leaf_pass += report.summary.passed;
-                leaf_fail += report.summary.failed;
-                leaf_skip += report.summary.skipped;
-                leaf_count += 1;
+            if !has_parent_report {
+                root_total += report.summary.total;
+                root_pass += report.summary.passed;
+                root_fail += report.summary.failed;
+                root_skip += report.summary.skipped;
+                root_count += 1;
             }
         }
 
-        let pass_pct = format_pct(leaf_pass, leaf_total);
-        let fail_pct = format_pct(leaf_fail, leaf_total);
-        let skip_pct = format_pct(leaf_skip, leaf_total);
+        let pass_pct = format_pct(root_pass, root_total);
+        let fail_pct = format_pct(root_fail, root_total);
+        let skip_pct = format_pct(root_skip, root_total);
 
-        let pass_str = format!("{:>4} {}", leaf_pass, pass_pct);
-        let fail_str = format!("{:>4} {}", leaf_fail, fail_pct);
-        let skip_str = format!("{:>4} {}", leaf_skip, skip_pct);
+        let pass_str = format!("{:>4} {}", root_pass, pass_pct);
+        let fail_str = format!("{:>4} {}", root_fail, fail_pct);
+        let skip_str = format!("{:>4} {}", root_skip, skip_pct);
 
         let pass_colored = pass_str.green().bold();
-        let fail_colored = if leaf_fail > 0 {
+        let fail_colored = if root_fail > 0 {
             fail_str.red().bold()
         } else {
             fail_str.bold()
         };
-        let skip_colored = if leaf_skip > 0 {
+        let skip_colored = if root_skip > 0 {
             skip_str.yellow().bold()
         } else {
             skip_str.bold()
@@ -184,13 +184,13 @@ async fn show_current_worktree() -> Result<()> {
 
         println!(
             "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
-            format!("TOTAL ({} leaf packages)", leaf_count).bold(),
+            format!("TOTAL ({} root packages)", root_count).bold(),
             "",
             "",
             pass_colored,
             fail_colored,
             skip_colored,
-            leaf_total.to_string().bold()
+            root_total.to_string().bold()
         );
     }
 
