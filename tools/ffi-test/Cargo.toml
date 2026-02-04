@@ -1,0 +1,19 @@
+[package]
+name = "ffi-test"
+version = "0.1.0"
+edition = "2021"
+description = "FFI compatibility testing tool for defradb.rs"
+
+[[bin]]
+name = "ffi-test"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1.35", features = ["process", "fs", "rt-multi-thread", "macros", "io-util"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+colored = "2.0"
+dirs = "5.0"
