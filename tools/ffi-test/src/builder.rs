@@ -1,7 +1,9 @@
 use std::path::Path;
 use tokio::process::Command;
 
-use crate::config::{CBINDGEN_CONFIG, FFI_LIB_NAME, HEADER_DESTINATION};
+use crate::config::{
+    CBINDGEN_CONFIG, FFI_LIB_NAME, GO_FFI_LIB_NAME, HEADER_DESTINATION, LIBRARY_DESTINATION,
+};
 use crate::error::{FfiTestError, Result};
 use crate::worktree::WorktreeContext;
 
@@ -12,6 +14,9 @@ pub async fn build_ffi(ctx: &WorktreeContext, verbose: bool) -> Result<()> {
 
     // Generate and copy the header
     generate_header(ctx, verbose).await?;
+
+    // Copy the library to Go worktree
+    copy_library(ctx, verbose).await?;
 
     Ok(())
 }
@@ -92,4 +97,46 @@ async fn check_cbindgen() -> Result<()> {
         Ok(o) if o.status.success() => Ok(()),
         _ => Err(FfiTestError::CbindgenNotFound),
     }
+}
+
+/// Copy the FFI library to the Go worktree
+async fn copy_library(ctx: &WorktreeContext, verbose: bool) -> Result<()> {
+    let lib_dir = ctx.go_path.join(LIBRARY_DESTINATION);
+
+    // Ensure destination directory exists
+    tokio::fs::create_dir_all(&lib_dir).await?;
+
+    // Platform-specific library names
+    #[cfg(target_os = "macos")]
+    let (src_name, dst_name) = (
+        format!("lib{}.dylib", FFI_LIB_NAME),
+        format!("lib{}.dylib", GO_FFI_LIB_NAME),
+    );
+
+    #[cfg(target_os = "linux")]
+    let (src_name, dst_name) = (
+        format!("lib{}.so", FFI_LIB_NAME),
+        format!("lib{}.so", GO_FFI_LIB_NAME),
+    );
+
+    #[cfg(target_os = "windows")]
+    let (src_name, dst_name) = (
+        format!("{}.dll", FFI_LIB_NAME),
+        format!("{}.dll", GO_FFI_LIB_NAME),
+    );
+
+    let src_path = ctx.rust_path.join("target").join("release").join(&src_name);
+    let dst_path = lib_dir.join(&dst_name);
+
+    if verbose {
+        println!("Copying library {} -> {}", src_path.display(), dst_path.display());
+    }
+
+    tokio::fs::copy(&src_path, &dst_path).await?;
+
+    if verbose {
+        println!("Library copied successfully");
+    }
+
+    Ok(())
 }

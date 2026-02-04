@@ -31,3 +31,9 @@ pub const HEADER_DESTINATION: &str = "tests/clients/rustffi/defra.h";
 
 /// FFI library name (without lib prefix or extension)
 pub const FFI_LIB_NAME: &str = "ffi";
+
+/// Library destination relative to Go worktree root
+pub const LIBRARY_DESTINATION: &str = "tests/clients/rustffi";
+
+/// Expected library name in Go worktree (without lib prefix or extension)
+pub const GO_FFI_LIB_NAME: &str = "defra_ffi";
