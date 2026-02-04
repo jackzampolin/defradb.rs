@@ -2007,6 +2007,34 @@ impl<S: Store> DB<S> {
                             // is handled by definition_validation post-patch.
                         }
 
+                        // Go compatibility: validate Kind value when replacing a field's Kind directly
+                        // e.g., replace /Fields/2/Kind with "NotAValidKind"
+                        if path.ends_with("/Kind") && path.contains("/Fields/") {
+                            // Extract field name from the path for error message
+                            // Path is like /Fields/2/Kind, we need to get the name of field at index 2
+                            let field_index_str = path
+                                .trim_start_matches("/Fields/")
+                                .split('/')
+                                .next()
+                                .unwrap_or("");
+                            let field_name = if let Ok(idx) = field_index_str.parse::<usize>() {
+                                schema_json
+                                    .get("Fields")
+                                    .and_then(|f| f.as_array())
+                                    .and_then(|arr| arr.get(idx))
+                                    .and_then(|f| f.get("Name"))
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("")
+                            } else {
+                                field_index_str
+                            };
+                            Self::validate_patch_field_kind(
+                                &value,
+                                field_name,
+                                &known_collection_names,
+                            )?;
+                        }
+
                         // Go compatibility: validate and auto-generate FieldID when adding new fields
                         // If path ends with /Fields/- or /Fields/<n> and value has Name but no FieldID
                         if path.contains("/Fields/") {
@@ -2231,6 +2259,21 @@ impl<S: Store> DB<S> {
                             .ok_or_else(|| {
                                 Error::InvalidPatch(format!("path not found: {}", from_path))
                             })?;
+
+                        // When copying a field, clear the FieldID so it becomes a "new" field.
+                        // Go DefraDB generates new FieldIDs for copied fields rather than
+                        // treating them as mutations of the original.
+                        let value_to_copy = if path.contains("/Fields/")
+                            && value_to_copy.is_object()
+                        {
+                            let mut v = value_to_copy;
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.remove("FieldID");
+                            }
+                            v
+                        } else {
+                            value_to_copy
+                        };
 
                         // Set at destination
                         Self::json_pointer_set(&mut schema_json, path, value_to_copy)?;
