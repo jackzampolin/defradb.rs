@@ -44,6 +44,10 @@ pub struct PlanResult {
     /// Each entry is (parent_relation_field_name, child_field_name).
     /// These fields appear in the document but should be stripped from output.
     pub ordering_only_fields: Vec<(String, String)>,
+    /// Internal render keys for aggregate relation data when there's a collision
+    /// with a relation selection (e.g., both `_count(published: {})` and `published(limit: 2)`).
+    /// Maps: aggregate_output_name -> (relation_field_name, internal_key)
+    pub aggregate_internal_keys: HashMap<String, (String, String)>,
 }
 
 impl PlanResult {
@@ -259,6 +263,10 @@ impl Planner {
                 result
             })
             .unwrap_or_default();
+
+        // Internal keys for aggregate relation data when there's a collision with a relation selection.
+        // Maps: aggregate_output_name -> (relation_field_name, internal_key)
+        let mut aggregate_internal_keys: HashMap<String, (String, String)> = HashMap::new();
 
         // Check if GROUP BY references relation fields (needs full schema mapping for joins)
         let group_by_has_relations = select
@@ -675,8 +683,11 @@ impl Planner {
         } else {
             filter_for_plan.as_ref()
         };
-        (plan, scan_mapping) =
+        let joins_result =
             self.apply_joins(plan, select, &collection, scan_mapping, 0, filter_for_joins)?;
+        plan = joins_result.0;
+        scan_mapping = joins_result.1;
+        aggregate_internal_keys = joins_result.2;
 
         // 3b. Apply joins for multi-level relation filter paths where the first relation
         // is NOT in the selection set. If the first relation IS selected, then apply_joins
@@ -1252,6 +1263,7 @@ impl Planner {
             plan,
             index_scan,
             ordering_only_fields,
+            aggregate_internal_keys,
         })
     }
 
@@ -1671,7 +1683,10 @@ impl Planner {
         mut mapping: DocumentMapping,
         depth: usize,
         parent_filter: Option<&crate::mapper::Filter>,
-    ) -> Result<(Box<dyn PlanNode>, DocumentMapping)> {
+    ) -> Result<(Box<dyn PlanNode>, DocumentMapping, HashMap<String, (String, String)>)> {
+        // Internal keys for aggregate relation data when there's a collision with a relation selection.
+        let mut aggregate_internal_keys: HashMap<String, (String, String)> = HashMap::new();
+
         // Check recursion depth to prevent stack overflow
         if depth > MAX_NESTING_DEPTH {
             return Err(QueryError::execution(format!(
@@ -2120,7 +2135,7 @@ impl Planner {
             // Recursively apply joins for any nested selections within this nested select.
             // This handles multi-level nesting like Users -> Posts -> Comments.
             // Note: We pass None for parent_filter since relation filters only apply at the top level.
-            (child_plan, child_scan_mapping) = self.apply_joins(
+            let nested_joins_result = self.apply_joins(
                 child_plan,
                 nested_select,
                 &target_collection,
@@ -2128,6 +2143,10 @@ impl Planner {
                 depth + 1,
                 None, // Nested relation filters handled differently
             )?;
+            child_plan = nested_joins_result.0;
+            child_scan_mapping = nested_joins_result.1;
+            // Merge nested aggregate internal keys into our collection
+            aggregate_internal_keys.extend(nested_joins_result.2);
 
             // Apply sub-joins for order_by references to relation fields within this nested select.
             // For example, if the nested select is `book(order: {publisher: {yearOpened: ASC}})`,
@@ -3087,6 +3106,8 @@ impl Planner {
                     // Determine the mapping index for this aggregate's relation data.
                     // When a selection already uses this relation (e.g., `books2020: book(...)`),
                     // we need a separate index so the aggregate gets independent, unfiltered data.
+                    // We also need a unique internal key to avoid collision with the selection's
+                    // limited/filtered data.
                     let selection_has_relation = select.fields.iter().any(|f| {
                         if let Requestable::Select(s) = f {
                             s.field.name == *relation_field_name
@@ -3096,10 +3117,18 @@ impl Planner {
                     });
                     let effective_relation_index = if selection_has_relation {
                         // Selection already uses relation_field_index with its own filter/limit.
-                        // Use a new index for the aggregate's independent data.
+                        // Use a new index and a unique internal key for the aggregate's data
+                        // to avoid collision with the selection's data in rendered JSON.
                         let idx = mapping.next_index();
+                        let internal_key =
+                            format!("__agg_{}_{}", relation_field_name, agg.output_name());
                         mapping.add(idx, relation_field_name);
-                        mapping.add_render_key(idx, relation_field_name);
+                        mapping.add_render_key(idx, &internal_key);
+                        // Store the mapping so the runner can look up data using the internal key
+                        aggregate_internal_keys.insert(
+                            agg.output_name().to_string(),
+                            (relation_field_name.clone(), internal_key),
+                        );
                         idx
                     } else {
                         if mapping.first_index_of_name(relation_field_name).is_none() {
@@ -3317,7 +3346,7 @@ impl Planner {
             }
         }
 
-        Ok((plan, mapping))
+        Ok((plan, mapping, aggregate_internal_keys))
     }
 
     /// Build a scan mapping for join child plans that includes ALL fields at schema indices.
@@ -4253,6 +4282,7 @@ impl Planner {
             plan,
             index_scan: None,
             ordering_only_fields: Vec::new(),
+            aggregate_internal_keys: HashMap::new(),
         })
     }
 }
