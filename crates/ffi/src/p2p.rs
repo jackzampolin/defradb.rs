@@ -415,28 +415,21 @@ pub unsafe extern "C" fn new_node_with_p2p(
             let mut sub = event_bus_for_broadcast.subscribe(&[events::EventName::Update]);
             while let Some(msg) = sub.recv().await {
                 if let Some(update) = msg.as_update() {
-                    // Skip relay updates (already from P2P)
-                    if update.is_relay {
-                        eprintln!(
-                            "[BROADCAST] Skipping relay update cid={} doc_id={}",
-                            update.cid, update.doc_id
-                        );
-                        continue;
-                    }
                     let cid = update.cid;
-                    let block = update.block.clone();
                     let doc_id = update.doc_id.clone();
                     let collection_id = update.collection_id.clone();
 
-                    eprintln!(
-                        "[BROADCAST] Got local update cid={} doc_id={} collection={} block_len={}",
-                        cid,
-                        doc_id,
-                        collection_id,
-                        block.len()
-                    );
+                    // Skip relay updates (already from P2P) - these don't need re-broadcast
+                    // since the originating node already broadcast to GossipSub.
+                    if update.is_relay {
+                        eprintln!("[BROADCAST] Skipping relay update cid={} doc_id={}", cid, doc_id);
+                        continue;
+                    }
 
-                    // Push to replicator peers via direct PushLog.
+                    // Local update: push to replicators + GossipSub broadcast.
+                    let block = update.block.clone();
+                    eprintln!("[BROADCAST] Local update cid={} doc_id={} collection={} block_len={}", cid, doc_id, collection_id, block.len());
+
                     coord_for_broadcast
                         .push_to_replicators(&cid, &block, &doc_id, &collection_id)
                         .await;
@@ -957,6 +950,9 @@ async fn push_existing_docs(
         .datastore()
         .map_err(|e| format!("failed to get datastore: {}", e))?;
 
+    // Collect JoinHandles so we can await all pushes before signaling completion.
+    let mut push_handles = Vec::new();
+
     for col_name in collections {
         let collection = match db
             .get_collection(col_name)
@@ -1041,13 +1037,12 @@ async fn push_existing_docs(
                     continue;
                 }
 
-                // Fire-and-forget: spawn each push so we don't block.
-                // Go's pushHeadsForAllDocs does the same (each push is a goroutine).
-                // The receiver's sync manager handles missing DAG links via Bitswap.
+                // Spawn each push concurrently but track the handle so we can
+                // await completion before emitting ReplicatorCompleted.
                 let push_h = handle.clone();
-                tokio::spawn(async move {
+                push_handles.push(tokio::spawn(async move {
                     let _ = push_h.send_two_stream_request(peer_id, request).await;
-                });
+                }));
             }
 
             iter.close()
@@ -1055,6 +1050,18 @@ async fn push_existing_docs(
                 .map_err(|e| format!("headstore close error: {}", e))?;
         }
     }
+
+    // Await all push tasks so ReplicatorCompleted isn't emitted prematurely.
+    // The Go test framework copies expected heads on ReplicatorCompleted, then
+    // waits for merge events — if pushes haven't landed yet, we get timeouts.
+    eprintln!(
+        "[PUSH-EXISTING] Awaiting {} push tasks to complete",
+        push_handles.len()
+    );
+    for handle in push_handles {
+        let _ = handle.await;
+    }
+    eprintln!("[PUSH-EXISTING] All push tasks completed");
 
     Ok(())
 }
