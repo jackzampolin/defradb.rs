@@ -53,8 +53,6 @@ pub struct IndexScanNode {
     index_fetches: u64,
     /// Execution statistics for explain execute mode
     exec_info: ExecInfo,
-    /// Number of fields per document (for fieldFetches calculation)
-    fields_per_doc: usize,
 }
 
 impl IndexScanNode {
@@ -64,12 +62,6 @@ impl IndexScanNode {
         document_mapping: DocumentMapping,
         index_params: IndexScanParams,
     ) -> Self {
-        // Count storable fields from the collection schema (matches Go's field fetch counting).
-        let fields_per_doc = collection
-            .fields
-            .iter()
-            .filter(|f| !f.id.is_empty())
-            .count();
         Self {
             collection,
             document_mapping,
@@ -84,7 +76,6 @@ impl IndexScanNode {
             docs_provided: false,
             index_fetches: 0,
             exec_info: ExecInfo::default(),
-            fields_per_doc,
         }
     }
 
@@ -195,8 +186,8 @@ impl PlanNode for IndexScanNode {
 
             // Track document fetch
             self.exec_info.docs_fetched += 1;
-            // Track field fetches (each field in the document)
-            self.exec_info.fields_fetched += self.fields_per_doc as u64;
+            // Track field fetches (actual stored fields in this document)
+            self.exec_info.fields_fetched += doc.stored_field_count as u64;
 
             // Skip deleted docs if not showing deleted
             if !self.show_deleted && doc.is_deleted() {

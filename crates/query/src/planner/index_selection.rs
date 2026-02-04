@@ -184,7 +184,13 @@ fn json_to_normal_value(value: &JsonValue) -> Option<NormalValue> {
             .as_i64()
             .map(NormalValue::Int)
             .or_else(|| n.as_f64().map(NormalValue::Float64)),
-        JsonValue::String(s) => Some(NormalValue::String(s.clone())),
+        JsonValue::String(s) => {
+            // Try to parse as DateTime first (RFC3339/ISO8601)
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                return Some(NormalValue::Time(dt));
+            }
+            Some(NormalValue::String(s.clone()))
+        }
         _ => None,
     }
 }
@@ -1238,7 +1244,20 @@ mod tests {
                     },
                     _ => panic!("expected Exclusive lower bound"),
                 }
-                assert!(upper.is_unbounded());
+                // Upper bound should be constrained to PathMax for the JSON path
+                match upper {
+                    Bound::Exclusive(v) => match v {
+                        NormalValue::JsonLeaf(leaf) => {
+                            assert_eq!(
+                                leaf.path.0[0],
+                                JsonPathPart::Property("height".to_string())
+                            );
+                            assert_eq!(leaf.value, JsonScalarValue::PathMax);
+                        }
+                        _ => panic!("expected JsonLeaf value for upper bound, got {:?}", v),
+                    },
+                    _ => panic!("expected Exclusive upper bound with PathMax"),
+                }
             }
             _ => panic!("expected RangeScan scan type"),
         }
