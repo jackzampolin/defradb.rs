@@ -1265,6 +1265,21 @@ impl<S: Store> DB<S> {
         Ok(cache.keys().cloned().collect())
     }
 
+    /// Add a collection to the runtime cache.
+    ///
+    /// This is used by the merge handler to add synced collections received via P2P
+    /// to the cache so they're visible to `list_collections` and `get_collection`.
+    /// The collection can be inactive (synced collections start inactive until manually activated).
+    pub fn add_collection_to_cache(&self, schema: CollectionVersion) -> Result<()> {
+        let name = schema.name.clone();
+        let mut cache = self.collections.write().map_err(|e| {
+            tracing::error!(error = ?e, collection_name = %name, "Collection cache lock poisoned during add_collection_to_cache");
+            Error::LockPoisoned("collection cache lock poisoned during add_collection_to_cache".into())
+        })?;
+        cache.insert(name, Collection::new(schema));
+        Ok(())
+    }
+
     /// Get a collection by name using the transaction's cache.
     ///
     /// This performs lazy loading - the collection is loaded from the store

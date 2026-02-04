@@ -131,23 +131,32 @@ pub unsafe extern "C" fn get_collections(
 
         // Get schemas for each collection, propagating errors
         let mut collections = Vec::new();
-        for name in names {
-            match database.get_collection(&name) {
+        for name in &names {
+            match database.get_collection(name) {
                 Ok(Some(collection)) => {
-                    collections.push(collection.schema().clone());
+                    let schema = collection.schema().clone();
+                    eprintln!(
+                        "[GET-COLLECTIONS] name={} version_id={} is_active={}",
+                        schema.name, schema.version_id, schema.is_active
+                    );
+                    collections.push(schema);
                 }
                 Ok(None) => {
                     // Collection was deleted between list and get - skip it
+                    eprintln!("[GET-COLLECTIONS] name={} not found", name);
                 }
                 Err(e) => {
                     return Err(format!("failed to get collection '{}': {}", name, e));
                 }
             }
         }
+        eprintln!("[GET-COLLECTIONS] Returning {} collections", collections.len());
 
         // Return JSON array
         let json = serde_json::to_string(&collections)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
+
+        eprintln!("[GET-COLLECTIONS] JSON output: {}", json);
 
         Ok::<String, String>(json)
     });
