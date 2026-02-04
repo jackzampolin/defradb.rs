@@ -87,7 +87,7 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
         }
     }
 
-    // Validate GROUP BY fields exist in schema
+    // Validate GROUP BY fields exist in schema and are groupable
     if let Some(ref group_by) = select.group_by {
         for field_name in &group_by.fields {
             if !field_exists(field_name) {
@@ -95,6 +95,15 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
                     "GROUP BY field '{}' not found in collection '{}'",
                     field_name, select.collection_name
                 )));
+            }
+            // Reject array relation fields (one-to-many) - can't group by a list value
+            if let Some(field) = collection.field_by_name(field_name) {
+                if field.kind.is_object() && field.kind.is_array() {
+                    return Err(QueryError::parse(format!(
+                        "invalid field value to groupBy. Field: {}",
+                        field_name
+                    )));
+                }
             }
         }
 

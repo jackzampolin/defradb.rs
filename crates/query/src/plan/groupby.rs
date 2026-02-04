@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -859,19 +859,104 @@ impl PlanNode for GroupByNode {
         self.source.start().await?;
         self.started = true;
 
-        // Buffer all documents and group them
-        let mut group_map: HashMap<String, usize> = HashMap::new();
-
+        // Buffer all documents from scan (storage order)
+        let mut all_docs: Vec<Doc> = Vec::new();
         while self.source.next().await? {
-            let doc = self.source.value().deep_clone();
-            let key = self.generate_key(&doc)?;
+            all_docs.push(self.source.value().deep_clone());
+        }
 
+        // Determine group key ordering.
+        //
+        // Go DefraDB's GroupNode uses an interleaved join of parent (scan order) and
+        // child (sorted by _group order) documents. Both mergeParent and appendChild
+        // can create new groups, so the group ordering depends on which source
+        // encounters a new group key first. We replicate this interleaving here.
+        //
+        // The interleaving only applies when _group has a simple order (no inner
+        // groupBy). When _group has a groupBy, Go's child source yields grouped
+        // results (fewer items) with different interleaving semantics.
+        let group_order = self.group_aliases.first().and_then(|a| a.order.clone());
+        let has_simple_group_order = group_order
+            .as_ref()
+            .map_or(false, |o| !o.is_empty() && self.inner_group_by_fields.is_empty());
+        let mut ordered_keys: Vec<String> = Vec::new();
+        let mut key_set: HashSet<String> = HashSet::new();
+
+        if has_simple_group_order {
+            let order = group_order.as_ref().unwrap();
+            if !all_docs.is_empty() {
+                // Sort indices by _group order (child order)
+                let mut sorted_indices: Vec<usize> = (0..all_docs.len()).collect();
+                sorted_indices.sort_by(|&ai, &bi| {
+                    for cond in &order.conditions {
+                        if let Some(field_name) = cond.fields.first() {
+                            if let Some(idx) =
+                                self.document_mapping.first_index_of_name(field_name)
+                            {
+                                let val_a = all_docs[ai].get(idx);
+                                let val_b = all_docs[bi].get(idx);
+                                let cmp = Self::compare_field_values(val_a, val_b);
+                                let cmp = match cond.direction {
+                                    OrderDirection::Asc => cmp,
+                                    OrderDirection::Desc => cmp.reverse(),
+                                };
+                                if cmp != std::cmp::Ordering::Equal {
+                                    return cmp;
+                                }
+                            }
+                        }
+                    }
+                    std::cmp::Ordering::Equal
+                });
+
+                // Interleave parent (scan order) and child (sorted order)
+                for i in 0..all_docs.len() {
+                    let parent_key = self.generate_key(&all_docs[i])?;
+                    if key_set.insert(parent_key.clone()) {
+                        ordered_keys.push(parent_key);
+                    }
+
+                    let child_key = self.generate_key(&all_docs[sorted_indices[i]])?;
+                    if key_set.insert(child_key.clone()) {
+                        ordered_keys.push(child_key);
+                    }
+                }
+            }
+        }
+
+        // Fallback: if no interleaving was done, use scan order
+        if ordered_keys.is_empty() {
+            for doc in &all_docs {
+                let key = self.generate_key(doc)?;
+                if key_set.insert(key.clone()) {
+                    ordered_keys.push(key);
+                }
+            }
+        }
+
+        // Pre-create groups in the determined order
+        let mut group_map: HashMap<String, usize> = HashMap::new();
+        for key in &ordered_keys {
+            let idx = self.groups.len();
+            group_map.insert(key.clone(), idx);
+            self.groups.push((
+                key.clone(),
+                DocumentGroup {
+                    docs: vec![],
+                    representative: Doc::default(),
+                },
+            ));
+        }
+
+        // Populate groups with docs in scan order
+        for doc in all_docs {
+            let key = self.generate_key(&doc)?;
             if let Some(&idx) = group_map.get(&key) {
-                self.groups[idx].1.add(doc);
-            } else {
-                let idx = self.groups.len();
-                group_map.insert(key.clone(), idx);
-                self.groups.push((key, DocumentGroup::new(doc)));
+                let group = &mut self.groups[idx].1;
+                if group.docs.is_empty() {
+                    group.representative = doc.deep_clone();
+                }
+                group.docs.push(doc);
             }
         }
 

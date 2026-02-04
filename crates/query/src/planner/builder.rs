@@ -652,8 +652,16 @@ impl Planner {
             // Apply scalar filter as residual filter on IndexScanNode.
             // The index may only cover part of the filter (e.g., first field of composite index),
             // so remaining conditions are applied as post-filtering on the fetched documents.
+            // Strip _alias for complex filters (same reason as ScanNode below).
             if let Some(ref filter) = scalar_filter {
-                index_scan_node = index_scan_node.with_residual_filter(filter.clone());
+                if is_complex_filter && filter.has_alias_filter() {
+                    let (non_alias, _alias) = filter.split_alias();
+                    if let Some(f) = non_alias {
+                        index_scan_node = index_scan_node.with_residual_filter(f);
+                    }
+                } else {
+                    index_scan_node = index_scan_node.with_residual_filter(filter.clone());
+                }
             }
             Box::new(index_scan_node)
         } else {
@@ -667,9 +675,20 @@ impl Planner {
             if let Some(ref doc_ids) = select.doc_ids {
                 scan = scan.with_doc_ids(doc_ids.clone());
             }
-            // Push scalar filter to ScanNode (matches Go DefraDB plan construction)
+            // Push scalar filter to ScanNode (matches Go DefraDB plan construction).
+            // For complex filters, strip _alias conditions: they reference aliased
+            // relation fields whose data is only available after TypeJoin populates
+            // the relation index. The full filter (including _alias) is applied after
+            // joins at the complex filter SelectNode.
             if let Some(ref filter) = scalar_filter {
-                scan = scan.with_filter(filter.clone());
+                if is_complex_filter && filter.has_alias_filter() {
+                    let (non_alias, _alias) = filter.split_alias();
+                    if let Some(f) = non_alias {
+                        scan = scan.with_filter(f);
+                    }
+                } else {
+                    scan = scan.with_filter(filter.clone());
+                }
             }
             Box::new(scan)
         };
