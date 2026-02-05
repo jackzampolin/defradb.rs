@@ -8,11 +8,11 @@ use crate::runner::list_packages;
 use crate::worktree::{list_rust_worktrees, WorktreeContext};
 
 /// Show status of FFI tests
-pub async fn execute(all: bool) -> Result<()> {
+pub async fn execute(all: bool, subpackages: bool) -> Result<()> {
     if all {
         show_all_worktrees().await
     } else {
-        show_current_worktree().await
+        show_current_worktree(subpackages).await
     }
 }
 
@@ -25,7 +25,7 @@ fn format_pct(value: usize, total: usize) -> String {
     }
 }
 
-async fn show_current_worktree() -> Result<()> {
+async fn show_current_worktree(subpackages: bool) -> Result<()> {
     let ctx = WorktreeContext::detect().await?;
 
     // Special case: if on main, show latest from ALL worktrees
@@ -49,7 +49,23 @@ async fn show_current_worktree() -> Result<()> {
     println!();
 
     // Get available packages
-    let packages = list_packages(&ctx.go_path).await?;
+    let all_packages = list_packages(&ctx.go_path).await?;
+
+    // Filter to root packages only (no parent package in the list) unless --subpackages
+    let packages: Vec<String> = if subpackages {
+        all_packages
+    } else {
+        all_packages
+            .iter()
+            .filter(|pkg| {
+                // Keep if no other package is a parent of this one
+                !all_packages
+                    .iter()
+                    .any(|other| other != *pkg && pkg.starts_with(&format!("{}/", other)))
+            })
+            .cloned()
+            .collect()
+    };
 
     // Load reports - from all branches if on main, otherwise just current branch
     let reports = if is_main {
@@ -118,53 +134,48 @@ async fn show_current_worktree() -> Result<()> {
             let fail_pct = format_pct(report.summary.failed, report.summary.total);
             let skip_pct = format_pct(report.summary.skipped, report.summary.total);
 
-            let pass_str = format!("{:>4} {}", report.summary.passed, pass_pct);
-            let fail_str = format!("{:>4} {}", report.summary.failed, fail_pct);
-            let skip_str = format!("{:>4} {}", report.summary.skipped, skip_pct);
-
             let timestamp = report.timestamp.format("%m-%d %H:%M").to_string();
 
-            // Color based on pass rate: green=100%, yellow=90%+, red=<90%
+            // Color stats based on pass rate: green=100%, yellow=90%+, red=<90%
             let pass_rate = if report.summary.total > 0 {
                 report.summary.passed * 100 / report.summary.total
             } else {
                 100
             };
 
-            if pass_rate == 100 {
-                println!(
-                    "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
-                    package.green(),
-                    report.commit.dimmed(),
-                    timestamp.dimmed(),
-                    pass_str.green(),
-                    fail_str.green(),
-                    skip_str.green(),
-                    report.summary.total.to_string().green()
-                );
+            let (pass_str, fail_str, skip_str, total_str) = if pass_rate == 100 {
+                (
+                    format!("{:>4} {}", report.summary.passed, pass_pct).green(),
+                    format!("{:>4} {}", report.summary.failed, fail_pct).green(),
+                    format!("{:>4} {}", report.summary.skipped, skip_pct).green(),
+                    report.summary.total.to_string().green(),
+                )
             } else if pass_rate >= 90 {
-                println!(
-                    "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
-                    package.yellow(),
-                    report.commit.dimmed(),
-                    timestamp.dimmed(),
-                    pass_str.yellow(),
-                    fail_str.yellow(),
-                    skip_str.yellow(),
-                    report.summary.total.to_string().yellow()
-                );
+                (
+                    format!("{:>4} {}", report.summary.passed, pass_pct).yellow(),
+                    format!("{:>4} {}", report.summary.failed, fail_pct).yellow(),
+                    format!("{:>4} {}", report.summary.skipped, skip_pct).yellow(),
+                    report.summary.total.to_string().yellow(),
+                )
             } else {
-                println!(
-                    "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
-                    package.red(),
-                    report.commit.dimmed(),
-                    timestamp.dimmed(),
-                    pass_str.red(),
-                    fail_str.red(),
-                    skip_str.red(),
-                    report.summary.total.to_string().red()
-                );
-            }
+                (
+                    format!("{:>4} {}", report.summary.passed, pass_pct).red(),
+                    format!("{:>4} {}", report.summary.failed, fail_pct).red(),
+                    format!("{:>4} {}", report.summary.skipped, skip_pct).red(),
+                    report.summary.total.to_string().red(),
+                )
+            };
+
+            println!(
+                "{:<50} {:<8} {:<12} {:>12} {:>12} {:>12} {:>6}",
+                package,  // White (no color)
+                report.commit.dimmed(),
+                timestamp.dimmed(),
+                pass_str,
+                fail_str,
+                skip_str,
+                total_str
+            );
 
             // Accumulate totals
             grand_total += report.summary.total;

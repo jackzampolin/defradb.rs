@@ -42,6 +42,10 @@ enum Commands {
         /// Show status for all worktrees
         #[arg(long)]
         all: bool,
+
+        /// Show subpackages (default: root packages only)
+        #[arg(short, long)]
+        subpackages: bool,
     },
 
     /// Show diff between test runs
@@ -113,7 +117,7 @@ async fn main() {
             skip_build,
         } => commands::run::execute(&package, test.as_deref(), verbose, skip_build).await,
 
-        Commands::Status { all } => commands::status::execute(all).await,
+        Commands::Status { all, subpackages } => commands::status::execute(all, subpackages).await,
 
         Commands::Diff { package } => commands::diff::execute(&package).await,
 
