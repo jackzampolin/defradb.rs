@@ -1,8 +1,21 @@
 //! Query planner for converting operations to execution plans
+//!
+//! This module is organized into submodules:
+//! - `builder`: Main Planner struct and plan building logic
+//! - `index_selection`: Index selection algorithms
+//! - `traits`: PlanNode trait and related types
+//! - `mapping`: Document mapping utilities (placeholder for extraction)
+//! - `aggregates`: Aggregate node building (placeholder for extraction)
+//! - `joins`: Join planning utilities (placeholder for extraction)
+//! - `views`: View planning utilities (placeholder for extraction)
 
+mod aggregates;
 mod builder;
 pub mod index_selection;
+mod joins;
+mod mapping;
 mod traits;
+mod views;
 
 pub use builder::{PlanResult, Planner};
 pub use index_selection::{

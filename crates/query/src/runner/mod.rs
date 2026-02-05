@@ -8,9 +8,24 @@
 //! The QueryRunner supports executing queries within transaction contexts via
 //! a `TransactionRegistry`. The registry manages transaction lifecycle and provides
 //! transaction-scoped document fetchers for query execution.
+//!
+//! # Module Organization
+//!
+//! - `executor`: QueryExecutor trait implementation
+//! - `fetcher`: Document fetching utilities
+//! - `introspection`: GraphQL introspection handling
+//! - `mutation`: Mutation execution
+//! - `plan`: Plan execution utilities
+//! - `query`: Main query execution logic
+//! - `explain`: Explain functionality (placeholder for extraction)
+//! - `commits`: Commits query handling (placeholder for extraction)
+//! - `helpers`: Utility functions (placeholder for extraction)
 
+mod commits;
 mod executor;
+mod explain;
 mod fetcher;
+mod helpers;
 mod introspection;
 mod mutation;
 mod plan;
