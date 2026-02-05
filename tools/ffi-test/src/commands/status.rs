@@ -75,9 +75,9 @@ async fn show_current_worktree(subpackages: bool) -> Result<()> {
 
     // Print table header
     println!(
-        "{:<50} {:<8} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
+        "{:<50} {:<12} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
         "Package".bold(),
-        "Commit".bold(),
+        "Branch".bold(),
         "Timestamp".bold(),
         "Pass".bold(),
         "Fail".bold(),
@@ -85,89 +85,91 @@ async fn show_current_worktree(subpackages: bool) -> Result<()> {
         "Total".bold(),
         "Rate".bold()
     );
-    println!("{}", "─".repeat(106));
+    println!("{}", "─".repeat(110));
 
     // Track how many packages have reports
     let mut packages_run = 0;
 
     // Print each package
     for package in &packages {
-        // Find all matching reports: exact match OR parent package match
-        // Then pick the most recent one
-        let report = {
-            let exact = latest_by_package.get(package);
-            let parent = latest_by_package
+        if subpackages {
+            // Show exact match only when displaying all subpackages
+            if let Some(report) = latest_by_package.get(package) {
+                print_package_row(package, report);
+                packages_run += 1;
+            } else {
+                print_empty_row(package);
+            }
+        } else {
+            // Roll up: aggregate this package + all subpackages
+            let matching_reports: Vec<&Report> = latest_by_package
                 .iter()
-                .filter(|(rp, _)| package.starts_with(&format!("{}/", rp)))
-                .max_by_key(|(_, r)| r.timestamp)
-                .map(|(_, r)| r);
+                .filter(|(rp, _)| *rp == package || rp.starts_with(&format!("{}/", package)))
+                .map(|(_, r)| r)
+                .collect();
 
-            // Pick whichever is more recent (or the one that exists)
-            match (exact, parent) {
-                (Some(e), Some(p)) => {
-                    if e.timestamp >= p.timestamp {
-                        Some(e)
-                    } else {
-                        Some(p)
+            if matching_reports.is_empty() {
+                print_empty_row(package);
+            } else {
+                // Aggregate stats from all matching reports
+                let mut total_pass = 0;
+                let mut total_fail = 0;
+                let mut total_skip = 0;
+                let mut latest_report: Option<&Report> = None;
+
+                for report in &matching_reports {
+                    total_pass += report.summary.passed;
+                    total_fail += report.summary.failed;
+                    total_skip += report.summary.skipped;
+
+                    // Track the most recent report for branch/timestamp
+                    if latest_report.is_none()
+                        || report.timestamp > latest_report.unwrap().timestamp
+                    {
+                        latest_report = Some(report);
                     }
                 }
-                (Some(e), None) => Some(e),
-                (None, Some(p)) => Some(p),
-                (None, None) => None,
+
+                let total = total_pass + total_fail + total_skip;
+                let pass_rate = if total > 0 {
+                    total_pass * 100 / total
+                } else {
+                    100
+                };
+
+                let rate_str = if pass_rate == 100 {
+                    format!("{}%", pass_rate).green()
+                } else if pass_rate >= 90 {
+                    format!("{}%", pass_rate).yellow()
+                } else {
+                    format!("{}%", pass_rate).red()
+                };
+
+                let report = latest_report.unwrap();
+                let timestamp = report.timestamp.format("%m-%d %H:%M").to_string();
+                let branch_display = report.branch.trim_start_matches("ffi/");
+
+                println!(
+                    "{:<50} {:<12} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
+                    package,
+                    branch_display.dimmed(),
+                    timestamp.dimmed(),
+                    total_pass,
+                    total_fail,
+                    total_skip,
+                    total,
+                    rate_str
+                );
+
+                packages_run += 1;
             }
-        };
-
-        if let Some(report) = report {
-            let timestamp = report.timestamp.format("%m-%d %H:%M").to_string();
-
-            // Calculate pass rate
-            let pass_rate = if report.summary.total > 0 {
-                report.summary.passed * 100 / report.summary.total
-            } else {
-                100
-            };
-
-            // Only Rate is colored: green=100%, yellow=90%+, red=<90%
-            let rate_str = if pass_rate == 100 {
-                format!("{}%", pass_rate).green()
-            } else if pass_rate >= 90 {
-                format!("{}%", pass_rate).yellow()
-            } else {
-                format!("{}%", pass_rate).red()
-            };
-
-            println!(
-                "{:<50} {:<8} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
-                package,
-                report.commit.dimmed(),
-                timestamp.dimmed(),
-                report.summary.passed,
-                report.summary.failed,
-                report.summary.skipped,
-                report.summary.total,
-                rate_str
-            );
-
-            packages_run += 1;
-        } else {
-            println!(
-                "{:<50} {:<8} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
-                package,
-                "-".dimmed(),
-                "-".dimmed(),
-                "-".dimmed(),
-                "-".dimmed(),
-                "-".dimmed(),
-                "-".dimmed(),
-                "-".dimmed()
-            );
         }
     }
 
     // Print totals if we have any data
     // With auto-split, each package has its own report, so count ALL packages
     if packages_run > 0 {
-        println!("{}", "─".repeat(106));
+        println!("{}", "─".repeat(110));
 
         // Calculate totals from ALL packages with reports
         let mut total_tests = 0;
@@ -202,7 +204,7 @@ async fn show_current_worktree(subpackages: bool) -> Result<()> {
         let label = format!("TOTAL ({} packages)", pkg_count);
 
         println!(
-            "{:<50} {:<8} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
+            "{:<50} {:<12} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
             label.bold(),
             "",
             "",
@@ -219,6 +221,51 @@ async fn show_current_worktree(subpackages: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn print_package_row(package: &str, report: &Report) {
+    let timestamp = report.timestamp.format("%m-%d %H:%M").to_string();
+    let branch_display = report.branch.trim_start_matches("ffi/");
+
+    let pass_rate = if report.summary.total > 0 {
+        report.summary.passed * 100 / report.summary.total
+    } else {
+        100
+    };
+
+    let rate_str = if pass_rate == 100 {
+        format!("{}%", pass_rate).green()
+    } else if pass_rate >= 90 {
+        format!("{}%", pass_rate).yellow()
+    } else {
+        format!("{}%", pass_rate).red()
+    };
+
+    println!(
+        "{:<50} {:<12} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
+        package,
+        branch_display.dimmed(),
+        timestamp.dimmed(),
+        report.summary.passed,
+        report.summary.failed,
+        report.summary.skipped,
+        report.summary.total,
+        rate_str
+    );
+}
+
+fn print_empty_row(package: &str) {
+    println!(
+        "{:<50} {:<12} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
+        package,
+        "-".dimmed(),
+        "-".dimmed(),
+        "-".dimmed(),
+        "-".dimmed(),
+        "-".dimmed(),
+        "-".dimmed(),
+        "-".dimmed()
+    );
 }
 
 async fn show_all_worktrees() -> Result<()> {
