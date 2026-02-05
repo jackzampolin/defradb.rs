@@ -24,16 +24,14 @@ use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use datastore::NamespaceView;
 use document::Document;
-use lens::{Lens, LensDoc, TargetedHistoryLink, TransformStore, DOC_ID_FIELD};
+use lens::{
+    build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink,
+    TransformStore, DOC_ID_FIELD,
+};
 use query::runner::{DocFetcher, FetchByIdsResult};
 use schema::CollectionVersion;
 use storage::corekv::Store;
 use tracing::{debug, trace, warn};
-
-use crate::lens_utils::{
-    build_collection_history, doc_needs_migration, doc_to_lens_doc, lens_doc_to_doc,
-    versions_have_migrations,
-};
 
 use crate::collection::Collection;
 use crate::collection_loader::get_collection_with_lazy_load;
@@ -87,6 +85,22 @@ impl<S: Store> LensedDocFetcher<S> {
         self.txn.clone()
     }
 
+    /// Check if any version in a list of collection versions has migrations registered.
+    ///
+    /// A collection has migrations if any version in its history has a transform
+    /// configured in the previous_version field. This matches Go's behavior of
+    /// checking the full history, not just the current version.
+    fn versions_have_migrations(versions: &[CollectionVersion]) -> bool {
+        for version in versions {
+            if let Some(ref prev) = version.previous_version {
+                if prev.transform.is_some() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Check if a collection has migrations registered (quick check).
     ///
     /// This is a fast check that only looks at the current version.
@@ -99,6 +113,42 @@ impl<S: Store> LensedDocFetcher<S> {
             }
         }
         false
+    }
+
+    /// Build the version history for a collection from a list of all versions.
+    ///
+    /// This takes all known versions and builds a directed graph showing
+    /// the migration path to the target version.
+    ///
+    /// # Arguments
+    /// * `versions` - All versions of the collection loaded from systemstore
+    /// * `target_version_id` - The version to build the history toward
+    fn build_collection_history_from_versions(
+        versions: &[CollectionVersion],
+        target_version_id: &str,
+    ) -> Option<HashMap<String, TargetedHistoryLink>> {
+        if versions.is_empty() {
+            return None;
+        }
+
+        let mut full_history: HashMap<String, CollectionHistoryLink> = HashMap::new();
+
+        // Add each version to the history
+        for version in versions {
+            let mut link = CollectionHistoryLink::new(&version.version_id, &version.collection_id);
+
+            // Check if there's a previous version
+            if let Some(ref prev) = version.previous_version {
+                link = link.with_previous(&prev.source_collection_id);
+                if let Some(ref transform_id) = prev.transform {
+                    link = link.with_transform(transform_id);
+                }
+            }
+
+            full_history.insert(version.version_id.clone(), link);
+        }
+
+        build_targeted_history(&full_history, target_version_id)
     }
 
     /// Load all versions of a collection and check if any have migrations.
@@ -132,7 +182,7 @@ impl<S: Store> LensedDocFetcher<S> {
         drop(txn_guard); // Release lock
 
         // Check if any version has migrations (matching Go's behavior)
-        let has_migrations = versions_have_migrations(&versions);
+        let has_migrations = Self::versions_have_migrations(&versions);
 
         Ok((versions, has_migrations))
     }
@@ -166,12 +216,13 @@ impl<S: Store> LensedDocFetcher<S> {
         }
 
         // Build the targeted history
-        let history = build_collection_history(&versions, target_version_id).ok_or_else(|| {
-            query::error::QueryError::execution(format!(
-                "failed to build migration history for collection {}",
-                collection_id
-            ))
-        })?;
+        let history = Self::build_collection_history_from_versions(&versions, target_version_id)
+            .ok_or_else(|| {
+                query::error::QueryError::execution(format!(
+                    "failed to build migration history for collection {}",
+                    collection_id
+                ))
+            })?;
 
         // Cache the history
         {
@@ -180,6 +231,50 @@ impl<S: Store> LensedDocFetcher<S> {
         }
 
         Ok(history)
+    }
+
+    /// Convert a Document to a LensDoc.
+    fn doc_to_lens_doc(doc: &Document) -> Option<LensDoc> {
+        // Use Document's to_map which handles all field conversions properly
+        let map = doc.to_map().ok()?;
+
+        // Convert HashMap to serde_json::Map
+        let mut lens_doc = LensDoc::new();
+        for (key, value) in map {
+            lens_doc.insert(key, value);
+        }
+
+        Some(lens_doc)
+    }
+
+    /// Convert a LensDoc back to a Document.
+    #[allow(dead_code)]
+    fn lens_doc_to_doc(lens_doc: LensDoc, original_doc: &Document) -> Document {
+        let mut doc = Document::new();
+
+        // Preserve original ID
+        if let Some(id) = original_doc.id() {
+            doc.set_id(id.clone());
+        }
+
+        // Copy fields from lens doc
+        for (field_name, value) in lens_doc {
+            if field_name != DOC_ID_FIELD {
+                doc.set(&field_name, value);
+            }
+        }
+
+        doc
+    }
+
+    /// Check if a document needs migration to the target version.
+    fn doc_needs_migration(doc: &Document, target_version_id: &str, has_migrations: bool) -> bool {
+        if !has_migrations {
+            return false;
+        }
+
+        // Check if document's version differs from target
+        doc.needs_migration(target_version_id)
     }
 
     /// Process a document, applying migration if needed.
@@ -196,7 +291,7 @@ impl<S: Store> LensedDocFetcher<S> {
         let target_version_id = &collection.schema().version_id;
 
         // Check if migration is needed
-        if !doc_needs_migration(&doc, target_version_id, has_migrations) {
+        if !Self::doc_needs_migration(&doc, target_version_id, has_migrations) {
             return Ok(doc);
         }
 
@@ -221,7 +316,7 @@ impl<S: Store> LensedDocFetcher<S> {
         }
 
         // Convert document to LensDoc
-        let original_lens_doc = doc_to_lens_doc(&doc).ok_or_else(|| {
+        let original_lens_doc = Self::doc_to_lens_doc(&doc).ok_or_else(|| {
             query::error::QueryError::execution(format!(
                 "failed to convert document {} to LensDoc for migration",
                 doc_id_str
@@ -266,7 +361,7 @@ impl<S: Store> LensedDocFetcher<S> {
         );
 
         // Convert back to Document
-        let mut migrated_doc = lens_doc_to_doc(migrated_lens_doc.clone(), &doc);
+        let mut migrated_doc = Self::lens_doc_to_doc(migrated_lens_doc.clone(), &doc);
         migrated_doc.set_schema_version_id(target_version_id);
 
         // Cache the migrated values in datastore
@@ -412,7 +507,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         // Count documents needing migration for logging
         let needs_migration_count = docs
             .iter()
-            .filter(|doc| doc_needs_migration(doc, target_version_id, has_migrations))
+            .filter(|doc| Self::doc_needs_migration(doc, target_version_id, has_migrations))
             .count();
 
         trace!(
@@ -514,7 +609,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         // Count documents needing migration for logging
         let needs_migration_count = docs
             .iter()
-            .filter(|doc| doc_needs_migration(doc, target_version_id, has_migrations))
+            .filter(|doc| Self::doc_needs_migration(doc, target_version_id, has_migrations))
             .count();
 
         trace!(
@@ -579,7 +674,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         // Count documents needing migration for logging
         let needs_migration_count = matching_docs
             .iter()
-            .filter(|doc| doc_needs_migration(doc, target_version_id, has_migrations))
+            .filter(|doc| Self::doc_needs_migration(doc, target_version_id, has_migrations))
             .count();
 
         trace!(
@@ -612,6 +707,42 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
 
         Ok(processed_docs)
     }
+
+    async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Vec<u8>>> {
+        use storage::corekv::IterOptions;
+        use storage::keys::datastore::ViewCacheKey;
+
+        let guard = self.txn.lock().await;
+        let txn = guard.as_ref().ok_or_else(|| {
+            query::error::QueryError::execution("transaction was already consumed")
+        })?;
+
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get datastore: {}", e))
+        })?;
+
+        let prefix = ViewCacheKey::collection_prefix(collection_id);
+        let opts = IterOptions::new().with_prefix(prefix);
+        let mut iter = datastore.iterator(opts).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to iterate view cache: {}", e))
+        })?;
+
+        let mut items = Vec::new();
+        while let Some(pair) = iter.next().await.map_err(|e| {
+            query::error::QueryError::execution(format!("view cache iteration error: {}", e))
+        })? {
+            items.push(pair.value);
+        }
+
+        iter.close().await.map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to close view cache iterator: {}",
+                e
+            ))
+        })?;
+
+        Ok(items)
+    }
 }
 
 #[cfg(test)]
@@ -625,7 +756,7 @@ mod tests {
         doc.set("name", Value::String("Alice".to_string()));
         doc.set("age", Value::Number(30.into()));
 
-        let lens_doc = doc_to_lens_doc(&doc).unwrap();
+        let lens_doc = LensedDocFetcher::<storage::MemoryStore>::doc_to_lens_doc(&doc).unwrap();
 
         assert_eq!(
             lens_doc.get("name").unwrap(),
