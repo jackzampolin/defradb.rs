@@ -11,7 +11,7 @@ use crate::error::{QueryError, Result};
 use crate::mapper::{GroupBy, OrderBy, OrderDirection};
 use crate::planner::{Doc, ExecInfo, PlanNode};
 
-use super::{JoinSide, RelationFilter};
+use super::{JoinChildMetrics, JoinSide, RelationFilter};
 
 /// TypeJoinMany implements one-to-many relation joins.
 ///
@@ -73,10 +73,7 @@ pub struct TypeJoinMany {
     /// Simulated Go-compatible child metrics.
     /// Go re-initializes the child scan per parent, reading ALL children from
     /// the collection each time. Metrics accumulate across all parent scans.
-    go_child_iterations: u64,
-    go_child_doc_fetches: u64,
-    go_child_field_fetches: u64,
-    go_child_index_fetches: u64,
+    go_child_metrics: JoinChildMetrics,
     /// Total children in the cache (docs per full collection scan)
     total_children_in_cache: u64,
     /// Total field fetches per full collection scan
@@ -153,10 +150,7 @@ impl TypeJoinMany {
             group_mapping: None,
             exec_info: ExecInfo::default(),
             child_exec_info: ExecInfo::default(),
-            go_child_iterations: 0,
-            go_child_doc_fetches: 0,
-            go_child_field_fetches: 0,
-            go_child_index_fetches: 0,
+            go_child_metrics: JoinChildMetrics::new(),
             total_children_in_cache: 0,
             total_fields_per_scan: 0,
             per_parent_child_scan: false,
@@ -329,7 +323,7 @@ impl TypeJoinMany {
 
         // Capture child plan's execution info before closing
         self.child_exec_info = self.child_plan.exec_info();
-        self.go_child_index_fetches = self.child_exec_info.indexes_fetched;
+        self.go_child_metrics.index_fetches = self.child_exec_info.indexes_fetched;
 
         // Capture per-scan totals for Go-compatible metric simulation.
         // Go re-scans ALL children per parent, so we need these totals.
@@ -611,10 +605,10 @@ impl TypeJoinMany {
 
             // Capture child plan metrics for this parent scan
             let child_info = self.child_plan.exec_info();
-            self.go_child_iterations += total_scanned + 1; // scanned entries + 1 false
-            self.go_child_doc_fetches += child_info.docs_fetched;
-            self.go_child_field_fetches += child_info.fields_fetched;
-            self.go_child_index_fetches += child_info.indexes_fetched;
+            self.go_child_metrics.iterations += total_scanned + 1; // scanned entries + 1 false
+            self.go_child_metrics.doc_fetches += child_info.docs_fetched;
+            self.go_child_metrics.field_fetches += child_info.fields_fetched;
+            self.go_child_metrics.index_fetches += child_info.indexes_fetched;
 
             // If limit was reached early, add the partial index fetches
             // (Go stops scanning when limit reached, so indexFetches = entries scanned)
@@ -622,8 +616,8 @@ impl TypeJoinMany {
                 // Override: Go counts only the entries actually scanned, not all
                 // The child plan may have fetched all from index, but Go would have stopped.
                 // We approximate with matching_count since Go scans until limit matches.
-                self.go_child_index_fetches -= child_info.indexes_fetched;
-                self.go_child_index_fetches += total_scanned;
+                self.go_child_metrics.index_fetches -= child_info.indexes_fetched;
+                self.go_child_metrics.index_fetches += total_scanned;
             }
 
             self.child_plan.close().await?;
@@ -693,10 +687,7 @@ impl PlanNode for TypeJoinMany {
         // Reset execution stats
         self.exec_info = ExecInfo::default();
         self.child_exec_info = ExecInfo::default();
-        self.go_child_iterations = 0;
-        self.go_child_doc_fetches = 0;
-        self.go_child_field_fetches = 0;
-        self.go_child_index_fetches = 0;
+        self.go_child_metrics.reset();
         self.total_children_in_cache = 0;
         self.total_fields_per_scan = 0;
 
@@ -782,9 +773,9 @@ impl PlanNode for TypeJoinMany {
                 .get(&parent_doc_id)
                 .map(|v| v.len() as u64)
                 .unwrap_or(0);
-            self.go_child_iterations += matching_count + 1; // matching children + 1 false
-            self.go_child_doc_fetches += self.total_children_in_cache;
-            self.go_child_field_fetches += self.total_fields_per_scan;
+            self.go_child_metrics.iterations += matching_count + 1; // matching children + 1 false
+            self.go_child_metrics.doc_fetches += self.total_children_in_cache;
+            self.go_child_metrics.field_fetches += self.total_fields_per_scan;
 
             // Merge children array into parent
             self.merge_children(&mut parent_doc, children);
@@ -1042,26 +1033,9 @@ impl PlanNode for TypeJoinMany {
         // Use simulated Go-compatible metrics for the child scan.
         // Go re-initializes the child scanNode per parent, reading ALL children
         // from the collection each time with an FK filter. Metrics accumulate.
-        let mut sub_type_obj = serde_json::Map::new();
-        sub_type_obj.insert(
-            "iterations".to_string(),
-            serde_json::json!(self.go_child_iterations),
-        );
-        sub_type_obj.insert(
-            "docFetches".to_string(),
-            serde_json::json!(self.go_child_doc_fetches),
-        );
-        sub_type_obj.insert(
-            "fieldFetches".to_string(),
-            serde_json::json!(self.go_child_field_fetches),
-        );
-        sub_type_obj.insert(
-            "indexFetches".to_string(),
-            serde_json::json!(self.go_child_index_fetches),
-        );
         obj.insert(
             "subTypeScanNode".to_string(),
-            serde_json::Value::Object(sub_type_obj),
+            self.go_child_metrics.to_json(),
         );
 
         serde_json::Value::Object(obj)

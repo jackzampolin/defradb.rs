@@ -1,16 +1,18 @@
-//! SumNode for computing SUM aggregate
+//! Generic aggregate node infrastructure
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
+use std::marker::PhantomData;
 
 use crate::document::DocumentMapping;
 use crate::error::Result;
 use crate::mapper::{Filter, Limit};
 use crate::planner::{Doc, ExecInfo, PlanNode};
 
-/// Source metadata for explain output.
+/// Source metadata for aggregates that operate on numeric fields.
+/// Used by SUM, MAX, MIN, AVG.
 #[derive(Debug, Clone)]
-pub struct SumSourceMeta {
+pub struct NumericSourceMeta {
     /// Field name (collection name or relation field name)
     pub field_name: String,
     /// Optional child field name for field-level aggregates
@@ -21,26 +23,62 @@ pub struct SumSourceMeta {
     pub is_inline_array: bool,
 }
 
-/// SumNode computes the sum of a numeric field from its source.
+/// Trait for aggregate operations (COUNT, SUM, MAX, MIN, AVG).
 ///
-/// Operates in two modes:
-/// - Without GROUP BY: Sums all documents and yields a single result
-/// - With GROUP BY: For each group, adds the sum to the document
+/// Each aggregate type implements this trait to define:
+/// - The accumulator type and initialization
+/// - How to accumulate values from documents
+/// - How to finalize the result
+/// - Explain output format
+pub trait AggregateOp: Send + Sync + 'static {
+    /// Accumulator state for this aggregate
+    type Accumulator: Default + Clone + Send + Sync;
+
+    /// Source metadata type for this aggregate
+    type SourceMeta: Clone + Send + Sync;
+
+    /// Whether this aggregate requires a field index (COUNT doesn't, others do)
+    const REQUIRES_FIELD_INDEX: bool;
+
+    /// Initialize accumulator state
+    fn init_accumulator() -> Self::Accumulator;
+
+    /// Accumulate a value from a document field
+    fn accumulate(acc: &mut Self::Accumulator, value: Option<&JsonValue>);
+
+    /// Accumulate from a child aggregate JSON array
+    fn accumulate_from_group(acc: &mut Self::Accumulator, items: &[JsonValue], field_name: &str);
+
+    /// Finalize the accumulator into a JSON result
+    fn finalize(acc: &Self::Accumulator) -> JsonValue;
+
+    /// The node kind name for explain output (e.g., "countNode", "sumNode")
+    fn kind() -> &'static str;
+
+    /// Build explain inner output for this aggregate's sources
+    fn build_explain_sources(sources: &[Self::SourceMeta]) -> Vec<JsonValue>;
+
+    /// Build explain sources for the count portion of average (no childFieldName)
+    fn build_explain_sources_for_count(_sources: &[Self::SourceMeta]) -> Option<Vec<JsonValue>> {
+        None
+    }
+}
+
+/// Generic aggregate node that wraps any `AggregateOp`.
 ///
-/// Null values are skipped. Returns 0 if no values to sum.
-/// Returns f64 if any values are floats, i64 if all integers.
-pub struct SumNode {
+/// Handles the common iteration, grouping, filtering, and limiting logic
+/// shared by all aggregate nodes. The specific accumulation logic is
+/// delegated to the `Op` type parameter.
+pub struct AggregateNode<Op: AggregateOp> {
     source: Box<dyn PlanNode>,
     document_mapping: DocumentMapping,
-    /// Index of the field to sum
+    /// Index of the field to aggregate (not used by COUNT)
     field_index: usize,
-    /// Index in the document where sum result should be stored
+    /// Index in the document where result should be stored
     aggregate_index: usize,
-    /// The computed sum value as float (for non-grouped mode)
-    sum: f64,
-    /// Whether we've seen any float values
-    has_float: bool,
-    /// Current document with sum result
+    /// Accumulator state for non-grouped mode
+    accumulator: Op::Accumulator,
+    /// Current document with result
     current_doc: Doc,
     /// Whether we've already yielded the result (for non-grouped mode)
     done: bool,
@@ -48,21 +86,23 @@ pub struct SumNode {
     started: bool,
     /// Whether we're in grouped mode (source provides group docs)
     grouped_mode: bool,
-    /// Optional filter to apply to group documents before summing
+    /// Optional filter to apply to group documents
     aggregate_filter: Option<Filter>,
-    /// Optional limit/offset to apply to group documents before summing
+    /// Optional limit/offset to apply to group documents
     aggregate_limit: Option<Limit>,
-    /// If set, operate in "child aggregate" mode: read values from _group JSON array.
+    /// If set, operate in "child aggregate" mode: read values from _group JSON array
     child_aggregate_source: Option<(usize, String)>,
-    /// Execution statistics for explain execute mode
+    /// Execution statistics
     exec_info: ExecInfo,
     /// Source metadata for explain output
-    sources: Vec<SumSourceMeta>,
+    sources: Vec<Op::SourceMeta>,
+    /// Phantom marker for the operation type
+    _op: PhantomData<Op>,
 }
 
-impl SumNode {
-    /// Create a new SumNode wrapping a source
-    pub fn new(
+impl<Op: AggregateOp> AggregateNode<Op> {
+    /// Create a new aggregate node with a field index (for SUM, MAX, MIN, AVG)
+    pub fn new_with_field(
         source: Box<dyn PlanNode>,
         document_mapping: DocumentMapping,
         field_index: usize,
@@ -73,8 +113,7 @@ impl SumNode {
             document_mapping,
             field_index,
             aggregate_index,
-            sum: 0.0,
-            has_float: false,
+            accumulator: Op::init_accumulator(),
             current_doc: Doc::default(),
             done: false,
             started: false,
@@ -84,7 +123,17 @@ impl SumNode {
             child_aggregate_source: None,
             exec_info: ExecInfo::default(),
             sources: Vec::new(),
+            _op: PhantomData,
         }
+    }
+
+    /// Create a new aggregate node without a field index (for COUNT)
+    pub fn new_without_field(
+        source: Box<dyn PlanNode>,
+        document_mapping: DocumentMapping,
+        aggregate_index: usize,
+    ) -> Self {
+        Self::new_with_field(source, document_mapping, 0, aggregate_index)
     }
 
     pub fn with_child_aggregate_source(mut self, group_index: usize, field_name: String) -> Self {
@@ -102,27 +151,13 @@ impl SumNode {
         self
     }
 
-    pub fn with_sources(mut self, sources: Vec<SumSourceMeta>) -> Self {
+    pub fn with_sources(mut self, sources: Vec<Op::SourceMeta>) -> Self {
         self.sources = sources;
         self
     }
 
-    /// Extract numeric value from JSON, returning None for nulls
-    fn extract_numeric(value: Option<&JsonValue>) -> Option<(f64, bool)> {
-        match value {
-            Some(JsonValue::Number(n)) => n
-                .as_i64()
-                .map(|i| (i as f64, false))
-                .or_else(|| n.as_f64().map(|f| (f, true))),
-            _ => None,
-        }
-    }
-
-    /// Compute sum of a slice of documents
-    fn compute_sum(&self, docs: &[Doc]) -> (f64, bool) {
-        let mut sum = 0.0;
-        let mut has_float = false;
-
+    /// Filter and limit a slice of documents for grouped aggregation
+    fn filter_and_limit_docs<'a>(&self, docs: &'a [Doc]) -> Vec<&'a Doc> {
         let filtered: Vec<&Doc> = docs
             .iter()
             .filter(|d| !d.hidden)
@@ -137,50 +172,26 @@ impl SumNode {
             })
             .collect();
 
-        let limited: Box<dyn Iterator<Item = &&Doc>> = if let Some(ref limit) = self.aggregate_limit
-        {
+        if let Some(ref limit) = self.aggregate_limit {
             let offset = limit.offset as usize;
             let effective_limit = limit.limit.map(|l| l as usize);
             match (effective_limit, offset) {
-                (Some(0), _) => Box::new(filtered.iter()),
-                (Some(l), o) => Box::new(filtered.iter().skip(o).take(l)),
-                (None, o) if o > 0 => Box::new(filtered.iter().skip(o)),
-                _ => Box::new(filtered.iter()),
+                (Some(0), _) => filtered,
+                (Some(l), o) => filtered.into_iter().skip(o).take(l).collect(),
+                (None, o) if o > 0 => filtered.into_iter().skip(o).collect(),
+                _ => filtered,
             }
         } else {
-            Box::new(filtered.iter())
-        };
-
-        for doc in limited {
-            if let Some((val, is_float)) = Self::extract_numeric(doc.get(self.field_index)) {
-                sum += val;
-                has_float = has_float || is_float;
-            }
-        }
-
-        (sum, has_float)
-    }
-
-    /// Convert sum to JSON value (int if no floats, float otherwise)
-    /// Returns Null for NaN/Infinity to prevent silent data corruption
-    fn sum_to_json(sum: f64, has_float: bool) -> JsonValue {
-        if has_float {
-            // NaN and Infinity cannot be represented in JSON - return null
-            serde_json::Number::from_f64(sum)
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null)
-        } else {
-            JsonValue::Number((sum as i64).into())
+            filtered
         }
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl PlanNode for SumNode {
+impl<Op: AggregateOp> PlanNode for AggregateNode<Op> {
     async fn init(&mut self) -> Result<()> {
-        self.sum = 0.0;
-        self.has_float = false;
+        self.accumulator = Op::init_accumulator();
         self.done = false;
         self.started = false;
         self.grouped_mode = false;
@@ -199,12 +210,10 @@ impl PlanNode for SumNode {
             self.start().await?;
         }
 
-        // Early return when already done (Go checks isCompleted before calling source.next)
         if self.done {
             return Ok(false);
         }
 
-        // Track iterations (Go counts each call to next)
         self.exec_info.iterations += 1;
 
         // Child aggregate mode: read from _group JSON array on each doc
@@ -213,85 +222,65 @@ impl PlanNode for SumNode {
                 return Ok(false);
             }
             let doc = self.source.value();
-            let (sum, has_float) = if let Some(JsonValue::Array(items)) = doc.get(group_index) {
-                let mut s = 0.0;
-                let mut hf = false;
-                for item in items {
-                    if let JsonValue::Object(obj) = item {
-                        if let Some(val) = obj.get(field_name.as_str()) {
-                            if let Some(i) = val.as_i64() {
-                                s += i as f64;
-                            } else if let Some(f) = val.as_f64() {
-                                s += f;
-                                hf = true;
-                            }
-                        }
-                    }
-                }
-                (s, hf)
-            } else {
-                (0.0, false)
-            };
+            let mut acc = Op::init_accumulator();
+            if let Some(JsonValue::Array(items)) = doc.get(group_index) {
+                Op::accumulate_from_group(&mut acc, items, field_name);
+            }
             let mut new_doc = doc.deep_clone();
-            new_doc.set(self.aggregate_index, Self::sum_to_json(sum, has_float));
+            new_doc.set(self.aggregate_index, Op::finalize(&acc));
             self.current_doc = new_doc;
             return Ok(true);
         }
 
         loop {
-            // Try to get next from source
             if !self.source.next().await? {
-                // No more source documents
                 if !self.grouped_mode && !self.done {
                     if self.source.is_grouped_source() {
                         return Ok(false);
                     }
-                    // Non-grouped mode: Return the single result
                     self.done = true;
                     let num_fields = self
                         .document_mapping
                         .next_index()
                         .max(self.aggregate_index + 1);
                     let mut doc = Doc::new(num_fields);
-                    doc.set(
-                        self.aggregate_index,
-                        Self::sum_to_json(self.sum, self.has_float),
-                    );
+                    doc.set(self.aggregate_index, Op::finalize(&self.accumulator));
                     self.current_doc = doc;
                     return Ok(true);
                 }
                 return Ok(false);
             }
 
-            // Check if source provides group docs
             if let Some(group_docs) = self.source.current_group_docs() {
-                // Grouped mode: sum field values in this group
                 self.grouped_mode = true;
-                let (group_sum, group_has_float) = self.compute_sum(group_docs);
-
-                // Clone the current doc from source and add the sum
+                let filtered = self.filter_and_limit_docs(group_docs);
+                let mut acc = Op::init_accumulator();
+                for doc in &filtered {
+                    if Op::REQUIRES_FIELD_INDEX {
+                        Op::accumulate(&mut acc, doc.get(self.field_index));
+                    } else {
+                        // COUNT: just accumulate presence
+                        Op::accumulate(&mut acc, Some(&JsonValue::Null));
+                    }
+                }
                 let mut doc = self.source.value().deep_clone();
                 if doc.num_fields() <= self.aggregate_index {
                     doc.set(self.aggregate_index, JsonValue::Null);
                 }
-                doc.set(
-                    self.aggregate_index,
-                    Self::sum_to_json(group_sum, group_has_float),
-                );
+                doc.set(self.aggregate_index, Op::finalize(&acc));
                 self.current_doc = doc;
                 return Ok(true);
             }
 
-            // Non-grouped mode: accumulate sum
+            // Non-grouped mode: accumulate
             let doc = self.source.value();
             if !doc.hidden {
-                if let Some((val, is_float)) = Self::extract_numeric(doc.get(self.field_index)) {
-                    self.sum += val;
-                    self.has_float = self.has_float || is_float;
+                if Op::REQUIRES_FIELD_INDEX {
+                    Op::accumulate(&mut self.accumulator, doc.get(self.field_index));
+                } else {
+                    Op::accumulate(&mut self.accumulator, Some(&JsonValue::Null));
                 }
             }
-
-            // Continue iterating to sum all docs (loop continues)
         }
     }
 
@@ -312,49 +301,15 @@ impl PlanNode for SumNode {
     }
 
     fn kind(&self) -> &'static str {
-        "sumNode"
+        Op::kind()
     }
 
     fn explain_inner(&self) -> JsonValue {
         let mut obj = serde_json::Map::new();
 
-        // sources: array of objects with fieldName, childFieldName, and filter
-        let sources: Vec<JsonValue> = self
-            .sources
-            .iter()
-            .map(|s| {
-                let mut source_obj = serde_json::Map::new();
-                source_obj.insert(
-                    "fieldName".to_string(),
-                    JsonValue::String(s.field_name.clone()),
-                );
-                match &s.child_field_name {
-                    Some(child_name) => {
-                        source_obj.insert(
-                            "childFieldName".to_string(),
-                            JsonValue::String(child_name.clone()),
-                        );
-                    }
-                    None => {
-                        source_obj.insert("childFieldName".to_string(), serde_json::Value::Null);
-                    }
-                }
-                if let Some(ref filter) = s.filter {
-                    let conditions = filter.conditions();
-                    if conditions.is_empty() {
-                        source_obj.insert("filter".to_string(), serde_json::Value::Null);
-                    } else {
-                        source_obj.insert("filter".to_string(), serde_json::json!(conditions));
-                    }
-                } else {
-                    source_obj.insert("filter".to_string(), serde_json::Value::Null);
-                }
-                JsonValue::Object(source_obj)
-            })
-            .collect();
+        let sources = Op::build_explain_sources(&self.sources);
         obj.insert("sources".to_string(), JsonValue::Array(sources));
 
-        // Include child nodes
         if let Some(source) = self.source() {
             let child_explain = source.explain();
             if let Some(child_obj) = child_explain.as_object() {
@@ -368,7 +323,6 @@ impl PlanNode for SumNode {
     }
 
     fn current_group_docs(&self) -> Option<&[Doc]> {
-        // Pass through from source for stacked aggregates
         self.source.current_group_docs()
     }
 

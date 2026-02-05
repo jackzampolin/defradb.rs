@@ -10,7 +10,7 @@ use crate::error::{QueryError, Result};
 use crate::mapper::Filter;
 use crate::planner::{Doc, ExecInfo, PlanNode};
 
-use super::{JoinDirection, JoinSide};
+use super::{JoinChildMetrics, JoinDirection, JoinSide};
 
 /// TypeJoinOne implements one-to-one relation joins.
 ///
@@ -71,10 +71,7 @@ pub struct TypeJoinOne {
     /// Simulated Go-compatible child metrics.
     /// Go re-initializes the child scan per parent with a specific docID prefix,
     /// calling Next() exactly once per parent. Metrics accumulate across parents.
-    go_child_iterations: u64,
-    go_child_doc_fetches: u64,
-    go_child_field_fetches: u64,
-    go_child_index_fetches: u64,
+    go_child_metrics: JoinChildMetrics,
 }
 
 /// A filter condition on a relation field.
@@ -136,10 +133,7 @@ impl TypeJoinOne {
             relation_filter: None,
             exec_info: ExecInfo::default(),
             child_exec_info: ExecInfo::default(),
-            go_child_iterations: 0,
-            go_child_doc_fetches: 0,
-            go_child_field_fetches: 0,
-            go_child_index_fetches: 0,
+            go_child_metrics: JoinChildMetrics::new(),
         }
     }
 
@@ -265,7 +259,7 @@ impl TypeJoinOne {
 
         // Capture child plan's execution info before closing
         self.child_exec_info = self.child_plan.exec_info();
-        self.go_child_index_fetches = self.child_exec_info.indexes_fetched;
+        self.go_child_metrics.index_fetches = self.child_exec_info.indexes_fetched;
 
         self.child_plan.close().await?;
         Ok(())
@@ -373,10 +367,7 @@ impl PlanNode for TypeJoinOne {
         // Reset execution stats
         self.exec_info = ExecInfo::default();
         self.child_exec_info = ExecInfo::default();
-        self.go_child_iterations = 0;
-        self.go_child_doc_fetches = 0;
-        self.go_child_field_fetches = 0;
-        self.go_child_index_fetches = 0;
+        self.go_child_metrics.reset();
 
         // Build child cache first (scans child_plan once)
         self.build_child_cache().await?;
@@ -416,10 +407,10 @@ impl PlanNode for TypeJoinOne {
             // with a docID-specific prefix. Next() is called exactly once.
             if child_doc.is_some() {
                 // Found a child: 1 iteration (Next()=true), 1 doc fetched
-                self.go_child_iterations += 1;
-                self.go_child_doc_fetches += 1;
+                self.go_child_metrics.iterations += 1;
+                self.go_child_metrics.doc_fetches += 1;
                 if let Some(ref doc) = child_doc {
-                    self.go_child_field_fetches += doc.stored_field_count as u64;
+                    self.go_child_metrics.field_fetches += doc.stored_field_count as u64;
                 }
             }
             // When FK is null/empty, Go doesn't call fetchDocWithIDAndItsSubDocs at all,
@@ -596,26 +587,9 @@ impl PlanNode for TypeJoinOne {
         // Use simulated Go-compatible metrics for the child scan.
         // Go re-initializes the child scanNode per parent with a docID-specific prefix,
         // calling Next() once per parent. Metrics accumulate across all parent lookups.
-        let mut sub_type_obj = serde_json::Map::new();
-        sub_type_obj.insert(
-            "iterations".to_string(),
-            serde_json::json!(self.go_child_iterations),
-        );
-        sub_type_obj.insert(
-            "docFetches".to_string(),
-            serde_json::json!(self.go_child_doc_fetches),
-        );
-        sub_type_obj.insert(
-            "fieldFetches".to_string(),
-            serde_json::json!(self.go_child_field_fetches),
-        );
-        sub_type_obj.insert(
-            "indexFetches".to_string(),
-            serde_json::json!(self.go_child_index_fetches),
-        );
         obj.insert(
             "subTypeScanNode".to_string(),
-            serde_json::Value::Object(sub_type_obj),
+            self.go_child_metrics.to_json(),
         );
 
         serde_json::Value::Object(obj)

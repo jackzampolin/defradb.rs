@@ -13,6 +13,7 @@
 use async_trait::async_trait;
 use schema::CollectionVersion;
 use std::sync::Arc;
+use tracing::debug;
 
 use crate::document::{documents_to_plan_docs, DocumentMapping};
 use crate::error::Result;
@@ -161,6 +162,13 @@ impl PlanNode for IndexScanNode {
         }
 
         self.initialized = true;
+        debug!(
+            collection = %self.collection.name,
+            index_name = %self.index_params.index_name,
+            doc_count = self.docs.len(),
+            index_fetches = self.index_fetches,
+            "IndexScanNode initialized"
+        );
         Ok(())
     }
 

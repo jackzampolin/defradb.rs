@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
+use tracing::instrument;
 
 use crate::error::{Result, TransactionError};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
@@ -27,6 +28,11 @@ fn convert_variables(variables: &Option<JsonValue>) -> Option<HashMap<String, Js
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRunner<F, R> {
+    #[instrument(
+        name = "query.execute_request",
+        skip(self, request),
+        fields(query_len = request.query.len())
+    )]
     async fn execute(&self, request: QueryRequest) -> QueryResponse {
         // Convert variables from JSON to HashMap format for the parser
         let variables = convert_variables(&request.variables);
@@ -121,6 +127,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         }
     }
 
+    #[instrument(
+        name = "query.execute_in_txn",
+        skip(self, request),
+        fields(query_len = request.query.len(), txn_id = %handle)
+    )]
     async fn execute_in_txn(
         &self,
         request: QueryRequest,

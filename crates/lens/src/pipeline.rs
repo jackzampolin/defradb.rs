@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 
 use crate::store::TransformStore;
 use crate::{Error, LensDoc, Result, TargetedHistoryLink, TransformId};
