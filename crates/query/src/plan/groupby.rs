@@ -256,6 +256,30 @@ impl GroupByNode {
         }
     }
 
+    /// Increment scanNode.iterations by 1 in the explain JSON output.
+    ///
+    /// In Go's pipeNode architecture, when `_group` child selections exist,
+    /// the childSource also iterates through the shared scanNode, causing
+    /// one additional iteration beyond what the parent source consumes.
+    fn increment_scan_iterations(mut value: serde_json::Value) -> serde_json::Value {
+        if let Some(obj) = value.as_object_mut() {
+            if let Some(select_node) = obj.get_mut("selectNode") {
+                if let Some(select_obj) = select_node.as_object_mut() {
+                    if let Some(scan_node) = select_obj.get_mut("scanNode") {
+                        if let Some(scan_obj) = scan_node.as_object_mut() {
+                            if let Some(iterations) = scan_obj.get_mut("iterations") {
+                                if let Some(n) = iterations.as_u64() {
+                                    *iterations = serde_json::json!(n + 1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        value
+    }
+
     /// Compare two field values for ordering.
     fn compare_field_values(a: Option<&JsonValue>, b: Option<&JsonValue>) -> std::cmp::Ordering {
         match (a, b) {
@@ -1203,8 +1227,16 @@ impl PlanNode for GroupByNode {
         obj.insert("hiddenAfterLimit".to_string(), serde_json::json!(0u64));
         obj.insert("hiddenChildSelections".to_string(), serde_json::json!(0u64));
 
-        // Recursively explain child node with execution info
+        // Recursively explain child node with execution info.
+        // When _group child selections exist, Go's pipeNode architecture causes
+        // the scanNode to be iterated one additional time by the childSource
+        // exhausting the shared scan. Adjust the JSON output to match.
         let child_explain = self.source.explain_execute();
+        let child_explain = if !self.child_selects.is_empty() {
+            Self::increment_scan_iterations(child_explain)
+        } else {
+            child_explain
+        };
         if let Some(child_obj) = child_explain.as_object() {
             for (key, value) in child_obj {
                 obj.insert(key.clone(), value.clone());
