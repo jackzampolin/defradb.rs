@@ -806,11 +806,7 @@ pub unsafe extern "C" fn refresh_views(node_ptr: usize, options: *const c_char) 
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
                         .collect::<Vec<_>>()
                 });
-                if let Some(n) = names {
-                    Some(db::RefreshViewsOptions::with_names(n))
-                } else {
-                    None
-                }
+                names.map(db::RefreshViewsOptions::with_names)
             }
             Err(_) => None,
         }

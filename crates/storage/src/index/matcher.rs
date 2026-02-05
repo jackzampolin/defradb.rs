@@ -197,7 +197,6 @@ impl IndexMatcher for NlikeMatcher {
 fn like_match(text: &str, pattern: &str) -> bool {
     let text_bytes = text.as_bytes();
     let pattern_bytes = pattern.as_bytes();
-    let t_len = text_bytes.len();
     let p_len = pattern_bytes.len();
 
     let mut dp = vec![false; p_len + 1];
@@ -211,14 +210,14 @@ fn like_match(text: &str, pattern: &str) -> bool {
         }
     }
 
-    for i in 0..t_len {
+    for &text_byte in text_bytes {
         let mut prev = dp[0];
         dp[0] = false;
         for j in 0..p_len {
             let temp = dp[j + 1];
             if pattern_bytes[j] == b'%' {
                 dp[j + 1] = prev || dp[j + 1];
-            } else if text_bytes[i] == pattern_bytes[j] {
+            } else if text_byte == pattern_bytes[j] {
                 dp[j + 1] = prev;
             } else {
                 dp[j + 1] = false;

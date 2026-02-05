@@ -181,7 +181,7 @@ impl<S: Store> CommitsFetcher<S> {
     ///
     /// Go stores field IDs as numeric short IDs in headstore keys, which gives
     /// lexicographic order: "1" < "2" < "C" (composite comes after regular fields).
-    fn sort_commits_go_order(&self, commits: &mut Vec<Document>) {
+    fn sort_commits_go_order(&self, commits: &mut [Document]) {
         commits.sort_by(|a, b| {
             // Primary sort: docID
             let doc_id_a = a.get("docID").and_then(|v| v.as_str()).unwrap_or("");

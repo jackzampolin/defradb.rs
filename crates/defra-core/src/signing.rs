@@ -22,7 +22,7 @@ pub struct SigningConfig {
 }
 
 thread_local! {
-    static CURRENT_SIGNING_CONFIG: RefCell<Option<SigningConfig>> = RefCell::new(None);
+    static CURRENT_SIGNING_CONFIG: RefCell<Option<SigningConfig>> = const { RefCell::new(None) };
 }
 
 /// Set the signing config for the current thread.

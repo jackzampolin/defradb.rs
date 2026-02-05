@@ -427,11 +427,11 @@ impl PlanNode for AverageNode {
 
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations as u64),
+            serde_json::json!(self.exec_info.iterations),
         );
 
         let source_explain = self.source.explain_execute();
-        let iterations = self.exec_info.iterations as u64;
+        let iterations = self.exec_info.iterations;
         let mut sum_inner = serde_json::Map::new();
         sum_inner.insert("iterations".to_string(), serde_json::json!(iterations));
         if let Some(source_obj) = source_explain.as_object() {

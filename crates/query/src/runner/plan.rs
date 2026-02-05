@@ -39,7 +39,6 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
             || name == "_group"
             || name == "__typename"
             || name == "_version"
-            || name == "_deleted"
             || collection.fields.iter().any(|f| f.name == name)
     };
 
@@ -377,8 +376,10 @@ pub(crate) fn build_mapping(
         }
     }
 
-    // If no fields specified (only _docID at index 0), add all from collection
-    if mapping.next_index() == 1 {
+    // If no fields specified (only _docID reserved at index 0, no render keys),
+    // add all collection fields. This handles the "SELECT *" case.
+    // Note: if _docID was explicitly requested, render_keys won't be empty.
+    if mapping.next_index() == 1 && mapping.render_keys.is_empty() {
         for field in &collection.fields {
             let index = mapping.next_index();
             mapping.add(index, &field.name);

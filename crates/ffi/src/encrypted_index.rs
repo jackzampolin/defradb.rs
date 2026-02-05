@@ -297,6 +297,10 @@ pub unsafe extern "C" fn list_encrypted_indexes(
 }
 
 /// List all encrypted indexes across all collections.
+///
+/// # Safety
+///
+/// Caller must ensure all pointer arguments are valid, non-null, and point to valid C strings.
 #[no_mangle]
 pub unsafe extern "C" fn list_all_encrypted_indexes(
     node_ptr: usize,

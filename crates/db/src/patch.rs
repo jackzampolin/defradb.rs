@@ -144,7 +144,7 @@ impl<S: Store> crate::database::DB<S> {
                 // Extract field name from path before substitution (for name mismatch validation)
                 let field_name_from_path = stripped_path
                     .as_deref()
-                    .and_then(|p| extract_field_name_from_path(p));
+                    .and_then(extract_field_name_from_path);
 
                 // Go compatibility: substitute field names for indices in /Fields/<name> paths
                 let path =
@@ -981,15 +981,12 @@ impl<S: Store> crate::database::DB<S> {
                 .collect();
             let mut depth = 0u64;
             let mut current_id = old_schema.version_id.as_str();
-            loop {
-                match versions_map.get(current_id) {
-                    Some(v) => match &v.previous_version {
-                        Some(prev) => {
-                            depth += 1;
-                            current_id = prev.source_collection_id.as_str();
-                        }
-                        None => break,
-                    },
+            while let Some(v) = versions_map.get(current_id) {
+                match &v.previous_version {
+                    Some(prev) => {
+                        depth += 1;
+                        current_id = prev.source_collection_id.as_str();
+                    }
                     None => break,
                 }
             }
@@ -1378,11 +1375,11 @@ impl<S: Store> crate::database::DB<S> {
         for prefix in prefixes {
             let no_slash_prefix = prefix.trim_start_matches('/');
 
-            if path.starts_with(prefix.as_str()) {
-                return format!("/{}", &path[prefix.len()..]);
+            if let Some(rest) = path.strip_prefix(prefix.as_str()) {
+                return format!("/{}", rest);
             }
-            if path.starts_with(no_slash_prefix) {
-                return format!("/{}", &path[no_slash_prefix.len()..]);
+            if let Some(rest) = path.strip_prefix(no_slash_prefix) {
+                return format!("/{}", rest);
             }
             // Exact match without trailing slash (collection-level operations).
             // E.g., path="/Users" with prefix="/Users/" → "/"
