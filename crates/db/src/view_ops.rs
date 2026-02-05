@@ -3,7 +3,6 @@
 //! This module contains operations for refreshing and managing
 //! materialized view caches.
 
-use crate::collection::Collection;
 use crate::error::{Error, Result};
 use datastore::NamespaceView;
 use schema::CollectionVersion;

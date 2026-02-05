@@ -15,7 +15,7 @@ use query::mapper::Filter;
 use query::plan::{AverageNode, CountNode, ScanNode, SumNode};
 use query::planner::{Doc, PlanNode};
 use schema::{CollectionVersion, FieldDescription, FieldKind};
-use serde_json::{json, Value as JsonValue};
+use serde_json::json;
 use std::collections::HashMap;
 
 // =============================================================================
@@ -475,16 +475,13 @@ async fn test_compatible_count_empty_returns_zero() {
 }
 
 // =============================================================================
-// P2: String vs Number Comparison (Deliberate Difference)
+// P2: String vs Number Comparison (Go Compatibility)
 // =============================================================================
-// Go DefraDB: String "5" vs int 5 comparison fails silently
-// Rust: Returns TypeMismatch error (more explicit, arguably better)
-// This is documented as intentional - Rust is stricter
+// Go DefraDB: String "Alice" vs int 5 comparison returns false (no match)
+// Rust matches Go behavior: mismatched types don't match
 
 #[test]
-fn test_p2_string_vs_int_comparison_strict() {
-    // Rust is intentionally stricter than Go here
-    // Comparing string field with numeric operator should fail
+fn test_p2_string_vs_int_comparison_returns_false() {
     let filter = Filter::from_conditions(HashMap::from([(
         "name".to_string(), // string field
         json!({"_gt": 5}),  // numeric comparison
@@ -498,11 +495,7 @@ fn test_p2_string_vs_int_comparison_strict() {
         Some(json!(100)),
     ];
 
-    // Rust returns error for string vs number comparison
-    // This is intentionally different from Go (which returns false)
+    // Matches Go behavior: type mismatch returns false (no match)
     let result = filter.matches(&fields, &mapping);
-    assert!(
-        result.is_err(),
-        "String vs number comparison should error in Rust"
-    );
+    assert_eq!(result.unwrap(), false);
 }

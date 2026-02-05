@@ -10,7 +10,6 @@ use crate::json_patch::{
     extract_field_name_from_path, json_pointer_get, json_pointer_remove, json_pointer_set,
     JsonPatchError,
 };
-use crate::txn::DbTxn;
 use schema::{CollectionSource, CollectionVersion};
 use storage::corekv::{Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey, CollectionVersionKey};

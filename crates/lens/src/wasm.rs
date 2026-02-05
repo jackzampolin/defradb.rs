@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use wasmtime::{AsContext, AsContextMut, Engine, Linker, Module, Store as WasmStore, TypedFunc};
 
-use tracing::{debug, info, trace, warn};
+use tracing::{info, warn};
 
 use crate::store::{LensDocResultStream, LensDocStream, TransformId, TransformStore};
 use crate::{Error, LensConfig, LensDoc, LensModule, Result};

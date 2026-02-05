@@ -783,6 +783,7 @@ impl Collection {
     }
 
     /// Generate the key prefix for all deletion markers in this collection.
+    #[allow(dead_code)]
     fn deleted_key_prefix(&self) -> Vec<u8> {
         let mut prefix = Vec::new();
         prefix.extend_from_slice(DELETED_KEY_PREFIX);

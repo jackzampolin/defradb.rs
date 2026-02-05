@@ -134,7 +134,7 @@ pub trait DocFetcher: MaybeSendSync {
     async fn get_all_with_deleted(
         &self,
         collection_name: &str,
-        show_deleted: bool,
+        _show_deleted: bool,
     ) -> Result<Vec<(Document, bool)>> {
         let docs = self.get_all(collection_name).await?;
         Ok(docs.into_iter().map(|d| (d, false)).collect())

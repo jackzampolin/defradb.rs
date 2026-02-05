@@ -236,6 +236,7 @@ fn validate_id_unique(new_state: &DefinitionState, _old_state: &DefinitionState)
 }
 
 /// Matches Go's validateSingleVersionActive.
+#[allow(dead_code)]
 fn validate_single_version_active(
     new_state: &DefinitionState,
     _old_state: &DefinitionState,

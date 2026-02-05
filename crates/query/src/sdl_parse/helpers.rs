@@ -361,6 +361,7 @@ pub(super) fn generate_field_id(field_name: &str, kind: &FieldKind, crdt_type: C
 ///
 /// Uses the same CID format as Go DefraDB for interoperability.
 /// In Go, for a new schema the VersionID equals the CollectionID.
+#[allow(dead_code)]
 pub(super) fn generate_version_id(name: &str, fields: &[FieldDescription]) -> String {
     // Version ID uses the same logic as collection ID (Go behavior for new schemas)
     generate_collection_id(name, fields, &HashMap::new())

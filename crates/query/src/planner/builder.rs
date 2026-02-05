@@ -268,6 +268,7 @@ impl Planner {
 
         // Internal keys for aggregate relation data when there's a collision with a relation selection.
         // Maps: aggregate_output_name -> (relation_field_name, internal_key)
+        #[allow(unused_assignments)]
         let mut aggregate_internal_keys: HashMap<String, (String, String)> = HashMap::new();
 
         // Check if GROUP BY references relation fields (needs full schema mapping for joins)

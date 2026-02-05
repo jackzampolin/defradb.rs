@@ -61,6 +61,7 @@ pub struct ScanNode {
     /// Execution statistics for explain execute mode
     exec_info: ExecInfo,
     /// Number of fields per document (for fieldFetches calculation)
+    #[allow(dead_code)]
     fields_per_doc: usize,
 }
 

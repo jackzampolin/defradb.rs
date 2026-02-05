@@ -821,7 +821,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .map(|f| f.has_relation_filters())
             .unwrap_or(false);
 
-        let order_has_relations = select
+        let _order_has_relations = select
             .order_by
             .as_ref()
             .map(|o| o.has_relation_order())
@@ -912,7 +912,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let docs = fetcher.get_all(&select.collection_name).await?;
                 documents_to_plan_docs(&docs, &mapping)?
             };
-            let doc_count = plan_docs.len();
+            let _doc_count = plan_docs.len();
 
             // Build ACP filter config if collection has policy and ACP is configured
             let acp_filter =
@@ -963,6 +963,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
     /// Add execution metrics to the explain output (Go format).
     /// Metrics are added to the scanNode, not the selectNode.
+    #[allow(dead_code)]
     fn add_iterations_to_explain(
         mut explanation: JsonValue,
         iterations: u64,
@@ -977,6 +978,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
     /// Recursively find and add metrics to scanNode.
     /// If the scanNode has an indexName field, it's an index scan and gets indexFetches.
+    #[allow(dead_code)]
     fn add_metrics_to_scan_node(
         value: &mut JsonValue,
         iterations: u64,

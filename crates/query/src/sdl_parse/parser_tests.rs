@@ -828,10 +828,11 @@ fn test_default_directive_json() {
     let config = &collections[0];
     let settings = config.field_by_name("settings").unwrap();
     assert!(settings.default_value.is_some());
-    if let Some(serde_json::Value::Object(obj)) = &settings.default_value {
-        assert_eq!(obj.get("key").unwrap(), "value");
+    // Go stores JSON defaults as string literals, so the value is a JSON string
+    if let Some(serde_json::Value::String(s)) = &settings.default_value {
+        assert_eq!(s, r#"{"key": "value"}"#);
     } else {
-        panic!("expected object default value");
+        panic!("expected string default value");
     }
 }
 
@@ -1308,20 +1309,9 @@ fn test_encrypted_index_directive_emits_unimplemented_warning() {
 
     let output = parse_sdl_with_warnings(sdl).unwrap();
     assert_eq!(output.collections.len(), 1);
-    // @encryptedIndex is recognized but not implemented
-    assert_eq!(output.warnings.len(), 1);
-    match &output.warnings[0] {
-        ParseWarning::UnimplementedDirective {
-            directive_name,
-            type_name,
-            field_name,
-        } => {
-            assert_eq!(directive_name, "encryptedIndex");
-            assert_eq!(type_name, "Secret");
-            assert_eq!(field_name.as_deref(), Some("data"));
-        }
-        other => panic!("expected UnimplementedDirective, got {:?}", other),
-    }
+    // @encryptedIndex is recognized and sets the encrypted_index flag (no warning)
+    assert_eq!(output.warnings.len(), 0);
+    assert_eq!(output.collections[0].encrypted_indexes.len(), 1);
 }
 
 #[test]
@@ -1333,16 +1323,10 @@ fn test_encrypted_index_unknown_argument_emits_warning() {
     "#;
 
     let output = parse_sdl_with_warnings(sdl).unwrap();
-    // Should have both UnknownDirectiveArgument and UnimplementedDirective
-    assert_eq!(output.warnings.len(), 2);
+    // Should have UnknownDirectiveArgument only (encryptedIndex is implemented, not unimplemented)
+    assert_eq!(output.warnings.len(), 1);
 
-    let unknown_arg = output
-        .warnings
-        .iter()
-        .find(|w| matches!(w, ParseWarning::UnknownDirectiveArgument { .. }))
-        .expect("should have UnknownDirectiveArgument warning");
-
-    match unknown_arg {
+    match &output.warnings[0] {
         ParseWarning::UnknownDirectiveArgument {
             directive_name,
             argument_name,
@@ -1351,7 +1335,7 @@ fn test_encrypted_index_unknown_argument_emits_warning() {
             assert_eq!(directive_name, "encryptedIndex");
             assert_eq!(argument_name, "badArg");
         }
-        _ => unreachable!(),
+        other => panic!("expected UnknownDirectiveArgument, got {:?}", other),
     }
 }
 
@@ -1367,8 +1351,8 @@ fn test_default_float32_wrong_type_returns_error() {
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("must be a float"),
-        "error should mention type mismatch: {}",
+        err.contains("has invalid value"),
+        "error should mention invalid value: {}",
         err
     );
 }
@@ -1385,8 +1369,8 @@ fn test_default_datetime_wrong_type_returns_error() {
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("must be a string"),
-        "error should mention type mismatch: {}",
+        err.contains("has invalid value"),
+        "error should mention invalid value: {}",
         err
     );
 }
@@ -1403,8 +1387,8 @@ fn test_default_blob_wrong_type_returns_error() {
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("must be a string"),
-        "error should mention type mismatch: {}",
+        err.contains("has invalid value"),
+        "error should mention invalid value: {}",
         err
     );
 }

@@ -573,7 +573,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         // Collect which relation fields are explicitly selected and their requested fields (for cleanup later)
-        let selected_relations: std::collections::HashSet<String> = select
+        let _selected_relations: std::collections::HashSet<String> = select
             .fields
             .iter()
             .filter_map(|f| {

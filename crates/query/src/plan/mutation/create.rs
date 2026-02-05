@@ -257,6 +257,7 @@ pub fn json_to_normal_value(value: &JsonValue) -> Result<document::NormalValue> 
 /// The `request_time` parameter is used for `UTC_NOW` resolution. When provided,
 /// all `UTC_NOW` values in the same request will resolve to the same timestamp,
 /// matching Go DefraDB's behavior where the time is computed once per request.
+#[allow(dead_code)]
 pub fn json_to_normal_value_with_kind(
     value: &JsonValue,
     field_kind: Option<&FieldKind>,

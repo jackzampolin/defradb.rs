@@ -70,6 +70,7 @@ pub struct DocumentGroup {
 }
 
 impl DocumentGroup {
+    #[allow(dead_code)]
     fn new(first_doc: Doc) -> Self {
         Self {
             representative: first_doc.deep_clone(),
@@ -77,6 +78,7 @@ impl DocumentGroup {
         }
     }
 
+    #[allow(dead_code)]
     fn add(&mut self, doc: Doc) {
         self.docs.push(doc);
     }

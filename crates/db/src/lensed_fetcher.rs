@@ -105,6 +105,7 @@ impl<S: Store> LensedDocFetcher<S> {
     ///
     /// This is a fast check that only looks at the current version.
     /// For a full check, use `versions_have_migrations` with all loaded versions.
+    #[allow(dead_code)]
     fn collection_has_migrations(collection: &Collection) -> bool {
         // Check if the current collection version has a previous version with a transform
         if let Some(ref prev) = collection.schema().previous_version {

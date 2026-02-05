@@ -10,7 +10,7 @@
 use document::{JsonLeafValue, JsonPath, JsonPathPart, JsonScalarValue};
 
 use super::{
-    decode_bool_ascending, decode_bool_descending, decode_bytes_ascending, decode_bytes_descending,
+    decode_bool_ascending, decode_bytes_ascending, decode_bytes_descending,
     decode_float64_ascending, decode_float64_descending, decode_if_null, decode_uvarint_ascending,
     decode_uvarint_descending, encode_bool_ascending, encode_bool_descending,
     encode_bytes_ascending, encode_bytes_descending, encode_float64_ascending,

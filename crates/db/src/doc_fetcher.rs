@@ -56,6 +56,7 @@ impl<S: Store> DbDocFetcher<S> {
     ///
     /// After calling this, `is_consumed()` will return `true` and all
     /// fetcher operations will return an error.
+    #[allow(dead_code)]
     pub(crate) async fn take_txn(&self) -> Option<DbTxn<S>> {
         self.txn.lock().await.take()
     }
