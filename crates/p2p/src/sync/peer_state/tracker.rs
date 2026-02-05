@@ -13,6 +13,8 @@ use parking_lot::RwLock;
 use cid::Cid;
 use libp2p::PeerId;
 
+use super::stats::PeerStats;
+
 /// Default maximum number of CIDs to track per peer.
 /// This prevents unbounded memory growth in long-running nodes.
 const DEFAULT_MAX_CIDS_PER_PEER: usize = 10_000;
@@ -443,64 +445,8 @@ impl PeerStateTracker {
     }
 }
 
-/// Statistics about tracked peers.
-///
-/// Use accessor methods to read values. This ensures the invariant
-/// that `connected_peers <= total_peers` is always maintained.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct PeerStats {
-    /// Total number of peers being tracked (connected + disconnected).
-    total_peers: usize,
-    /// Number of currently connected peers.
-    connected_peers: usize,
-    /// Total CIDs tracked across all peers.
-    total_tracked_cids: usize,
-}
-
-impl PeerStats {
-    /// Create new peer statistics (internal use only).
-    pub(crate) fn new(
-        total_peers: usize,
-        connected_peers: usize,
-        total_tracked_cids: usize,
-    ) -> Self {
-        debug_assert!(
-            connected_peers <= total_peers,
-            "connected_peers ({}) must be <= total_peers ({})",
-            connected_peers,
-            total_peers
-        );
-        Self {
-            total_peers,
-            connected_peers,
-            total_tracked_cids,
-        }
-    }
-
-    /// Get the total number of peers being tracked.
-    pub fn total_peers(&self) -> usize {
-        self.total_peers
-    }
-
-    /// Get the number of currently connected peers.
-    pub fn connected_peers(&self) -> usize {
-        self.connected_peers
-    }
-
-    /// Get the number of disconnected peers.
-    pub fn disconnected_peers(&self) -> usize {
-        self.total_peers - self.connected_peers
-    }
-
-    /// Get the total CIDs tracked across all peers.
-    pub fn total_tracked_cids(&self) -> usize {
-        self.total_tracked_cids
-    }
-}
-
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use std::str::FromStr;
 
@@ -513,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn test_peer_connect_disconnect() {
+    pub fn test_peer_connect_disconnect() {
         let tracker = PeerStateTracker::new();
         let peer = test_peer_id();
 
@@ -527,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn test_peer_has_cid() {
+    pub fn test_peer_has_cid() {
         let tracker = PeerStateTracker::new();
         let peer = test_peer_id();
         let cid = test_cid();
@@ -540,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn test_peers_with_cid() {
+    pub fn test_peers_with_cid() {
         let tracker = PeerStateTracker::new();
         let peer1 = test_peer_id();
         let peer2 = test_peer_id();
@@ -559,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn test_peers_without_cid() {
+    pub fn test_peers_without_cid() {
         let tracker = PeerStateTracker::new();
         let peer1 = test_peer_id();
         let peer2 = test_peer_id();
@@ -578,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn test_collection_subscription() {
+    pub fn test_collection_subscription() {
         let tracker = PeerStateTracker::new();
         let peer = test_peer_id();
 
@@ -598,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn test_disconnected_peer_not_in_results() {
+    pub fn test_disconnected_peer_not_in_results() {
         let tracker = PeerStateTracker::new();
         let peer = test_peer_id();
         let cid = test_cid();
@@ -618,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stats() {
+    pub fn test_stats() {
         let tracker = PeerStateTracker::new();
         let peer1 = test_peer_id();
         let peer2 = test_peer_id();
@@ -639,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_stale() {
+    pub fn test_cleanup_stale() {
         let tracker = PeerStateTracker::with_ttl(Duration::from_millis(10));
         let peer = test_peer_id();
 
@@ -660,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn test_connected_peers() {
+    pub fn test_connected_peers() {
         let tracker = PeerStateTracker::new();
         let peer1 = test_peer_id();
         let peer2 = test_peer_id();
@@ -678,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn test_peer_has_cid_creates_entry_for_unknown_peer() {
+    pub fn test_peer_has_cid_creates_entry_for_unknown_peer() {
         // Test that peer_has_cid creates a peer entry if one doesn't exist
         // This handles race conditions where CID announcements arrive before connection events
         let tracker = PeerStateTracker::new();
@@ -711,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn test_peer_has_cids_creates_entry_for_unknown_peer() {
+    pub fn test_peer_has_cids_creates_entry_for_unknown_peer() {
         // Test that peer_has_cids also creates a peer entry if one doesn't exist
         let tracker = PeerStateTracker::new();
         let peer = test_peer_id();
@@ -734,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lru_eviction_when_max_cids_exceeded() {
+    pub fn test_lru_eviction_when_max_cids_exceeded() {
         // Create tracker with a small limit for testing
         let tracker = PeerStateTracker::with_config(Duration::from_secs(3600), 3);
         let peer = test_peer_id();
@@ -783,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn test_adding_same_cid_twice_does_not_evict() {
+    pub fn test_adding_same_cid_twice_does_not_evict() {
         let tracker = PeerStateTracker::with_config(Duration::from_secs(3600), 3);
         let peer = test_peer_id();
         tracker.peer_connected(peer);
@@ -813,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn test_concurrent_peer_operations() {
+    pub fn test_concurrent_peer_operations() {
         use std::sync::Arc;
         use std::thread;
 
@@ -858,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn test_concurrent_cid_tracking() {
+    pub fn test_concurrent_cid_tracking() {
         use std::sync::Arc;
         use std::thread;
 
@@ -898,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn test_global_peer_limits_enforced_on_connect() {
+    pub fn test_global_peer_limits_enforced_on_connect() {
         // Test that global limits are enforced when adding peers
         // Create tracker with small max_peers limit
         let tracker = PeerStateTracker::with_full_config(
@@ -922,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn test_global_limits_evicts_disconnected_first() {
+    pub fn test_global_limits_evicts_disconnected_first() {
         // Test that disconnected peers get evicted before connected ones
         let tracker = PeerStateTracker::with_full_config(
             Duration::from_secs(3600),

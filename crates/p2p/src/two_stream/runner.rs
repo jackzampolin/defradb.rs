@@ -1,0 +1,137 @@
+//! Two-stream protocol runner.
+//!
+//! Runner that accepts incoming streams and emits events.
+//! This should be spawned as a separate task.
+
+use std::sync::Arc;
+
+use futures::StreamExt;
+use libp2p_stream as stream;
+use tokio::sync::mpsc;
+
+use super::event::TwoStreamEvent;
+use super::handler::TwoStreamHandler;
+
+/// Runner that accepts incoming streams and emits events.
+///
+/// This should be spawned as a separate task.
+pub struct TwoStreamRunner {
+    /// Handler for processing streams.
+    handler: Arc<tokio::sync::Mutex<TwoStreamHandler>>,
+    /// Incoming request streams.
+    request_streams: stream::IncomingStreams,
+    /// Incoming response streams.
+    response_streams: stream::IncomingStreams,
+    /// Channel to send events.
+    event_tx: mpsc::Sender<TwoStreamEvent>,
+}
+
+impl TwoStreamRunner {
+    /// Create a new runner.
+    pub fn new(
+        handler: Arc<tokio::sync::Mutex<TwoStreamHandler>>,
+        request_streams: stream::IncomingStreams,
+        response_streams: stream::IncomingStreams,
+        event_tx: mpsc::Sender<TwoStreamEvent>,
+    ) -> Self {
+        Self {
+            handler,
+            request_streams,
+            response_streams,
+            event_tx,
+        }
+    }
+
+    /// Run the stream handler loop.
+    pub async fn run(mut self) {
+        tracing::info!(
+            "Two-stream runner started - listening for Go request/response streams on {} and {}",
+            TwoStreamHandler::request_protocol(),
+            TwoStreamHandler::response_protocol()
+        );
+
+        loop {
+            tokio::select! {
+                // Handle incoming request streams
+                Some((peer_id, stream)) = self.request_streams.next() => {
+                    tracing::info!(
+                        peer_id = %peer_id,
+                        "Received incoming stream on request protocol"
+                    );
+                    let event_tx = self.event_tx.clone();
+                    tokio::spawn(async move {
+                        match TwoStreamHandler::handle_request_stream(peer_id, stream).await {
+                            Ok(event) => {
+                                tracing::info!(peer_id = %peer_id, "Sending TwoStreamEvent to host channel");
+                                if event_tx.send(event).await.is_err() {
+                                    tracing::warn!(
+                                        peer_id = %peer_id,
+                                        "Failed to send two-stream event - receiver dropped"
+                                    );
+                                } else {
+                                    tracing::info!(peer_id = %peer_id, "Successfully sent TwoStreamEvent to host channel");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    peer_id = %peer_id,
+                                    error = %e,
+                                    "Failed to handle request stream"
+                                );
+                                let _ = event_tx.send(TwoStreamEvent::DecodeError {
+                                    peer_id,
+                                    error: e.to_string(),
+                                }).await;
+                            }
+                        }
+                    });
+                }
+                // Handle incoming response streams
+                Some((peer_id, stream)) = self.response_streams.next() => {
+                    eprintln!("[DOCSYNC] TwoStreamRunner received incoming response stream from peer={}", peer_id);
+                    tracing::info!(
+                        peer_id = %peer_id,
+                        "Received incoming stream on response protocol"
+                    );
+                    let handler = self.handler.clone();
+                    let event_tx = self.event_tx.clone();
+                    tokio::spawn(async move {
+                        let h = handler.lock().await;
+                        match h.handle_response_stream(peer_id, stream).await {
+                            Ok(Some(event)) => {
+                                // DocSyncReply events should be forwarded to the coordinator
+                                eprintln!("[DOCSYNC] TwoStreamRunner got DocSyncReply event, sending to host channel");
+                                tracing::info!(peer_id = %peer_id, "Sending DocSyncReply event to host channel");
+                                if event_tx.send(event).await.is_err() {
+                                    eprintln!("[DOCSYNC] TwoStreamRunner failed to send DocSyncReply event - receiver dropped");
+                                    tracing::warn!(
+                                        peer_id = %peer_id,
+                                        "Failed to send DocSyncReply event - receiver dropped"
+                                    );
+                                } else {
+                                    eprintln!("[DOCSYNC] TwoStreamRunner sent DocSyncReply event to host channel");
+                                }
+                            }
+                            Ok(None) => {
+                                eprintln!("[DOCSYNC] TwoStreamRunner got PushLogReply (handled internally)");
+                                // PushLogReply was handled internally via pending channels
+                            }
+                            Err(e) => {
+                                eprintln!("[DOCSYNC] TwoStreamRunner failed to handle response stream: {}", e);
+                                tracing::warn!(
+                                    peer_id = %peer_id,
+                                    error = %e,
+                                    "Failed to handle response stream"
+                                );
+                            }
+                        }
+                    });
+                }
+                else => {
+                    tracing::info!("Two-stream runner shutting down");
+                    break;
+                }
+            }
+        }
+    }
+}
