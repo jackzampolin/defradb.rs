@@ -87,11 +87,7 @@ async fn show_current_worktree(subpackages: bool) -> Result<()> {
     );
     println!("{}", "─".repeat(106));
 
-    // Track totals
-    let mut grand_total = 0;
-    let mut grand_pass = 0;
-    let mut grand_fail = 0;
-    let mut grand_skip = 0;
+    // Track how many packages have reports
     let mut packages_run = 0;
 
     // Print each package
@@ -152,11 +148,6 @@ async fn show_current_worktree(subpackages: bool) -> Result<()> {
                 rate_str
             );
 
-            // Accumulate totals
-            grand_total += report.summary.total;
-            grand_pass += report.summary.passed;
-            grand_fail += report.summary.failed;
-            grand_skip += report.summary.skipped;
             packages_run += 1;
         } else {
             println!(

@@ -60,7 +60,7 @@ pub struct RunResult {
     pub duration_secs: f64,
 }
 
-/// Run Go tests for a package
+/// Run Go tests for a package (non-recursive - runs only tests in that specific package)
 pub async fn run_tests(
     ctx: &WorktreeContext,
     package: &str,
@@ -80,13 +80,14 @@ pub async fn run_tests(
         cmd.arg("-run").arg(filter);
     }
 
-    cmd.arg(format!("./tests/integration/{}/...", package))
+    // Run non-recursively (no /...) to run just this package's tests
+    cmd.arg(format!("./tests/integration/{}", package))
         .current_dir(&ctx.go_path)
         .envs(env);
 
     if verbose {
         println!(
-            "Running: go test -json -count=1 ./tests/integration/{}/...",
+            "Running: go test -json -count=1 ./tests/integration/{}",
             package
         );
     }
@@ -254,6 +255,24 @@ pub async fn list_packages(go_path: &Path) -> Result<Vec<String>> {
     packages.sort();
     Ok(packages)
 }
+
+/// Discover all subpackages under a given package prefix (including the root if it has tests)
+/// Returns packages sorted by name, which naturally groups hierarchically
+pub async fn discover_subpackages(go_path: &Path, package: &str) -> Result<Vec<String>> {
+    let all_packages = list_packages(go_path).await?;
+
+    // Filter to packages that match or are under the given package
+    let subpackages: Vec<String> = all_packages
+        .into_iter()
+        .filter(|p| {
+            // Exact match or child package
+            p == package || p.starts_with(&format!("{}/", package))
+        })
+        .collect();
+
+    Ok(subpackages)
+}
+
 
 /// Recursively collect test packages
 async fn collect_packages(base: &Path, current: &Path, packages: &mut Vec<String>) -> Result<()> {
