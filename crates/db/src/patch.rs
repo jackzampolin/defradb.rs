@@ -6,6 +6,10 @@
 
 use crate::collection::Collection;
 use crate::error::{Error, Result};
+use crate::json_patch::{
+    extract_field_name_from_path, json_pointer_get, json_pointer_remove, json_pointer_set,
+    JsonPatchError,
+};
 use crate::txn::DbTxn;
 use schema::{CollectionSource, CollectionVersion};
 use storage::corekv::{Key, Store};
@@ -139,7 +143,7 @@ impl<S: Store> crate::database::DB<S> {
                 // Extract field name from path before substitution (for name mismatch validation)
                 let field_name_from_path = stripped_path
                     .as_deref()
-                    .and_then(|p| Self::extract_field_name_from_path(p));
+                    .and_then(|p| extract_field_name_from_path(p));
 
                 // Go compatibility: substitute field names for indices in /Fields/<name> paths
                 let path =
@@ -324,19 +328,16 @@ impl<S: Store> crate::database::DB<S> {
                             }
                         }
 
-                        if let Err(e) = Self::json_pointer_set(&mut schema_json, path, value) {
+                        if let Err(e) = json_pointer_set(&mut schema_json, path, value) {
                             match &e {
-                                Error::InvalidPatch(msg)
-                                    if msg.starts_with("path not found:")
-                                        || msg.starts_with("cannot set value")
-                                        || msg.starts_with("cannot navigate") =>
-                                {
+                                JsonPatchError::PathNotFound(_)
+                                | JsonPatchError::CannotNavigate(_) => {
                                     return Err(Error::InvalidPatch(
                                         "add operation does not apply: doc is missing path"
                                             .to_string(),
                                     ));
                                 }
-                                _ => return Err(e),
+                                _ => return Err(e.into()),
                             }
                         }
                     }
@@ -361,7 +362,7 @@ impl<S: Store> crate::database::DB<S> {
                                     ));
                                 }
                             }
-                            Self::json_pointer_remove(&mut schema_json, path)?;
+                            json_pointer_remove(&mut schema_json, path)?;
                         }
                     }
                     (Some("test"), Some(path)) => {
@@ -376,7 +377,7 @@ impl<S: Store> crate::database::DB<S> {
                             .clone();
 
                         // Get the actual value at the path
-                        let actual_value = Self::json_pointer_get(&schema_json, path);
+                        let actual_value = json_pointer_get(&schema_json, path);
 
                         // Compare: if path doesn't exist or values don't match, test fails
                         match actual_value {
@@ -434,7 +435,7 @@ impl<S: Store> crate::database::DB<S> {
                         // Get the value to copy. First try current schema, then
                         // cross-collection: Go applies patches against a global dict
                         // of all collections, so "from" can reference other collections.
-                        let value_to_copy = Self::json_pointer_get(&schema_json, &from_path)
+                        let value_to_copy = json_pointer_get(&schema_json, &from_path)
                             .or_else(|| {
                                 let trimmed = from_path.trim_start_matches('/');
                                 let first_slash = trimmed.find('/');
@@ -444,7 +445,7 @@ impl<S: Store> crate::database::DB<S> {
                                     if let Ok(Some(other_col)) = self.get_collection(other_name) {
                                         let other_schema = other_col.schema();
                                         if let Ok(other_json) = serde_json::to_value(other_schema) {
-                                            return Self::json_pointer_get(&other_json, rest);
+                                            return json_pointer_get(&other_json, rest);
                                         }
                                     }
                                 }
@@ -469,7 +470,7 @@ impl<S: Store> crate::database::DB<S> {
                             };
 
                         // Set at destination
-                        Self::json_pointer_set(&mut schema_json, path, value_to_copy)?;
+                        json_pointer_set(&mut schema_json, path, value_to_copy)?;
                     }
                     (Some("move"), Some(path)) => {
                         // RFC 6902 "move" operation: move value from "from" to "path"
@@ -500,16 +501,16 @@ impl<S: Store> crate::database::DB<S> {
                         let from_path = Self::strip_collection_prefix(&from_path, &strip_prefixes);
 
                         // Get the value to move
-                        let value_to_move = Self::json_pointer_get(&schema_json, &from_path)
+                        let value_to_move = json_pointer_get(&schema_json, &from_path)
                             .ok_or_else(|| {
                                 Error::InvalidPatch(format!("path not found: {}", from_path))
                             })?;
 
                         // Remove from source first
-                        Self::json_pointer_remove(&mut schema_json, &from_path)?;
+                        json_pointer_remove(&mut schema_json, &from_path)?;
 
                         // Set at destination
-                        Self::json_pointer_set(&mut schema_json, path, value_to_move)?;
+                        json_pointer_set(&mut schema_json, path, value_to_move)?;
                     }
                     _ => {
                         return Err(Error::InvalidPatch(format!(
@@ -1517,179 +1518,6 @@ impl<S: Store> crate::database::DB<S> {
             "adding collections via patch is not supported. Name: {}",
             effective_name,
         )))
-    }
-
-    /// Helper: Set a value at a JSON pointer path.
-    fn json_pointer_set(
-        json: &mut serde_json::Value,
-        path: &str,
-        value: serde_json::Value,
-    ) -> Result<()> {
-        // Convert JSON pointer to path segments
-        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        if segments.is_empty() {
-            return Err(Error::InvalidPatch("empty path".to_string()));
-        }
-
-        let mut current = json;
-        for (i, segment) in segments.iter().enumerate() {
-            if i == segments.len() - 1 {
-                // Last segment - set the value
-                match current {
-                    serde_json::Value::Object(map) => {
-                        map.insert(segment.to_string(), value);
-                        return Ok(());
-                    }
-                    serde_json::Value::Array(arr) => {
-                        // JSON Pointer uses "-" to mean "append to end of array"
-                        if *segment == "-" {
-                            arr.push(value);
-                        } else {
-                            let idx: usize = segment.parse().map_err(|_| {
-                                Error::InvalidPatch(format!("invalid array index: {}", segment))
-                            })?;
-                            if idx >= arr.len() {
-                                arr.push(value);
-                            } else {
-                                arr[idx] = value;
-                            }
-                        }
-                        return Ok(());
-                    }
-                    _ => {
-                        return Err(Error::InvalidPatch(format!(
-                            "cannot set value at path {}",
-                            path
-                        )));
-                    }
-                }
-            } else {
-                // Navigate to the next level
-                match current {
-                    serde_json::Value::Object(map) => {
-                        current = map.get_mut(*segment).ok_or_else(|| {
-                            Error::InvalidPatch(format!("path not found: {}", path))
-                        })?;
-                    }
-                    serde_json::Value::Array(arr) => {
-                        let idx: usize = segment.parse().map_err(|_| {
-                            Error::InvalidPatch(format!("invalid array index: {}", segment))
-                        })?;
-                        current = arr.get_mut(idx).ok_or_else(|| {
-                            Error::InvalidPatch(format!("path not found: {}", path))
-                        })?;
-                    }
-                    _ => {
-                        return Err(Error::InvalidPatch(format!(
-                            "cannot navigate path: {}",
-                            path
-                        )));
-                    }
-                }
-            }
-        }
-
-        Err(Error::InvalidPatch("failed to set value".to_string()))
-    }
-
-    /// Helper: Remove a value at a JSON pointer path.
-    fn json_pointer_remove(json: &mut serde_json::Value, path: &str) -> Result<()> {
-        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        if segments.is_empty() {
-            return Err(Error::InvalidPatch("empty path".to_string()));
-        }
-
-        let mut current = json;
-        for (i, segment) in segments.iter().enumerate() {
-            if i == segments.len() - 1 {
-                // Last segment - remove the value
-                match current {
-                    serde_json::Value::Object(map) => {
-                        map.remove(*segment);
-                        return Ok(());
-                    }
-                    serde_json::Value::Array(arr) => {
-                        let idx: usize = segment.parse().map_err(|_| {
-                            Error::InvalidPatch(format!("invalid array index: {}", segment))
-                        })?;
-                        if idx < arr.len() {
-                            arr.remove(idx);
-                        }
-                        return Ok(());
-                    }
-                    _ => {
-                        return Err(Error::InvalidPatch(format!(
-                            "cannot remove value at path {}",
-                            path
-                        )));
-                    }
-                }
-            } else {
-                // Navigate to the next level
-                match current {
-                    serde_json::Value::Object(map) => {
-                        current = map.get_mut(*segment).ok_or_else(|| {
-                            Error::InvalidPatch(format!("path not found: {}", path))
-                        })?;
-                    }
-                    serde_json::Value::Array(arr) => {
-                        let idx: usize = segment.parse().map_err(|_| {
-                            Error::InvalidPatch(format!("invalid array index: {}", segment))
-                        })?;
-                        current = arr.get_mut(idx).ok_or_else(|| {
-                            Error::InvalidPatch(format!("path not found: {}", path))
-                        })?;
-                    }
-                    _ => {
-                        return Err(Error::InvalidPatch(format!(
-                            "cannot navigate path: {}",
-                            path
-                        )));
-                    }
-                }
-            }
-        }
-
-        Err(Error::InvalidPatch("failed to remove value".to_string()))
-    }
-
-    /// Extract a field name from a path like `/Fields/email` or `/Fields/email/Name`.
-    /// Returns None if the segment after /Fields/ is numeric, "-", or /Fields/ isn't present.
-    fn extract_field_name_from_path(path: &str) -> Option<String> {
-        let segments: Vec<&str> = path.split('/').collect();
-        for (i, seg) in segments.iter().enumerate() {
-            if *seg == "Fields" && i + 1 < segments.len() {
-                let next = segments[i + 1];
-                if next.parse::<usize>().is_ok() || next == "-" {
-                    return None;
-                }
-                return Some(next.to_string());
-            }
-        }
-        None
-    }
-
-    /// Helper: Get a value at a JSON pointer path (for test operation).
-    fn json_pointer_get(json: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
-        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        if segments.is_empty() {
-            return None;
-        }
-
-        let mut current = json;
-        for segment in segments.iter() {
-            match current {
-                serde_json::Value::Object(map) => {
-                    current = map.get(*segment)?;
-                }
-                serde_json::Value::Array(arr) => {
-                    let idx: usize = segment.parse().ok()?;
-                    current = arr.get(idx)?;
-                }
-                _ => return None,
-            }
-        }
-        Some(current.clone())
     }
 
     /// Helper: Substitute field names for indices in paths like /Fields/<name>

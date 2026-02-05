@@ -76,6 +76,9 @@ pub enum Error {
 
     #[error("lens error: {0}")]
     Lens(String),
+
+    #[error("json patch error: {0}")]
+    JsonPatch(#[from] crate::json_patch::JsonPatchError),
 }
 
 /// Result type for database operations.
