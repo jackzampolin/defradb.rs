@@ -3,20 +3,17 @@
 //! Parses GraphQL query strings into Select and Mutation operations for execution.
 //!
 //! This module is organized into submodules for maintainability:
-//! - `parser`: Main parsing logic (entry points, field/mutation parsing)
-//! - `types`: Type definitions (ExplainType, ParsedOperation)
-//! - `explain`: Explain directive handling
-//! - `values`: GraphQL to JSON value conversion
-//! - `variables`: Variable handling and defaults
+//! - `parser`: Main parsing logic (entry points, field/selection parsing)
+//! - `filters`: Filter argument parsing
+//! - `ordering`: Order argument parsing
+//! - `aggregates`: Aggregate and groupBy parsing
+//! - `mutations`: Mutation operation parsing
 
+mod aggregates;
+mod filters;
+mod mutations;
+mod ordering;
 mod parser;
-
-// Future: these modules contain extracted helper functions
-// that can be used once parser.rs is refactored to use them
-mod explain;
-mod types;
-mod values;
-mod variables;
 
 // Re-export everything from parser for backwards compatibility
 pub use parser::{
