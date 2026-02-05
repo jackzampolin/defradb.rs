@@ -66,6 +66,7 @@ pub mod error;
 #[cfg(feature = "p2p")]
 pub mod head_provider;
 pub mod index_manager;
+pub mod lens_utils;
 pub mod lensed_auto_commit_fetcher;
 pub mod lensed_fetcher;
 #[cfg(feature = "p2p")]
