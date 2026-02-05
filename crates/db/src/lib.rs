@@ -83,6 +83,7 @@ pub mod txn;
 pub mod txn_context;
 pub mod txn_registry;
 pub mod versioned_fetcher;
+pub mod view_ops;
 
 // Re-export commonly used types
 #[cfg(feature = "p2p")]
@@ -129,6 +130,7 @@ pub use txn::DbTxn;
 pub use txn_context::DbTransactionContext;
 pub use txn_registry::{CleanupResult, DbTransactionRegistry};
 pub use versioned_fetcher::VersionedFetcher;
+pub use view_ops::RefreshViewsOptions;
 
 // NAC exports
 pub use nac::{create_memory_nac_manager, NacConfig, NacInfo, NacManager};

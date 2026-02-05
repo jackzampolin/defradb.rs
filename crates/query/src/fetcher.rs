@@ -276,6 +276,26 @@ pub trait DocFetcher: MaybeSendSync {
         let doc = self.get_document_at_cid(cid, expected_doc_id).await?;
         Ok(vec![doc])
     }
+
+    /// Get all cached view items for a materialized view.
+    ///
+    /// Returns serialized view items (JSON bytes) that can be deserialized
+    /// using `unmarshal_view_item`.
+    ///
+    /// # Arguments
+    ///
+    /// * `collection_id` - The collection root ID of the materialized view
+    ///
+    /// # Returns
+    ///
+    /// A vector of serialized view items (each as JSON bytes).
+    ///
+    /// Default implementation returns an empty vector - implementations that support
+    /// materialized views should override this.
+    async fn get_view_cache_items(&self, collection_id: u32) -> Result<Vec<Vec<u8>>> {
+        let _ = collection_id;
+        Ok(Vec::new())
+    }
 }
 
 /// Options for _commits queries

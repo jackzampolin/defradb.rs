@@ -2,6 +2,7 @@
 
 mod alldocs;
 mod average;
+mod cached_view_fetcher;
 mod count;
 pub mod groupby;
 mod index_scan;
@@ -18,9 +19,11 @@ mod similarity;
 mod sum;
 mod type_join;
 pub mod view;
+pub mod view_cache;
 
 pub use alldocs::AllDocsNode;
 pub use average::{AverageNode, AvgSourceMeta};
+pub use cached_view_fetcher::CachedViewFetcher;
 pub use count::{CountNode, CountSourceMeta};
 pub use groupby::{ChildSelectMeta, DocumentGroup, GroupAlias, GroupByNode, InnerAggregateDef};
 pub use index_scan::IndexScanNode;

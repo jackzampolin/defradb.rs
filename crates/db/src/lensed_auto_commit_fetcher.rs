@@ -9,17 +9,15 @@ use std::sync::Arc;
 use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use document::Document;
-use lens::{Lens, LensDoc, TargetedHistoryLink};
+use lens::{
+    build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink, DOC_ID_FIELD,
+};
 use query::fetcher::CommitsQueryOptions;
 use query::planner::index_selection::{IndexScanParams, IndexScanType};
 use query::runner::{DocFetcher, FetchByIdsResult};
 use storage::corekv::Store;
 use storage::index::IndexIterator;
 use tracing::{debug, info, trace, warn};
-
-use crate::lens_utils::{
-    build_collection_history, doc_needs_migration, doc_to_lens_doc, lens_doc_to_doc,
-};
 
 use crate::collection::{collection_short_id, Collection};
 use crate::commits_fetcher::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
@@ -100,6 +98,159 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         Ok((has_migrations, if has_migrations { history } else { None }))
     }
 
+    /// Check if a document needs migration.
+    fn doc_needs_migration(doc: &Document, target_version_id: &str, has_migrations: bool) -> bool {
+        let doc_version = doc.schema_version_id();
+        let needs = if !has_migrations {
+            false
+        } else {
+            doc.needs_migration(target_version_id)
+        };
+
+        debug!(
+            doc_id = ?doc.id(),
+            doc_version = ?doc_version,
+            target_version = %target_version_id,
+            has_migrations = has_migrations,
+            needs_migration = needs,
+            "Checking if document needs migration"
+        );
+
+        needs
+    }
+
+    /// Convert a Document to a LensDoc.
+    fn doc_to_lens_doc(doc: &Document) -> Option<LensDoc> {
+        let map = doc.to_map().ok()?;
+        let mut lens_doc = LensDoc::new();
+        for (key, value) in map {
+            lens_doc.insert(key, value);
+        }
+        Some(lens_doc)
+    }
+
+    /// Convert a LensDoc back to a Document.
+    fn lens_doc_to_doc(lens_doc: LensDoc, original_doc: &Document) -> Document {
+        let mut doc = Document::new();
+        if let Some(id) = original_doc.id() {
+            doc.set_id(id.clone());
+        }
+        for (field_name, value) in lens_doc {
+            if field_name != DOC_ID_FIELD {
+                doc.set(&field_name, value);
+            }
+        }
+        doc
+    }
+
+    /// Build collection history from versions.
+    fn build_collection_history(
+        versions: &[schema::CollectionVersion],
+        target_version_id: &str,
+    ) -> Option<HashMap<String, TargetedHistoryLink>> {
+        info!(
+            version_count = versions.len(),
+            target_version_id = %target_version_id,
+            "Building collection history"
+        );
+
+        if versions.is_empty() {
+            warn!("No versions provided, cannot build history");
+            return None;
+        }
+
+        let mut full_history: HashMap<String, CollectionHistoryLink> = HashMap::new();
+        for version in versions {
+            let mut link = CollectionHistoryLink::new(&version.version_id, &version.collection_id);
+            if let Some(ref prev) = version.previous_version {
+                info!(
+                    version_id = %version.version_id,
+                    previous_source_collection_id = %prev.source_collection_id,
+                    transform = ?prev.transform,
+                    "Version has previous_version"
+                );
+                link = link.with_previous(&prev.source_collection_id);
+                if let Some(ref transform_id) = prev.transform {
+                    link = link.with_transform(transform_id);
+                }
+            } else {
+                debug!(
+                    version_id = %version.version_id,
+                    "Version has no previous_version (root version)"
+                );
+            }
+            full_history.insert(version.version_id.clone(), link);
+        }
+
+        info!(
+            full_history_size = full_history.len(),
+            "Built initial history graph"
+        );
+
+        // Build `next` links by reverse-indexing `previous` links.
+        // Each version's `previous` points to its parent; the parent's `next` should point back.
+        let reverse_links: Vec<(String, String)> = full_history
+            .values()
+            .flat_map(|link| {
+                link.previous
+                    .iter()
+                    .map(|prev_id| (prev_id.clone(), link.version_id.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        info!(
+            reverse_links_count = reverse_links.len(),
+            "Building reverse links"
+        );
+
+        for (parent_id, child_id) in &reverse_links {
+            debug!(
+                parent_id = %parent_id,
+                child_id = %child_id,
+                "Adding next link"
+            );
+            if let Some(parent_link) = full_history.get_mut(parent_id) {
+                if !parent_link.next.contains(child_id) {
+                    parent_link.next.push(child_id.clone());
+                }
+            } else {
+                warn!(
+                    parent_id = %parent_id,
+                    "Parent version not found in history when adding next link"
+                );
+            }
+        }
+
+        // Log the final full history before targeting
+        for (vid, link) in &full_history {
+            info!(
+                version_id = %vid,
+                transform = ?link.transform,
+                previous = ?link.previous,
+                next = ?link.next,
+                "Full history link"
+            );
+        }
+
+        let result = build_targeted_history(&full_history, target_version_id);
+
+        if result.is_none() {
+            warn!(
+                target_version_id = %target_version_id,
+                "build_targeted_history returned None"
+            );
+        } else {
+            info!(
+                target_version_id = %target_version_id,
+                targeted_history_size = result.as_ref().map_or(0, |h| h.len()),
+                "Successfully built targeted history"
+            );
+        }
+
+        result
+    }
+
     /// Load collection history from database.
     async fn load_collection_history(
         &self,
@@ -130,7 +281,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
 
         let _ = txn.discard(); // Ignore discard errors for read-only txn
 
-        build_collection_history(&versions, target_version_id).ok_or_else(|| {
+        Self::build_collection_history(&versions, target_version_id).ok_or_else(|| {
             query::error::QueryError::execution(format!(
                 "failed to build migration history for collection {}",
                 collection_id
@@ -150,7 +301,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     ) -> query::error::Result<Document> {
         let target_version_id = &collection.schema().version_id;
 
-        if !doc_needs_migration(&doc, target_version_id, has_migrations) {
+        if !Self::doc_needs_migration(&doc, target_version_id, has_migrations) {
             trace!(
                 doc_id = ?doc.id(),
                 doc_version = ?doc.schema_version_id(),
@@ -184,7 +335,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         }
 
         // Convert to LensDoc
-        let original_lens_doc = doc_to_lens_doc(&doc).ok_or_else(|| {
+        let original_lens_doc = Self::doc_to_lens_doc(&doc).ok_or_else(|| {
             query::error::QueryError::execution(format!(
                 "failed to convert document {} to LensDoc for migration",
                 doc_id_str
@@ -229,7 +380,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         );
 
         // Convert back to Document
-        let mut migrated_doc = lens_doc_to_doc(migrated_lens_doc, &doc);
+        let mut migrated_doc = Self::lens_doc_to_doc(migrated_lens_doc, &doc);
         migrated_doc.set_schema_version_id(target_version_id);
 
         Ok(migrated_doc)
@@ -278,7 +429,7 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         // Count docs needing migration
         let needs_migration_count = docs
             .iter()
-            .filter(|doc| doc_needs_migration(doc, target_version_id, has_migrations))
+            .filter(|doc| Self::doc_needs_migration(doc, target_version_id, has_migrations))
             .count();
 
         trace!(
@@ -749,5 +900,43 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         }
 
         result
+    }
+
+    async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Vec<u8>>> {
+        use storage::corekv::IterOptions;
+        use storage::keys::datastore::ViewCacheKey;
+
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get datastore: {}", e))
+        })?;
+
+        let prefix = ViewCacheKey::collection_prefix(collection_id);
+        let opts = IterOptions::new().with_prefix(prefix);
+        let mut iter = datastore.iterator(opts).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to iterate view cache: {}", e))
+        })?;
+
+        let mut items = Vec::new();
+        while let Some(pair) = iter.next().await.map_err(|e| {
+            query::error::QueryError::execution(format!("view cache iteration error: {}", e))
+        })? {
+            items.push(pair.value);
+        }
+
+        iter.close().await.map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to close view cache iterator: {}",
+                e
+            ))
+        })?;
+
+        // Clean up transaction
+        let _ = txn.discard();
+
+        Ok(items)
     }
 }

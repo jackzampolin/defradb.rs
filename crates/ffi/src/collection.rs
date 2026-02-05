@@ -741,6 +741,23 @@ pub unsafe extern "C" fn add_view(
             .await
             .map_err(|e| format!("failed to create view collection: {}", e))?;
 
+        // Auto-refresh materialized views after creation
+        // Exclude embedded-only types (interfaces) - they can't be queried
+        let materialized_names: Vec<String> = created_versions
+            .iter()
+            .filter(|col| col.is_materialized && !col.is_embedded_only)
+            .map(|col| col.name.clone())
+            .collect();
+
+        if !materialized_names.is_empty() {
+            database
+                .refresh_views(Some(db::RefreshViewsOptions::with_names(
+                    materialized_names,
+                )))
+                .await
+                .map_err(|e| format!("failed to refresh materialized views: {}", e))?;
+        }
+
         let json = serde_json::to_string(&created_versions)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
 
@@ -755,12 +772,12 @@ pub unsafe extern "C" fn add_view(
 
 /// Refresh view caches.
 ///
-/// Refreshes the caches of all views matching the given options.
+/// Refreshes the caches of all materialized views matching the given options.
 ///
 /// # Arguments
 ///
 /// * `node_ptr` - Handle to the node
-/// * `options` - JSON string of CollectionFetchOptions (null for all views)
+/// * `options` - JSON string with optional "Names" field (null for all views)
 ///
 /// # Returns
 ///
@@ -770,13 +787,50 @@ pub unsafe extern "C" fn add_view(
 /// # Safety
 ///
 /// `options` must be null or a valid null-terminated UTF-8 string.
-///
-/// # Note
-///
-/// Not yet implemented. See issue #178.
 #[no_mangle]
-pub unsafe extern "C" fn refresh_views(_node_ptr: usize, _options: *const c_char) -> FfiResult {
-    FfiResult::error("refresh_views is not yet implemented - see issue #178")
+pub unsafe extern "C" fn refresh_views(node_ptr: usize, options: *const c_char) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
+
+    // Parse options if provided
+    let refresh_options = if let Some(opts_str) = c_str_to_string(options) {
+        // Parse JSON options
+        match serde_json::from_str::<serde_json::Value>(&opts_str) {
+            Ok(json) => {
+                let names = json.get("Names").and_then(|n| n.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                });
+                if let Some(n) = names {
+                    Some(db::RefreshViewsOptions::with_names(n))
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    let result = rt.block_on(async {
+        database
+            .refresh_views(refresh_options)
+            .await
+            .map_err(|e| format!("failed to refresh views: {}", e))?;
+
+        Ok::<String, String>("{}".to_string())
+    });
+
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
+    }
 }
 
 /// Set migration for collection versions.
