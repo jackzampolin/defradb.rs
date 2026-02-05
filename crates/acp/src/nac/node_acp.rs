@@ -30,6 +30,10 @@ use crate::zanzibar::{PermissionEngine, Relationship, Subject, ZanzibarStore};
 /// There's only one "node" instance, so we use a constant ID.
 pub const NODE_OBJECT_ID: &str = "singleton";
 
+/// Sentinel relation name used to persist "disabled temporarily" status.
+/// Stored as a relationship in the Zanzibar store so it survives restarts.
+const DISABLED_RELATION: &str = "_disabled";
+
 /// NAC status indicating whether node access control is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NacStatus {
@@ -105,12 +109,29 @@ impl<S: ZanzibarStore> NodeACP<S> {
             // Extract the DID from the first Entity subject
             if let Some(Subject::Entity(owner_did)) = subjects.first() {
                 *self.owner.write().await = Some(owner_did.clone());
-                *self.status.write().await = NacStatus::Enabled;
+
+                // Check if NAC was disabled before restart
+                let disabled_subjects = self
+                    .store
+                    .get_relation_subjects(
+                        NODE_POLICY_ID,
+                        NODE_RESOURCE_NAME,
+                        NODE_OBJECT_ID,
+                        DISABLED_RELATION,
+                    )
+                    .await?;
+
+                if disabled_subjects.is_empty() {
+                    *self.status.write().await = NacStatus::Enabled;
+                } else {
+                    *self.status.write().await = NacStatus::DisabledTemporarily;
+                }
 
                 tracing::info!(
                     target: "nac::audit",
                     event = "nac_loaded",
                     owner = %owner_did,
+                    disabled = !disabled_subjects.is_empty(),
                     "NAC state loaded from store"
                 );
             }
@@ -204,6 +225,19 @@ impl<S: ZanzibarStore> NodeACP<S> {
             NacStatus::Enabled => {} // proceed
         }
 
+        // Persist disabled flag so it survives restarts
+        if let Some(owner) = self.owner.read().await.clone() {
+            let disabled_rel = Relationship::with_entity(
+                NODE_RESOURCE_NAME,
+                NODE_OBJECT_ID,
+                DISABLED_RELATION,
+                owner,
+            );
+            self.store
+                .store_relationship(NODE_POLICY_ID, &disabled_rel)
+                .await?;
+        }
+
         *self.status.write().await = NacStatus::DisabledTemporarily;
 
         tracing::info!(
@@ -235,6 +269,20 @@ impl<S: ZanzibarStore> NodeACP<S> {
                 return Err(Error::InvalidPolicy("node acp is already enabled".into()));
             }
             NacStatus::DisabledTemporarily => {} // proceed
+        }
+
+        // Remove persisted disabled flag
+        if let Some(owner) = self.owner.read().await.clone() {
+            let disabled_rel = Relationship::with_entity(
+                NODE_RESOURCE_NAME,
+                NODE_OBJECT_ID,
+                DISABLED_RELATION,
+                owner,
+            );
+            let _ = self
+                .store
+                .delete_relationship(NODE_POLICY_ID, &disabled_rel)
+                .await;
         }
 
         *self.status.write().await = NacStatus::Enabled;

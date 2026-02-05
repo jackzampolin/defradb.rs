@@ -28,13 +28,16 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
 
     let result = rt.block_on(async {
         // Create storage backend based on options
+        let db_path_opt: Option<String>;
         let store: Arc<FfiStore> = if options.in_memory == 0 && !options.db_path.is_null() {
             let path = unsafe { c_str_to_string(options.db_path) }
                 .ok_or_else(|| "db_path is not valid UTF-8".to_string())?;
             let redb = storage::RedbStore::open(&path)
                 .map_err(|e| format!("failed to open redb store at '{}': {}", path, e))?;
+            db_path_opt = Some(path);
             Arc::new(FfiStore::Redb(redb))
         } else {
+            db_path_opt = None;
             Arc::new(FfiStore::Memory(storage::MemoryStore::new()))
         };
 
@@ -148,9 +151,33 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
             Arc::new(acp::LocalDocumentACP::new(acp_store));
 
         // Create NAC manager for node-level access control
-        let nac_store = Arc::new(acp::MemoryZanzibarStore::new());
-        let nac_config = db::NacConfig::new().with_dev_mode();
-        let nac_manager = Arc::new(db::NacManager::new(nac_store, nac_config));
+        // Use persistent store when file-based storage is configured
+        let nac_manager: Arc<dyn db::NacManagerApi> = if let Some(ref path) = db_path_opt {
+            // db_path is a file (e.g., /tmp/Test/rustffi), use parent dir for NAC store
+            let data_path = std::path::Path::new(path);
+            let parent = data_path
+                .parent()
+                .ok_or_else(|| "db_path has no parent directory".to_string())?;
+            let nac_path = parent.join("local_node_acp");
+            std::fs::create_dir_all(&nac_path)
+                .map_err(|e| format!("failed to create NAC data directory: {}", e))?;
+            let nac_db_path = nac_path.join("nac.db");
+            let nac_store = acp::PersistentZanzibarStore::open(&nac_db_path)
+                .map_err(|e| format!("failed to open persistent NAC store: {}", e))?;
+            let nac_config = db::NacConfig::new()
+                .with_dev_mode()
+                .with_data_path(nac_path.display().to_string());
+            let mgr = Arc::new(db::NacManager::new(Arc::new(nac_store), nac_config));
+            // Load existing NAC state from persistent store
+            mgr.initialize(None)
+                .await
+                .map_err(|e| format!("failed to initialize NAC from persistent store: {}", e))?;
+            mgr as Arc<dyn db::NacManagerApi>
+        } else {
+            let nac_store = Arc::new(acp::MemoryZanzibarStore::new());
+            let nac_config = db::NacConfig::new().with_dev_mode();
+            Arc::new(db::NacManager::new(nac_store, nac_config))
+        };
 
         // Encryption key for CRDT delta encryption (test key matching Go DefraDB)
         let encryption_key = b"examplekey1234567890examplekey12".to_vec();

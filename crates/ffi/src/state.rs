@@ -267,8 +267,8 @@ pub type FfiMergeHandler = db::DbMergeHandler<FfiStore, FfiBlockstore>;
 /// Type alias for node handles (opaque to FFI callers).
 pub type NodeHandle = usize;
 
-/// Type alias for the NAC manager used in FFI (in-memory).
-pub type FfiNacManager = db::NacManager<acp::MemoryZanzibarStore>;
+/// Type alias for the NAC manager used in FFI (dynamic dispatch over store backend).
+pub type FfiNacManager = dyn db::NacManagerApi;
 
 /// Type alias for subscription handles (opaque to FFI callers).
 pub type SubscriptionHandle = usize;
