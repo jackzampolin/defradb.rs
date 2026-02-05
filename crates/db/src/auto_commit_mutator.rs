@@ -171,6 +171,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                     short_id,
                                     schema_version_id,
                                     block_result.cid,
+                                    sign_config.as_ref(),
                                 )
                                 .await
                                 {
@@ -375,6 +376,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                     short_id,
                                     schema_version_id,
                                     block_result.cid,
+                                    sign_config.as_ref(),
                                 )
                                 .await
                                 {
@@ -549,6 +551,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                     short_id,
                                     schema_version_id,
                                     composite_cid,
+                                    sign_config.as_ref(),
                                 )
                                 .await
                                 {

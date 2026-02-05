@@ -5,6 +5,7 @@
 use std::ffi::c_char;
 
 use acp::nac::NodePermission;
+use acp::{DocumentPermission, Identity};
 
 use crate::get_runtime;
 use crate::nac_check::check_nac_for_node;
@@ -60,11 +61,16 @@ pub unsafe extern "C" fn block_verify_signature(
         None => return FfiResult::error("block_cid is null"),
     };
 
-    // Get database from node state
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
+    // Get database and document_acp from node state
+    let (database, document_acp) = match NODES.get(node_ptr, |state| {
+        (state.database.clone(), state.document_acp.clone())
+    }) {
+        Some((db, acp)) => (db, acp),
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
+
+    // Parse identity DID for DAC permission check
+    let identity_did_str = c_str_to_string(identity_did);
 
     // Parse the key type
     let crypto_key_type = match key_type_str.as_str() {
@@ -128,6 +134,41 @@ pub unsafe extern "C" fn block_verify_signature(
 
             (block, signature)
         }; // blockstore dropped here, releasing its Arc<SharedTxn> reference
+
+        // Check document-level ACP permission (Read) if block has delta with doc_id
+        if let (Some(doc_id_bytes), Some(schema_version_id)) =
+            (block.delta.doc_id(), block.delta.schema_version_id())
+        {
+            let doc_id = String::from_utf8_lossy(doc_id_bytes).to_string();
+
+            // Find collection by schema_version_id
+            if let Some(collection) = database
+                .get_collection_by_version_id(schema_version_id)
+                .map_err(|e| format!("failed to get collection: {}", e))?
+            {
+                // Build identity from caller DID
+                let identity: Identity = identity_did_str
+                    .as_ref()
+                    .and_then(|d| identity::Did::try_from(d.clone()).ok())
+                    .into();
+
+                // Check read permission
+                let has_permission = db::check_doc_permission(
+                    document_acp.as_ref(),
+                    &identity,
+                    DocumentPermission::Read,
+                    collection.schema(),
+                    &doc_id,
+                )
+                .await
+                .map_err(|e| format!("ACP check failed: {}", e))?;
+
+                if !has_permission {
+                    let _ = txn.discard();
+                    return Err("missing permission".to_string());
+                }
+            }
+        }
 
         // Verify that the identity matches the signature's identity
         let sig_identity = String::from_utf8_lossy(&signature.header.identity);
