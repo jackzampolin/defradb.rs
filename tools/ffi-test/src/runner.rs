@@ -273,7 +273,6 @@ pub async fn discover_subpackages(go_path: &Path, package: &str) -> Result<Vec<S
     Ok(subpackages)
 }
 
-
 /// Recursively collect test packages
 async fn collect_packages(base: &Path, current: &Path, packages: &mut Vec<String>) -> Result<()> {
     let mut entries = tokio::fs::read_dir(current).await?;

@@ -166,13 +166,12 @@ impl<S: Store> LensedDocFetcher<S> {
         }
 
         // Build the targeted history
-        let history = build_collection_history(&versions, target_version_id)
-            .ok_or_else(|| {
-                query::error::QueryError::execution(format!(
-                    "failed to build migration history for collection {}",
-                    collection_id
-                ))
-            })?;
+        let history = build_collection_history(&versions, target_version_id).ok_or_else(|| {
+            query::error::QueryError::execution(format!(
+                "failed to build migration history for collection {}",
+                collection_id
+            ))
+        })?;
 
         // Cache the history
         {

@@ -503,8 +503,8 @@ impl<S: Store> crate::database::DB<S> {
                         let from_path = Self::strip_collection_prefix(&from_path, &strip_prefixes);
 
                         // Get the value to move
-                        let value_to_move = json_pointer_get(&schema_json, &from_path)
-                            .ok_or_else(|| {
+                        let value_to_move =
+                            json_pointer_get(&schema_json, &from_path).ok_or_else(|| {
                                 Error::InvalidPatch(format!("path not found: {}", from_path))
                             })?;
 

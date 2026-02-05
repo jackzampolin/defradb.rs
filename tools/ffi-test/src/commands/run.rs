@@ -105,11 +105,7 @@ async fn run_multiple_packages(
     println!(
         "{} {} ({} packages found)",
         "Running tests:".bold(),
-        packages[0]
-            .split('/')
-            .next()
-            .unwrap_or(&packages[0])
-            .cyan(),
+        packages[0].split('/').next().unwrap_or(&packages[0]).cyan(),
         packages.len()
     );
     if let Some(filter) = test_filter {

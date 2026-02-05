@@ -97,7 +97,9 @@ pub fn json_pointer_set(json: &mut Value, path: &str, value: Value) -> Result<()
         }
     }
 
-    Err(JsonPatchError::InvalidPath("failed to set value".to_string()))
+    Err(JsonPatchError::InvalidPath(
+        "failed to set value".to_string(),
+    ))
 }
 
 /// Remove a value at a JSON Pointer path (RFC 6901).

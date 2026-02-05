@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 
 use document::Document;
-use lens::{build_targeted_history, CollectionHistoryLink, LensDoc, TargetedHistoryLink, DOC_ID_FIELD};
+use lens::{
+    build_targeted_history, CollectionHistoryLink, LensDoc, TargetedHistoryLink, DOC_ID_FIELD,
+};
 use schema::CollectionVersion;
 use tracing::{debug, info, warn};
 

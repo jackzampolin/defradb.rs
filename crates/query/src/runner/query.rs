@@ -3918,7 +3918,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
             if let Ok(collection_names) = self.collection_provider.list_collections().await {
                 for name in collection_names {
-                    if let Ok(Some(collection)) = self.collection_provider.get_collection(&name).await
+                    if let Ok(Some(collection)) =
+                        self.collection_provider.get_collection(&name).await
                     {
                         if let Some(ref policy) = collection.policy {
                             policy_map.insert(

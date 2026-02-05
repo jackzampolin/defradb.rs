@@ -234,9 +234,7 @@ impl<S: Store> crate::database::DB<S> {
     }
 
     /// Get the next collection short ID from the sequence key.
-    pub(crate) async fn next_collection_short_id(
-        systemstore: &NamespaceView,
-    ) -> Result<u32> {
+    pub(crate) async fn next_collection_short_id(systemstore: &NamespaceView) -> Result<u32> {
         let seq_key = CollectionIDSequenceKey;
         let key_bytes = seq_key.bytes();
         let current: u32 = match systemstore.get(&key_bytes).await.map_err(Error::Storage)? {
@@ -399,7 +397,7 @@ impl<S: Store> crate::database::DB<S> {
         match schema::generate_collection_block_full(
             Some(&schema.name),
             &field_cids,
-            1, // priority=1 for new collections
+            1,   // priority=1 for new collections
             &[], // no heads for new collections
         ) {
             Ok(block_with_cid) => {
@@ -508,11 +506,7 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// Note: This does NOT delete documents. Use `truncate_collection` first if needed.
     #[instrument(skip(self, txn), fields(collection = %name), name = "db.delete_collection")]
-    pub async fn delete_collection_with_txn(
-        &self,
-        txn: &mut DbTxn<S>,
-        name: &str,
-    ) -> Result<()> {
+    pub async fn delete_collection_with_txn(&self, txn: &mut DbTxn<S>, name: &str) -> Result<()> {
         // Get the collection to find its version_id and collection_id
         let collection = txn
             .get_collection(name)
@@ -878,8 +872,8 @@ impl<S: Store> crate::database::DB<S> {
                 .map_err(Error::Storage)?
                 .ok_or(Error::CollectionVersionNotFound(version_id.to_string()))?;
 
-            let mut target_schema: CollectionVersion =
-                serde_json::from_slice(&target_bytes).map_err(|e| {
+            let mut target_schema: CollectionVersion = serde_json::from_slice(&target_bytes)
+                .map_err(|e| {
                     Error::Serialization(format!(
                         "failed to deserialize schema for version_id '{}': {}",
                         version_id, e
@@ -923,8 +917,10 @@ impl<S: Store> crate::database::DB<S> {
                     if other_version_id != version_id {
                         // Load, deactivate, and store the other version
                         let other_key = CollectionKey::new(other_version_id);
-                        if let Some(other_bytes) =
-                            systemstore.get(&other_key.bytes()).await.map_err(Error::Storage)?
+                        if let Some(other_bytes) = systemstore
+                            .get(&other_key.bytes())
+                            .await
+                            .map_err(Error::Storage)?
                         {
                             if let Ok(mut other_schema) =
                                 serde_json::from_slice::<CollectionVersion>(&other_bytes)
@@ -932,9 +928,8 @@ impl<S: Store> crate::database::DB<S> {
                                 if other_schema.is_active {
                                     other_schema.is_active = false;
                                     if let Ok(other_data) = serde_json::to_vec(&other_schema) {
-                                        let _ = systemstore
-                                            .set(&other_key.bytes(), &other_data)
-                                            .await;
+                                        let _ =
+                                            systemstore.set(&other_key.bytes(), &other_data).await;
                                     }
                                 }
                             }
