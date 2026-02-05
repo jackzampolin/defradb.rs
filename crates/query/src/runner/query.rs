@@ -755,7 +755,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Handle _commits system collection (no real collection exists)
         if select.collection_name == "_commits" {
             // Actually execute the commits query to get real metrics
-            let results = self.execute_commits_query(select).await?;
+            let results = self
+                .execute_commits_query(select, caller_identity.clone())
+                .await?;
             let doc_count = results.as_array().map(|a| a.len()).unwrap_or(0);
 
             // Build execute explain with real metrics matching Go's format:
@@ -1604,7 +1606,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Handle _commits system collection specially
         if select.collection_name == "_commits" {
-            return self.execute_commits_query(select).await;
+            return self
+                .execute_commits_query(select, caller_identity.clone())
+                .await;
         }
 
         // Check if _version is selected - it needs special handling since it's commit data
@@ -3883,7 +3887,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ///
     /// This handles queries to the special _commits collection which fetches
     /// commit history from the headstore and blockstore.
-    async fn execute_commits_query(&self, select: &Select) -> Result<JsonValue> {
+    ///
+    /// ACP filtering is applied: commits for documents the caller cannot read are excluded.
+    async fn execute_commits_query(
+        &self,
+        select: &Select,
+        caller_identity: Option<Did>,
+    ) -> Result<JsonValue> {
         use crate::fetcher::CommitsQueryOptions;
         use crate::mapper::{AggregateType, OrderDirection};
 
@@ -3897,6 +3907,86 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Fetch commits using the fetcher
         let mut commits = self.fetcher.get_commits(&options).await?;
+
+        // Apply ACP filtering: exclude commits for documents the caller cannot read.
+        // This requires checking each commit's collection for ACP policy.
+        if let Some(ref acp) = self.acp {
+            // Build a map of collection version ID -> (policy_id, resource_name)
+            // for all collections that have ACP policies
+            let mut policy_map: std::collections::HashMap<String, (String, String)> =
+                std::collections::HashMap::new();
+
+            if let Ok(collection_names) = self.collection_provider.list_collections().await {
+                for name in collection_names {
+                    if let Ok(Some(collection)) = self.collection_provider.get_collection(&name).await
+                    {
+                        if let Some(ref policy) = collection.policy {
+                            policy_map.insert(
+                                collection.version_id.clone(),
+                                (policy.id.clone(), policy.resource_name.clone()),
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Filter commits based on ACP access
+            if !policy_map.is_empty() {
+                let identity = Identity::from(caller_identity);
+
+                // Cache access decisions to avoid repeated ACP checks for same doc
+                let mut access_cache: std::collections::HashMap<(String, String), bool> =
+                    std::collections::HashMap::new();
+
+                // Use retain with a sync predicate - we'll do async checks separately
+                let mut accessible_commits = Vec::new();
+                for commit in commits {
+                    let version_id = commit
+                        .get("collectionVersionId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let doc_id = commit
+                        .get("docID")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+
+                    // If no policy for this collection, allow access
+                    let Some((policy_id, resource_name)) = policy_map.get(&version_id) else {
+                        accessible_commits.push(commit);
+                        continue;
+                    };
+
+                    // Check cache first
+                    let cache_key = (doc_id.clone(), version_id.clone());
+                    if let Some(&has_access) = access_cache.get(&cache_key) {
+                        if has_access {
+                            accessible_commits.push(commit);
+                        }
+                        continue;
+                    }
+
+                    // Check ACP access (fail-closed: deny on error)
+                    let has_access = acp
+                        .check_doc_access(
+                            &identity,
+                            DocumentPermission::Read,
+                            policy_id,
+                            resource_name,
+                            &doc_id,
+                        )
+                        .await
+                        .unwrap_or(false);
+
+                    access_cache.insert(cache_key, has_access);
+                    if has_access {
+                        accessible_commits.push(commit);
+                    }
+                }
+                commits = accessible_commits;
+            }
+        }
 
         // Build a mapping for commit fields (needed for filter evaluation)
         let mapping = Self::build_commits_mapping();
