@@ -77,7 +77,16 @@ async fn show_current_worktree() -> Result<()> {
 
     // Print each package
     for package in &packages {
-        if let Some(report) = latest_by_package.get(package) {
+        // Try exact match first, then parent package match
+        let report = latest_by_package.get(package).or_else(|| {
+            // Check if any report's package is a parent of this package
+            latest_by_package
+                .iter()
+                .find(|(rp, _)| package.starts_with(&format!("{}/", rp)) || *rp == package)
+                .map(|(_, r)| r)
+        });
+
+        if let Some(report) = report {
             let pass_pct = format_pct(report.summary.passed, report.summary.total);
             let fail_pct = format_pct(report.summary.failed, report.summary.total);
             let skip_pct = format_pct(report.summary.skipped, report.summary.total);
