@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use colored::Colorize;
 
 use crate::error::Result;
-use crate::report::{load_all_for_branch, Report};
+use crate::report::{load_all_for_branch, load_all_reports, Report};
 use crate::runner::list_packages;
 use crate::worktree::{list_rust_worktrees, WorktreeContext};
 
@@ -28,10 +28,17 @@ fn format_pct(value: usize, total: usize) -> String {
 async fn show_current_worktree() -> Result<()> {
     let ctx = WorktreeContext::detect().await?;
 
+    // Special case: if on main, show latest from ALL worktrees
+    let is_main = ctx.branch == "main" || ctx.branch == "master";
+
     println!(
         "{} {} @ {}{}",
         "FFI Test Status:".bold(),
-        ctx.branch.cyan(),
+        if is_main {
+            format!("{} (all worktrees)", ctx.branch).cyan()
+        } else {
+            ctx.branch.cyan()
+        },
         ctx.commit.yellow(),
         if ctx.dirty {
             " (dirty)".red().to_string()
@@ -44,8 +51,12 @@ async fn show_current_worktree() -> Result<()> {
     // Get available packages
     let packages = list_packages(&ctx.go_path).await?;
 
-    // Load reports for this branch
-    let reports = load_all_for_branch(&ctx.branch).await?;
+    // Load reports - from all branches if on main, otherwise just current branch
+    let reports = if is_main {
+        load_all_reports().await?
+    } else {
+        load_all_for_branch(&ctx.branch).await?
+    };
 
     // Group reports by package (keep only latest per package)
     let mut latest_by_package: HashMap<String, Report> = HashMap::new();
@@ -77,14 +88,30 @@ async fn show_current_worktree() -> Result<()> {
 
     // Print each package
     for package in &packages {
-        // Try exact match first, then parent package match
-        let report = latest_by_package.get(package).or_else(|| {
-            // Check if any report's package is a parent of this package
-            latest_by_package
+        // Find all matching reports: exact match OR parent package match
+        // Then pick the most recent one
+        let report = {
+            let exact = latest_by_package.get(package);
+            let parent = latest_by_package
                 .iter()
-                .find(|(rp, _)| package.starts_with(&format!("{}/", rp)) || *rp == package)
-                .map(|(_, r)| r)
-        });
+                .filter(|(rp, _)| package.starts_with(&format!("{}/", rp)))
+                .max_by_key(|(_, r)| r.timestamp)
+                .map(|(_, r)| r);
+
+            // Pick whichever is more recent (or the one that exists)
+            match (exact, parent) {
+                (Some(e), Some(p)) => {
+                    if e.timestamp >= p.timestamp {
+                        Some(e)
+                    } else {
+                        Some(p)
+                    }
+                }
+                (Some(e), None) => Some(e),
+                (None, Some(p)) => Some(p),
+                (None, None) => None,
+            }
+        };
 
         if let Some(report) = report {
             let pass_pct = format_pct(report.summary.passed, report.summary.total);

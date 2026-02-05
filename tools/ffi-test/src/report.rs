@@ -130,6 +130,38 @@ fn parse_timestamp_from_filename(filename: &str) -> Option<DateTime<Utc>> {
     None
 }
 
+/// Load all reports from all branches (for main worktree unified view)
+pub async fn load_all_reports() -> Result<Vec<Report>> {
+    let dir = reports_dir();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut reports = Vec::new();
+    let mut entries = tokio::fs::read_dir(&dir).await?;
+
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        if name_str.ends_with(".json") {
+            let content = tokio::fs::read_to_string(entry.path()).await?;
+            if let Ok(report) = serde_json::from_str::<Report>(&content) {
+                reports.push(report);
+            }
+        }
+    }
+
+    // Sort by package then timestamp (newest first)
+    reports.sort_by(|a, b| {
+        a.package
+            .cmp(&b.package)
+            .then_with(|| b.timestamp.cmp(&a.timestamp))
+    });
+
+    Ok(reports)
+}
+
 /// Load all reports for a branch
 pub async fn load_all_for_branch(branch: &str) -> Result<Vec<Report>> {
     let dir = reports_dir();
