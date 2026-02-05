@@ -96,11 +96,8 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         message: PushLogBroadcast,
         topic: String,
     ) -> Result<()> {
-        eprintln!(
-            "[COORD] GossipMessage from={} doc_id={} collection={} topic={}",
-            propagation_source, message.doc_id, message.collection_id, topic
-        );
         tracing::debug!(
+            peer_id = %propagation_source,
             doc_id = %message.doc_id,
             collection_id = %message.collection_id,
             topic = %topic,
@@ -146,13 +143,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         request: crate::message::PushLogRequest,
         channel: crate::host::ResponseChannel,
     ) -> Result<()> {
-        eprintln!(
-            "[COORD] PushLogRequest from={} doc_id={} collection={}",
-            peer_id, request.doc_id, request.collection_id
-        );
         tracing::debug!(
             peer_id = %peer_id,
             doc_id = %request.doc_id,
+            collection_id = %request.collection_id,
             "Received PushLog request"
         );
 
@@ -242,13 +236,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         peer_id: libp2p::PeerId,
         request: crate::message::PushLogRequest,
     ) -> Result<()> {
-        eprintln!(
-            "[COORD] TwoStreamRequest from={} doc_id={} collection={}",
-            peer_id, request.doc_id, request.collection_id
-        );
         tracing::debug!(
             peer_id = %peer_id,
             doc_id = %request.doc_id,
+            collection_id = %request.collection_id,
             message_id = %request.metadata.message_id,
             "Received PushLog request via two-stream protocol (Go compatibility)"
         );
@@ -397,10 +388,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         success: bool,
         error: Option<String>,
     ) -> Result<()> {
-        eprintln!(
-            "[DOCSYNC] BitswapComplete query_id={} success={} error={:?}",
-            query_id.0, success, error
-        );
         tracing::info!(
             query_id = query_id.0,
             success = success,
@@ -410,16 +397,15 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
 
         if success {
             let pending_dags: Vec<Cid> = self.manager.pending_dag_cids();
-            eprintln!(
-                "[DOCSYNC] BitswapComplete: pending_dags count={}",
-                pending_dags.len()
+            tracing::debug!(
+                pending_dag_count = pending_dags.len(),
+                "Processing pending DAGs after Bitswap completion"
             );
 
             for root_cid in pending_dags {
-                eprintln!("[DOCSYNC] Retrying pending DAG root_cid={}", root_cid);
+                tracing::debug!(root_cid = %root_cid, "Retrying pending DAG");
                 match self.manager.retry_pending_dag(&root_cid).await {
                     Ok(true) => {
-                        eprintln!("[DOCSYNC] Pending DAG completed root_cid={}", root_cid);
                         tracing::info!(
                             query_id = query_id.0,
                             root_cid = %root_cid,
@@ -429,7 +415,11 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     Ok(false) => {
                         let missing = self.manager.pending_dag_missing(&root_cid);
                         if !missing.is_empty() {
-                            eprintln!("[DOCSYNC] Pending DAG has {} missing child blocks, fetching via Bitswap root_cid={}", missing.len(), root_cid);
+                            tracing::debug!(
+                                root_cid = %root_cid,
+                                missing_count = missing.len(),
+                                "Pending DAG has missing child blocks, fetching via Bitswap"
+                            );
                             let providers = self
                                 .peer_state
                                 .connected_peers()
@@ -438,10 +428,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                             if let Err(e) =
                                 self.host.bitswap_sync(root_cid, providers, missing).await
                             {
-                                eprintln!(
-                                    "[DOCSYNC] Failed to start Bitswap for child blocks: {}",
-                                    e
-                                );
                                 tracing::warn!(
                                     root_cid = %root_cid,
                                     error = %e,
@@ -449,7 +435,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                                 );
                             }
                         } else {
-                            eprintln!("[DOCSYNC] Pending DAG still has missing links but no missing CIDs reported root_cid={}", root_cid);
+                            tracing::debug!(
+                                root_cid = %root_cid,
+                                "Pending DAG still has missing links but no missing CIDs reported"
+                            );
                         }
                         tracing::debug!(
                             query_id = query_id.0,
@@ -458,10 +447,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                         );
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[DOCSYNC] Failed to retry pending DAG root_cid={}: {}",
-                            root_cid, e
-                        );
                         tracing::warn!(
                             query_id = query_id.0,
                             root_cid = %root_cid,
@@ -472,7 +457,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 }
             }
         } else if let Some(ref err) = error {
-            eprintln!("[DOCSYNC] Bitswap fetch failed: {}", err);
             tracing::warn!(
                 query_id = query_id.0,
                 error = %err,
@@ -487,10 +471,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         peer_id: libp2p::PeerId,
         request: crate::message::DocSyncRequest,
     ) -> Result<()> {
-        eprintln!(
-            "[DOCSYNC] Received DocSyncRequest from peer={} doc_ids={:?}",
-            peer_id, request.doc_ids
-        );
         tracing::debug!(
             peer_id = %peer_id,
             doc_ids = ?request.doc_ids,
@@ -500,20 +480,15 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
 
         let mut results: Vec<DocSyncItem> = Vec::new();
         for doc_id in &request.doc_ids {
-            eprintln!("[DOCSYNC] Looking up heads for doc_id={}", doc_id);
+            tracing::trace!(doc_id = %doc_id, "Looking up heads for document");
             match self.head_provider.get_document_heads(doc_id).await {
                 Ok(heads) => {
-                    eprintln!(
-                        "[DOCSYNC] Found {} heads for doc_id={}",
-                        heads.len(),
-                        doc_id
+                    tracing::debug!(
+                        doc_id = %doc_id,
+                        head_count = heads.len(),
+                        "Found document heads for DocSync response"
                     );
                     if !heads.is_empty() {
-                        tracing::debug!(
-                            doc_id = %doc_id,
-                            head_count = heads.len(),
-                            "Found document heads for DocSync response"
-                        );
                         results.push(DocSyncItem {
                             doc_id: doc_id.clone(),
                             heads: heads.iter().map(|cid| cid.to_bytes()).collect(),
@@ -521,7 +496,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[DOCSYNC] Error getting heads for doc_id={}: {}", doc_id, e);
                     tracing::warn!(
                         doc_id = %doc_id,
                         error = %e,
@@ -531,10 +505,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             }
         }
 
-        eprintln!(
-            "[DOCSYNC] Sending DocSync response with {} results",
-            results.len()
-        );
         tracing::debug!(
             peer_id = %peer_id,
             result_count = results.len(),
@@ -544,7 +514,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         let mut reply = DocSyncReply::success(&request.metadata.message_id, results);
 
         if let Err(e) = crate::signing::sign_message(self.host.keypair(), &mut reply) {
-            eprintln!("[DOCSYNC] Failed to sign DocSync response: {}", e);
             tracing::error!(
                 peer_id = %peer_id,
                 error = %e,
@@ -554,14 +523,12 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         }
 
         if let Err(e) = self.host.send_doc_sync_response(peer_id, reply).await {
-            eprintln!("[DOCSYNC] Failed to send DocSync response: {}", e);
             tracing::warn!(
                 peer_id = %peer_id,
                 error = %e,
                 "Failed to send DocSync response"
             );
         } else {
-            eprintln!("[DOCSYNC] Sent DocSync response to peer={}", peer_id);
             tracing::debug!(
                 peer_id = %peer_id,
                 "Sent DocSync response"
@@ -575,12 +542,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         peer_id: libp2p::PeerId,
         reply: DocSyncReply,
     ) -> Result<()> {
-        eprintln!(
-            "[DOCSYNC] Received DocSyncReply from peer={} message_id={} results_count={}",
-            peer_id,
-            reply.message_id,
-            reply.results.len()
-        );
         tracing::info!(
             peer_id = %peer_id,
             message_id = %reply.message_id,
@@ -631,32 +592,25 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         }
 
         if !cids_to_fetch.is_empty() {
-            eprintln!(
-                "[DOCSYNC] Initiating Bitswap fetch for {} CIDs",
-                cids_to_fetch.len()
-            );
             tracing::info!(
                 cid_count = cids_to_fetch.len(),
                 "Initiating Bitswap fetch for DocSync blocks"
             );
 
             for (root_cid, doc_id) in &cids_to_fetch {
-                eprintln!(
-                    "[DOCSYNC] Registering pending DAG cid={} doc_id={}",
-                    root_cid, doc_id
+                tracing::debug!(
+                    cid = %root_cid,
+                    doc_id = %doc_id,
+                    "Registering pending DAG for DocSync"
                 );
                 self.manager.register_docsync_dag(*root_cid, doc_id.clone());
 
-                eprintln!("[DOCSYNC] Starting Bitswap sync for cid={}", root_cid);
+                tracing::debug!(cid = %root_cid, "Starting Bitswap sync");
                 if let Err(e) = self
                     .host
                     .bitswap_sync(*root_cid, vec![peer_id], vec![*root_cid])
                     .await
                 {
-                    eprintln!(
-                        "[DOCSYNC] Failed to start Bitswap sync for cid={}: {}",
-                        root_cid, e
-                    );
                     tracing::warn!(
                         error = %e,
                         cid = %root_cid,
@@ -666,7 +620,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 }
             }
         } else {
-            eprintln!("[DOCSYNC] No blocks to fetch from DocSync reply (all local)");
             tracing::debug!("No blocks to fetch from DocSync reply (all local)");
         }
         Ok(())
@@ -677,9 +630,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         peer_id: libp2p::PeerId,
         request: crate::message::BranchableSyncRequest,
     ) -> Result<()> {
-        eprintln!(
-            "[BRANCHABLE] Received BranchableSyncRequest from peer={} collection={}",
-            peer_id, request.collection_id
+        tracing::debug!(
+            peer_id = %peer_id,
+            collection_id = %request.collection_id,
+            "Received BranchableSync request"
         );
 
         let heads = match self
@@ -688,18 +642,19 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             .await
         {
             Ok(heads) => {
-                eprintln!(
-                    "[BRANCHABLE] Found {} collection heads for {}",
-                    heads.len(),
-                    request.collection_id
+                tracing::debug!(
+                    collection_id = %request.collection_id,
+                    head_count = heads.len(),
+                    "Found collection heads for BranchableSync response"
                 );
-                for h in &heads {
-                    eprintln!("[BRANCHABLE]   head CID: {}", h);
-                }
                 heads.iter().map(|cid| cid.to_bytes()).collect()
             }
             Err(e) => {
-                eprintln!("[BRANCHABLE] Failed to get collection heads: {}", e);
+                tracing::warn!(
+                    collection_id = %request.collection_id,
+                    error = %e,
+                    "Failed to get collection heads"
+                );
                 Vec::new()
             }
         };
@@ -738,17 +693,17 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         peer_id: libp2p::PeerId,
         reply: crate::message::BranchableSyncReply,
     ) -> Result<()> {
-        eprintln!(
-            "[BRANCHABLE] Received BranchableSyncReply from peer={} collection={} heads={}",
-            peer_id,
-            reply.collection_id,
-            reply.heads.len()
+        tracing::debug!(
+            peer_id = %peer_id,
+            collection_id = %reply.collection_id,
+            head_count = reply.heads.len(),
+            "Received BranchableSync reply"
         );
 
         if reply.heads.is_empty() {
-            eprintln!(
-                "[BRANCHABLE] Peer has no heads for collection {}",
-                reply.collection_id
+            tracing::debug!(
+                collection_id = %reply.collection_id,
+                "Peer has no heads for collection"
             );
             return Ok(());
         }
@@ -757,31 +712,32 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         for head_bytes in &reply.heads {
             match Cid::try_from(head_bytes.as_slice()) {
                 Ok(cid) => {
-                    eprintln!("[BRANCHABLE] Parsed collection head CID: {}", cid);
+                    tracing::trace!(cid = %cid, "Parsed collection head CID");
                     match self.manager.blockstore().has(&cid).await {
                         Ok(true) => {
-                            eprintln!("[BRANCHABLE] Already have block {}", cid);
+                            tracing::debug!(cid = %cid, "Already have block");
                         }
                         Ok(false) => {
-                            eprintln!("[BRANCHABLE] Need to fetch block {}", cid);
+                            tracing::debug!(cid = %cid, "Need to fetch block");
                             cids_to_fetch.push(cid);
                         }
                         Err(e) => {
-                            eprintln!("[BRANCHABLE] Error checking block {}: {}", cid, e);
+                            tracing::warn!(cid = %cid, error = %e, "Error checking block");
                             cids_to_fetch.push(cid);
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("[BRANCHABLE] Failed to parse CID from reply: {}", e);
+                    tracing::warn!(error = %e, "Failed to parse CID from BranchableSync reply");
                 }
             }
         }
 
         if !cids_to_fetch.is_empty() {
-            eprintln!(
-                "[BRANCHABLE] Initiating Bitswap fetch for {} collection blocks",
-                cids_to_fetch.len()
+            tracing::info!(
+                collection_id = %reply.collection_id,
+                cid_count = cids_to_fetch.len(),
+                "Initiating Bitswap fetch for collection blocks"
             );
 
             for root_cid in &cids_to_fetch {
@@ -793,16 +749,17 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     .bitswap_sync(*root_cid, vec![peer_id], vec![*root_cid])
                     .await
                 {
-                    eprintln!(
-                        "[BRANCHABLE] Failed to start Bitswap for {}: {}",
-                        root_cid, e
+                    tracing::warn!(
+                        cid = %root_cid,
+                        error = %e,
+                        "Failed to start Bitswap for collection block"
                     );
                 }
             }
         } else {
-            eprintln!(
-                "[BRANCHABLE] All blocks already local for collection {}",
-                reply.collection_id
+            tracing::debug!(
+                collection_id = %reply.collection_id,
+                "All blocks already local for collection"
             );
         }
         Ok(())

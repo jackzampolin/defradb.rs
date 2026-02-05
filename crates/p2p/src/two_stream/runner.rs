@@ -88,7 +88,6 @@ impl TwoStreamRunner {
                 }
                 // Handle incoming response streams
                 Some((peer_id, stream)) = self.response_streams.next() => {
-                    eprintln!("[DOCSYNC] TwoStreamRunner received incoming response stream from peer={}", peer_id);
                     tracing::info!(
                         peer_id = %peer_id,
                         "Received incoming stream on response protocol"
@@ -100,24 +99,20 @@ impl TwoStreamRunner {
                         match h.handle_response_stream(peer_id, stream).await {
                             Ok(Some(event)) => {
                                 // DocSyncReply events should be forwarded to the coordinator
-                                eprintln!("[DOCSYNC] TwoStreamRunner got DocSyncReply event, sending to host channel");
-                                tracing::info!(peer_id = %peer_id, "Sending DocSyncReply event to host channel");
+                                tracing::debug!(peer_id = %peer_id, "Sending DocSyncReply event to host channel");
                                 if event_tx.send(event).await.is_err() {
-                                    eprintln!("[DOCSYNC] TwoStreamRunner failed to send DocSyncReply event - receiver dropped");
                                     tracing::warn!(
                                         peer_id = %peer_id,
                                         "Failed to send DocSyncReply event - receiver dropped"
                                     );
                                 } else {
-                                    eprintln!("[DOCSYNC] TwoStreamRunner sent DocSyncReply event to host channel");
+                                    tracing::debug!(peer_id = %peer_id, "Sent DocSyncReply event to host channel");
                                 }
                             }
                             Ok(None) => {
-                                eprintln!("[DOCSYNC] TwoStreamRunner got PushLogReply (handled internally)");
-                                // PushLogReply was handled internally via pending channels
+                                tracing::trace!(peer_id = %peer_id, "PushLogReply handled internally via pending channels");
                             }
                             Err(e) => {
-                                eprintln!("[DOCSYNC] TwoStreamRunner failed to handle response stream: {}", e);
                                 tracing::warn!(
                                     peer_id = %peer_id,
                                     error = %e,

@@ -131,12 +131,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         // Parse CID from message
         let cid = Cid::try_from(msg.cid.as_slice())
             .map_err(|e| Error::InvalidCid(format!("Failed to parse CID: {}", e)))?;
-        eprintln!(
-            "[SYNC-MGR] process_pushlog cid={} doc_id={} collection={} block_len={}",
-            cid,
-            msg.doc_id,
-            msg.collection_id,
-            msg.block.len()
+        tracing::debug!(
+            cid = %cid,
+            doc_id = %msg.doc_id,
+            collection_id = %msg.collection_id,
+            block_len = msg.block.len(),
+            "Processing pushlog"
         );
 
         // Try to acquire exclusive processing rights for this CID
@@ -206,11 +206,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         // Check if already merged
         match self.blockstore.is_merged(cid).await {
             Ok(true) => {
-                eprintln!(
-                    "[SYNC-MGR] Block already merged cid={} doc_id={}",
-                    cid, msg.doc_id
-                );
-                tracing::debug!(?cid, "Block already merged, skipping");
+                tracing::debug!(cid = %cid, doc_id = %msg.doc_id, "Block already merged, skipping");
                 if self
                     .event_tx
                     .send(SyncEvent::BlockAlreadyMerged { cid: *cid })
@@ -292,10 +288,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         if missing.is_empty() {
             // DAG is complete - emit BlockReceived for merge
-            eprintln!(
-                "[SYNC-MGR] DAG complete cid={} doc_id={} — emitting BlockReceived",
-                cid, msg.doc_id
-            );
             tracing::info!(
                 ?cid,
                 doc_id = %msg.doc_id,
@@ -323,12 +315,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
         } else {
             // DAG has missing blocks - track as pending and request Bitswap fetch
-            eprintln!(
-                "[SYNC-MGR] DAG incomplete cid={} doc_id={} missing={} — requesting Bitswap",
-                cid,
-                msg.doc_id,
-                missing.len()
-            );
             tracing::info!(
                 ?cid,
                 missing_count = missing.len(),
@@ -713,18 +699,18 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
         };
 
-        eprintln!(
-            "[DAG-RETRY] root_cid={} doc_id={} missing_count={}",
-            root_cid,
-            info.doc_id,
-            missing.len()
+        tracing::debug!(
+            root_cid = %root_cid,
+            doc_id = %info.doc_id,
+            missing_count = missing.len(),
+            "Retrying pending DAG"
         );
 
         if !missing.is_empty() {
-            eprintln!(
-                "[DAG-RETRY] Still missing {} blocks: {:?}",
-                missing.len(),
-                missing.iter().map(|c| c.to_string()).collect::<Vec<_>>()
+            tracing::debug!(
+                root_cid = %root_cid,
+                missing_count = missing.len(),
+                "Still missing blocks for DAG"
             );
             // Update the pending info with new missing CIDs
             self.pending_dags.write().insert(
@@ -739,9 +725,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         // DAG is complete at all depths - remove from pending and process
         self.pending_dags.write().remove(root_cid);
-        eprintln!(
-            "[DAG-RETRY] DAG complete! root_cid={} doc_id={} — emitting DagReady",
-            root_cid, info.doc_id
+        tracing::info!(
+            root_cid = %root_cid,
+            doc_id = %info.doc_id,
+            "DAG complete, emitting DagReady"
         );
 
         // Emit event that DAG is ready for merge

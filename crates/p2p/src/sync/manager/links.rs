@@ -112,7 +112,7 @@ fn find_missing_recursive<'a, B: Blockstore + 'a>(
                     }
                 }
                 Ok(false) => {
-                    eprintln!("[DAG-WALK] Missing block at depth: cid={}", link_cid);
+                    tracing::debug!(cid = %link_cid, "Missing block at depth in DAG");
                     missing.push(link_cid);
                 }
                 Err(e) => {
