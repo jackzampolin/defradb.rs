@@ -7,11 +7,11 @@ use crate::report::{load_all_for_branch, load_all_reports, Report};
 use crate::worktree::{list_rust_worktrees, WorktreeContext};
 
 /// Show status of FFI tests
-pub async fn execute(all: bool, depth: usize) -> Result<()> {
+pub async fn execute(all: bool, depth: usize, filter: Option<&str>) -> Result<()> {
     if all {
         show_all_worktrees().await
     } else {
-        show_current_worktree(depth).await
+        show_current_worktree(depth, filter).await
     }
 }
 
@@ -23,7 +23,16 @@ fn truncate_to_depth(package: &str, depth: usize) -> String {
     parts.into_iter().take(depth).collect::<Vec<_>>().join("/")
 }
 
-async fn show_current_worktree(depth: usize) -> Result<()> {
+/// Compute the maximum depth of any package path
+fn max_depth(packages: &[&String]) -> usize {
+    packages
+        .iter()
+        .map(|p| p.split('/').count())
+        .max()
+        .unwrap_or(1)
+}
+
+async fn show_current_worktree(depth: usize, filter: Option<&str>) -> Result<()> {
     let ctx = WorktreeContext::detect().await?;
 
     // Special case: if on main, show latest from ALL worktrees
@@ -66,17 +75,54 @@ async fn show_current_worktree(depth: usize) -> Result<()> {
             .or_insert(report);
     }
 
+    // Apply package filter if provided
+    if let Some(prefix) = filter {
+        latest_by_package
+            .retain(|pkg, _| pkg == prefix || pkg.starts_with(&format!("{}/", prefix)));
+    }
+
+    if latest_by_package.is_empty() {
+        if let Some(prefix) = filter {
+            println!(
+                "{}",
+                format!("No test reports found for '{}'", prefix).dimmed()
+            );
+        } else {
+            println!("{}", "No test reports found".dimmed());
+        }
+        return Ok(());
+    }
+
+    // When filtering to a specific package, auto-expand to full depth
+    let effective_depth = if filter.is_some() {
+        let keys: Vec<&String> = latest_by_package.keys().collect();
+        max_depth(&keys)
+    } else {
+        depth
+    };
+
     // Group packages by truncated path at specified depth
     // Use BTreeMap for sorted output
     let mut groups: BTreeMap<String, Vec<&Report>> = BTreeMap::new();
     for (pkg, report) in &latest_by_package {
-        let group_key = truncate_to_depth(pkg, depth);
+        let group_key = truncate_to_depth(pkg, effective_depth);
         groups.entry(group_key).or_default().push(report);
     }
 
+    // Compute dynamic column width from longest group name
+    let pkg_col_width = groups
+        .keys()
+        .map(|k| k.len())
+        .max()
+        .unwrap_or(7)
+        .max(7) // minimum "Package" header width
+        + 2; // padding
+
+    let line_width = pkg_col_width + 12 + 12 + 6 + 6 + 6 + 6 + 6 + 7; // field widths + gaps
+
     // Print table header
     println!(
-        "{:<30} {:<12} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
+        "{:<pw$} {:<12} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
         "Package".bold(),
         "Branch".bold(),
         "Timestamp".bold(),
@@ -84,9 +130,10 @@ async fn show_current_worktree(depth: usize) -> Result<()> {
         "Fail".bold(),
         "Skip".bold(),
         "Total".bold(),
-        "Rate".bold()
+        "Rate".bold(),
+        pw = pkg_col_width
     );
-    println!("{}", "─".repeat(94));
+    println!("{}", "─".repeat(line_width));
 
     // Print each group
     for (group_name, group_reports) in &groups {
@@ -128,7 +175,6 @@ async fn show_current_worktree(depth: usize) -> Result<()> {
         let timestamp = report.timestamp.format("%m-%d %H:%M").to_string();
         let branch_display = report.branch.trim_start_matches("ffi/");
 
-        // Show total as - if no tests
         let total_str = if total == 0 {
             "-".to_string()
         } else {
@@ -136,7 +182,7 @@ async fn show_current_worktree(depth: usize) -> Result<()> {
         };
 
         println!(
-            "{:<30} {:<12} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
+            "{:<pw$} {:<12} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
             group_name,
             branch_display.dimmed(),
             timestamp.dimmed(),
@@ -156,12 +202,13 @@ async fn show_current_worktree(depth: usize) -> Result<()> {
                 total_skip.to_string()
             },
             total_str,
-            rate_str
+            rate_str,
+            pw = pkg_col_width
         );
     }
 
     // Print totals
-    println!("{}", "─".repeat(94));
+    println!("{}", "─".repeat(line_width));
 
     let mut grand_pass = 0;
     let mut grand_fail = 0;
@@ -191,7 +238,7 @@ async fn show_current_worktree(depth: usize) -> Result<()> {
     let label = format!("TOTAL ({} packages)", latest_by_package.len());
 
     println!(
-        "{:<30} {:<12} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
+        "{:<pw$} {:<12} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
         label.bold(),
         "",
         "",
@@ -199,7 +246,8 @@ async fn show_current_worktree(depth: usize) -> Result<()> {
         grand_fail,
         grand_skip,
         grand_total,
-        rate_str
+        rate_str,
+        pw = pkg_col_width
     );
 
     Ok(())

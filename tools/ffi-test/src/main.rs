@@ -39,6 +39,9 @@ enum Commands {
 
     /// Show status of FFI tests
     Status {
+        /// Filter to a specific package prefix (e.g., "net", "query")
+        package: Option<String>,
+
         /// Show status for all worktrees
         #[arg(long)]
         all: bool,
@@ -117,7 +120,11 @@ async fn main() {
             skip_build,
         } => commands::run::execute(&package, test.as_deref(), verbose, skip_build).await,
 
-        Commands::Status { all, depth } => commands::status::execute(all, depth).await,
+        Commands::Status {
+            package,
+            all,
+            depth,
+        } => commands::status::execute(all, depth, package.as_deref()).await,
 
         Commands::Diff { package } => commands::diff::execute(&package).await,
 
