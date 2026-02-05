@@ -30,6 +30,7 @@ mod introspection;
 mod mutation;
 mod plan;
 mod query;
+mod version;
 
 use acp::DocumentACP;
 use identity::Did;
