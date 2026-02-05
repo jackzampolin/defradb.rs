@@ -2,25 +2,27 @@
 //!
 //! This module handles filter parsing, manipulation, and evaluation.
 //!
-//! # Module Organization (planned)
+//! # Module Organization
 //!
-//! - `filter_impl`: Main Filter struct and all current functionality
-//! - `op`: FilterOp enum (placeholder for extraction)
-//! - `inspection`: has_*, is_* methods (placeholder for extraction)
-//! - `relation`: relation_field_names, extract_relation_filter (placeholder)
-//! - `split`: split_by_relation, split_alias (placeholder)
-//! - `eval/`: Evaluation logic (placeholder for extraction)
-//! - `json_match`: matches_json_object (placeholder)
+//! - `op`: FilterOp enum for filter operators
+//! - `filter_impl`: Filter struct, constructors, and core evaluation (matches, eval_conditions)
+//! - `inspection`: Boolean queries about filter structure (has_*, is_*)
+//! - `relation`: Relation filter extraction and path analysis
+//! - `split`: Filter decomposition for query planning
+//! - `eval/`: Operator evaluation (comparison, equality, pattern matching)
+//! - `json_match`: JSON object/scalar matching for aggregate filters
 
 mod filter_impl;
 
-// Placeholder modules for future extraction
 mod eval;
 mod inspection;
 mod json_match;
-mod op;
+pub mod op;
 mod relation;
 mod split;
+
+// Re-export FilterOp from op module
+pub use op::FilterOp;
 
 // Re-export everything from filter_impl for backwards compatibility
 pub use filter_impl::*;

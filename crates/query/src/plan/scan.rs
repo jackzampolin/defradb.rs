@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use schema::CollectionVersion;
 
-use crate::document::{
-    documents_to_plan_docs, documents_with_status_to_plan_docs, DocumentMapping,
-};
+use tracing::debug;
+
+use crate::document::{documents_with_status_to_plan_docs, DocumentMapping};
 use crate::error::Result;
 use crate::fetcher::DocFetcher;
 use crate::mapper::Filter;
@@ -187,6 +187,11 @@ impl PlanNode for ScanNode {
         }
 
         self.initialized = true;
+        debug!(
+            collection = %self.collection.name,
+            doc_count = self.docs.len(),
+            "ScanNode initialized"
+        );
         Ok(())
     }
 
