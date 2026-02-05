@@ -780,13 +780,27 @@ impl<S: Store> crate::database::DB<S> {
             && new_schema.is_active == old_schema.is_active
             && new_schema.previous_version != old_schema.previous_version;
 
-        if is_deactivation || is_isactive_only_change || is_transform_only_change {
+        // Check if only metadata changed (VectorEmbeddings, Indexes, IsMaterialized, etc.)
+        // without field or name changes. Go treats these as in-place updates.
+        let is_metadata_only_change = !is_deactivation
+            && !is_active_explicitly_set
+            && !is_transform_only_change
+            && new_schema.fields == old_schema.fields
+            && new_schema.name == old_schema.name
+            && new_schema.is_active == old_schema.is_active
+            && new_schema.previous_version == old_schema.previous_version;
+
+        if is_deactivation
+            || is_isactive_only_change
+            || is_transform_only_change
+            || is_metadata_only_change
+        {
             if is_deactivation {
                 new_schema.is_active = false;
             }
             // Keep original version_id
             new_schema.version_id = old_version_id.clone();
-            // For IsActive-only or deactivation, restore original previous_version.
+            // For IsActive-only, metadata-only, or deactivation, restore original previous_version.
             // For Transform-only changes, keep the new previous_version (contains the transform).
             if !is_transform_only_change {
                 new_schema.previous_version = old_schema.previous_version.clone();
@@ -971,36 +985,58 @@ impl<S: Store> crate::database::DB<S> {
             }
         }
 
-        // Compute version depth by following the previous_version chain from old_schema to root.
-        // This ensures branching schemas get the correct priority (based on chain depth,
-        // not total version count). Both branches from the same parent get the same priority.
-        let version_depth = {
-            let versions_map: std::collections::HashMap<&str, &CollectionVersion> = all_existing
-                .iter()
-                .map(|v| (v.version_id.as_str(), v))
-                .collect();
-            let mut depth = 0u64;
-            let mut current_id = old_schema.version_id.as_str();
-            while let Some(v) = versions_map.get(current_id) {
-                match &v.previous_version {
-                    Some(prev) => {
-                        depth += 1;
-                        current_id = prev.source_collection_id.as_str();
+        // Read current heads from schema_heads (emulates Go's persistent headstore).
+        // For branching patches (v1→v2 then v1→v3), the headstore tracks the latest
+        // CID after v2, so v3 gets heads=[v2_cid] and priority=3, matching Go.
+        let (collection_heads, collection_priority) = {
+            let heads_map = self
+                .schema_heads
+                .read()
+                .map_err(|_| Error::LockPoisoned("schema_heads lock poisoned".into()))?;
+            match heads_map.get(&actual_name) {
+                Some((heads, h)) => (heads.clone(), *h + 1),
+                None => {
+                    // Fallback: compute from version chain (for databases loaded from storage)
+                    let versions_map: std::collections::HashMap<&str, &CollectionVersion> =
+                        all_existing
+                            .iter()
+                            .map(|v| (v.version_id.as_str(), v))
+                            .collect();
+                    let mut depth = 0u64;
+                    let mut current_id = old_schema.version_id.as_str();
+                    while let Some(v) = versions_map.get(current_id) {
+                        match &v.previous_version {
+                            Some(prev) => {
+                                depth += 1;
+                                current_id = prev.source_collection_id.as_str();
+                            }
+                            None => break,
+                        }
                     }
-                    None => break,
+                    let version_depth = depth + 1;
+                    let old_cid = cid::Cid::try_from(old_schema.version_id.as_str()).ok();
+                    (old_cid.into_iter().collect(), version_depth + 1)
                 }
             }
-            // depth = chain length from old_schema to root
-            // version_depth = depth + 1 (the old version's "height" in the DAG)
-            depth + 1
         };
 
-        // Generate new version_id from schema content with proper priorities
-        let new_version_id =
-            Self::generate_patch_version_id(&mut new_schema, &old_schema, version_depth);
+        // Generate new version_id from schema content with headstore heads and priority
+        let new_version_id = Self::generate_patch_version_id_with_heads(
+            &mut new_schema,
+            &old_schema,
+            collection_priority,
+            &collection_heads,
+        );
 
         // Update new schema with version info
         new_schema.version_id = new_version_id.clone();
+
+        // Update schema_heads with new version CID and priority
+        if let Ok(new_cid) = cid::Cid::try_from(new_version_id.as_str()) {
+            if let Ok(mut heads) = self.schema_heads.write() {
+                heads.insert(actual_name.clone(), (vec![new_cid], collection_priority));
+            }
+        }
 
         // Check if a placeholder version exists with this ID (from pre-registered migration).
         // When set_migration is called before patch_collection, it creates a placeholder
@@ -1195,18 +1231,15 @@ impl<S: Store> crate::database::DB<S> {
     /// Matches Go DefraDB's saveBlocks() behavior:
     /// - Existing fields (present in old_schema) are SKIPPED entirely
     /// - Only NEW fields get CIDs generated with priority=1 (empty headstore)
-    /// - The collection block gets priority=version_depth+1, heads=[old_version_CID],
-    ///   and links containing only new field CIDs
-    fn generate_patch_version_id(
+    /// - The collection block uses headstore heads and priority
+    fn generate_patch_version_id_with_heads(
         schema: &mut CollectionVersion,
         old_schema: &CollectionVersion,
-        version_depth: u64,
+        collection_priority: u64,
+        collection_heads: &[cid::Cid],
     ) -> String {
         use cid::Cid;
         use sha2::{Digest, Sha256};
-        use std::str::FromStr;
-
-        let collection_priority = version_depth + 1;
 
         // Build set of old field names for detecting which fields are new
         let old_field_names: std::collections::HashSet<&str> = old_schema
@@ -1262,7 +1295,7 @@ impl<S: Store> crate::database::DB<S> {
             }
         }
 
-        // Generate collection CID with old version as head.
+        // Generate collection CID with headstore heads.
         // Go's Delta only includes name when it changed. For field-only patches, name=None.
         let name_changed = schema.name != old_schema.name;
         let collection_name = if name_changed {
@@ -1270,13 +1303,11 @@ impl<S: Store> crate::database::DB<S> {
         } else {
             None
         };
-        let old_version_cid = Cid::from_str(&old_schema.version_id).ok();
-        let collection_heads: Vec<Cid> = old_version_cid.into_iter().collect();
         match schema::generate_collection_cid_full(
             collection_name,
             &field_cids,
             collection_priority,
-            &collection_heads,
+            collection_heads,
         ) {
             Ok(cid) => cid.to_string(),
             Err(_) => {

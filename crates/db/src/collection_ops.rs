@@ -190,23 +190,60 @@ impl<S: Store> crate::database::DB<S> {
         CollectionVersion::finalize_relations_hashmap(&mut schemas, String::new, || 0)?;
 
         // Update cache
-        let mut cache = self.collections.write().map_err(|e| {
-            tracing::error!(error = ?e, "Collection cache lock poisoned during load");
-            Error::LockPoisoned("collection cache lock poisoned during load".into())
-        })?;
+        {
+            let mut cache = self.collections.write().map_err(|e| {
+                tracing::error!(error = ?e, "Collection cache lock poisoned during load");
+                Error::LockPoisoned("collection cache lock poisoned during load".into())
+            })?;
 
-        for (name, schema) in schemas {
-            tracing::trace!(
-                collection_name = %name,
-                version_id = %schema.version_id,
-                collection_id = %schema.collection_id,
-                field_count = schema.fields.len(),
-                "Loaded collection"
-            );
-            cache.insert(name, Collection::new(schema));
+            for (name, schema) in schemas {
+                tracing::trace!(
+                    collection_name = %name,
+                    version_id = %schema.version_id,
+                    collection_id = %schema.collection_id,
+                    field_count = schema.fields.len(),
+                    "Loaded collection"
+                );
+                cache.insert(name, Collection::new(schema));
+            }
+
+            tracing::info!(collection_count = cache.len(), "Loaded collections");
         }
 
-        tracing::info!(collection_count = cache.len(), "Loaded collections");
+        // Reconstruct schema_heads from loaded collections.
+        // For each collection, count all versions in its version chain to determine height,
+        // then set the active version's CID as the head.
+        {
+            let all_versions = self.get_all_collection_versions().await?;
+            // Group versions by collection_id
+            let mut versions_by_collection: std::collections::HashMap<
+                &str,
+                Vec<&CollectionVersion>,
+            > = std::collections::HashMap::new();
+            for v in &all_versions {
+                versions_by_collection
+                    .entry(v.collection_id.as_str())
+                    .or_default()
+                    .push(v);
+            }
+
+            let mut heads_map = self.schema_heads.write().map_err(|e| {
+                tracing::error!(error = ?e, "schema_heads lock poisoned during load");
+                Error::LockPoisoned("schema_heads lock poisoned during load".into())
+            })?;
+
+            for versions in versions_by_collection.values() {
+                // Total versions = height of the latest version
+                let height = versions.len() as u64;
+                // Find the active version to use as head
+                if let Some(active) = versions.iter().find(|v| v.is_active) {
+                    if let Ok(cid) = cid::Cid::try_from(active.version_id.as_str()) {
+                        heads_map.insert(active.name.clone(), (vec![cid], height));
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -428,6 +465,13 @@ impl<S: Store> crate::database::DB<S> {
             .set(&version_index_key.bytes(), b"1")
             .await
             .map_err(Error::Storage)?;
+
+        // Update schema_heads: new collection starts at height=1
+        if let Ok(cid) = cid::Cid::try_from(version_id.as_str()) {
+            if let Ok(mut heads) = self.schema_heads.write() {
+                heads.insert(name.clone(), (vec![cid], 1));
+            }
+        }
 
         // Add to transaction's cache
         txn.cache_collection(Collection::new(schema.clone()));
@@ -986,7 +1030,7 @@ impl<S: Store> crate::database::DB<S> {
     }
 
     /// Get a collection by version ID, searching both cache and KV store.
-    pub(crate) async fn get_collection_by_version_id_full(
+    pub async fn get_collection_by_version_id_full(
         &self,
         version_id: &str,
     ) -> Result<Option<Collection>> {

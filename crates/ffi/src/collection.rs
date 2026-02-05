@@ -549,7 +549,8 @@ pub unsafe extern "C" fn get_collection_by_version_id(
 
     let result = rt.block_on(async {
         let collection = database
-            .get_collection_by_version_id(&version_str)
+            .get_collection_by_version_id_full(&version_str)
+            .await
             .map_err(|e| format!("failed to get collection: {}", e))?;
 
         let json = match collection {

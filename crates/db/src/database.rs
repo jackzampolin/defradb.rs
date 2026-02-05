@@ -6,6 +6,7 @@
 use crate::collection::Collection;
 use crate::error::{Error, Result};
 use crate::txn::DbTxn;
+use cid::Cid;
 use datastore::BasicTxn;
 use events::Bus;
 use identity::{Identity, RawIdentity};
@@ -102,6 +103,10 @@ pub struct DB<S: Store> {
     /// Pending migrations registered before their destination version exists.
     /// Maps dest_version_id -> (source_version_id, transform_id_string).
     pub(crate) pending_migrations: RwLock<HashMap<String, (String, String)>>,
+    /// Schema definition headstore: tracks latest CID and height per collection.
+    /// Emulates Go's persistent headstore for CID computation during patching.
+    /// Key: collection name, Value: (sorted heads as CIDs, max height)
+    pub(crate) schema_heads: RwLock<HashMap<String, (Vec<Cid>, u64)>>,
 }
 
 impl<S: Store> DB<S> {
@@ -127,6 +132,7 @@ impl<S: Store> DB<S> {
             event_bus: None,
             lens_store,
             pending_migrations: RwLock::new(HashMap::new()),
+            schema_heads: RwLock::new(HashMap::new()),
         })
     }
 
@@ -172,6 +178,7 @@ impl<S: Store> DB<S> {
             event_bus: None,
             lens_store,
             pending_migrations: RwLock::new(HashMap::new()),
+            schema_heads: RwLock::new(HashMap::new()),
         })
     }
 
