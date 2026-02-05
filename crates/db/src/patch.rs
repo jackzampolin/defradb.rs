@@ -14,6 +14,7 @@ use crate::txn::DbTxn;
 use schema::{CollectionSource, CollectionVersion};
 use storage::corekv::{Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey, CollectionVersionKey};
+use tracing::instrument;
 
 impl<S: Store> crate::database::DB<S> {
     /// Apply a JSON Patch to a collection schema.
@@ -45,6 +46,7 @@ impl<S: Store> crate::database::DB<S> {
     /// - `CollectionNotFound` if the collection doesn't exist
     /// - `InvalidPatch` if the patch is invalid or cannot be applied
     /// - `Schema` if the resulting schema is invalid
+    #[instrument(skip(self, patch), fields(collection = %collection_name), name = "db.patch_collection")]
     pub async fn patch_collection(
         &self,
         collection_name: &str,

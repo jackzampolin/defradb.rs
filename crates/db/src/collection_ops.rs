@@ -18,6 +18,7 @@ use storage::keys::systemstore::{
     CollectionID, CollectionIDSequenceKey, CollectionKey, CollectionNameKey, CollectionVersionKey,
     IndexIDSequenceKey,
 };
+use tracing::instrument;
 
 /// Helper to delete all keys with a given prefix from a namespace view.
 async fn delete_prefix(store: &NamespaceView, prefix: Vec<u8>) -> Result<()> {
@@ -46,6 +47,7 @@ impl<S: Store> crate::database::DB<S> {
     /// This also finalizes relations by:
     /// - Auto-generating `_id` fields for non-array relation fields
     /// - Auto-determining primary sides for one-to-many relations
+    #[instrument(skip(self), name = "db.load_collections")]
     pub async fn load_collections(&self) -> Result<()> {
         let txn = self.new_txn(true).await?;
         let prefix = CollectionNameKey::name_prefix();
@@ -274,6 +276,7 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// - `InvalidCollectionName` if the collection name is invalid
     /// - `CollectionAlreadyExists` if a collection with this name already exists
+    #[instrument(skip(self, txn, schema), fields(collection = %schema.name), name = "db.create_collection")]
     pub async fn create_collection_with_txn(
         &self,
         txn: &mut DbTxn<S>,
@@ -446,6 +449,7 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// This creates a new transaction, calls `create_collection_with_txn`, commits,
     /// and updates the process-wide cache.
+    #[instrument(skip(self, schema), fields(collection = %schema.name), name = "db.create_collection_auto")]
     pub async fn create_collection(&self, schema: CollectionVersion) -> Result<()> {
         let name = schema.name.clone();
         let mut txn = self.new_txn(false).await?;
@@ -503,6 +507,7 @@ impl<S: Store> crate::database::DB<S> {
     /// 3. The version index entry from `/collection/version/{collection_id}/{version_id}`
     ///
     /// Note: This does NOT delete documents. Use `truncate_collection` first if needed.
+    #[instrument(skip(self, txn), fields(collection = %name), name = "db.delete_collection")]
     pub async fn delete_collection_with_txn(
         &self,
         txn: &mut DbTxn<S>,
@@ -559,6 +564,7 @@ impl<S: Store> crate::database::DB<S> {
     /// and updates the process-wide cache.
     ///
     /// Note: This does NOT delete documents. Use `truncate_collection` first if needed.
+    #[instrument(skip(self), fields(collection = %name), name = "db.delete_collection_auto")]
     pub async fn delete_collection(&self, name: &str) -> Result<()> {
         let mut txn = self.new_txn(false).await?;
 
@@ -592,6 +598,7 @@ impl<S: Store> crate::database::DB<S> {
     /// while preserving the collection schema.
     ///
     /// This resets the collection to an empty state as if it were just created.
+    #[instrument(skip(self), fields(collection = %name), name = "db.truncate_collection")]
     pub async fn truncate_collection(&self, name: &str) -> Result<()> {
         let collection = self
             .get_collection(name)?
@@ -850,6 +857,7 @@ impl<S: Store> crate::database::DB<S> {
     /// # Errors
     ///
     /// - `CollectionVersionNotFound` if no collection with the given version ID exists
+    #[instrument(skip(self), fields(version_id = %version_id), name = "db.set_active_version")]
     pub async fn set_active_collection_version(&self, version_id: &str) -> Result<()> {
         if version_id.is_empty() {
             return Err(Error::CollectionVersionIDEmpty);
