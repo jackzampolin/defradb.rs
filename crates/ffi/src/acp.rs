@@ -1012,17 +1012,17 @@ pub extern "C" fn RegisterIdentity(
     let result = (|| {
         // SAFETY: These pointers come from Go/C FFI and are valid C strings.
         let did_str = unsafe { c_str_to_string(did) }.ok_or("invalid did parameter")?;
-        let priv_hex =
-            unsafe { c_str_to_string(private_key_hex) }.ok_or("invalid private_key_hex parameter")?;
+        let priv_hex = unsafe { c_str_to_string(private_key_hex) }
+            .ok_or("invalid private_key_hex parameter")?;
         let pub_hex =
             unsafe { c_str_to_string(public_key_hex) }.ok_or("invalid public_key_hex parameter")?;
         let key_type_str =
             unsafe { c_str_to_string(key_type) }.unwrap_or_else(|| "secp256k1".to_string());
 
-        let private_key_bytes = hex::decode(&priv_hex)
-            .map_err(|e| format!("invalid private key hex: {}", e))?;
-        let public_key_bytes = hex::decode(&pub_hex)
-            .map_err(|e| format!("invalid public key hex: {}", e))?;
+        let private_key_bytes =
+            hex::decode(&priv_hex).map_err(|e| format!("invalid private key hex: {}", e))?;
+        let public_key_bytes =
+            hex::decode(&pub_hex).map_err(|e| format!("invalid public key hex: {}", e))?;
 
         eprintln!(
             "[SIGN-DEBUG] register_identity: did={}, key_type={}",
