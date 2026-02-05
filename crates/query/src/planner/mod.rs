@@ -15,7 +15,7 @@ pub mod index_selection;
 mod joins;
 mod mapping;
 mod traits;
-mod views;
+mod view_builder;
 
 pub use builder::{PlanResult, Planner};
 pub use index_selection::{

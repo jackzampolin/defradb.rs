@@ -53,4 +53,4 @@ pub use manager::{SyncConfig, SyncEvent, SyncManager};
 pub use merge::{BlockMetadata, MergeHandler, MergeOutcome};
 pub use peer_state::{PeerStateTracker, PeerStats};
 pub use queue::ProcessQueue;
-pub use replication::{ReplicationConfig, ReplicationLoop, ReplicationResult};
+pub use replication::{recover_unmerged, ReplicationConfig, ReplicationLoop, ReplicationResult};

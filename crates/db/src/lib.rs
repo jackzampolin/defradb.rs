@@ -54,6 +54,7 @@ pub mod collection_acp;
 pub mod collection_cache;
 pub(crate) mod collection_loader;
 pub mod collection_name;
+pub mod collection_ops;
 pub mod collection_provider;
 pub mod collection_snapshot;
 pub mod commits_fetcher;
@@ -65,11 +66,15 @@ pub mod error;
 #[cfg(feature = "p2p")]
 pub mod head_provider;
 pub mod index_manager;
+pub mod json_patch;
+pub mod lens_utils;
 pub mod lensed_auto_commit_fetcher;
 pub mod lensed_fetcher;
 #[cfg(feature = "p2p")]
 pub mod merge_handler;
+pub mod migration;
 pub mod nac;
+pub mod patch;
 #[cfg(feature = "p2p")]
 pub mod peer_identity;
 pub mod schema_loader;
@@ -78,6 +83,7 @@ pub mod txn;
 pub mod txn_context;
 pub mod txn_registry;
 pub mod versioned_fetcher;
+pub mod view_ops;
 
 // Re-export commonly used types
 #[cfg(feature = "p2p")]
@@ -124,6 +130,7 @@ pub use txn::DbTxn;
 pub use txn_context::DbTransactionContext;
 pub use txn_registry::{CleanupResult, DbTransactionRegistry};
 pub use versioned_fetcher::VersionedFetcher;
+pub use view_ops::RefreshViewsOptions;
 
 // NAC exports
 pub use nac::{create_memory_nac_manager, NacConfig, NacInfo, NacManager};

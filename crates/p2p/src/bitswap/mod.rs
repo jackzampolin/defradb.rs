@@ -24,7 +24,9 @@
 //! missing DAG links and fetches them via Bitswap.
 
 mod access;
+mod registry;
 mod store;
 
-pub use access::{AccessMode, ReplicatorRegistry};
+pub use access::AccessMode;
+pub use registry::ReplicatorRegistry;
 pub use store::BitswapStoreAdapter;

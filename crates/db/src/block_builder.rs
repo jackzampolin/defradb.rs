@@ -462,6 +462,12 @@ pub async fn write_document_blocks(
                     let key = enc.derive_key(field_name, &doc_id_str);
                     let encrypted = encrypt_delta(&value_bytes, &key)?;
 
+                    tracing::debug!(
+                        field = %field_name,
+                        ciphertext_len = encrypted.len(),
+                        "Encrypted field delta"
+                    );
+
                     // Create Encryption metadata block (matches Go's block/encryption.go)
                     let is_field_level = enc.encrypt_fields.iter().any(|f| f == field_name);
                     let enc_block = Encryption {
@@ -542,31 +548,22 @@ pub async fn write_document_blocks(
             // Go's signBlock: sign the block bytes (without signature), store
             // the Signature as a separate block, then set block.signature = sig_cid.
             if let Some(signer) = signing_config {
-                eprintln!("[SIGN-DEBUG] write_document_blocks: signing field block for field={}, priority={}", field_name, priority);
+                tracing::debug!(field = %field_name, priority, "Signing field block");
                 match sign_block(&field_block, signer, blockstore).await {
                     Ok(Some(sig_cid)) => {
-                        eprintln!(
-                            "[SIGN-DEBUG] write_document_blocks: signed! sig_cid={}",
-                            sig_cid
-                        );
+                        tracing::debug!(field = %field_name, sig_cid = %sig_cid, "Field block signed");
                         field_block.signature = Some(sig_cid);
                     }
                     Ok(None) => {
-                        eprintln!("[SIGN-DEBUG] write_document_blocks: sign_block returned None (priority too high?)");
+                        tracing::debug!(field = %field_name, priority, "Skipped signing (priority > 1)");
                     }
                     Err(e) => {
-                        eprintln!(
-                            "[SIGN-DEBUG] write_document_blocks: sign_block ERROR: {}",
-                            e
-                        );
+                        tracing::debug!(field = %field_name, error = %e, "Failed to sign field block");
                         return Err(e);
                     }
                 }
             } else {
-                eprintln!(
-                    "[SIGN-DEBUG] write_document_blocks: no signing_config for field={}",
-                    field_name
-                );
+                tracing::debug!(field = %field_name, "No signing config for field");
             }
 
             // Serialize and generate CID (includes signature CID if signed)
@@ -578,18 +575,17 @@ pub async fn write_document_blocks(
                 .map_err(|e| format!("Failed to generate field CID: {}", e))?;
 
             // Debug: verify roundtrip of signature through serialization
-            eprintln!("[SIGN-DEBUG] write_document_blocks: storing field block cid={}, bytes_len={}, signature={:?}", field_cid, field_block_bytes.len(), field_block.signature);
-            {
-                let rt_block = Block::from_dag_cbor(&field_block_bytes);
-                match rt_block {
-                    Ok(b) => eprintln!(
-                        "[SIGN-DEBUG] write_document_blocks: roundtrip signature={:?}",
-                        b.signature
-                    ),
-                    Err(e) => eprintln!(
-                        "[SIGN-DEBUG] write_document_blocks: roundtrip FAILED: {}",
-                        e
-                    ),
+            tracing::debug!(
+                field = %field_name,
+                cid = %field_cid,
+                bytes_len = field_block_bytes.len(),
+                signature = ?field_block.signature,
+                "Storing field block"
+            );
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                match Block::from_dag_cbor(&field_block_bytes) {
+                    Ok(b) => tracing::debug!(signature = ?b.signature, "Signature roundtrip OK"),
+                    Err(e) => tracing::debug!(error = %e, "Signature roundtrip failed"),
                 }
             }
 
@@ -839,6 +835,7 @@ pub async fn write_collection_block(
     collection_short_id: u32,
     schema_version_id: &str,
     doc_composite_cid: Cid,
+    signing_config: Option<&SigningConfig>,
 ) -> Result<Cid, String> {
     use storage::corekv::IterOptions;
 
@@ -888,7 +885,15 @@ pub async fn write_collection_block(
     let links = vec![DAGLink::new(String::new(), doc_composite_cid)];
 
     // Create the collection block
-    let collection_block = Block::new(CrdtDelta::Collection(collection_payload), col_heads, links);
+    let mut collection_block =
+        Block::new(CrdtDelta::Collection(collection_payload), col_heads, links);
+
+    // Sign the collection block if a signer is available
+    if let Some(signer) = signing_config {
+        if let Some(sig_cid) = sign_block(&collection_block, signer, blockstore).await? {
+            collection_block.signature = Some(sig_cid);
+        }
+    }
 
     // Serialize and generate CID
     let collection_bytes = collection_block

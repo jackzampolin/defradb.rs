@@ -1,4 +1,4 @@
-//! Two-stream protocol handler for Go compatibility.
+//! Two-stream protocol handler.
 //!
 //! Go's DefraDB uses a two-stream pattern for request-response:
 //! 1. Sender opens stream on `/defradb/rep_req/0.0.1`, sends request, closes stream
@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
 use libp2p::{PeerId, Stream, StreamProtocol};
 use libp2p_stream as stream;
 use parking_lot::Mutex;
@@ -26,40 +25,10 @@ use crate::message::{
 };
 use crate::protocol::{REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL};
 
+use super::event::TwoStreamEvent;
+
 /// Timeout for waiting for a response.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Event emitted by the two-stream handler.
-#[derive(Debug)]
-pub enum TwoStreamEvent {
-    /// Received a PushLog request from a peer.
-    InboundRequest {
-        peer_id: PeerId,
-        request: PushLogRequest,
-    },
-    /// Received a DocSync request from a peer.
-    DocSyncRequest {
-        peer_id: PeerId,
-        request: DocSyncRequest,
-    },
-    /// Received a DocSync reply from a peer.
-    DocSyncReply {
-        peer_id: PeerId,
-        reply: DocSyncReply,
-    },
-    /// Received a BranchableSync request from a peer.
-    BranchableSyncRequest {
-        peer_id: PeerId,
-        request: BranchableSyncRequest,
-    },
-    /// Received a BranchableSync reply from a peer.
-    BranchableSyncReply {
-        peer_id: PeerId,
-        reply: BranchableSyncReply,
-    },
-    /// Failed to decode an incoming message.
-    DecodeError { peer_id: PeerId, error: String },
-}
 
 /// State for tracking pending responses.
 #[derive(Default)]
@@ -181,24 +150,11 @@ impl TwoStreamHandler {
             .await
             .map_err(|e| Error::CborDeserialization(format!("failed to read response: {}", e)))?;
 
-        // Debug: hex dump first 200 bytes of response for troubleshooting deserialization
-        let hex_preview: String = buf
-            .iter()
-            .take(200)
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join(" ");
-        eprintln!(
-            "[TWO-STREAM-DESER] Response from peer={} len={} hex={}",
-            peer_id,
-            buf.len(),
-            hex_preview
+        tracing::trace!(
+            peer_id = %peer_id,
+            buf_len = buf.len(),
+            "Reading response on two-stream protocol"
         );
-
-        // Also try to parse as generic CBOR value for debugging
-        if let Ok(value) = serde_cbor::from_slice::<serde_cbor::Value>(&buf) {
-            eprintln!("[TWO-STREAM-DESER] Parsed as generic CBOR: {:?}", value);
-        }
 
         // Try BranchableSyncReply first (has CollectionID + Heads fields).
         // Must come before DocSyncReply since serde_cbor ignores unknown fields.
@@ -214,10 +170,10 @@ impl TwoStreamHandler {
                 return Ok(Some(TwoStreamEvent::BranchableSyncReply { peer_id, reply }));
             }
             Ok(_) => {
-                eprintln!("[TWO-STREAM-DESER] BranchableSyncReply parsed but collection_id empty, trying other types");
+                tracing::trace!("BranchableSyncReply parsed but collection_id empty, trying other types");
             }
-            Err(e) => {
-                eprintln!("[TWO-STREAM-DESER] BranchableSyncReply deser failed: {}", e);
+            Err(_) => {
+                // Not a BranchableSyncReply, will try other types
             }
         }
 
@@ -613,178 +569,5 @@ impl TwoStreamHandler {
         );
 
         Ok(())
-    }
-}
-
-/// Runner that accepts incoming streams and emits events.
-///
-/// This should be spawned as a separate task.
-pub struct TwoStreamRunner {
-    /// Handler for processing streams.
-    handler: Arc<tokio::sync::Mutex<TwoStreamHandler>>,
-    /// Incoming request streams.
-    request_streams: stream::IncomingStreams,
-    /// Incoming response streams.
-    response_streams: stream::IncomingStreams,
-    /// Channel to send events.
-    event_tx: tokio::sync::mpsc::Sender<TwoStreamEvent>,
-}
-
-impl TwoStreamRunner {
-    /// Create a new runner.
-    pub fn new(
-        handler: Arc<tokio::sync::Mutex<TwoStreamHandler>>,
-        request_streams: stream::IncomingStreams,
-        response_streams: stream::IncomingStreams,
-        event_tx: tokio::sync::mpsc::Sender<TwoStreamEvent>,
-    ) -> Self {
-        Self {
-            handler,
-            request_streams,
-            response_streams,
-            event_tx,
-        }
-    }
-
-    /// Run the stream handler loop.
-    pub async fn run(mut self) {
-        tracing::info!(
-            "Two-stream runner started - listening for Go request/response streams on {} and {}",
-            TwoStreamHandler::request_protocol(),
-            TwoStreamHandler::response_protocol()
-        );
-
-        loop {
-            tokio::select! {
-                // Handle incoming request streams
-                Some((peer_id, stream)) = self.request_streams.next() => {
-                    tracing::info!(
-                        peer_id = %peer_id,
-                        "Received incoming stream on request protocol"
-                    );
-                    let event_tx = self.event_tx.clone();
-                    tokio::spawn(async move {
-                        match TwoStreamHandler::handle_request_stream(peer_id, stream).await {
-                            Ok(event) => {
-                                tracing::info!(peer_id = %peer_id, "Sending TwoStreamEvent to host channel");
-                                if event_tx.send(event).await.is_err() {
-                                    tracing::warn!(
-                                        peer_id = %peer_id,
-                                        "Failed to send two-stream event - receiver dropped"
-                                    );
-                                } else {
-                                    tracing::info!(peer_id = %peer_id, "Successfully sent TwoStreamEvent to host channel");
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    peer_id = %peer_id,
-                                    error = %e,
-                                    "Failed to handle request stream"
-                                );
-                                let _ = event_tx.send(TwoStreamEvent::DecodeError {
-                                    peer_id,
-                                    error: e.to_string(),
-                                }).await;
-                            }
-                        }
-                    });
-                }
-                // Handle incoming response streams
-                Some((peer_id, stream)) = self.response_streams.next() => {
-                    eprintln!("[DOCSYNC] TwoStreamRunner received incoming response stream from peer={}", peer_id);
-                    tracing::info!(
-                        peer_id = %peer_id,
-                        "Received incoming stream on response protocol"
-                    );
-                    let handler = self.handler.clone();
-                    let event_tx = self.event_tx.clone();
-                    tokio::spawn(async move {
-                        let h = handler.lock().await;
-                        match h.handle_response_stream(peer_id, stream).await {
-                            Ok(Some(event)) => {
-                                // DocSyncReply events should be forwarded to the coordinator
-                                eprintln!("[DOCSYNC] TwoStreamRunner got DocSyncReply event, sending to host channel");
-                                tracing::info!(peer_id = %peer_id, "Sending DocSyncReply event to host channel");
-                                if event_tx.send(event).await.is_err() {
-                                    eprintln!("[DOCSYNC] TwoStreamRunner failed to send DocSyncReply event - receiver dropped");
-                                    tracing::warn!(
-                                        peer_id = %peer_id,
-                                        "Failed to send DocSyncReply event - receiver dropped"
-                                    );
-                                } else {
-                                    eprintln!("[DOCSYNC] TwoStreamRunner sent DocSyncReply event to host channel");
-                                }
-                            }
-                            Ok(None) => {
-                                eprintln!("[DOCSYNC] TwoStreamRunner got PushLogReply (handled internally)");
-                                // PushLogReply was handled internally via pending channels
-                            }
-                            Err(e) => {
-                                eprintln!("[DOCSYNC] TwoStreamRunner failed to handle response stream: {}", e);
-                                tracing::warn!(
-                                    peer_id = %peer_id,
-                                    error = %e,
-                                    "Failed to handle response stream"
-                                );
-                            }
-                        }
-                    });
-                }
-                else => {
-                    tracing::info!("Two-stream runner shutting down");
-                    break;
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_protocol_ids() {
-        assert_eq!(
-            TwoStreamHandler::request_protocol().as_ref(),
-            "/defradb/rep_req/0.0.1"
-        );
-        assert_eq!(
-            TwoStreamHandler::response_protocol().as_ref(),
-            "/defradb/rep_resp/0.0.1"
-        );
-    }
-
-    #[test]
-    fn test_success_reply() {
-        let request = PushLogRequest::new(
-            "doc123".to_string(),
-            vec![1, 2, 3],
-            "col123".to_string(),
-            "creator".to_string(),
-            vec![4, 5, 6],
-        );
-
-        let reply = TwoStreamHandler::success_reply(&request);
-        // PushLogReply has flat fields (no metadata struct) for CBOR wire compatibility
-        assert_eq!(reply.message_id, request.metadata.message_id);
-        assert!(reply.err_message.is_none());
-    }
-
-    #[test]
-    fn test_error_reply() {
-        let request = PushLogRequest::new(
-            "doc123".to_string(),
-            vec![1, 2, 3],
-            "col123".to_string(),
-            "creator".to_string(),
-            vec![4, 5, 6],
-        );
-
-        let reply = TwoStreamHandler::error_reply(&request, "test error");
-        // PushLogReply has flat fields (no metadata struct) for CBOR wire compatibility
-        assert_eq!(reply.message_id, request.metadata.message_id);
-        assert_eq!(reply.err_message, Some("test error".to_string()));
     }
 }

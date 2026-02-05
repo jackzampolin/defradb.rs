@@ -15,7 +15,6 @@ use sha2::{Digest, Sha256};
 use storage::MemoryStore;
 
 use blockstore::DefraBlockstore;
-use p2p::sync::MergeHandler;
 use p2p::P2PHostHandle;
 
 use crate::policy_yaml::ParsedPolicy;
@@ -145,8 +144,6 @@ pub struct P2PState {
     pub host_event_handle: Option<tokio::task::AbortHandle>,
     /// Abort handle for the replication loop task.
     pub replication_handle: Option<tokio::task::AbortHandle>,
-    /// Abort handle for the local update broadcast task.
-    pub broadcast_handle: Option<tokio::task::AbortHandle>,
 }
 
 impl P2PState {
@@ -157,7 +154,6 @@ impl P2PState {
         merge_handler: Arc<db::DbMergeHandler<FfiStore, DefraBlockstore<FfiStore>>>,
         host_event_handle: tokio::task::AbortHandle,
         replication_handle: tokio::task::AbortHandle,
-        broadcast_handle: tokio::task::AbortHandle,
     ) -> Self {
         Self {
             handle,
@@ -168,7 +164,6 @@ impl P2PState {
             peer_addresses: RwLock::new(HashMap::new()),
             host_event_handle: Some(host_event_handle),
             replication_handle: Some(replication_handle),
-            broadcast_handle: Some(broadcast_handle),
         }
     }
 
@@ -178,9 +173,6 @@ impl P2PState {
             h.abort();
         }
         if let Some(ref h) = self.replication_handle {
-            h.abort();
-        }
-        if let Some(ref h) = self.broadcast_handle {
             h.abort();
         }
     }

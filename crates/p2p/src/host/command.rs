@@ -1,0 +1,184 @@
+//! Host commands for controlling the P2P host.
+
+use cid::Cid;
+use libp2p::{gossipsub, Multiaddr, PeerId};
+use tokio::sync::oneshot;
+
+use crate::error::Result;
+use crate::message::PushLogBroadcast;
+use crate::replicator::ReplicatorInfo;
+use crate::topics::DefraTopic;
+use crate::QueryId;
+
+use super::ResponseChannel;
+
+/// Commands that can be sent to the P2P host.
+#[derive(Debug)]
+pub enum HostCommand {
+    /// Start listening on an address.
+    Listen {
+        addr: Multiaddr,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Dial a peer at the given addresses.
+    Dial {
+        peer_id: PeerId,
+        addrs: Vec<Multiaddr>,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Send a PushLog request to a peer.
+    SendPushLog {
+        peer_id: PeerId,
+        request: crate::message::PushLogRequest,
+        response: oneshot::Sender<Result<crate::message::PushLogReply>>,
+    },
+
+    /// Send a PushLog response through a response channel.
+    SendPushLogResponse {
+        channel: ResponseChannel,
+        reply: crate::message::PushLogReply,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Get the local peer ID.
+    LocalPeerId { response: oneshot::Sender<PeerId> },
+
+    /// Get listening addresses.
+    ListenAddresses {
+        response: oneshot::Sender<Vec<Multiaddr>>,
+    },
+
+    /// Get connected peers.
+    ConnectedPeers {
+        response: oneshot::Sender<Vec<PeerId>>,
+    },
+
+    /// Subscribe to a GossipSub topic.
+    Subscribe {
+        topic: DefraTopic,
+        response: oneshot::Sender<Result<bool>>,
+    },
+
+    /// Unsubscribe from a GossipSub topic.
+    Unsubscribe {
+        topic: DefraTopic,
+        response: oneshot::Sender<Result<bool>>,
+    },
+
+    /// Publish a message to a GossipSub topic.
+    Publish {
+        topic: DefraTopic,
+        message: PushLogBroadcast,
+        response: oneshot::Sender<Result<gossipsub::MessageId>>,
+    },
+
+    /// Get subscribed topics.
+    SubscribedTopics {
+        response: oneshot::Sender<Vec<String>>,
+    },
+
+    /// Shutdown the host.
+    Shutdown,
+
+    /// Start a Bitswap sync operation to fetch missing blocks.
+    BitswapSync {
+        cid: Cid,
+        providers: Vec<PeerId>,
+        missing: Vec<Cid>,
+        response: oneshot::Sender<Result<QueryId>>,
+    },
+
+    /// Cancel a Bitswap query.
+    BitswapCancel {
+        query_id: QueryId,
+        response: oneshot::Sender<bool>,
+    },
+
+    /// Set (add/update) a replicator.
+    ///
+    /// Adds the peer as a replicator for the specified collections.
+    /// If the peer is already a replicator, updates their collections.
+    SetReplicator {
+        peer_id: PeerId,
+        collections: Vec<String>,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Delete a replicator.
+    ///
+    /// Removes the peer from all collections they were replicating.
+    DeleteReplicator {
+        peer_id: PeerId,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Remove specific collections from a replicator.
+    ///
+    /// If the replicator has no collections left after removal, they are deleted.
+    /// This matches Go DefraDB's partial removal behavior.
+    RemoveReplicatorCollections {
+        peer_id: PeerId,
+        collections: Vec<String>,
+        response: oneshot::Sender<Result<bool>>, // true if replicator was fully deleted
+    },
+
+    /// Get all registered replicators.
+    GetAllReplicators {
+        response: oneshot::Sender<Vec<ReplicatorInfo>>,
+    },
+
+    /// Get replicator info for a specific peer.
+    GetReplicator {
+        peer_id: PeerId,
+        response: oneshot::Sender<Option<ReplicatorInfo>>,
+    },
+
+    /// Send a PushLog response via two-stream protocol (Go compatibility).
+    SendTwoStreamResponse {
+        peer_id: PeerId,
+        reply: crate::message::PushLogReply,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Send a PushLog request via two-stream protocol (Go compatibility).
+    SendTwoStreamRequest {
+        peer_id: PeerId,
+        request: crate::message::PushLogRequest,
+        response: oneshot::Sender<Result<crate::message::PushLogReply>>,
+    },
+
+    /// Send a DocSync response via two-stream protocol.
+    SendDocSyncResponse {
+        peer_id: PeerId,
+        reply: crate::message::DocSyncReply,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Send a DocSync request via two-stream protocol.
+    SendDocSyncRequest {
+        peer_id: PeerId,
+        request: crate::message::DocSyncRequest,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Send a BranchableSync response via two-stream protocol.
+    SendBranchableSyncResponse {
+        peer_id: PeerId,
+        reply: crate::message::BranchableSyncReply,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Send a BranchableSync request via two-stream protocol.
+    SendBranchableSyncRequest {
+        peer_id: PeerId,
+        request: crate::message::BranchableSyncRequest,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
+    PeerAddresses {
+        response: oneshot::Sender<Vec<String>>,
+    },
+}

@@ -14,7 +14,6 @@
 
 use crate::QueryId;
 use cid::Cid;
-use libipld::{Block, DefaultParams};
 use libp2p::PeerId;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
@@ -27,98 +26,11 @@ use crate::error::{Error, Result};
 use crate::message::PushLogBroadcast;
 use crate::sync::PeerStateTracker;
 
-use super::queue::ProcessQueue;
-
-/// Configuration for the SyncManager.
-#[derive(Debug, Clone)]
-pub struct SyncConfig {
-    /// Size of the event channel buffer.
-    pub event_buffer_size: usize,
-}
-
-impl Default for SyncConfig {
-    fn default() -> Self {
-        Self {
-            event_buffer_size: 256,
-        }
-    }
-}
-
-/// Events emitted by the SyncManager for higher layers to process.
-#[derive(Debug, Clone)]
-pub enum SyncEvent {
-    /// A new block was received and stored, needs CRDT merge.
-    ///
-    /// The database layer should process this by:
-    /// 1. Loading the block from blockstore
-    /// 2. Applying CRDT merge
-    /// 3. Calling blockstore.mark_as_merged()
-    BlockReceived {
-        /// The CID of the received block
-        cid: Cid,
-        /// Document ID this block belongs to
-        doc_id: String,
-        /// Collection ID
-        collection_id: String,
-        /// Creator peer ID
-        creator: String,
-    },
-
-    /// A block was already merged (received duplicate).
-    BlockAlreadyMerged { cid: Cid },
-
-    /// Failed to process a sync request.
-    SyncError { cid: Cid, error: String },
-
-    /// DAG has missing blocks that need to be fetched via Bitswap.
-    ///
-    /// The coordinator should:
-    /// 1. Call host.bitswap_sync() with the missing CIDs
-    /// 2. Register the QueryId with manager.register_query()
-    DagNeedsFetch {
-        /// Root CID of the DAG being synced
-        root_cid: Cid,
-        /// CIDs of missing blocks to fetch
-        missing: Vec<Cid>,
-        /// Suggested providers (peers that may have the blocks)
-        providers: Vec<PeerId>,
-        /// Document ID for the root block
-        doc_id: String,
-        /// Collection ID for the root block
-        collection_id: String,
-        /// Creator of the root block
-        creator: String,
-    },
-
-    /// DAG is ready for merge after Bitswap fetch completed.
-    ///
-    /// All missing blocks have been fetched. The database layer should now
-    /// process the complete DAG for CRDT merge.
-    DagReady {
-        /// Root CID of the completed DAG
-        root_cid: Cid,
-        /// Document ID
-        doc_id: String,
-        /// Collection ID
-        collection_id: String,
-        /// Schema version ID
-        schema_version_id: String,
-    },
-}
-
-/// Metadata for a pending DAG sync waiting for Bitswap to complete.
-#[derive(Debug, Clone)]
-pub struct PendingDag {
-    /// Document ID from the original PushLog message
-    pub doc_id: String,
-    /// Collection ID from the original PushLog message
-    pub collection_id: String,
-    /// Creator from the original PushLog message
-    pub creator: String,
-    /// CIDs still missing (gets smaller as blocks arrive via Bitswap)
-    #[allow(dead_code)] // Used for tracking Bitswap progress
-    pub missing: HashSet<Cid>,
-}
+use super::config::SyncConfig;
+use super::events::SyncEvent;
+use super::links::{find_all_missing_links, find_missing_links};
+use super::pending::PendingDag;
+use super::super::queue::ProcessQueue;
 
 /// Manager for P2P block synchronization.
 ///
@@ -219,12 +131,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         // Parse CID from message
         let cid = Cid::try_from(msg.cid.as_slice())
             .map_err(|e| Error::InvalidCid(format!("Failed to parse CID: {}", e)))?;
-        eprintln!(
-            "[SYNC-MGR] process_pushlog cid={} doc_id={} collection={} block_len={}",
-            cid,
-            msg.doc_id,
-            msg.collection_id,
-            msg.block.len()
+        tracing::debug!(
+            cid = %cid,
+            doc_id = %msg.doc_id,
+            collection_id = %msg.collection_id,
+            block_len = msg.block.len(),
+            "Processing pushlog"
         );
 
         // Try to acquire exclusive processing rights for this CID
@@ -294,11 +206,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         // Check if already merged
         match self.blockstore.is_merged(cid).await {
             Ok(true) => {
-                eprintln!(
-                    "[SYNC-MGR] Block already merged cid={} doc_id={}",
-                    cid, msg.doc_id
-                );
-                tracing::debug!(?cid, "Block already merged, skipping");
+                tracing::debug!(cid = %cid, doc_id = %msg.doc_id, "Block already merged, skipping");
                 if self
                     .event_tx
                     .send(SyncEvent::BlockAlreadyMerged { cid: *cid })
@@ -358,7 +266,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         );
 
         // Check for missing linked blocks
-        let missing = match self.find_missing_links(&msg.block).await {
+        let missing = match find_missing_links(self.blockstore.as_ref(), &msg.block).await {
             Ok(m) => m,
             Err(e) => {
                 // Block parsing failed - emit error event and propagate error
@@ -380,10 +288,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         if missing.is_empty() {
             // DAG is complete - emit BlockReceived for merge
-            eprintln!(
-                "[SYNC-MGR] DAG complete cid={} doc_id={} — emitting BlockReceived",
-                cid, msg.doc_id
-            );
             tracing::info!(
                 ?cid,
                 doc_id = %msg.doc_id,
@@ -411,12 +315,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
         } else {
             // DAG has missing blocks - track as pending and request Bitswap fetch
-            eprintln!(
-                "[SYNC-MGR] DAG incomplete cid={} doc_id={} missing={} — requesting Bitswap",
-                cid,
-                msg.doc_id,
-                missing.len()
-            );
             tracing::info!(
                 ?cid,
                 missing_count = missing.len(),
@@ -466,122 +364,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         }
 
         Ok(())
-    }
-
-    /// Find missing blocks by extracting links from the block data (one level).
-    ///
-    /// This parses the block's IPLD structure and checks which linked CIDs
-    /// are not present in the blockstore.
-    async fn find_missing_links(&self, block_data: &[u8]) -> Result<Vec<Cid>> {
-        self.extract_references(block_data).await
-    }
-
-    /// Extract IPLD references from block data and check which are missing.
-    async fn extract_references(&self, block_data: &[u8]) -> Result<Vec<Cid>> {
-        use libipld::multihash::{Code, MultihashDigest};
-        let hash = Code::Sha2_256.digest(block_data);
-        let dummy_cid = Cid::new_v1(0x71, hash); // 0x71 = DAG-CBOR codec
-
-        let mut refs = Vec::new();
-        let block = Block::<DefaultParams>::new_unchecked(dummy_cid, block_data.to_vec());
-        if let Err(e) = block.references(&mut refs) {
-            let error_msg = e.to_string();
-            if error_msg.contains("Unsupported codec") {
-                return Ok(Vec::new());
-            }
-            return Err(Error::BlockParseError {
-                reason: format!("Failed to extract references: {}. Block may be corrupt.", e),
-            });
-        }
-
-        let mut missing = Vec::new();
-        for link_cid in refs {
-            match self.blockstore.has(&link_cid).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    missing.push(link_cid);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        cid = %link_cid,
-                        error = %e,
-                        "Failed to check if block exists, treating as missing"
-                    );
-                    missing.push(link_cid);
-                }
-            }
-        }
-
-        Ok(missing)
-    }
-
-    /// Recursively find ALL missing blocks in the DAG rooted at `block_data`.
-    ///
-    /// Unlike `find_missing_links` (one level), this walks the entire DAG tree.
-    /// For multi-level DAGs (Collection → Composite → LWW), this discovers
-    /// missing blocks at any depth.
-    async fn find_all_missing_links(&self, block_data: &[u8]) -> Result<Vec<Cid>> {
-        let mut missing = Vec::new();
-        let mut visited = HashSet::new();
-        self.find_missing_recursive(block_data, &mut missing, &mut visited)
-            .await?;
-        Ok(missing)
-    }
-
-    /// Inner recursive link walker.
-    fn find_missing_recursive<'a>(
-        &'a self,
-        block_data: &'a [u8],
-        missing: &'a mut Vec<Cid>,
-        visited: &'a mut HashSet<Cid>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(async move {
-            use libipld::multihash::{Code, MultihashDigest};
-            let hash = Code::Sha2_256.digest(block_data);
-            let dummy_cid = Cid::new_v1(0x71, hash);
-
-            let mut refs = Vec::new();
-            let block = Block::<DefaultParams>::new_unchecked(dummy_cid, block_data.to_vec());
-            if let Err(e) = block.references(&mut refs) {
-                let error_msg = e.to_string();
-                if error_msg.contains("Unsupported codec") {
-                    return Ok(());
-                }
-                return Err(Error::BlockParseError {
-                    reason: format!("Failed to extract references: {}", e),
-                });
-            }
-
-            for link_cid in refs {
-                if visited.contains(&link_cid) {
-                    continue;
-                }
-                visited.insert(link_cid);
-
-                match self.blockstore.has(&link_cid).await {
-                    Ok(true) => {
-                        // Block exists — recursively check ITS links too
-                        if let Ok(Some(child_data)) = self.blockstore.get(&link_cid).await {
-                            self.find_missing_recursive(&child_data, missing, visited)
-                                .await?;
-                        }
-                    }
-                    Ok(false) => {
-                        eprintln!("[DAG-WALK] Missing block at depth: cid={}", link_cid);
-                        missing.push(link_cid);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            cid = %link_cid,
-                            error = %e,
-                            "Failed to check if block exists, treating as missing"
-                        );
-                        missing.push(link_cid);
-                    }
-                }
-            }
-            Ok(())
-        })
     }
 
     /// Get providers (peers that may have the blocks) for the given CIDs.
@@ -905,7 +687,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         // Recursively check ALL missing links at every depth of the DAG.
         // This is critical for multi-level DAGs like Collection → Composite → LWW
         // where a single-level check would declare the DAG "ready" prematurely.
-        let missing = match self.find_all_missing_links(&block_data).await {
+        let missing = match find_all_missing_links(self.blockstore.as_ref(), &block_data).await {
             Ok(missing) => missing,
             Err(e) => {
                 tracing::error!(
@@ -917,18 +699,18 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
         };
 
-        eprintln!(
-            "[DAG-RETRY] root_cid={} doc_id={} missing_count={}",
-            root_cid,
-            info.doc_id,
-            missing.len()
+        tracing::debug!(
+            root_cid = %root_cid,
+            doc_id = %info.doc_id,
+            missing_count = missing.len(),
+            "Retrying pending DAG"
         );
 
         if !missing.is_empty() {
-            eprintln!(
-                "[DAG-RETRY] Still missing {} blocks: {:?}",
-                missing.len(),
-                missing.iter().map(|c| c.to_string()).collect::<Vec<_>>()
+            tracing::debug!(
+                root_cid = %root_cid,
+                missing_count = missing.len(),
+                "Still missing blocks for DAG"
             );
             // Update the pending info with new missing CIDs
             self.pending_dags.write().insert(
@@ -943,9 +725,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         // DAG is complete at all depths - remove from pending and process
         self.pending_dags.write().remove(root_cid);
-        eprintln!(
-            "[DAG-RETRY] DAG complete! root_cid={} doc_id={} — emitting DagReady",
-            root_cid, info.doc_id
+        tracing::info!(
+            root_cid = %root_cid,
+            doc_id = %info.doc_id,
+            "DAG complete, emitting DagReady"
         );
 
         // Emit event that DAG is ready for merge

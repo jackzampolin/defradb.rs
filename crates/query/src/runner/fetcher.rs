@@ -157,4 +157,16 @@ impl DocFetcher for FetcherWrapper {
     fn supports_index_queries(&self) -> bool {
         self.get_fetcher().supports_index_queries()
     }
+
+    async fn get_view_cache_items(&self, collection_id: u32) -> Result<Vec<Vec<u8>>> {
+        self.get_fetcher()
+            .get_view_cache_items(collection_id)
+            .await
+            .map_err(|e| {
+                QueryError::execution(format!(
+                    "fetcher error during view cache retrieval for collection {}: {}",
+                    collection_id, e
+                ))
+            })
+    }
 }

@@ -152,8 +152,24 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         })?;
 
         // Decrypt using AES-256-GCM (nonce is prepended to ciphertext)
-        crypto::encryption::aes::decrypt_aes(None, data, &enc_block.key, &[])
-            .map_err(|e| MergeError::MergeFailed(format!("Decryption failed: {}", e)))
+        match crypto::encryption::aes::decrypt_aes(None, data, &enc_block.key, &[]) {
+            Ok(decrypted) => {
+                tracing::debug!(
+                    encryption_cid = %enc_cid,
+                    plaintext_len = decrypted.len(),
+                    "Decrypted block data"
+                );
+                Ok(decrypted)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    encryption_cid = %enc_cid,
+                    error = %e,
+                    "Failed to decrypt block data"
+                );
+                Err(MergeError::MergeFailed(format!("Decryption failed: {}", e)))
+            }
+        }
     }
 
     /// Process an LWW delta from a block (standalone, with its own transaction).
@@ -1220,13 +1236,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         payload: &defra_core::block::CollectionDeltaPayload,
         metadata: &BlockMetadata<'_>,
     ) -> std::result::Result<MergeOutcome, MergeError> {
-        eprintln!(
-            "[MERGE-COL] Processing Collection delta cid={} schema_version={} priority={} links={} heads={}",
-            cid,
-            payload.schema_version_id,
-            payload.priority,
-            block.links.as_ref().map(|l| l.len()).unwrap_or(0),
-            block.heads.as_ref().map(|h| h.len()).unwrap_or(0),
+        tracing::debug!(
+            cid = %cid,
+            schema_version = %payload.schema_version_id,
+            priority = payload.priority,
+            links_count = block.links.as_ref().map(|l| l.len()).unwrap_or(0),
+            heads_count = block.heads.as_ref().map(|h| h.len()).unwrap_or(0),
+            "Processing Collection delta"
         );
 
         // Recursively process parent collection blocks from `heads` before
@@ -1319,19 +1335,20 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     }
                 };
 
-                eprintln!(
-                    "[MERGE-COL] Linked block {} delta_type={:?}",
-                    link_cid,
-                    std::mem::discriminant(&linked_block.delta)
+                tracing::debug!(
+                    link_cid = %link_cid,
+                    delta_type = ?std::mem::discriminant(&linked_block.delta),
+                    "Processing linked block from Collection"
                 );
 
                 match &linked_block.delta {
                     CrdtDelta::Composite(composite_payload) => {
                         let doc_id_str =
                             String::from_utf8_lossy(&composite_payload.doc_id).to_string();
-                        eprintln!(
-                            "[MERGE-COL] Processing linked composite {} doc_id={}",
-                            link_cid, doc_id_str
+                        tracing::debug!(
+                            link_cid = %link_cid,
+                            doc_id = %doc_id_str,
+                            "Processing linked composite from Collection"
                         );
                         match self
                             .process_composite_delta(
@@ -1343,7 +1360,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             .await
                         {
                             Ok(MergeOutcome::Merged) => {
-                                eprintln!("[MERGE-COL] Composite {} merged OK", link_cid);
+                                tracing::debug!(link_cid = %link_cid, "Composite merged successfully");
                                 any_merged = true;
 
                                 // Publish per-document MergeComplete so the Go test
@@ -1362,21 +1379,22 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                 }
                             }
                             Ok(outcome) => {
-                                eprintln!(
-                                    "[MERGE-COL] Composite {} skipped: {:?}",
-                                    link_cid, outcome
+                                tracing::debug!(
+                                    link_cid = %link_cid,
+                                    outcome = ?outcome,
+                                    "Composite skipped"
                                 );
                             }
                             Err(e) => {
-                                eprintln!("[MERGE-COL] Composite {} FAILED: {}", link_cid, e);
+                                tracing::debug!(link_cid = %link_cid, error = %e, "Composite merge failed");
                             }
                         }
                     }
                     other => {
-                        eprintln!(
-                            "[MERGE-COL] Skipping non-composite link {} type={:?}",
-                            link_cid,
-                            std::mem::discriminant(other)
+                        tracing::debug!(
+                            link_cid = %link_cid,
+                            delta_type = ?std::mem::discriminant(other),
+                            "Skipping non-composite link"
                         );
                     }
                 }
@@ -1620,9 +1638,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             .add_collection_to_cache(schema.clone())
             .map_err(MergeError::Database)?;
 
-        eprintln!(
-            "[MERGE-HANDLER] Stored synced collection name={} version={} is_active={} is_materialized={} (added to cache)",
-            collection_name, version_id, schema.is_active, schema.is_materialized
+        tracing::debug!(
+            collection_name = %collection_name,
+            version_id = %version_id,
+            is_active = schema.is_active,
+            is_materialized = schema.is_materialized,
+            "Stored synced collection schema in cache"
         );
 
         tracing::info!(

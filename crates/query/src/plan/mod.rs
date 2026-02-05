@@ -2,6 +2,7 @@
 
 pub mod aggregate;
 mod alldocs;
+mod cached_view_fetcher;
 pub mod groupby;
 mod index_scan;
 pub mod lens_node;
@@ -14,12 +15,14 @@ mod select;
 mod similarity;
 mod type_join;
 pub mod view;
+pub mod view_cache;
 
 pub use aggregate::{
     AverageNode, AvgSourceMeta, CountNode, CountSourceMeta, MaxNode, MaxSourceMeta, MinNode,
     MinSourceMeta, SumNode, SumSourceMeta,
 };
 pub use alldocs::AllDocsNode;
+pub use cached_view_fetcher::CachedViewFetcher;
 pub use groupby::{ChildSelectMeta, DocumentGroup, GroupAlias, GroupByNode, InnerAggregateDef};
 pub use index_scan::IndexScanNode;
 pub use lens_node::LensNode;

@@ -297,4 +297,42 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
 
         result
     }
+
+    async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Vec<u8>>> {
+        use storage::corekv::IterOptions;
+        use storage::keys::datastore::ViewCacheKey;
+
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        let datastore = txn.datastore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get datastore: {}", e))
+        })?;
+
+        let prefix = ViewCacheKey::collection_prefix(collection_id);
+        let opts = IterOptions::new().with_prefix(prefix);
+        let mut iter = datastore.iterator(opts).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to iterate view cache: {}", e))
+        })?;
+
+        let mut items = Vec::new();
+        while let Some(pair) = iter.next().await.map_err(|e| {
+            query::error::QueryError::execution(format!("view cache iteration error: {}", e))
+        })? {
+            items.push(pair.value);
+        }
+
+        iter.close().await.map_err(|e| {
+            query::error::QueryError::execution(format!(
+                "failed to close view cache iterator: {}",
+                e
+            ))
+        })?;
+
+        // Clean up transaction
+        let _ = txn.discard();
+
+        Ok(items)
+    }
 }

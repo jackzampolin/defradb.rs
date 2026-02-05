@@ -138,9 +138,10 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     let enc_config = get_encryption_config();
                     // Get signing config from thread-local (set by FFI exec_request)
                     let sign_config = get_signing_config();
-                    eprintln!(
-                        "[SIGN-DEBUG] auto_commit_mutator::create sign_config.is_some()={}",
-                        sign_config.is_some()
+                    tracing::debug!(
+                        has_signing_config = sign_config.is_some(),
+                        has_encryption_config = enc_config.is_some(),
+                        "Auto-commit create mutation configs"
                     );
 
                     // For create operations, all fields are new - pass None for modified_fields
@@ -170,6 +171,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                     short_id,
                                     schema_version_id,
                                     block_result.cid,
+                                    sign_config.as_ref(),
                                 )
                                 .await
                                 {
@@ -374,6 +376,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                     short_id,
                                     schema_version_id,
                                     block_result.cid,
+                                    sign_config.as_ref(),
                                 )
                                 .await
                                 {
@@ -548,6 +551,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                     short_id,
                                     schema_version_id,
                                     composite_cid,
+                                    sign_config.as_ref(),
                                 )
                                 .await
                                 {

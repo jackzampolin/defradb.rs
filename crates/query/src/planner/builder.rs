@@ -68,7 +68,7 @@ pub struct Planner {
     /// Optional fetcher for ScanNodes to load data on-demand
     pub(super) fetcher: Option<Arc<dyn DocFetcher>>,
     /// Optional lens transform store for view queries with transforms
-    pub(super) lens_store: Option<Arc<dyn lens::TransformStore>>,
+    pub(crate) lens_store: Option<Arc<dyn lens::TransformStore>>,
     /// Optional ACP for permission filtering in plans
     acp: Option<Arc<dyn DocumentACP>>,
     /// Identity for ACP permission checks
@@ -151,7 +151,7 @@ impl Planner {
     /// the collection to resolve the relation. This method tries both lookups:
     /// 1. First by name (for Named kind fields and root queries)
     /// 2. Then by CollectionID (for Relation kind fields)
-    pub(super) fn get_collection(&self, name_or_id: &str) -> Option<Arc<CollectionVersion>> {
+    pub(crate) fn get_collection(&self, name_or_id: &str) -> Option<Arc<CollectionVersion>> {
         self.collections
             .get(name_or_id)
             .or_else(|| self.collections_by_id.get(name_or_id))
@@ -1403,40 +1403,6 @@ impl Planner {
     /// Get a collection schema by name.
     pub fn collection(&self, name: &str) -> Option<&Arc<CollectionVersion>> {
         self.collections.get(name)
-    }
-
-    /// Validate that all nested select fields exist in the target collection's schema.
-    ///
-    /// This catches invalid field references in view queries, e.g. querying
-    /// `books { author { name } }` when `BookView` only defines `name`.
-    /// In Go, this is caught by the GraphQL schema validator. In Rust, we
-    /// do it here during plan building.
-    pub(super) fn validate_nested_select_fields(
-        &self,
-        select: &Select,
-        collection: &CollectionVersion,
-    ) -> Result<()> {
-        for requestable in &select.fields {
-            if let Requestable::Select(nested) = requestable {
-                let field_name = &nested.field.name;
-                if field_name == "_group" || field_name == "_version" {
-                    continue;
-                }
-                let field = collection.field_by_name(field_name).ok_or_else(|| {
-                    QueryError::unknown_field(format!(
-                        "Cannot query field \"{}\" on type \"{}\".",
-                        field_name, collection.name
-                    ))
-                })?;
-                // Recurse into the target collection for deeper validation
-                if let Some(target_id) = field.kind.relation_collection_id() {
-                    if let Some(target) = self.get_collection(target_id) {
-                        self.validate_nested_select_fields(nested, &target)?;
-                    }
-                }
-            }
-        }
-        Ok(())
     }
 }
 

@@ -321,11 +321,11 @@ impl<S: Store> CommitsFetcher<S> {
 
         let block = Block::from_dag_cbor(&data)
             .map_err(|e| Error::Serialization(format!("Failed to decode block: {}", e)))?;
-        eprintln!(
-            "[SIGN-DEBUG] load_block: cid={}, data_len={}, block.signature={:?}",
-            cid,
-            data.len(),
-            block.signature
+        tracing::debug!(
+            cid = %cid,
+            data_len = data.len(),
+            signature = ?block.signature,
+            "Loaded block from blockstore"
         );
         Ok(block)
     }
@@ -355,9 +355,11 @@ impl<S: Store> CommitsFetcher<S> {
         cid: &Cid,
         block: &Block,
     ) -> Result<Document> {
-        eprintln!(
-            "[SIGN-DEBUG] block_to_commit_doc: cid={}, block.signature={:?}, block.encryption={:?}",
-            cid, block.signature, block.encryption
+        tracing::debug!(
+            cid = %cid,
+            signature = ?block.signature,
+            encryption = ?block.encryption,
+            "Converting block to commit document"
         );
         let mut map = HashMap::new();
 
@@ -483,10 +485,7 @@ impl<S: Store> CommitsFetcher<S> {
 
         // signature - load from blockstore if the block has a signature CID
         let sig_value = if let Some(sig_cid) = &block.signature {
-            eprintln!(
-                "[SIGN-DEBUG] block_to_commit_doc: loading signature block sig_cid={}",
-                sig_cid
-            );
+            tracing::debug!(sig_cid = %sig_cid, "Loading signature block");
             match self.load_signature_block(txn, sig_cid).await {
                 Ok(sig) => {
                     let sig_type = match sig.header.sig_type {
@@ -498,28 +497,18 @@ impl<S: Store> CommitsFetcher<S> {
                         "identity": String::from_utf8_lossy(&sig.header.identity).to_string(),
                         "value": hex::encode(&sig.value),
                     });
-                    eprintln!(
-                        "[SIGN-DEBUG] block_to_commit_doc: signature loaded OK: {}",
-                        sig_json
-                    );
+                    tracing::debug!(sig_type, "Signature loaded successfully");
                     sig_json
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[SIGN-DEBUG] block_to_commit_doc: load_signature_block FAILED: {}",
-                        e
-                    );
+                    tracing::debug!(sig_cid = %sig_cid, error = %e, "Failed to load signature block");
                     JsonValue::Null
                 }
             }
         } else {
-            eprintln!("[SIGN-DEBUG] block_to_commit_doc: no signature CID on block");
+            tracing::debug!(cid = %cid, "Block has no signature CID");
             JsonValue::Null
         };
-        eprintln!(
-            "[SIGN-DEBUG] block_to_commit_doc: inserting signature into map: {}",
-            sig_value
-        );
         map.insert("signature".to_string(), sig_value);
 
         Document::from_map(map)

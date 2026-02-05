@@ -39,15 +39,46 @@ enum Commands {
 
     /// Show status of FFI tests
     Status {
+        /// Filter to a specific package prefix (e.g., "net", "query")
+        package: Option<String>,
+
         /// Show status for all worktrees
         #[arg(long)]
         all: bool,
+
+        /// Package path depth to display (default: 1 = top-level only)
+        #[arg(short, long, default_value = "1")]
+        depth: usize,
     },
 
     /// Show diff between test runs
     Diff {
         /// Test package path to compare
         package: String,
+    },
+
+    /// Show test output/logs from last run
+    Logs {
+        /// Test package path (e.g., "query/simple")
+        package: String,
+
+        /// Filter to specific test by name pattern
+        #[arg(short = 't', long)]
+        test: Option<String>,
+
+        /// Show only failed tests
+        #[arg(long)]
+        failed: bool,
+
+        /// Show output for all tests (not just failures)
+        #[arg(short, long)]
+        all: bool,
+    },
+
+    /// List available test packages from the Go test directory
+    Packages {
+        /// Filter to packages under a prefix (e.g., "net", "query")
+        package: Option<String>,
     },
 
     /// Manage paired worktrees
@@ -95,9 +126,24 @@ async fn main() {
             skip_build,
         } => commands::run::execute(&package, test.as_deref(), verbose, skip_build).await,
 
-        Commands::Status { all } => commands::status::execute(all).await,
+        Commands::Status {
+            package,
+            all,
+            depth,
+        } => commands::status::execute(all, depth, package.as_deref()).await,
 
         Commands::Diff { package } => commands::diff::execute(&package).await,
+
+        Commands::Logs {
+            package,
+            test,
+            failed,
+            all,
+        } => commands::logs::execute(&package, test.as_deref(), failed, all).await,
+
+        Commands::Packages { package } => {
+            commands::packages::execute(package.as_deref()).await
+        }
 
         Commands::Worktree { command } => match command {
             WorktreeCommands::List => commands::worktree::list().await,
