@@ -69,7 +69,9 @@ pub mod lensed_auto_commit_fetcher;
 pub mod lensed_fetcher;
 #[cfg(feature = "p2p")]
 pub mod merge_handler;
+pub mod migration;
 pub mod nac;
+pub mod patch;
 #[cfg(feature = "p2p")]
 pub mod peer_identity;
 pub mod schema_loader;
