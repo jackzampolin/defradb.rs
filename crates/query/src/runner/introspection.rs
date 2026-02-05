@@ -611,9 +611,11 @@ fn build_order_input_type(
         InputValue::new("_docID", TypeRef::named("Ordering")),
     ));
 
-    // Add order fields for each collection field
+    // Add order fields for each collection field (scalars and scalar arrays only).
+    // Relation fields are excluded — Go rejects ordering by related child fields
+    // (e.g., `Author(order: {articles: {name: ASC}})` produces a validation error).
     for field in &collection.fields {
-        if field.name == "_docID" {
+        if field.name == "_docID" || field.kind.is_relation() {
             continue;
         }
         fields.push((
