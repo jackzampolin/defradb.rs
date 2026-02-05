@@ -283,6 +283,21 @@ impl CrdtDelta {
         }
     }
 
+    /// Get the schema version ID / collection version ID (if present)
+    ///
+    /// Note: FieldDefinition and CollectionDefinition deltas do not have
+    /// a schema_version_id, so return None for those types.
+    pub fn schema_version_id(&self) -> Option<&str> {
+        match self {
+            CrdtDelta::Lww(d) => Some(&d.schema_version_id),
+            CrdtDelta::Counter(d) => Some(&d.schema_version_id),
+            CrdtDelta::Composite(d) => Some(&d.schema_version_id),
+            CrdtDelta::Collection(d) => Some(&d.schema_version_id),
+            CrdtDelta::FieldDefinition(_) => None,
+            CrdtDelta::CollectionDefinition(_) => None,
+        }
+    }
+
     /// Check if this is a schema definition delta
     pub fn is_definition(&self) -> bool {
         matches!(
