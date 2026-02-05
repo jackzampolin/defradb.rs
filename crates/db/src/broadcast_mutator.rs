@@ -102,61 +102,19 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
             }
         };
 
-        // Broadcast to network and capture result
-        let broadcast_status = match self
-            .sync
-            .broadcast_local_update(
+        // Push directly to registered replicators first (fast, fire-and-forget per peer)
+        self.sync
+            .push_to_replicators(
                 &block_result.cid,
                 &block_result.block,
                 &block_result.doc_id,
                 &collection_id,
             )
-            .await
-        {
-            Ok(BroadcastResult::Success) => {
-                tracing::debug!(
-                    doc_id = %block_result.doc_id,
-                    cid = %block_result.cid,
-                    collection = %collection_name,
-                    field_blocks = block_result.field_cids.len(),
-                    "Broadcast document create to P2P network"
-                );
-                BroadcastStatus::Success
-            }
-            Ok(BroadcastResult::PartialDocumentOnly { collection_error }) => {
-                tracing::warn!(
-                    doc_id = %block_result.doc_id,
-                    collection = %collection_name,
-                    error = %collection_error,
-                    "Partial broadcast: document topic succeeded, collection topic failed"
-                );
-                BroadcastStatus::Failed(format!(
-                    "Partial: collection topic failed: {}",
-                    collection_error
-                ))
-            }
-            Ok(BroadcastResult::PartialCollectionOnly { document_error }) => {
-                tracing::warn!(
-                    doc_id = %block_result.doc_id,
-                    collection = %collection_name,
-                    error = %document_error,
-                    "Partial broadcast: collection topic succeeded, document topic failed"
-                );
-                BroadcastStatus::Failed(format!(
-                    "Partial: document topic failed: {}",
-                    document_error
-                ))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    doc_id = %block_result.doc_id,
-                    collection = %collection_name,
-                    error = %e,
-                    "Failed to broadcast document create to P2P network - local mutation succeeded"
-                );
-                BroadcastStatus::Failed(e.to_string())
-            }
-        };
+            .await;
+
+        // Broadcast via GossipSub with retry for InsufficientPeers
+        let broadcast_status =
+            broadcast_with_retry(&self.sync, &block_result, &collection_id, collection_name).await;
 
         Ok(CreateResult::with_broadcast(
             result.doc_id,
@@ -215,61 +173,19 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
             }
         };
 
-        // Broadcast to network and capture result
-        let broadcast_status = match self
-            .sync
-            .broadcast_local_update(
+        // Push directly to registered replicators first (fast, fire-and-forget per peer)
+        self.sync
+            .push_to_replicators(
                 &block_result.cid,
                 &block_result.block,
                 &block_result.doc_id,
                 &collection_id,
             )
-            .await
-        {
-            Ok(BroadcastResult::Success) => {
-                tracing::debug!(
-                    doc_id = %block_result.doc_id,
-                    cid = %block_result.cid,
-                    collection = %collection_name,
-                    field_blocks = block_result.field_cids.len(),
-                    "Broadcast document update to P2P network"
-                );
-                BroadcastStatus::Success
-            }
-            Ok(BroadcastResult::PartialDocumentOnly { collection_error }) => {
-                tracing::warn!(
-                    doc_id = %block_result.doc_id,
-                    collection = %collection_name,
-                    error = %collection_error,
-                    "Partial broadcast: document topic succeeded, collection topic failed"
-                );
-                BroadcastStatus::Failed(format!(
-                    "Partial: collection topic failed: {}",
-                    collection_error
-                ))
-            }
-            Ok(BroadcastResult::PartialCollectionOnly { document_error }) => {
-                tracing::warn!(
-                    doc_id = %block_result.doc_id,
-                    collection = %collection_name,
-                    error = %document_error,
-                    "Partial broadcast: collection topic succeeded, document topic failed"
-                );
-                BroadcastStatus::Failed(format!(
-                    "Partial: document topic failed: {}",
-                    document_error
-                ))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    doc_id = %block_result.doc_id,
-                    collection = %collection_name,
-                    error = %e,
-                    "Failed to broadcast document update to P2P network - local mutation succeeded"
-                );
-                BroadcastStatus::Failed(e.to_string())
-            }
-        };
+            .await;
+
+        // Broadcast via GossipSub with retry for InsufficientPeers
+        let broadcast_status =
+            broadcast_with_retry(&self.sync, &block_result, &collection_id, collection_name).await;
 
         Ok(UpdateResult::with_broadcast(
             result.document,
@@ -318,5 +234,93 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
         doc_id: &DocID,
     ) -> query::error::Result<Option<Document>> {
         self.inner.get_for_update(collection_name, doc_id).await
+    }
+}
+
+use crate::block_builder::BlockResult;
+
+/// Broadcast via GossipSub with retry for InsufficientPeers errors.
+///
+/// Uses exponential backoff (100ms * 2^attempt, max 3.2s) with up to 10 retries.
+/// This matches the FFI broadcast_task behavior.
+async fn broadcast_with_retry<B: Blockstore + 'static>(
+    sync: &SyncCoordinator<B>,
+    block_result: &BlockResult,
+    collection_id: &str,
+    collection_name: &str,
+) -> BroadcastStatus {
+    const MAX_RETRIES: u32 = 10;
+    let mut attempt = 0u32;
+
+    loop {
+        attempt += 1;
+        match sync
+            .broadcast_local_update(
+                &block_result.cid,
+                &block_result.block,
+                &block_result.doc_id,
+                collection_id,
+            )
+            .await
+        {
+            Ok(BroadcastResult::Success) => {
+                tracing::debug!(
+                    doc_id = %block_result.doc_id,
+                    cid = %block_result.cid,
+                    collection = %collection_name,
+                    field_blocks = block_result.field_cids.len(),
+                    attempts = attempt,
+                    "Broadcast document to P2P network"
+                );
+                return BroadcastStatus::Success;
+            }
+            Ok(BroadcastResult::PartialDocumentOnly { collection_error }) => {
+                tracing::warn!(
+                    doc_id = %block_result.doc_id,
+                    collection = %collection_name,
+                    error = %collection_error,
+                    "Partial broadcast: document topic succeeded, collection topic failed"
+                );
+                return BroadcastStatus::Failed(format!(
+                    "Partial: collection topic failed: {}",
+                    collection_error
+                ));
+            }
+            Ok(BroadcastResult::PartialCollectionOnly { document_error }) => {
+                tracing::warn!(
+                    doc_id = %block_result.doc_id,
+                    collection = %collection_name,
+                    error = %document_error,
+                    "Partial broadcast: collection topic succeeded, document topic failed"
+                );
+                return BroadcastStatus::Failed(format!(
+                    "Partial: document topic failed: {}",
+                    document_error
+                ));
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("InsufficientPeers") && attempt <= MAX_RETRIES {
+                    // Exponential backoff: 100ms, 200ms, 400ms, ... capped at 3.2s
+                    let delay_ms = 100 * (1u64 << attempt.min(5));
+                    tracing::trace!(
+                        doc_id = %block_result.doc_id,
+                        attempt = attempt,
+                        delay_ms = delay_ms,
+                        "Retrying broadcast after InsufficientPeers"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+                tracing::warn!(
+                    doc_id = %block_result.doc_id,
+                    collection = %collection_name,
+                    error = %e,
+                    attempts = attempt,
+                    "Failed to broadcast document to P2P network - local mutation succeeded"
+                );
+                return BroadcastStatus::Failed(e.to_string());
+            }
+        }
     }
 }

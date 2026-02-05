@@ -405,91 +405,15 @@ pub unsafe extern "C" fn new_node_with_p2p(
             tracing::info!("FFI replication loop stopped");
         });
 
-        // Task 3: Local update broadcaster - broadcasts local mutations to P2P network.
-        // Push to replicators is synchronous (fast, fire-and-forget per peer).
-        // GossipSub broadcast retries are spawned as background tasks so they
-        // don't block the event loop from processing subsequent Update events.
-        let coord_for_broadcast = coordinator.clone();
-        let event_bus_for_broadcast = event_bus.clone();
-        let broadcast_task = tokio::spawn(async move {
-            let mut sub = event_bus_for_broadcast.subscribe(&[events::EventName::Update]);
-            while let Some(msg) = sub.recv().await {
-                if let Some(update) = msg.as_update() {
-                    let cid = update.cid;
-                    let doc_id = update.doc_id.clone();
-                    let collection_id = update.collection_id.clone();
-
-                    // Skip relay updates (already from P2P) - these don't need re-broadcast
-                    // since the originating node already broadcast to GossipSub.
-                    if update.is_relay {
-                        eprintln!(
-                            "[BROADCAST] Skipping relay update cid={} doc_id={}",
-                            cid, doc_id
-                        );
-                        continue;
-                    }
-
-                    // Local update: push to replicators + GossipSub broadcast.
-                    let block = update.block.clone();
-                    eprintln!(
-                        "[BROADCAST] Local update cid={} doc_id={} collection={} block_len={}",
-                        cid,
-                        doc_id,
-                        collection_id,
-                        block.len()
-                    );
-
-                    coord_for_broadcast
-                        .push_to_replicators(&cid, &block, &doc_id, &collection_id)
-                        .await;
-
-                    // Spawn GossipSub broadcast with retry as a background task.
-                    // This prevents the retry backoff from blocking subsequent events.
-                    let gossip_coord = coord_for_broadcast.clone();
-                    tokio::spawn(async move {
-                        let max_retries = 10u32;
-                        let mut attempt = 0u32;
-                        loop {
-                            attempt += 1;
-                            match gossip_coord
-                                .broadcast_local_update(&cid, &block, &doc_id, &collection_id)
-                                .await
-                            {
-                                Ok(_) => break,
-                                Err(e) => {
-                                    let err_str = e.to_string();
-                                    if err_str.contains("InsufficientPeers")
-                                        && attempt <= max_retries
-                                    {
-                                        let delay_ms = 100 * (1u64 << attempt.min(5));
-                                        tokio::time::sleep(std::time::Duration::from_millis(
-                                            delay_ms,
-                                        ))
-                                        .await;
-                                        continue;
-                                    }
-                                    tracing::debug!(
-                                        doc_id = %doc_id,
-                                        error = %e,
-                                        "Failed to broadcast local update"
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                    });
-                }
-            }
-        });
-
         // Create P2P state with sync pipeline components and abort handles
+        // Note: Local update broadcast is now handled by BroadcastMutator directly
+        // when mutations are executed, so no separate broadcast task is needed.
         let p2p_state = Arc::new(P2PState::new(
             handle.clone(),
             blockstore.clone(),
             merge_handler.clone(),
             host_event_task.abort_handle(),
             replication_task.abort_handle(),
-            broadcast_task.abort_handle(),
         ));
 
         // Create lensed auto-committing fetcher
@@ -502,9 +426,10 @@ pub unsafe extern "C" fn new_node_with_p2p(
         // Create transaction registry
         let registry = Arc::new(db::DbTransactionRegistry::new(database.clone()));
 
-        // Create mutator
+        // Create mutator with P2P broadcast support
+        // BroadcastMutator handles push_to_replicators + GossipSub broadcast with retry
         let mutator: Arc<dyn query::DocMutator> =
-            Arc::new(db::AutoCommitMutator::new(database.clone()));
+            Arc::new(db::BroadcastMutator::new(database.clone(), coordinator.clone()));
 
         // Create ACP store
         let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
