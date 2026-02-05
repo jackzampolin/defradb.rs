@@ -1,5 +1,920 @@
-//! Collection building utilities
+//! Collection building methods
 //!
-//! Placeholder for extracting build_collections() from parser.rs
+//! Contains SdlParser methods for building CollectionVersion schemas:
+//! - `collect_primary_directives()` - Gather @primary directive info
+//! - `build_collections()` - Main entry point for building all collections
+//! - `detect_collection_set()` - Detect circular relation sets
+//! - `build_collection()` - Build a single collection schema
+//! - `resolve_field_kind()` - Resolve field types to FieldKind
 
-// Future: Extract collection building methods here
+use cid::Cid;
+
+use crate::error::{QueryError, Result};
+use schema::{
+    CType, CollectionVersion, FieldDescription, FieldKind, IndexDescription,
+    IndexedFieldDescription,
+};
+use std::collections::HashMap;
+
+use super::directives::IndexDirection;
+use super::helpers::{
+    generate_collection_id, generate_field_id, generate_index_name, generate_relation_name,
+    graphql_to_scalar_kind,
+};
+use super::parser::{ParsedType, ParsedTypeDef, SdlParser};
+
+impl<'a> SdlParser<'a> {
+    pub(super) fn collect_primary_directives(
+        &self,
+        type_names: &std::collections::HashSet<String>,
+    ) -> std::collections::HashMap<(String, String), bool> {
+        let mut result = std::collections::HashMap::new();
+
+        for (type_name, type_def) in &self.type_defs {
+            for field in &type_def.fields {
+                let target = &field.field_type.base_type;
+
+                // Only consider relations to other types in the schema
+                if type_names.contains(target) {
+                    // Key: (source_type, target_type) -> has_primary directive
+                    // Use OR logic: if ANY field in this (source, target) pair has @primary, it's true.
+                    // This handles self-referencing types where multiple fields share the same key.
+                    let entry = result
+                        .entry((type_name.clone(), target.clone()))
+                        .or_insert(false);
+                    if field.directives.is_primary {
+                        *entry = true;
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Validate parsed types before building collections.
+    /// Checks for NonNull fields, one-one relation primary constraints, and default value constraints.
+
+    pub(super) fn build_collections(&self) -> Result<Vec<CollectionVersion>> {
+        // Build collection names set for relation detection, including external types
+        let mut type_names: std::collections::HashSet<_> = self.type_defs.keys().cloned().collect();
+        type_names.extend(self.known_external_types.iter().cloned());
+
+        // Collect @primary directive information for determining actual primaryness
+        let primary_directives = self.collect_primary_directives(&type_names);
+
+        // Detect circular relation sets - types that form TRUE cycles
+        // A cycle only occurs if BOTH sides of a mutual reference are PRIMARY
+        // (i.e., neither has @primary making the other secondary)
+        let collection_set = self.detect_collection_set(&type_names, &primary_directives);
+
+        // Process types in alphabetical order (Go behavior)
+        let mut sorted_type_names: Vec<_> = self.type_defs.keys().cloned().collect();
+        sorted_type_names.sort();
+
+        // TOPOLOGICAL ORDER APPROACH (matches Go behavior):
+        // Process types in topological order based on CID dependencies.
+        //
+        // A type A depends on type B if A has a PRIMARY relation field to B
+        // (meaning B's CollectionID must be known to calculate A's CID).
+        //
+        // Types are sorted by:
+        // 1. Dependency order (types with fewer dependencies first)
+        // 2. Alphabetical order as tiebreaker
+        //
+        // This ensures that when we process a type, all types it depends on
+        // have already been processed and their CollectionIDs are known.
+
+        // Build dependency graph: which types does each type's CID depend on?
+        let mut dependencies: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+
+        for type_name in &sorted_type_names {
+            let type_def = self.type_defs.get(type_name).unwrap();
+            let mut deps = std::collections::HashSet::new();
+
+            for field in &type_def.fields {
+                let target = &field.field_type.base_type;
+                if !type_names.contains(target) || target == type_name {
+                    continue; // Not a relation to another type in schema, or self-ref
+                }
+                if self.known_external_types.contains(target) {
+                    continue; // External type already exists, no CID dependency
+                }
+
+                // Check if this field is PRIMARY (included in CID calculation)
+                let is_array = field.field_type.is_list;
+                if is_array {
+                    continue; // Arrays are secondary, not in CID
+                }
+
+                let has_primary = field.directives.is_primary;
+                let counterpart_has_primary = primary_directives
+                    .get(&(target.clone(), type_name.clone()))
+                    .copied()
+                    .unwrap_or(false);
+
+                let is_field_primary = has_primary || !counterpart_has_primary;
+                if is_field_primary {
+                    // This field is PRIMARY, so this type's CID depends on target's CID
+                    deps.insert(target.clone());
+                }
+            }
+
+            dependencies.insert(type_name.clone(), deps);
+        }
+
+        // Topological sort using Kahn's algorithm
+        // In-degree = number of types this type depends on (not how many depend on it).
+        // Types with in-degree 0 have no unresolved dependencies and can be processed.
+        let mut in_degree: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (type_name, deps) in &dependencies {
+            in_degree.insert(type_name.clone(), deps.len());
+        }
+
+        // Queue starts with types that have no dependencies
+        let mut queue: Vec<&String> = sorted_type_names
+            .iter()
+            .filter(|name| {
+                dependencies
+                    .get(*name)
+                    .map(|d| d.is_empty())
+                    .unwrap_or(true)
+            })
+            .collect();
+        // Sort queue alphabetically for determinism
+        queue.sort();
+
+        let mut processing_order = Vec::new();
+        while !queue.is_empty() {
+            // Sort queue alphabetically for deterministic ordering
+            queue.sort();
+            let current = queue.remove(0);
+            processing_order.push(current.clone());
+
+            // For each type that depends on current, decrease its in-degree
+            for (type_name, deps) in &dependencies {
+                if deps.contains(current) {
+                    let degree = in_degree.get_mut(type_name).unwrap();
+                    *degree = degree.saturating_sub(1);
+                    if *degree == 0 && !processing_order.contains(type_name) {
+                        queue.push(type_name);
+                    }
+                }
+            }
+        }
+
+        // If there's a cycle, fall back to alphabetical order for remaining types
+        for type_name in &sorted_type_names {
+            if !processing_order.contains(type_name) {
+                processing_order.push(type_name.clone());
+            }
+        }
+
+        // TWO-PASS APPROACH:
+        // Pass 1: Calculate CollectionIDs in topological order
+        // This ensures CID dependencies are resolved correctly.
+        // Also simulates Go's headstore to replicate prefix collision behavior.
+        let mut all_collection_ids: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut headstore: HashMap<String, (Cid, u64)> = HashMap::new();
+
+        for type_name in &processing_order {
+            let type_def = self.type_defs.get(type_name).unwrap();
+            let collection = self.build_collection(
+                type_def,
+                &type_names,
+                &collection_set,
+                &all_collection_ids, // Pass already-calculated CollectionIDs
+                &primary_directives,
+                &headstore,
+            )?;
+            // Store this type's CollectionID for later types to reference
+            all_collection_ids.insert(type_name.clone(), collection.collection_id.clone());
+
+            // Update simulated headstore: store this collection's CID with height=1
+            // (Go stores collection definition CIDs at prefix /g/<CollectionName>)
+            if let Ok(cid) = collection.collection_id.parse::<Cid>() {
+                // Determine height: check if any prefix collision occurred
+                let prefix = format!("/g/{}", type_name);
+                let max_height: u64 = headstore
+                    .iter()
+                    .filter(|(k, _)| format!("/g/{}", k).starts_with(&prefix))
+                    .map(|(_, (_, h))| *h)
+                    .max()
+                    .unwrap_or(0);
+                let height = max_height + 1;
+                headstore.insert(type_name.clone(), (cid, height));
+            }
+        }
+        // Pass 2: Rebuild all collections with ALL CollectionIDs known
+        // This ensures all relation fields have proper CollectionKind (not NamedKind)
+        // for query resolution, even for secondary fields pointing to later types.
+        // Return in SDL definition order to match Go's parser behavior (Go's sequential
+        // prefix counter assigns IDs in the order types appear in the SDL).
+        //
+        // IMPORTANT: Use the collection_id/version_id from Pass 1, not the regenerated
+        // ones from Pass 2. Pass 1 computes CIDs in topological order with headstore
+        // simulation matching Go's behavior. Pass 2 may produce different field CIDs
+        // (because Named → Relation resolution changes the field kind), which would
+        // change the collection CID incorrectly.
+        let mut collections = Vec::new();
+
+        for type_name in &self.definition_order {
+            let type_def = self.type_defs.get(type_name).unwrap();
+            let mut collection = self.build_collection(
+                type_def,
+                &type_names,
+                &collection_set,
+                &all_collection_ids, // Now has ALL CollectionIDs
+                &primary_directives,
+                &headstore,
+            )?;
+
+            // Override with Pass 1's CID (computed in topological order with headstore)
+            if let Some(pass1_id) = all_collection_ids.get(type_name) {
+                collection.collection_id = pass1_id.clone();
+                collection.version_id = pass1_id.clone();
+            }
+
+            // Interface types are embedded-only (not root-queryable)
+            if type_def.is_interface {
+                collection.is_embedded_only = true;
+            }
+
+            collections.push(collection);
+        }
+
+        Ok(collections)
+    }
+
+    /// Detect types that form circular relation sets.
+    /// Returns a map from type name to its sorted index within its connected cycle group.
+    /// Types with circular relations use SelfKind with relative indices for CID generation.
+    ///
+    /// IMPORTANT: A cycle only exists if BOTH sides of a mutual reference are PRIMARY.
+    /// If one side has @primary and the other doesn't, the side WITHOUT @primary is SECONDARY
+    /// and gets empty FieldID (not included in CID calculation), breaking the cycle.
+    ///
+    /// IMPORTANT: Only types that are ACTUALLY part of a cycle are included.
+    /// Different cycle groups (e.g., Employee self-ref) are treated as separate collection sets.
+    pub(super) fn detect_collection_set(
+        &self,
+        type_names: &std::collections::HashSet<String>,
+        primary_directives: &std::collections::HashMap<(String, String), bool>,
+    ) -> std::collections::HashMap<String, i32> {
+        // Helper to check if a relation field from source->target is actually primary
+        // (will be included in CID calculation)
+        let is_field_primary = |source: &str, target: &str, is_array: bool| -> bool {
+            if is_array {
+                // Arrays are always secondary
+                return false;
+            }
+
+            // Check if this field has @primary directive
+            let has_primary = primary_directives
+                .get(&(source.to_string(), target.to_string()))
+                .copied()
+                .unwrap_or(false);
+
+            if has_primary {
+                return true;
+            }
+
+            // Check if the counterpart (target->source) has @primary
+            // If it does, this side is SECONDARY
+            let counterpart_has_primary = primary_directives
+                .get(&(target.to_string(), source.to_string()))
+                .copied()
+                .unwrap_or(false);
+
+            if counterpart_has_primary {
+                // Counterpart has @primary, so this side is secondary
+                return false;
+            }
+
+            // Neither side has @primary - single-object relation defaults to primary
+            true
+        };
+
+        // Build relation graph: which types reference which other types via PRIMARY relations only
+        let mut references: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+
+        for (type_name, type_def) in &self.type_defs {
+            let mut refs = std::collections::HashSet::new();
+            for field in &type_def.fields {
+                let target = &field.field_type.base_type;
+                // Only consider relations to other types that are:
+                // 1. In the current schema (type_names)
+                // 2. Actually PRIMARY (will be included in CID)
+                if type_names.contains(target)
+                    && is_field_primary(type_name, target, field.field_type.is_list)
+                {
+                    refs.insert(target.clone());
+                }
+            }
+            references.insert(type_name.clone(), refs);
+        }
+
+        // Build bidirectional cycle edges: only keep edges that form cycles
+        // A->B is a cycle edge if A->B and B->A (mutual reference) or A->A (self-ref)
+        // where BOTH sides are PRIMARY
+        let mut cycle_edges: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+
+        for (type_a, refs_a) in &references {
+            let mut edges = std::collections::HashSet::new();
+
+            // Self-reference (single-object only - already filtered above)
+            if refs_a.contains(type_a) {
+                edges.insert(type_a.clone());
+            }
+
+            // Mutual references where BOTH directions are primary
+            for type_b in refs_a {
+                if type_a != type_b {
+                    if let Some(refs_b) = references.get(type_b) {
+                        // Both A->B and B->A are in PRIMARY references
+                        if refs_b.contains(type_a) {
+                            edges.insert(type_b.clone());
+                        }
+                    }
+                }
+            }
+
+            if !edges.is_empty() {
+                cycle_edges.insert(type_a.clone(), edges);
+            }
+        }
+
+        if cycle_edges.is_empty() {
+            return std::collections::HashMap::new();
+        }
+
+        // Find connected components of cycle graph using union-find style approach
+        let mut component: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
+        fn find_root(
+            node: &str,
+            component: &mut std::collections::HashMap<String, String>,
+        ) -> String {
+            if let Some(parent) = component.get(node).cloned() {
+                if parent != node {
+                    let root = find_root(&parent, component);
+                    component.insert(node.to_string(), root.clone());
+                    return root;
+                }
+            }
+            node.to_string()
+        }
+
+        fn union(a: &str, b: &str, component: &mut std::collections::HashMap<String, String>) {
+            let root_a = find_root(a, component);
+            let root_b = find_root(b, component);
+            if root_a != root_b {
+                // Use lexicographically smaller as root for determinism
+                if root_a < root_b {
+                    component.insert(root_b, root_a);
+                } else {
+                    component.insert(root_a, root_b);
+                }
+            }
+        }
+
+        // Initialize each node as its own component
+        for type_name in cycle_edges.keys() {
+            component.insert(type_name.clone(), type_name.clone());
+        }
+
+        // Union nodes that are connected via cycle edges
+        for (type_a, edges) in &cycle_edges {
+            for type_b in edges {
+                union(type_a, type_b, &mut component);
+            }
+        }
+
+        // Group types by their component root
+        let mut components: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for type_name in cycle_edges.keys() {
+            let root = find_root(type_name, &mut component);
+            components.entry(root).or_default().push(type_name.clone());
+        }
+
+        // Build result: each type gets index within its component
+        let mut result = std::collections::HashMap::new();
+        for (_root, mut members) in components {
+            members.sort(); // Sort alphabetically within component
+            for (idx, name) in members.into_iter().enumerate() {
+                result.insert(name, idx as i32);
+            }
+        }
+
+        result
+    }
+
+    pub(super) fn build_collection(
+        &self,
+        type_def: &ParsedTypeDef,
+        type_names: &std::collections::HashSet<String>,
+        collection_set: &std::collections::HashMap<String, i32>,
+        known_collection_ids: &std::collections::HashMap<String, String>,
+        primary_directives: &std::collections::HashMap<(String, String), bool>,
+        headstore: &HashMap<String, (Cid, u64)>,
+    ) -> Result<CollectionVersion> {
+        // collection_id will be generated after fields are created (like Go)
+        let mut fields = Vec::new();
+        let mut indexes = Vec::new();
+        let mut existing_index_names: Vec<String> = Vec::new();
+        let mut field_id_counter = 1u32;
+
+        // Track one-to-one FK fields that may need auto-created unique indexes.
+        // We defer auto-index creation until after type-level indexes are processed
+        // so we can check if the user defined a covering index.
+        let mut one_to_one_fk_fields: Vec<String> = Vec::new();
+
+        // Add implicit _docID field
+        // NOTE: Go uses CType::None (0) for _docID, not LwwRegister (1)
+        let doc_id_kind = FieldKind::doc_id();
+        let doc_id_field_id = generate_field_id("_docID", &doc_id_kind, CType::None);
+        fields.push(
+            FieldDescription::new(&doc_id_field_id, "_docID", doc_id_kind)
+                .with_crdt_type(CType::None),
+        );
+        field_id_counter += 1;
+
+        // Process user-defined fields
+        for parsed_field in &type_def.fields {
+            let kind = self.resolve_field_kind(
+                &parsed_field.field_type,
+                &parsed_field.name,
+                type_names,
+                &type_def.name,
+                collection_set,
+                known_collection_ids,
+            )?;
+
+            // Determine if this relation creates an implicit _id field (FK):
+            // - Single-object relations (not arrays) get an implicit {field}_id field
+            // - But only on the PRIMARY side (the side with @primary OR the default primary)
+            let creates_fk_field = kind.is_relation() && !kind.is_array();
+
+            // Check if this is a self-reference relation (field type == current type)
+            let is_self_ref_relation =
+                kind.is_relation() && parsed_field.field_type.base_type == type_def.name;
+
+            // Determine the actual primary status for this relation field
+            // In Go, a field is PRIMARY if:
+            // 1. It has explicit @primary directive, OR
+            // 2. It's a single-object relation AND the counterpart does NOT have @primary
+            // A field is SECONDARY if:
+            // 1. It's an array relation, OR
+            // 2. The counterpart (target->source) has @primary
+            let is_primary = if kind.is_relation() {
+                let target_type = &parsed_field.field_type.base_type;
+                let source_type = &type_def.name;
+
+                // Check if this field has @primary directive
+                let has_primary_directive = parsed_field.directives.is_primary;
+
+                // Check if counterpart has @primary directive
+                let counterpart_has_primary = primary_directives
+                    .get(&(target_type.clone(), source_type.clone()))
+                    .copied()
+                    .unwrap_or(false);
+
+                if kind.is_array() {
+                    // Arrays are always secondary
+                    false
+                } else if has_primary_directive {
+                    // Explicit @primary makes this primary
+                    true
+                } else if counterpart_has_primary {
+                    // Counterpart has @primary, so this is secondary
+                    false
+                } else {
+                    // Neither has @primary - single-object defaults to primary
+                    true
+                }
+            } else {
+                // Non-relation fields: use explicit @primary directive
+                parsed_field.directives.is_primary
+            };
+
+            // Determine CRDT type: directive overrides > relation defaults > LwwRegister
+            // Go uses NONE_CRDT (Typ=0) for ALL relation object fields, not just single-object
+            let crdt_type = if let Some(ct) = parsed_field.directives.crdt_type {
+                ct
+            } else if kind.is_relation() {
+                // All relation object fields use NONE_CRDT in Go
+                CType::None
+            } else {
+                CType::LwwRegister
+            };
+
+            // Generate field ID using actual kind and CRDT type.
+            // Go assigns empty FieldID to:
+            // - Secondary (non-primary) relation object fields
+            // - Self-referencing relation object fields with empty RelativeID
+            //   (Go's Delta() skips them because strconv.Atoi("") fails)
+            let field_id = if is_self_ref_relation || (kind.is_relation() && !is_primary) {
+                String::new()
+            } else {
+                generate_field_id(&parsed_field.name, &kind, crdt_type)
+            };
+
+            let mut field = FieldDescription::new(&field_id, &parsed_field.name, kind.clone())
+                .with_crdt_type(crdt_type);
+
+            // Set is_primary based on our earlier computation
+            if is_primary {
+                field = field.as_primary();
+            }
+            if let Some(ref default_value) = parsed_field.directives.default_value {
+                field = field.with_default(default_value.clone());
+            }
+            if let Some(size) = parsed_field.directives.size_constraint {
+                field = field.with_size(size);
+            }
+
+            // Set relation name - use explicit @relation(name:) if provided, otherwise auto-generate
+            if kind.is_relation() {
+                let relation_name = parsed_field
+                    .directives
+                    .relation_name
+                    .clone()
+                    .unwrap_or_else(|| {
+                        // Go uses lexicographic sort of type names for auto-generated relation names
+                        generate_relation_name(
+                            &type_def.name,
+                            &parsed_field.name,
+                            &parsed_field.field_type.base_type,
+                        )
+                    });
+                field = field.with_relation_name(relation_name.clone());
+
+                // For single-object relations (not arrays), Go automatically creates an
+                // implicit _{field}ID field to store the foreign key.
+                // The FK field has the SAME is_primary status as the main relation field:
+                // - If main field is PRIMARY, FK field is also PRIMARY (non-empty FieldID)
+                // - If main field is SECONDARY, FK field is also SECONDARY (empty FieldID)
+                if creates_fk_field {
+                    let id_field_name = format!("_{}ID", parsed_field.name);
+                    let id_field_kind = FieldKind::doc_id();
+                    let id_field_crdt = CType::LwwRegister;
+
+                    // FK field gets a FieldID only if primary.
+                    // Go's Delta() skips secondary fields: RelationName.HasValue() && !IsPrimary.
+                    // This applies to both self-ref and cross-type secondary FK fields.
+                    let id_field_id = if is_primary {
+                        generate_field_id(&id_field_name, &id_field_kind, id_field_crdt)
+                    } else {
+                        String::new()
+                    };
+                    // FK field has same is_primary status as relation object field
+                    let mut id_field =
+                        FieldDescription::new(&id_field_id, &id_field_name.clone(), id_field_kind)
+                            .with_crdt_type(id_field_crdt)
+                            .with_relation_name(relation_name);
+                    if is_primary {
+                        id_field = id_field.as_primary();
+
+                        // Only create a unique index for true one-to-one relations.
+                        // One-to-one means the counterpart type has a non-array field
+                        // pointing back to this type. No back-reference (join tables)
+                        // or array back-reference (one-to-many) means no unique index.
+                        // See Go's ensureOneToOneUniqueIndex() in collection_define.go
+                        //
+                        // Skip auto-index creation if the user has defined their own @index
+                        // directive on this field - they take responsibility for the index.
+                        let has_user_index = parsed_field.directives.index.is_some();
+
+                        let is_one_to_one = self
+                            .type_defs
+                            .get(&parsed_field.field_type.base_type)
+                            .map(|target_def| {
+                                target_def.fields.iter().any(|f| {
+                                    f.field_type.base_type == type_def.name && !f.field_type.is_list
+                                })
+                            })
+                            .unwrap_or(false);
+
+                        // Validate user-defined index on one-to-one relation must be unique
+                        if is_one_to_one {
+                            if let Some(ref idx) = parsed_field.directives.index {
+                                if !idx.unique {
+                                    return Err(QueryError::parse(
+                                        "one-to-one relation must have a unique index",
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Track one-to-one FK fields for potential auto-index creation.
+                        // We defer until after type-level indexes are processed.
+                        // Don't add if user has field-level @index (they take responsibility).
+                        if is_one_to_one && !has_user_index {
+                            one_to_one_fk_fields.push(id_field_name.clone());
+                        }
+                    }
+                    fields.push(id_field);
+                    field_id_counter += 1;
+                }
+            }
+
+            // Handle field-level @index directive
+            if let Some(ref idx_config) = parsed_field.directives.index {
+                // Build fields list based on includes
+                // For relation fields (non-array), Go DefraDB stores indexes on the FK field
+                // (_fieldID) rather than the relation field name.
+                let is_relation_field = !parsed_field.field_type.is_list
+                    && self
+                        .type_defs
+                        .contains_key(&parsed_field.field_type.base_type);
+
+                let primary_field_name = if is_relation_field {
+                    // Use FK field name for relation fields (e.g., "address" -> "_addressID")
+                    format!("_{}ID", parsed_field.name)
+                } else {
+                    parsed_field.name.clone()
+                };
+                let primary_descending = matches!(idx_config.direction, IndexDirection::Desc);
+
+                let index_fields: Vec<IndexedFieldDescription> = if idx_config
+                    .includes
+                    .iter()
+                    .any(|(name, _)| name == &parsed_field.name || name == &primary_field_name)
+                {
+                    // includes explicitly contains the primary field - use includes order
+                    // Transform relation field names to FK field names
+                    idx_config
+                        .includes
+                        .iter()
+                        .map(|(name, descending)| {
+                            let final_name = if *name == parsed_field.name && is_relation_field {
+                                format!("_{}ID", parsed_field.name)
+                            } else {
+                                name.clone()
+                            };
+                            IndexedFieldDescription {
+                                name: final_name,
+                                descending: *descending,
+                            }
+                        })
+                        .collect()
+                } else if idx_config.includes.is_empty() {
+                    // No includes - just the primary field
+                    vec![IndexedFieldDescription {
+                        name: primary_field_name.clone(),
+                        descending: primary_descending,
+                    }]
+                } else {
+                    // includes doesn't contain primary field - prepend it
+                    let mut fields = vec![IndexedFieldDescription {
+                        name: primary_field_name.clone(),
+                        descending: primary_descending,
+                    }];
+                    for (name, descending) in &idx_config.includes {
+                        fields.push(IndexedFieldDescription {
+                            name: name.clone(),
+                            descending: *descending,
+                        });
+                    }
+                    fields
+                };
+
+                // Generate index name based on first field
+                let first_field_name = index_fields
+                    .first()
+                    .map(|f| f.name.as_str())
+                    .unwrap_or(&primary_field_name);
+                let idx_name = idx_config.name.clone().unwrap_or_else(|| {
+                    generate_index_name(&type_def.name, first_field_name, &existing_index_names)
+                });
+                existing_index_names.push(idx_name.clone());
+
+                indexes.push(IndexDescription {
+                    name: idx_name,
+                    id: field_id_counter,
+                    fields: index_fields,
+                    unique: idx_config.unique,
+                });
+            }
+
+            fields.push(field);
+            field_id_counter += 1;
+        }
+
+        // Handle type-level @index directives (composite indexes)
+        // Build a set of valid field names for validation.
+        // Use the `fields` vector (not type_def.fields) because it includes auto-generated
+        // FK fields like `_addressID` that may be referenced in type-level indexes.
+        let valid_field_names: std::collections::HashSet<_> =
+            fields.iter().map(|f| f.name.as_str()).collect();
+
+        for composite_idx in &type_def.directives.indexes {
+            // Validate that all referenced fields exist
+            for (field_ref, _) in &composite_idx.fields {
+                if !valid_field_names.contains(field_ref.as_str()) {
+                    return Err(QueryError::parse(format!(
+                        "@index on type {} references unknown field '{}'",
+                        type_def.name, field_ref
+                    )));
+                }
+            }
+
+            let idx_name = composite_idx.name.clone().unwrap_or_else(|| {
+                let first_field = composite_idx
+                    .fields
+                    .first()
+                    .map(|(n, _)| n.as_str())
+                    .unwrap_or("unknown");
+                generate_index_name(&type_def.name, first_field, &existing_index_names)
+            });
+            existing_index_names.push(idx_name.clone());
+
+            let indexed_fields: Vec<IndexedFieldDescription> = composite_idx
+                .fields
+                .iter()
+                .map(|(name, descending)| IndexedFieldDescription {
+                    name: name.clone(),
+                    descending: *descending,
+                })
+                .collect();
+
+            indexes.push(IndexDescription {
+                name: idx_name,
+                id: field_id_counter,
+                fields: indexed_fields,
+                unique: composite_idx.unique,
+            });
+        }
+
+        // Create auto-indexes for one-to-one FK fields that aren't covered by user indexes.
+        // We deferred this until after type-level indexes so we can check coverage.
+        // Go's behavior: if user defines ANY index with FK field as first field (unique or not),
+        // that determines uniqueness - auto-index isn't created.
+        for fk_field_name in &one_to_one_fk_fields {
+            // Check if any existing index has this FK field as its first field
+            let has_covering_index = indexes.iter().any(|idx| {
+                idx.fields
+                    .first()
+                    .map(|f| f.name == *fk_field_name)
+                    .unwrap_or(false)
+            });
+
+            if has_covering_index {
+                // User defined an index - validate it's unique for one-to-one
+                let user_index_is_unique = indexes
+                    .iter()
+                    .find(|idx| {
+                        idx.fields
+                            .first()
+                            .map(|f| f.name == *fk_field_name)
+                            .unwrap_or(false)
+                    })
+                    .map(|idx| idx.unique)
+                    .unwrap_or(false);
+
+                if !user_index_is_unique {
+                    return Err(QueryError::parse(
+                        "one-to-one relation must have a unique index",
+                    ));
+                }
+                // User's unique index is sufficient, skip auto-creation
+                continue;
+            }
+
+            // No user index - create auto unique index
+            let idx_name =
+                generate_index_name(&type_def.name, fk_field_name, &existing_index_names);
+            existing_index_names.push(idx_name.clone());
+            indexes.push(IndexDescription {
+                name: idx_name,
+                id: field_id_counter,
+                fields: vec![IndexedFieldDescription {
+                    name: fk_field_name.clone(),
+                    descending: false,
+                }],
+                unique: true,
+            });
+            field_id_counter += 1;
+        }
+
+        // INTEROP CRITICAL: Sort fields alphabetically after _docID (like Go does).
+        //
+        // Go's collection.go sorts fields so _docID stays at position 0,
+        // and remaining fields are sorted alphabetically by name.
+        //
+        // Field order affects collection CID generation because:
+        // 1. Each field gets a priority based on its position (1, 2, 3, ...)
+        // 2. Priority is encoded in the field's CRDT delta payload
+        // 3. Different priorities = different field CIDs = different collection CID
+        //
+        // Without this sort, schemas like "type Users { name: String, age: Int }"
+        // would have fields [_docID, name, age] in Rust but [_docID, age, name] in Go,
+        // causing CID mismatches and P2P topic subscription failures.
+        if fields.len() > 1 {
+            fields[1..].sort_by(|a, b| a.name.cmp(&b.name));
+        }
+
+        // Generate collection ID from type name and fields (like Go, includes field CIDs as links)
+        // The headstore simulates Go's prefix collision behavior for deterministic CIDs
+        let collection_id = generate_collection_id(&type_def.name, &fields, headstore);
+
+        // Version ID equals collection ID for new schemas (Go behavior)
+        let version_id = collection_id.clone();
+
+        // Build encrypted indexes from @encryptedIndex directives
+        let encrypted_indexes: Vec<schema::EncryptedIndexDescription> = type_def
+            .fields
+            .iter()
+            .filter(|f| f.directives.encrypted_index)
+            .map(|f| schema::EncryptedIndexDescription::new(&f.name))
+            .collect();
+
+        let mut collection =
+            CollectionVersion::new(&type_def.name, &version_id, &collection_id, fields);
+        collection.indexes = indexes;
+        collection.encrypted_indexes = encrypted_indexes;
+        collection.is_materialized = type_def.directives.is_materialized;
+        collection.is_branchable = type_def.directives.is_branchable;
+        if let Some(ref policy_config) = type_def.directives.policy {
+            collection.policy = Some(schema::PolicyDescription::new(
+                &policy_config.id,
+                &policy_config.resource,
+            ));
+        }
+
+        Ok(collection)
+    }
+
+    pub(super) fn resolve_field_kind(
+        &self,
+        parsed_type: &ParsedType,
+        field_name: &str,
+        type_names: &std::collections::HashSet<String>,
+        current_type: &str,
+        collection_set: &std::collections::HashMap<String, i32>,
+        known_collection_ids: &std::collections::HashMap<String, String>,
+    ) -> Result<FieldKind> {
+        let base = &parsed_type.base_type;
+
+        // Check if it's a scalar type
+        if let Some(scalar_kind) = graphql_to_scalar_kind(base) {
+            if parsed_type.is_list {
+                let array_kind = if parsed_type.element_non_null {
+                    scalar_kind.to_array_kind()
+                } else {
+                    scalar_kind.to_nillable_array_kind()
+                };
+
+                return array_kind.map(FieldKind::ScalarArray).ok_or_else(|| {
+                    QueryError::parse(format!("scalar type {} cannot be used in arrays", base))
+                });
+            }
+            return Ok(FieldKind::Scalar(scalar_kind));
+        }
+
+        // Check if it's a self-reference (same type or "Self" keyword)
+        if base == current_type || base == "Self" {
+            // For self-references (type pointing to itself), Go ALWAYS uses empty RelativeID
+            // The RelativeID indices are only used for cross-type references within a collection set
+            return Ok(FieldKind::self_ref("", parsed_type.is_list));
+        }
+
+        // Check if it references another type in the schema
+        if type_names.contains(base) {
+            // This is a relation to another type
+            // If the target type is in the collection set (circular relations),
+            // use SelfRef with the target's relative index
+            if let Some(&target_idx) = collection_set.get(base) {
+                return Ok(FieldKind::self_ref(
+                    target_idx.to_string(),
+                    parsed_type.is_list,
+                ));
+            }
+
+            // If target type was already processed (alphabetically earlier),
+            // use Relation with the known CollectionID (matches Go behavior)
+            if let Some(collection_id) = known_collection_ids.get(base) {
+                return Ok(FieldKind::relation(
+                    collection_id.clone(),
+                    parsed_type.is_list,
+                ));
+            }
+
+            // For non-circular relations where target not yet processed, use Named
+            return Ok(FieldKind::named(base, parsed_type.is_list));
+        }
+
+        // Unknown type - error for Go compatibility
+        Err(QueryError::parse(format!(
+            "no type found for given name. Field: {}, Kind: {}",
+            field_name, base
+        )))
+    }
+}
