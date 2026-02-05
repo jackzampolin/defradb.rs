@@ -109,7 +109,7 @@ async fn show_current_worktree(depth: usize, filter: Option<&str>) -> Result<()>
         groups.entry(group_key).or_default().push(report);
     }
 
-    // Compute dynamic column width from longest group name
+    // Compute dynamic column widths from content
     let pkg_col_width = groups
         .keys()
         .map(|k| k.len())
@@ -118,11 +118,24 @@ async fn show_current_worktree(depth: usize, filter: Option<&str>) -> Result<()>
         .max(7) // minimum "Package" header width
         + 2; // padding
 
-    let line_width = pkg_col_width + 12 + 12 + 6 + 6 + 6 + 6 + 6 + 7; // field widths + gaps
+    let branch_col_width = groups
+        .values()
+        .filter_map(|reports| {
+            reports
+                .iter()
+                .max_by_key(|r| r.timestamp)
+                .map(|r| r.branch.trim_start_matches("ffi/").len())
+        })
+        .max()
+        .unwrap_or(6)
+        .max(6) // minimum "Branch" header width
+        + 2; // padding
+
+    let line_width = pkg_col_width + branch_col_width + 12 + 6 + 6 + 6 + 6 + 6 + 7; // field widths + gaps
 
     // Print table header
     println!(
-        "{:<pw$} {:<12} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
+        "{:<pw$} {:<bw$} {:<12} {:>6} {:>6} {:>6} {:>6}   {}",
         "Package".bold(),
         "Branch".bold(),
         "Timestamp".bold(),
@@ -131,7 +144,8 @@ async fn show_current_worktree(depth: usize, filter: Option<&str>) -> Result<()>
         "Skip".bold(),
         "Total".bold(),
         "Rate".bold(),
-        pw = pkg_col_width
+        pw = pkg_col_width,
+        bw = branch_col_width
     );
     println!("{}", "─".repeat(line_width));
 
@@ -161,14 +175,15 @@ async fn show_current_worktree(depth: usize, filter: Option<&str>) -> Result<()>
             100
         };
 
+        // Pre-pad rate text before coloring (ANSI codes break {:>N} alignment)
         let rate_str = if total == 0 {
-            "-".dimmed().to_string()
+            format!("{:>5}", "-").dimmed().to_string()
         } else if pass_rate == 100 {
-            format!("{}%", pass_rate).green().to_string()
+            format!("{:>4}%", pass_rate).green().to_string()
         } else if pass_rate >= 90 {
-            format!("{}%", pass_rate).yellow().to_string()
+            format!("{:>4}%", pass_rate).yellow().to_string()
         } else {
-            format!("{}%", pass_rate).red().to_string()
+            format!("{:>4}%", pass_rate).red().to_string()
         };
 
         let report = latest_report.unwrap();
@@ -182,7 +197,7 @@ async fn show_current_worktree(depth: usize, filter: Option<&str>) -> Result<()>
         };
 
         println!(
-            "{:<pw$} {:<12} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
+            "{:<pw$} {:<bw$} {:<12} {:>6} {:>6} {:>6} {:>6}   {}",
             group_name,
             branch_display.dimmed(),
             timestamp.dimmed(),
@@ -203,7 +218,8 @@ async fn show_current_worktree(depth: usize, filter: Option<&str>) -> Result<()>
             },
             total_str,
             rate_str,
-            pw = pkg_col_width
+            pw = pkg_col_width,
+            bw = branch_col_width
         );
     }
 
@@ -227,18 +243,19 @@ async fn show_current_worktree(depth: usize, filter: Option<&str>) -> Result<()>
         100
     };
 
+    // Pre-pad rate text before coloring (ANSI codes break {:>N} alignment)
     let rate_str = if pass_rate == 100 {
-        format!("{}%", pass_rate).green().bold()
+        format!("{:>4}%", pass_rate).green().bold()
     } else if pass_rate >= 90 {
-        format!("{}%", pass_rate).yellow().bold()
+        format!("{:>4}%", pass_rate).yellow().bold()
     } else {
-        format!("{}%", pass_rate).red().bold()
+        format!("{:>4}%", pass_rate).red().bold()
     };
 
     let label = format!("TOTAL ({} packages)", latest_by_package.len());
 
     println!(
-        "{:<pw$} {:<12} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
+        "{:<pw$} {:<bw$} {:<12} {:>6} {:>6} {:>6} {:>6}   {}",
         label.bold(),
         "",
         "",
@@ -247,7 +264,8 @@ async fn show_current_worktree(depth: usize, filter: Option<&str>) -> Result<()>
         grand_skip,
         grand_total,
         rate_str,
-        pw = pkg_col_width
+        pw = pkg_col_width,
+        bw = branch_col_width
     );
 
     Ok(())
