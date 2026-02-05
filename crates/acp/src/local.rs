@@ -136,26 +136,10 @@ impl DocumentACP for LocalDocumentACP {
     ) -> Result<bool> {
         // Check if document is registered
         if !self.store.is_doc_registered(resource_name, doc_id).await? {
-            // Document is NOT registered in our local ACP store.
-            // This happens when:
-            // 1. A document is replicated from another node with ACP protection,
-            //    but ACP registrations are NOT replicated between nodes.
-            // 2. The collection has a policy but this specific document wasn't
-            //    created through normal channels (e.g., direct datastore write).
-            //
-            // Since we're being called (collection has a policy), treat unregistered
-            // documents as PROTECTED and DENY access. This is fail-closed security:
-            // without proof of permission (the registration), we deny access.
-            tracing::debug!(
-                target: "acp::audit",
-                event = "permission_denied_unregistered",
-                identity = %identity,
-                permission = ?permission,
-                collection = %resource_name,
-                doc_id = %doc_id,
-                "Permission denied: document not registered in local ACP store"
-            );
-            return Ok(false);
+            // Document is NOT registered — it was created without an identity
+            // on an ACP-protected collection, making it a public document.
+            // Anyone can read/update/delete it.
+            return Ok(true);
         }
 
         // Document is registered, need authenticated identity to access
