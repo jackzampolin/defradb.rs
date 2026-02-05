@@ -131,38 +131,23 @@ async fn show_current_worktree(subpackages: bool) -> Result<()> {
                 100
             };
 
-            // Color Pass/Fail/Skip based on pass rate: green=100%, yellow=90%+, red=<90%
-            let (pass_str, fail_str, skip_str) = if pass_rate == 100 {
-                (
-                    report.summary.passed.to_string().green(),
-                    report.summary.failed.to_string().green(),
-                    report.summary.skipped.to_string().green(),
-                )
+            // Only Rate is colored: green=100%, yellow=90%+, red=<90%
+            let rate_str = if pass_rate == 100 {
+                format!("{}%", pass_rate).green()
             } else if pass_rate >= 90 {
-                (
-                    report.summary.passed.to_string().yellow(),
-                    report.summary.failed.to_string().yellow(),
-                    report.summary.skipped.to_string().yellow(),
-                )
+                format!("{}%", pass_rate).yellow()
             } else {
-                (
-                    report.summary.passed.to_string().red(),
-                    report.summary.failed.to_string().red(),
-                    report.summary.skipped.to_string().red(),
-                )
+                format!("{}%", pass_rate).red()
             };
-
-            // Total and Rate are white (no color)
-            let rate_str = format!("{}%", pass_rate);
 
             println!(
                 "{:<50} {:<8} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
                 package,
                 report.commit.dimmed(),
                 timestamp.dimmed(),
-                pass_str,
-                fail_str,
-                skip_str,
+                report.summary.passed,
+                report.summary.failed,
+                report.summary.skipped,
                 report.summary.total,
                 rate_str
             );
@@ -219,44 +204,31 @@ async fn show_current_worktree(subpackages: bool) -> Result<()> {
             }
         }
 
-        // Color based on pass rate: green=100%, yellow=90%+, red=<90%
+        // Only Rate is colored: green=100%, yellow=90%+, red=<90%
         let pass_rate = if root_total > 0 {
             root_pass * 100 / root_total
         } else {
             100
         };
 
-        let (pass_str, fail_str, skip_str) = if pass_rate == 100 {
-            (
-                root_pass.to_string().green().bold(),
-                root_fail.to_string().green().bold(),
-                root_skip.to_string().green().bold(),
-            )
+        let rate_str = if pass_rate == 100 {
+            format!("{}%", pass_rate).green().bold()
         } else if pass_rate >= 90 {
-            (
-                root_pass.to_string().yellow().bold(),
-                root_fail.to_string().yellow().bold(),
-                root_skip.to_string().yellow().bold(),
-            )
+            format!("{}%", pass_rate).yellow().bold()
         } else {
-            (
-                root_pass.to_string().red().bold(),
-                root_fail.to_string().red().bold(),
-                root_skip.to_string().red().bold(),
-            )
+            format!("{}%", pass_rate).red().bold()
         };
 
         let label = format!("TOTAL ({} packages)", root_count);
-        let rate_str = format!("{}%", pass_rate);
 
         println!(
             "{:<50} {:<8} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
             label.bold(),
             "",
             "",
-            pass_str,
-            fail_str,
-            skip_str,
+            root_pass,
+            root_fail,
+            root_skip,
             root_total,
             rate_str
         );
