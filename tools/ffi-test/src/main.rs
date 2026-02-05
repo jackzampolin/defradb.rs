@@ -43,9 +43,9 @@ enum Commands {
         #[arg(long)]
         all: bool,
 
-        /// Show subpackages (default: root packages only)
-        #[arg(short, long)]
-        subpackages: bool,
+        /// Package path depth to display (default: 1 = top-level only)
+        #[arg(short, long, default_value = "1")]
+        depth: usize,
     },
 
     /// Show diff between test runs
@@ -117,7 +117,7 @@ async fn main() {
             skip_build,
         } => commands::run::execute(&package, test.as_deref(), verbose, skip_build).await,
 
-        Commands::Status { all, subpackages } => commands::status::execute(all, subpackages).await,
+        Commands::Status { all, depth } => commands::status::execute(all, depth).await,
 
         Commands::Diff { package } => commands::diff::execute(&package).await,
 
