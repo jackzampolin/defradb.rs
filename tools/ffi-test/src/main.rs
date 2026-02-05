@@ -75,6 +75,12 @@ enum Commands {
         all: bool,
     },
 
+    /// List available test packages from the Go test directory
+    Packages {
+        /// Filter to packages under a prefix (e.g., "net", "query")
+        package: Option<String>,
+    },
+
     /// Manage paired worktrees
     Worktree {
         #[command(subcommand)]
@@ -134,6 +140,10 @@ async fn main() {
             failed,
             all,
         } => commands::logs::execute(&package, test.as_deref(), failed, all).await,
+
+        Commands::Packages { package } => {
+            commands::packages::execute(package.as_deref()).await
+        }
 
         Commands::Worktree { command } => match command {
             WorktreeCommands::List => commands::worktree::list().await,
