@@ -835,6 +835,7 @@ pub async fn write_collection_block(
     collection_short_id: u32,
     schema_version_id: &str,
     doc_composite_cid: Cid,
+    signing_config: Option<&SigningConfig>,
 ) -> Result<Cid, String> {
     use storage::corekv::IterOptions;
 
@@ -884,7 +885,15 @@ pub async fn write_collection_block(
     let links = vec![DAGLink::new(String::new(), doc_composite_cid)];
 
     // Create the collection block
-    let collection_block = Block::new(CrdtDelta::Collection(collection_payload), col_heads, links);
+    let mut collection_block =
+        Block::new(CrdtDelta::Collection(collection_payload), col_heads, links);
+
+    // Sign the collection block if a signer is available
+    if let Some(signer) = signing_config {
+        if let Some(sig_cid) = sign_block(&collection_block, signer, blockstore).await? {
+            collection_block.signature = Some(sig_cid);
+        }
+    }
 
     // Serialize and generate CID
     let collection_bytes = collection_block
