@@ -53,6 +53,7 @@ pub mod collection;
 pub mod collection_acp;
 pub mod collection_cache;
 pub(crate) mod collection_loader;
+pub mod collection_ops;
 pub mod collection_name;
 pub mod collection_provider;
 pub mod collection_snapshot;
