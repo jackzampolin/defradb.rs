@@ -168,9 +168,9 @@ async fn show_current_worktree() -> Result<()> {
 
         for (pkg, report) in &latest_by_package {
             // Check if any parent of this package has a report
-            let has_parent_report = reported_packages.iter().any(|other| {
-                *other != pkg && pkg.starts_with(&format!("{}/", other))
-            });
+            let has_parent_report = reported_packages
+                .iter()
+                .any(|other| *other != pkg && pkg.starts_with(&format!("{}/", other)));
 
             if !has_parent_report {
                 root_total += report.summary.total;
@@ -288,8 +288,16 @@ async fn show_all_worktrees() -> Result<()> {
             }
 
             let total = total_pass + total_fail + total_skip;
-            let pass_pct = if total > 0 { total_pass * 100 / total } else { 0 };
-            let fail_pct = if total > 0 { total_fail * 100 / total } else { 0 };
+            let pass_pct = if total > 0 {
+                total_pass * 100 / total
+            } else {
+                0
+            };
+            let fail_pct = if total > 0 {
+                total_fail * 100 / total
+            } else {
+                0
+            };
 
             println!(
                 "  Tests: {} passed ({}%), {} failed ({}%), {} skipped ({} total, {} packages)",

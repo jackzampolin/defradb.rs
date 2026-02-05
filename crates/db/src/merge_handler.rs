@@ -18,7 +18,9 @@ use defra_core::types::DocId;
 use document::{DocID, Document, NormalValue};
 use events::{MergeCompleteData, Message, Update};
 use p2p::sync::{BlockMetadata, MergeHandler, MergeOutcome};
-use schema::{self, CType, CollectionVersion, FieldDescription, FieldKind, QuerySource, ScalarKind};
+use schema::{
+    self, CType, CollectionVersion, FieldDescription, FieldKind, QuerySource, ScalarKind,
+};
 use storage::corekv::{Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
 

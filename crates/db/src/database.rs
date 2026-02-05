@@ -558,7 +558,11 @@ impl<S: Store> DB<S> {
     /// committing or rolling back the transaction.
     ///
     /// This is used for transaction-aware migration configuration via the FFI.
-    pub async fn set_migration_in_txn(&self, txn: &DbTxn<S>, config: LensConfig) -> Result<TransformId> {
+    pub async fn set_migration_in_txn(
+        &self,
+        txn: &DbTxn<S>,
+        config: LensConfig,
+    ) -> Result<TransformId> {
         let dest_version_id = config.destination_schema_version_id.clone();
         let source_version_id = config.source_schema_version_id.clone();
 
@@ -695,20 +699,16 @@ impl<S: Store> DB<S> {
 
             // Write CollectionVersionKey entries
             if !source_col.collection_id.is_empty() {
-                let src_version_key = CollectionVersionKey::new(
-                    &source_col.collection_id,
-                    &source_version_id,
-                );
+                let src_version_key =
+                    CollectionVersionKey::new(&source_col.collection_id, &source_version_id);
                 systemstore
                     .set(&src_version_key.bytes(), b"1")
                     .await
                     .map_err(Error::Storage)?;
             }
             if !dst_col.collection_id.is_empty() {
-                let dst_version_key = CollectionVersionKey::new(
-                    &dst_col.collection_id,
-                    &dest_version_id,
-                );
+                let dst_version_key =
+                    CollectionVersionKey::new(&dst_col.collection_id, &dest_version_id);
                 systemstore
                     .set(&dst_version_key.bytes(), b"1")
                     .await
@@ -2119,9 +2119,8 @@ impl<S: Store> DB<S> {
                 let value = op.get("value");
 
                 // Strip collection name/version prefix from path if present (Go compatibility)
-                let stripped_path = raw_path.map(|p| {
-                    Self::strip_collection_prefix(p, &strip_prefixes)
-                });
+                let stripped_path =
+                    raw_path.map(|p| Self::strip_collection_prefix(p, &strip_prefixes));
 
                 // Extract field name from path before substitution (for name mismatch validation)
                 let field_name_from_path = stripped_path
@@ -2416,8 +2415,7 @@ impl<S: Store> DB<S> {
                         let from_path =
                             Self::substitute_field_name_in_path(from_path, &schema_json);
                         // Strip collection prefix from "from" path if present
-                        let from_path =
-                            Self::strip_collection_prefix(&from_path, &strip_prefixes);
+                        let from_path = Self::strip_collection_prefix(&from_path, &strip_prefixes);
 
                         // Get the value to copy. First try current schema, then
                         // cross-collection: Go applies patches against a global dict
@@ -2431,9 +2429,7 @@ impl<S: Store> DB<S> {
                                     let rest = &trimmed[pos..];
                                     if let Ok(Some(other_col)) = self.get_collection(other_name) {
                                         let other_schema = other_col.schema();
-                                        if let Ok(other_json) =
-                                            serde_json::to_value(other_schema)
-                                        {
+                                        if let Ok(other_json) = serde_json::to_value(other_schema) {
                                             return Self::json_pointer_get(&other_json, rest);
                                         }
                                     }
@@ -2447,17 +2443,16 @@ impl<S: Store> DB<S> {
                         // When copying a field, clear the FieldID so it becomes a "new" field.
                         // Go DefraDB generates new FieldIDs for copied fields rather than
                         // treating them as mutations of the original.
-                        let value_to_copy = if path.contains("/Fields/")
-                            && value_to_copy.is_object()
-                        {
-                            let mut v = value_to_copy;
-                            if let Some(obj) = v.as_object_mut() {
-                                obj.remove("FieldID");
-                            }
-                            v
-                        } else {
-                            value_to_copy
-                        };
+                        let value_to_copy =
+                            if path.contains("/Fields/") && value_to_copy.is_object() {
+                                let mut v = value_to_copy;
+                                if let Some(obj) = v.as_object_mut() {
+                                    obj.remove("FieldID");
+                                }
+                                v
+                            } else {
+                                value_to_copy
+                            };
 
                         // Set at destination
                         Self::json_pointer_set(&mut schema_json, path, value_to_copy)?;
@@ -2488,8 +2483,7 @@ impl<S: Store> DB<S> {
                         let from_path =
                             Self::substitute_field_name_in_path(from_path, &schema_json);
                         // Strip collection prefix from "from" path if present
-                        let from_path =
-                            Self::strip_collection_prefix(&from_path, &strip_prefixes);
+                        let from_path = Self::strip_collection_prefix(&from_path, &strip_prefixes);
 
                         // Get the value to move
                         let value_to_move = Self::json_pointer_get(&schema_json, &from_path)
@@ -2914,8 +2908,12 @@ impl<S: Store> DB<S> {
         // but BEFORE CID generation (since indexes are part of the schema content).
         {
             // Go uses sequential IDs starting from the next available for this collection
-            let schema_max_index_id =
-                new_schema.indexes.iter().map(|idx| idx.id).max().unwrap_or(0);
+            let schema_max_index_id = new_schema
+                .indexes
+                .iter()
+                .map(|idx| idx.id)
+                .max()
+                .unwrap_or(0);
             let mut next_index_id = schema_max_index_id;
 
             let mut indexes_to_add = Vec::new();
@@ -3172,10 +3170,7 @@ impl<S: Store> DB<S> {
         if new_schema.is_active {
             // New version is active - cache it under the actual collection name
             // (not collection_name, which might be a version_id for branching patches)
-            cache.insert(
-                actual_name.clone(),
-                Collection::new(new_schema.clone()),
-            );
+            cache.insert(actual_name.clone(), Collection::new(new_schema.clone()));
         }
         // If new version is inactive, old version stays in cache (already there)
 
