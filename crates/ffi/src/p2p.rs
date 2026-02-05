@@ -422,13 +422,22 @@ pub unsafe extern "C" fn new_node_with_p2p(
                     // Skip relay updates (already from P2P) - these don't need re-broadcast
                     // since the originating node already broadcast to GossipSub.
                     if update.is_relay {
-                        eprintln!("[BROADCAST] Skipping relay update cid={} doc_id={}", cid, doc_id);
+                        eprintln!(
+                            "[BROADCAST] Skipping relay update cid={} doc_id={}",
+                            cid, doc_id
+                        );
                         continue;
                     }
 
                     // Local update: push to replicators + GossipSub broadcast.
                     let block = update.block.clone();
-                    eprintln!("[BROADCAST] Local update cid={} doc_id={} collection={} block_len={}", cid, doc_id, collection_id, block.len());
+                    eprintln!(
+                        "[BROADCAST] Local update cid={} doc_id={} collection={} block_len={}",
+                        cid,
+                        doc_id,
+                        collection_id,
+                        block.len()
+                    );
 
                     coord_for_broadcast
                         .push_to_replicators(&cid, &block, &doc_id, &collection_id)

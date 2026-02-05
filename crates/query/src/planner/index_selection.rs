@@ -731,10 +731,15 @@ pub fn filter_to_index_scan(
                 });
                 if let Some(cond) = field_cond {
                     if let ConditionValue::Single(v) = &cond.value {
-                        let normalized =
-                            normalize_for_index_field(v.clone(), &field_desc.name, collection_fields);
-                        in_suffix_values
-                            .push(wrap_value_for_json_path(normalized, cond.json_path.as_ref()));
+                        let normalized = normalize_for_index_field(
+                            v.clone(),
+                            &field_desc.name,
+                            collection_fields,
+                        );
+                        in_suffix_values.push(wrap_value_for_json_path(
+                            normalized,
+                            cond.json_path.as_ref(),
+                        ));
                     } else {
                         break;
                     }

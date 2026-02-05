@@ -876,9 +876,9 @@ impl PlanNode for GroupByNode {
         // groupBy). When _group has a groupBy, Go's child source yields grouped
         // results (fewer items) with different interleaving semantics.
         let group_order = self.group_aliases.first().and_then(|a| a.order.clone());
-        let has_simple_group_order = group_order
-            .as_ref()
-            .map_or(false, |o| !o.is_empty() && self.inner_group_by_fields.is_empty());
+        let has_simple_group_order = group_order.as_ref().map_or(false, |o| {
+            !o.is_empty() && self.inner_group_by_fields.is_empty()
+        });
         let mut ordered_keys: Vec<String> = Vec::new();
         let mut key_set: HashSet<String> = HashSet::new();
 
@@ -890,8 +890,7 @@ impl PlanNode for GroupByNode {
                 sorted_indices.sort_by(|&ai, &bi| {
                     for cond in &order.conditions {
                         if let Some(field_name) = cond.fields.first() {
-                            if let Some(idx) =
-                                self.document_mapping.first_index_of_name(field_name)
+                            if let Some(idx) = self.document_mapping.first_index_of_name(field_name)
                             {
                                 let val_a = all_docs[ai].get(idx);
                                 let val_b = all_docs[bi].get(idx);

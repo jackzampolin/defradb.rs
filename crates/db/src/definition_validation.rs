@@ -467,12 +467,11 @@ fn validate_source_belongs_to_host(
         if let Some(ref prev) = col.previous_version {
             if !prev.source_collection_id.is_empty() {
                 // Look up the source version to check its collection_id
-                if let Some(source_col) = new_state.collections_by_id.get(&prev.source_collection_id)
+                if let Some(source_col) =
+                    new_state.collections_by_id.get(&prev.source_collection_id)
                 {
                     if source_col.collection_id != col.collection_id {
-                        errs.push(
-                            "collection source must belong to host collection.".to_string(),
-                        );
+                        errs.push("collection source must belong to host collection.".to_string());
                     }
                 }
             }
