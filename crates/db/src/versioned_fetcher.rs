@@ -161,7 +161,7 @@ impl<S: Store> VersionedFetcher<S> {
 
         // Reconstruct each document at its specific composite CID
         let mut documents = Vec::new();
-        for (_doc_id, (_priority, composite_cid)) in &doc_composites {
+        for (_priority, composite_cid) in doc_composites.values() {
             let composite_block = match self.load_block(txn, composite_cid).await {
                 Ok(b) => b,
                 Err(_) => continue,

@@ -335,7 +335,6 @@ fn like_match(
 pub fn like_pattern_match(text: &str, pattern: &str) -> bool {
     let text_bytes = text.as_bytes();
     let pattern_bytes = pattern.as_bytes();
-    let t_len = text_bytes.len();
     let p_len = pattern_bytes.len();
 
     // dp[j] = true means text[0..i] matches pattern[0..j]
@@ -351,7 +350,7 @@ pub fn like_pattern_match(text: &str, pattern: &str) -> bool {
         }
     }
 
-    for i in 0..t_len {
+    for &text_byte in text_bytes {
         let mut prev = dp[0];
         dp[0] = false;
         for j in 0..p_len {
@@ -359,7 +358,7 @@ pub fn like_pattern_match(text: &str, pattern: &str) -> bool {
             if pattern_bytes[j] == b'%' {
                 // '%' matches zero or more chars: either skip '%' (dp[j]) or extend match (dp[j+1])
                 dp[j + 1] = dp[j] || dp[j + 1];
-            } else if text_bytes[i] == pattern_bytes[j] {
+            } else if text_byte == pattern_bytes[j] {
                 dp[j + 1] = prev;
             } else {
                 dp[j + 1] = false;

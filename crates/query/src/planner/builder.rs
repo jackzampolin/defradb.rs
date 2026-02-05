@@ -255,8 +255,7 @@ impl Planner {
 
                         // If nested_field is not in the selected fields, it's ordering-only
                         if !nested_selection_fields
-                            .iter()
-                            .any(|f| *f == nested_field_name)
+                            .contains(&nested_field_name)
                         {
                             result.push((relation_field_name.clone(), nested_field_name.clone()));
                         }
@@ -387,7 +386,7 @@ impl Planner {
                 let output_name = agg.output_name();
                 // Add a new index if this specific output name isn't already registered
                 if scan_mapping
-                    .try_find_index_from_render_key(&output_name)
+                    .try_find_index_from_render_key(output_name)
                     .is_none()
                 {
                     let scan_index = scan_mapping.next_index();
@@ -462,11 +461,10 @@ impl Planner {
                 if scan_mapping
                     .first_index_of_name(&sim.target_field)
                     .is_none()
+                    && collection.field_by_name(&sim.target_field).is_some()
                 {
-                    if collection.field_by_name(&sim.target_field).is_some() {
-                        let idx = scan_mapping.next_index();
-                        scan_mapping.add(idx, &sim.target_field);
-                    }
+                    let idx = scan_mapping.next_index();
+                    scan_mapping.add(idx, &sim.target_field);
                 }
             }
         }

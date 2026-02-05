@@ -44,7 +44,7 @@ impl EncryptionConfig {
 }
 
 thread_local! {
-    static CURRENT_ENCRYPTION_CONFIG: RefCell<Option<EncryptionConfig>> = RefCell::new(None);
+    static CURRENT_ENCRYPTION_CONFIG: RefCell<Option<EncryptionConfig>> = const { RefCell::new(None) };
 }
 
 /// Set the encryption config for the current thread.

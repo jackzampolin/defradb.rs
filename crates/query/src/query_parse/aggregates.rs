@@ -351,7 +351,7 @@ pub(super) fn parse_top_level_aggregate(
         .targets
         .first()
         .map(|t| t.host_name.clone())
-        .unwrap_or_else(|| String::new());
+        .unwrap_or_default();
 
     // Create a Select that wraps this aggregate
     // The field name should be the aggregate name (e.g., "_avg") so the response

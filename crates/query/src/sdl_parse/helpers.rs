@@ -93,7 +93,7 @@ pub(super) fn graphql_schema_value_to_json(
 /// Go's time.Time drops trailing zeros in fractional seconds, so:
 /// - "2000-07-23T03:00:00.000Z" becomes "2000-07-23T03:00:00Z"
 /// - "2000-07-23T03:00:00.123Z" stays "2000-07-23T03:00:00.123Z"
-/// If parsing fails, returns the original string (e.g., for special values).
+///   If parsing fails, returns the original string (e.g., for special values).
 pub(super) fn normalize_datetime_string(s: &str) -> String {
     // Try to parse as RFC3339 variant (ISO 8601)
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
@@ -154,8 +154,8 @@ pub(super) fn parse_policy_directive(directive: &Directive<'_, String>) -> Resul
         _ => None,
     });
 
-    let id_empty = id.as_ref().map_or(true, |s| s.is_empty());
-    let resource_empty = resource.as_ref().map_or(true, |s| s.is_empty());
+    let id_empty = id.as_ref().is_none_or(|s| s.is_empty());
+    let resource_empty = resource.as_ref().is_none_or(|s| s.is_empty());
 
     if id_empty && resource_empty {
         return Err(QueryError::parse(

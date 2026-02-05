@@ -119,9 +119,7 @@ impl SelectNode {
 
         // Check if root contains another typeIndexJoin (indicating a chain)
         let root_obj = root.as_object()?;
-        if root_obj.get("typeIndexJoin").is_none() {
-            return None; // Single join, no parallelNode needed
-        }
+        root_obj.get("typeIndexJoin")?; // Single join if absent, no parallelNode needed
 
         // Walk the chain collecting all joins and finding the innermost root
         let mut joins_data: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
@@ -178,9 +176,7 @@ impl SelectNode {
         let join_content = obj.get("typeIndexJoin")?.as_object()?;
 
         // Check if this join contains another typeIndexJoin (indicating a chain)
-        if join_content.get("typeIndexJoin").is_none() {
-            return None; // Single join, no parallelNode needed
-        }
+        join_content.get("typeIndexJoin")?; // Single join if absent, no parallelNode needed
 
         // Walk the chain collecting all joins
         let mut joins_data: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
@@ -353,11 +349,11 @@ impl PlanNode for SelectNode {
 
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations as u64),
+            serde_json::json!(self.exec_info.iterations),
         );
         obj.insert(
             "filterMatches".to_string(),
-            serde_json::json!(self.filter_matches as u64),
+            serde_json::json!(self.filter_matches),
         );
 
         // Recursively explain child node with execution info.

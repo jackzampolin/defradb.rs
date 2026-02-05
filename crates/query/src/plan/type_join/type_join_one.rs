@@ -574,7 +574,7 @@ impl PlanNode for TypeJoinOne {
 
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations as u64),
+            serde_json::json!(self.exec_info.iterations),
         );
 
         let parent_execute = self.parent_plan.explain_execute();

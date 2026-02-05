@@ -991,7 +991,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 if let Some(scan_obj) = scan_node.as_object_mut() {
                     scan_obj.insert(
                         "iterations".to_string(),
-                        serde_json::json!(iterations as u64),
+                        serde_json::json!(iterations),
                     );
                     scan_obj.insert(
                         "docFetches".to_string(),

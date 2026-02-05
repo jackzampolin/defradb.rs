@@ -125,7 +125,7 @@ pub async fn fetch_doc_ids<S: Reader>(
         }
 
         // Early exit if intersection is empty
-        if doc_id_set.as_ref().map_or(false, |s| s.is_empty()) {
+        if doc_id_set.as_ref().is_some_and(|s| s.is_empty()) {
             break;
         }
     }

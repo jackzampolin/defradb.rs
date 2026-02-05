@@ -268,6 +268,7 @@ pub extern "C" fn poll_subscription(subscription_handle: usize) -> PollSubscript
 
 /// Alias for poll_subscription (for Go compatibility)
 /// Accepts a string subscription ID and parses it as a numeric handle.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn poll_graphql_subscription(
     subscription_id: *const c_char,
@@ -316,6 +317,7 @@ pub extern "C" fn close_subscription(subscription_handle: usize) -> CloseSubscri
 
 /// Alias for close_subscription (for Go compatibility)
 /// Accepts a string subscription ID and parses it as a numeric handle.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn close_graphql_subscription(
     subscription_id: *const c_char,

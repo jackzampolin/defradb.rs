@@ -155,20 +155,15 @@ impl Field {
 }
 
 /// Selection type for polymorphic queries
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SelectionType {
     /// Normal object selection
+    #[default]
     Object,
     /// Commit/history selection
     Commit,
     /// Encrypted search selection
     EncryptedSearch,
-}
-
-impl Default for SelectionType {
-    fn default() -> Self {
-        Self::Object
-    }
 }
 
 /// A similarity computation (dot product between document vector and query vector)
