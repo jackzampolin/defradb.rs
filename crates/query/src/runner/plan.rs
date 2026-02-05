@@ -250,9 +250,11 @@ pub(crate) fn build_mapping(
     // ALWAYS reserve index 0 for _docID (required for Doc::doc_id() to work).
     // Only add a render key if _docID was explicitly requested in the query.
     mapping.add(0, "_docID");
+    let mut doc_id_requested = false;
     for requestable in &select.fields {
         if let Requestable::Field(field) = requestable {
             if field.name == "_docID" {
+                doc_id_requested = true;
                 mapping.add_render_key(0, field.output_name());
                 break;
             }
@@ -378,7 +380,7 @@ pub(crate) fn build_mapping(
     }
 
     // If no fields specified (only _docID at index 0), add all from collection
-    if mapping.next_index() == 1 {
+    if !doc_id_requested && mapping.next_index() == 1 {
         for field in &collection.fields {
             let index = mapping.next_index();
             mapping.add(index, &field.name);

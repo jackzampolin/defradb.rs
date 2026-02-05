@@ -24,6 +24,7 @@ use schema::{
 use storage::corekv::{Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
 
+use crate::block_builder::write_collection_block;
 use crate::collection::collection_short_id;
 use crate::database::DB;
 use crate::error::Error;
@@ -483,6 +484,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let mut any_field_applied = false;
         let mut process_error: Option<MergeError> = None;
         let mut is_branchable = false;
+        let mut col_short_id: Option<u32> = None;
 
         // Process linked blocks within the transaction scope
         // Use a scoped block to ensure datastore is dropped before commit/discard
@@ -666,6 +668,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 match collection_lookup {
                     Some(collection) => {
                         is_branchable = collection.schema().is_branchable;
+                        if is_branchable {
+                            col_short_id = Some(collection_short_id(collection.collection_id()));
+                        }
                         if is_delete {
                             // Handle delete: write the deletion marker so queries
                             // exclude this document (or show _deleted:true).
@@ -875,6 +880,32 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
+        // For branchable collections, create a local collection-level block
+        // linking to the document's composite CID. This mirrors what the sender's
+        // auto_commit_mutator does, ensuring the collection DAG is complete and
+        // the _commits query can traverse the full chain.
+        if is_branchable && process_error.is_none() {
+            if let (Some(short_id), Ok(bs), Ok(hs)) =
+                (col_short_id, txn.blockstore(), txn.headstore())
+            {
+                if let Err(e) = write_collection_block(
+                    &bs,
+                    &hs,
+                    short_id,
+                    &payload.schema_version_id,
+                    *cid,
+                    None,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to write collection block for branchable merge"
+                    );
+                }
+            }
+        }
+
         // Handle transaction commit/discard based on result
         match process_error {
             None => {
@@ -900,8 +931,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     bus.publish(Message::update(update));
 
                     // For branchable collections, emit a collection-level merge_complete
-                    // event so the test framework (and Go event system) can track
-                    // collection DAG heads separately from document DAG heads.
+                    // event. process_collection_delta() emits the real one with the
+                    // correct collection CID; this fallback uses the composite CID
+                    // for the case where the composite arrives before the collection block.
                     if is_branchable {
                         let by_peer = metadata.creator.unwrap_or("").to_string();
                         let mc = MergeCompleteData {
@@ -1448,6 +1480,17 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             any_merged = any_merged,
             "Collection delta processed"
         );
+
+        // Emit collection-level merge_complete with the incoming collection CID
+        if let Some(bus) = self.db.event_bus() {
+            let by_peer = metadata.creator.unwrap_or("").to_string();
+            bus.publish(Message::merge_complete(MergeCompleteData {
+                doc_id: String::new(),
+                cid: *cid,
+                collection_id: collection_id.to_string(),
+                by_peer,
+            }));
+        }
 
         if any_merged {
             Ok(MergeOutcome::Merged)

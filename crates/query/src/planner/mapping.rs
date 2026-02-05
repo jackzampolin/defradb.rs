@@ -101,7 +101,7 @@ impl Planner {
             }
         }
 
-        if mapping.next_index() == 1 {
+        if !doc_id_requested && mapping.next_index() == 1 {
             for (i, field) in collection.fields.iter().enumerate() {
                 if field.name != "_docID" {
                     mapping.add(i, &field.name);
