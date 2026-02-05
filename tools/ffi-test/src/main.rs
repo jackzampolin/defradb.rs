@@ -50,6 +50,24 @@ enum Commands {
         package: String,
     },
 
+    /// Show test output/logs from last run
+    Logs {
+        /// Test package path (e.g., "query/simple")
+        package: String,
+
+        /// Filter to specific test by name pattern
+        #[arg(short = 't', long)]
+        test: Option<String>,
+
+        /// Show only failed tests
+        #[arg(long)]
+        failed: bool,
+
+        /// Show output for all tests (not just failures)
+        #[arg(short, long)]
+        all: bool,
+    },
+
     /// Manage paired worktrees
     Worktree {
         #[command(subcommand)]
@@ -98,6 +116,13 @@ async fn main() {
         Commands::Status { all } => commands::status::execute(all).await,
 
         Commands::Diff { package } => commands::diff::execute(&package).await,
+
+        Commands::Logs {
+            package,
+            test,
+            failed,
+            all,
+        } => commands::logs::execute(&package, test.as_deref(), failed, all).await,
 
         Commands::Worktree { command } => match command {
             WorktreeCommands::List => commands::worktree::list().await,
