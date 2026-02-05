@@ -53,6 +53,7 @@ pub mod collection;
 pub mod collection_acp;
 pub mod collection_cache;
 pub(crate) mod collection_loader;
+pub mod collection_ops;
 pub mod collection_name;
 pub mod collection_provider;
 pub mod collection_snapshot;
@@ -65,11 +66,15 @@ pub mod error;
 #[cfg(feature = "p2p")]
 pub mod head_provider;
 pub mod index_manager;
+pub mod json_patch;
+pub mod lens_utils;
 pub mod lensed_auto_commit_fetcher;
 pub mod lensed_fetcher;
 #[cfg(feature = "p2p")]
 pub mod merge_handler;
+pub mod migration;
 pub mod nac;
+pub mod patch;
 #[cfg(feature = "p2p")]
 pub mod peer_identity;
 pub mod schema_loader;
