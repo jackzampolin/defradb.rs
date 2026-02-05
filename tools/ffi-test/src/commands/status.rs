@@ -165,39 +165,28 @@ async fn show_current_worktree(subpackages: bool) -> Result<()> {
     }
 
     // Print totals if we have any data
-    // For totals, only count packages where no parent package has a report
-    // (parent packages include child package tests, so we avoid double counting)
+    // With auto-split, each package has its own report, so count ALL packages
     if packages_run > 0 {
         println!("{}", "─".repeat(106));
 
-        // Get list of packages with reports
-        let reported_packages: Vec<&String> = latest_by_package.keys().collect();
+        // Calculate totals from ALL packages with reports
+        let mut total_tests = 0;
+        let mut total_pass = 0;
+        let mut total_fail = 0;
+        let mut total_skip = 0;
 
-        // Calculate totals excluding packages whose parent has a report
-        let mut root_total = 0;
-        let mut root_pass = 0;
-        let mut root_fail = 0;
-        let mut root_skip = 0;
-        let mut root_count = 0;
-
-        for (pkg, report) in &latest_by_package {
-            // Check if any parent of this package has a report
-            let has_parent_report = reported_packages
-                .iter()
-                .any(|other| *other != pkg && pkg.starts_with(&format!("{}/", other)));
-
-            if !has_parent_report {
-                root_total += report.summary.total;
-                root_pass += report.summary.passed;
-                root_fail += report.summary.failed;
-                root_skip += report.summary.skipped;
-                root_count += 1;
-            }
+        for report in latest_by_package.values() {
+            total_tests += report.summary.total;
+            total_pass += report.summary.passed;
+            total_fail += report.summary.failed;
+            total_skip += report.summary.skipped;
         }
 
+        let pkg_count = latest_by_package.len();
+
         // Only Rate is colored: green=100%, yellow=90%+, red=<90%
-        let pass_rate = if root_total > 0 {
-            root_pass * 100 / root_total
+        let pass_rate = if total_tests > 0 {
+            total_pass * 100 / total_tests
         } else {
             100
         };
@@ -210,17 +199,17 @@ async fn show_current_worktree(subpackages: bool) -> Result<()> {
             format!("{}%", pass_rate).red().bold()
         };
 
-        let label = format!("TOTAL ({} packages)", root_count);
+        let label = format!("TOTAL ({} packages)", pkg_count);
 
         println!(
             "{:<50} {:<8} {:<12} {:>6} {:>6} {:>6} {:>6} {:>6}",
             label.bold(),
             "",
             "",
-            root_pass,
-            root_fail,
-            root_skip,
-            root_total,
+            total_pass,
+            total_fail,
+            total_skip,
+            total_tests,
             rate_str
         );
     }
