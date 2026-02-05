@@ -219,7 +219,13 @@ fn normal_value_to_json_scalar(value: &NormalValue) -> Option<JsonScalarValue> {
 /// Wrap a NormalValue in JsonLeafValue if a JSON path is present.
 fn wrap_value_for_json_path(value: NormalValue, json_path: Option<&JsonPath>) -> NormalValue {
     match json_path {
-        Some(path) if !path.0.is_empty() => {
+        Some(path) => {
+            // Top-level null JSON values (empty path) are stored as plain NormalValue::Null
+            // in the index (see NormalValue::json_leaves()). Null with non-empty path IS
+            // stored as JsonLeafValue { path, value: Null }.
+            if matches!(value, NormalValue::Null) && path.is_empty() {
+                return value;
+            }
             if let Some(scalar) = normal_value_to_json_scalar(&value) {
                 NormalValue::JsonLeaf(JsonLeafValue {
                     path: path.clone(),
@@ -229,7 +235,7 @@ fn wrap_value_for_json_path(value: NormalValue, json_path: Option<&JsonPath>) ->
                 value
             }
         }
-        _ => value,
+        None => value,
     }
 }
 
@@ -239,7 +245,7 @@ fn wrap_values_for_json_path(
     json_path: Option<&JsonPath>,
 ) -> Vec<NormalValue> {
     match json_path {
-        Some(path) if !path.0.is_empty() => values
+        Some(path) => values
             .into_iter()
             .filter_map(|v| {
                 normal_value_to_json_scalar(&v).map(|scalar| {
@@ -250,7 +256,7 @@ fn wrap_values_for_json_path(
                 })
             })
             .collect(),
-        _ => values,
+        None => values,
     }
 }
 
@@ -887,6 +893,25 @@ fn score_index_for_filter(filter: &Filter, index: &IndexDescription) -> Option<u
                     && c.array_op != Some(FilterOp::None)
             }) {
                 score += 5;
+            }
+
+            // _in is multi-exact-match (better than range, worse than single eq)
+            if conditions
+                .iter()
+                .any(|c| c.field_name == field.name && c.op == FilterOp::In)
+            {
+                score += 4;
+            }
+
+            // Range operators narrow the scan (better than full-scan like _like/_ne)
+            if conditions.iter().any(|c| {
+                c.field_name == field.name
+                    && matches!(
+                        c.op,
+                        FilterOp::Gt | FilterOp::Gte | FilterOp::Lt | FilterOp::Lte
+                    )
+            }) {
+                score += 3;
             }
         } else {
             // Stop if we hit a gap in field coverage

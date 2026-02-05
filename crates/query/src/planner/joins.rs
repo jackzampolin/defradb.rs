@@ -470,8 +470,29 @@ impl Planner {
                 (None, None) => None,
             };
 
+            // Extract relation filter from parent for child index selection and join filter.
+            // e.g., User(filter: {address: {city: {_eq: "Munich"}}}) → child filter: {city: {_eq: "Munich"}}
+            let parent_relation_filter_for_child =
+                parent_filter.and_then(|f| f.extract_relation_filter(relation_field_name));
+
+            // Use parent relation filter for child index selection only for one-to-one relations.
+            // For one-to-many, the child scan must return ALL children because TypeJoinMany
+            // renders all children of matching parents, not just those matching the filter.
+            let parent_rel_for_index = if !relation_field.kind.is_array() {
+                parent_relation_filter_for_child.as_ref()
+            } else {
+                None
+            };
+
+            let child_filter_for_index = match (&nested_select.filter, parent_rel_for_index) {
+                (Some(child_f), Some(parent_rf)) => Some(child_f.and(parent_rf.clone())),
+                (Some(child_f), None) => Some(child_f.clone()),
+                (None, Some(parent_rf)) => Some(parent_rf.clone()),
+                (None, None) => None,
+            };
+
             let child_index_result = self.try_select_child_index(
-                nested_select.filter.as_ref(),
+                child_filter_for_index.as_ref(),
                 combined_child_order.as_ref(),
                 &target_collection,
             );
@@ -503,6 +524,75 @@ impl Planner {
                     child_scan = child_scan.with_filter(filter);
                 }
                 Box::new(child_scan)
+            };
+
+            // For OneToMany with parent relation filter: create a separate filter child plan
+            // that uses an index for efficient filter evaluation. The main child_plan handles
+            // display (ALL children), while filter_child_plan handles filter evaluation only.
+            // This matches Go's inverted index join behavior.
+            let filter_child_plan: Option<Box<dyn PlanNode>> = if relation_field.kind.is_array() {
+                parent_relation_filter_for_child
+                    .as_ref()
+                    .and_then(|rel_filter| {
+                        let filter_index =
+                            self.try_select_child_index(Some(rel_filter), None, &target_collection);
+                        if let Some((params, _)) = filter_index {
+                            // Build mapping with FK field and filter fields at schema positions
+                            let mut filter_mapping = DocumentMapping::new();
+                            filter_mapping.add(0, "_docID");
+                            // Find the FK field on the child (target) side.
+                            // For OneToMany, the child has the FK (e.g., Device has _ownerID).
+                            // Find the back-reference field on the target collection.
+                            let fk_field_name = relation_field
+                                .relation_name
+                                .as_ref()
+                                .and_then(|rel_name| {
+                                    target_collection.field_by_relation(
+                                        rel_name,
+                                        &parent_collection.name,
+                                        relation_field_name,
+                                    )
+                                })
+                                .map(|f| schema::CollectionVersion::relation_id_field_name(&f.name))
+                                .unwrap_or_else(|| {
+                                    schema::CollectionVersion::relation_id_field_name(
+                                        relation_field_name,
+                                    )
+                                });
+                            if let Some(fk_idx) = target_collection
+                                .fields
+                                .iter()
+                                .position(|f| f.name == fk_field_name)
+                            {
+                                filter_mapping.add(fk_idx, &fk_field_name);
+                            }
+                            // Add filter referenced fields at schema positions
+                            for field_name in rel_filter.referenced_fields() {
+                                if filter_mapping.first_index_of_name(&field_name).is_none() {
+                                    if let Some(idx) = target_collection
+                                        .fields
+                                        .iter()
+                                        .position(|f| f.name == field_name)
+                                    {
+                                        filter_mapping.add(idx, &field_name);
+                                    }
+                                }
+                            }
+                            let mut index_scan = IndexScanNode::new(
+                                (*target_collection).clone(),
+                                filter_mapping,
+                                params,
+                            );
+                            if let Some(ref fetcher) = self.fetcher {
+                                index_scan = index_scan.with_fetcher(fetcher.clone());
+                            }
+                            Some(Box::new(index_scan) as Box<dyn PlanNode>)
+                        } else {
+                            None // No index for filter, use in-memory evaluation
+                        }
+                    })
+            } else {
+                None
             };
 
             // Extract nested limit/offset and order_by for per-parent application in TypeJoin.
@@ -884,14 +974,13 @@ impl Planner {
                 child_relation_index,
             )?;
 
-            // Extract relation filter for this join if parent has a filter
-            let relation_filter = parent_filter.and_then(|f| {
-                f.extract_relation_filter(relation_field_name)
-                    .map(|nested_filter| RelationFilter {
-                        relation_field: relation_field_name.clone(),
-                        conditions: nested_filter,
-                    })
-            });
+            // Build RelationFilter from the already-extracted parent relation filter
+            let relation_filter = parent_relation_filter_for_child
+                .as_ref()
+                .map(|nested_filter| RelationFilter {
+                    relation_field: relation_field_name.clone(),
+                    conditions: nested_filter.clone(),
+                });
 
             // Create the appropriate join node
             // Note: We pass child_render_mapping as the output mapping (for TypeJoin to render children)
@@ -906,6 +995,48 @@ impl Planner {
                     join_many = join_many.with_relation_filter(rel_filter);
                 }
 
+                // Check if child has an index on its FK field for this relation.
+                // When FK is indexed, a global child scan can efficiently map children
+                // to parents, so per-parent scanning is not needed for ordering.
+                let has_child_fk_index = target_relation_field
+                    .and_then(|trf| {
+                        let rel_name = trf.relation_name.as_deref()?;
+                        // Find the FK ID field (same relation, kind Scalar(DocID))
+                        let fk_field = target_collection.fields.iter().find(|f| {
+                            f.relation_name.as_deref() == Some(rel_name)
+                                && matches!(
+                                    f.kind,
+                                    schema::FieldKind::Scalar(schema::ScalarKind::DocID)
+                                )
+                        })?;
+                        // Check if any index covers this FK field
+                        target_collection.indexes.iter().find(|idx| {
+                            idx.fields
+                                .first()
+                                .map_or(false, |f| f.name == fk_field.name)
+                        })
+                    })
+                    .is_some();
+
+                // Determine per-parent mode before moving filter_child_plan.
+                // Per-parent scanning re-inits the child plan for each parent:
+                // - With limit: needed for early termination per parent
+                // - With child sub-filter but no parent filter_child_plan: child filter
+                //   runs per parent (when filter_child_plan exists, it handles globally)
+                // - With ordering + no FK index + no parent filter: Go scans the
+                //   ordering index per parent without FK index for efficient matching
+                let use_per_parent = child_uses_index
+                    && (nested_limit.is_some()
+                        || (nested_select.filter.is_some() && filter_child_plan.is_none())
+                        || (filter_child_plan.is_none()
+                            && nested_order_by.is_some()
+                            && !has_child_fk_index));
+
+                // Apply filter child plan for indexed relation filter evaluation
+                if let Some(fcp) = filter_child_plan {
+                    join_many = join_many.with_filter_child_plan(fcp);
+                }
+
                 // Apply per-parent limit/offset/ordering
                 if let Some(limit) = nested_limit {
                     join_many = join_many.with_limit(limit);
@@ -916,7 +1047,7 @@ impl Planner {
                 if let Some(order_by) = nested_order_by.clone() {
                     join_many = join_many.with_order_by(order_by);
                 }
-                if child_uses_index {
+                if use_per_parent {
                     join_many = join_many.with_per_parent_child_scan();
                 }
 

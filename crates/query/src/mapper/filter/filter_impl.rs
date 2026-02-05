@@ -791,8 +791,8 @@ mod tests {
     }
 
     #[test]
-    fn test_nilike_null_field_returns_true() {
-        // Negated: null field with _nilike should return true (null doesn't match pattern)
+    fn test_nilike_null_field_returns_false() {
+        // Go returns false for _nilike with null (non-string values always return false)
         let filter = Filter::from_conditions(HashMap::from([(
             "name".to_string(),
             json!({"_nilike": "Ali%"}),
@@ -800,7 +800,7 @@ mod tests {
         let mapping = make_mapping();
         let mut fields = make_fields();
         fields[1] = Some(json!(null)); // name is null
-        assert!(filter.matches(&fields, &mapping).unwrap());
+        assert!(!filter.matches(&fields, &mapping).unwrap());
     }
 
     // Helper to create mapping with array and object fields for testing

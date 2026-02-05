@@ -16,8 +16,11 @@ pub struct SelectNode {
     source: Box<dyn PlanNode>,
     /// Document mapping for this select
     document_mapping: DocumentMapping,
-    /// Optional additional filter
+    /// Optional additional filter (applied during next())
     filter: Option<Filter>,
+    /// Optional explain-only filter (shown in explain output but NOT applied during next()).
+    /// Used for relation filters that are already handled by TypeJoin nodes.
+    explain_filter: Option<Filter>,
     /// Optional document IDs for filtering (used in explain output)
     doc_ids: Option<Vec<String>>,
     /// Current document
@@ -35,6 +38,7 @@ impl SelectNode {
             source,
             document_mapping,
             filter: None,
+            explain_filter: None,
             doc_ids: None,
             current_doc: Doc::default(),
             exec_info: ExecInfo::default(),
@@ -45,6 +49,13 @@ impl SelectNode {
     /// Set an additional filter
     pub fn with_filter(mut self, filter: Filter) -> Self {
         self.filter = Some(filter);
+        self
+    }
+
+    /// Set a filter for explain display only (not applied during execution).
+    /// Used for relation filters handled by TypeJoin nodes.
+    pub fn with_explain_filter(mut self, filter: Filter) -> Self {
+        self.explain_filter = Some(filter);
         self
     }
 
@@ -296,7 +307,9 @@ impl PlanNode for SelectNode {
 
         // Go DefraDB format: always include filter (null if none)
         // Strip _docID conditions - Go handles doc_ids separately and doesn't show them as filters
-        if let Some(ref filter) = self.filter {
+        // Use explain_filter as fallback when no real filter is set (for relation filter display).
+        let display_filter = self.filter.as_ref().or(self.explain_filter.as_ref());
+        if let Some(filter) = display_filter {
             let conditions = filter.conditions();
             let stripped = super::strip_docid_from_conditions(conditions);
             obj.insert("filter".to_string(), stripped);
@@ -338,9 +351,12 @@ impl PlanNode for SelectNode {
 
     fn exec_info(&self) -> ExecInfo {
         let mut info = self.exec_info.clone();
-        // Propagate indexes_fetched from source (e.g., IndexScanNode wrapped by this SelectNode)
+        // Propagate storage-level metrics from source (e.g., IndexScanNode wrapped by this SelectNode).
+        // SelectNode doesn't do I/O itself - docs/fields/indexes are counted by the source.
         let source_info = self.source.exec_info();
         info.indexes_fetched = source_info.indexes_fetched;
+        info.docs_fetched = source_info.docs_fetched;
+        info.fields_fetched = source_info.fields_fetched;
         info
     }
 

@@ -905,11 +905,13 @@ impl Planner {
             if let Some(ref doc_ids) = select.doc_ids {
                 select_node = select_node.with_doc_ids(doc_ids.clone());
             }
-            // Set relation filter on SelectNode for explain display (matches Go DefraDB).
-            // The actual relation filtering is handled by TypeJoin's RelationFilter,
-            // but Go's selectNode stores the relation filter and shows it in explain output.
+            // Store relation filter on SelectNode for explain display only.
+            // The actual relation filtering is handled by TypeJoin's RelationFilter.
+            // We must NOT apply it as a real filter because after TypeJoinMany merges
+            // sub-filtered children, re-evaluating the parent's relation filter would
+            // fail when sub-filter and parent filter target different values.
             if let Some(ref rel_filter) = relation_filter {
-                select_node = select_node.with_filter(rel_filter.clone());
+                select_node = select_node.with_explain_filter(rel_filter.clone());
             }
             plan = Box::new(select_node);
         } else if is_complex_filter && !select.fields.is_empty() {
@@ -1338,24 +1340,39 @@ impl Planner {
         let limit = select.limit.as_ref().and_then(|l| l.limit);
         let offset = select.limit.as_ref().map(|l| l.offset).unwrap_or(0);
 
-        // Try filter-based index selection first
-        if let Some(filter) = select.filter.as_ref() {
-            if let Some(best_index) = select_best_index(filter, &collection.indexes) {
-                if let Some(params) = filter_to_index_scan(
-                    filter,
-                    best_index,
-                    select.order_by.as_ref(),
-                    &collection.fields,
-                    limit,
-                    offset,
-                ) {
-                    // Check if this index also provides ordering
-                    let provides_ordering = select
-                        .order_by
-                        .as_ref()
-                        .map(|o| can_be_ordered_by_index(o, best_index).0)
-                        .unwrap_or(false);
-                    return Some((params, provides_ordering));
+        // Check if filter has any true relation field conditions (using schema info).
+        // When relation filters are present, Go skips parent filter-based index selection
+        // because the relation join already narrows the parent set.
+        // This check uses schema field_kind.is_relation() to avoid confusing JSON field
+        // access ({custom: {title: ...}}) with relation traversal ({devices: {model: ...}}).
+        let has_relation_filter = select.filter.as_ref().map_or(false, |f| {
+            f.conditions().keys().any(|field_name| {
+                collection
+                    .field_by_name(field_name)
+                    .map_or(false, |field| field.kind.is_relation())
+            })
+        });
+
+        // Try filter-based index selection first (skip when relation filters are present)
+        if !has_relation_filter {
+            if let Some(filter) = select.filter.as_ref() {
+                if let Some(best_index) = select_best_index(filter, &collection.indexes) {
+                    if let Some(params) = filter_to_index_scan(
+                        filter,
+                        best_index,
+                        select.order_by.as_ref(),
+                        &collection.fields,
+                        limit,
+                        offset,
+                    ) {
+                        // Check if this index also provides ordering
+                        let provides_ordering = select
+                            .order_by
+                            .as_ref()
+                            .map(|o| can_be_ordered_by_index(o, best_index).0)
+                            .unwrap_or(false);
+                        return Some((params, provides_ordering));
+                    }
                 }
             }
         }
