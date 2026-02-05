@@ -989,6 +989,65 @@ pub extern "C" fn get_node_identity(node_ptr: usize) -> FfiResult {
     }
 }
 
+/// Register an existing identity for block signing.
+///
+/// This allows Go-created identities to be used for signing blocks in Rust.
+/// The identity's signing config is stored in the global identity store.
+///
+/// # Parameters
+/// - `did`: The DID string (e.g., "did:key:z6Mk...")
+/// - `private_key_hex`: Hex-encoded private key bytes
+/// - `public_key_hex`: Hex-encoded public key bytes
+/// - `key_type`: Key type ("secp256k1" or "ed25519")
+///
+/// # Returns
+/// Success with empty JSON object, or error on failure.
+#[no_mangle]
+pub extern "C" fn RegisterIdentity(
+    did: *const c_char,
+    private_key_hex: *const c_char,
+    public_key_hex: *const c_char,
+    key_type: *const c_char,
+) -> FfiResult {
+    let result = (|| {
+        // SAFETY: These pointers come from Go/C FFI and are valid C strings.
+        let did_str = unsafe { c_str_to_string(did) }.ok_or("invalid did parameter")?;
+        let priv_hex =
+            unsafe { c_str_to_string(private_key_hex) }.ok_or("invalid private_key_hex parameter")?;
+        let pub_hex =
+            unsafe { c_str_to_string(public_key_hex) }.ok_or("invalid public_key_hex parameter")?;
+        let key_type_str =
+            unsafe { c_str_to_string(key_type) }.unwrap_or_else(|| "secp256k1".to_string());
+
+        let private_key_bytes = hex::decode(&priv_hex)
+            .map_err(|e| format!("invalid private key hex: {}", e))?;
+        let public_key_bytes = hex::decode(&pub_hex)
+            .map_err(|e| format!("invalid public key hex: {}", e))?;
+
+        eprintln!(
+            "[SIGN-DEBUG] register_identity: did={}, key_type={}",
+            did_str, key_type_str
+        );
+
+        defra_core::signing::store_identity(
+            &did_str,
+            defra_core::signing::SigningConfig {
+                key_type: key_type_str,
+                private_key_bytes,
+                public_key_bytes,
+                public_key_hex: pub_hex,
+            },
+        );
+
+        Ok::<String, String>("{}".to_string())
+    })();
+
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
+    }
+}
+
 /// Create a new identity (Ed25519 keypair).
 ///
 /// Generates a fresh Ed25519 keypair and returns the DID and private key.

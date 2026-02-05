@@ -80,6 +80,7 @@ pub use acp::{
     add_dac_actor_relationship, add_dac_policy, add_nac_actor_relationship, create_identity,
     delete_dac_actor_relationship, delete_nac_actor_relationship, disable_nac, enable_nac,
     get_dac_policy, get_nac_status, get_node_identity, list_dac_policies, re_enable_nac,
+    RegisterIdentity,
 };
 pub use backup::{basic_export, basic_import};
 pub use block::block_verify_signature;
