@@ -2142,7 +2142,9 @@ impl Planner {
                             combined.push(pc.clone());
                         }
                     }
-                    Some(OrderBy { conditions: combined })
+                    Some(OrderBy {
+                        conditions: combined,
+                    })
                 }
                 (Some(child), None) => Some(child.clone()),
                 (None, Some(parent)) => Some(parent.clone()),

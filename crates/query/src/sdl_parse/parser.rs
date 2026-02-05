@@ -1872,7 +1872,8 @@ impl<'a> SdlParser<'a> {
             }
 
             // No user index - create auto unique index
-            let idx_name = generate_index_name(&type_def.name, fk_field_name, &existing_index_names);
+            let idx_name =
+                generate_index_name(&type_def.name, fk_field_name, &existing_index_names);
             existing_index_names.push(idx_name.clone());
             indexes.push(IndexDescription {
                 name: idx_name,

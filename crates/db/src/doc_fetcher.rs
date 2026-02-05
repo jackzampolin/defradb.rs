@@ -279,10 +279,9 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                         // All index fields covered: In value + suffix Eq values = exact match
                         let mut key_values = vec![value.clone()];
                         key_values.extend(suffix_values.iter().cloned());
-                        let mut iter =
-                            index.get(&datastore, &key_values).await.map_err(|e| {
-                                query::error::QueryError::execution(format!("index error: {}", e))
-                            })?;
+                        let mut iter = index.get(&datastore, &key_values).await.map_err(|e| {
+                            query::error::QueryError::execution(format!("index error: {}", e))
+                        })?;
                         let entries = iter.collect_all().await.map_err(|e| {
                             query::error::QueryError::execution(format!(
                                 "index iteration error: {}",

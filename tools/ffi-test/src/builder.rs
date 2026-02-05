@@ -129,7 +129,11 @@ async fn copy_library(ctx: &WorktreeContext, verbose: bool) -> Result<()> {
     let dst_path = lib_dir.join(&dst_name);
 
     if verbose {
-        println!("Copying library {} -> {}", src_path.display(), dst_path.display());
+        println!(
+            "Copying library {} -> {}",
+            src_path.display(),
+            dst_path.display()
+        );
     }
 
     tokio::fs::copy(&src_path, &dst_path).await?;

@@ -640,12 +640,10 @@ impl TypeJoinMany {
                 let child_mapping = self.child_plan.document_map();
                 all_children.sort_by(|a, b| {
                     for condition in &order_by.conditions {
-                        let field_name =
-                            condition.fields.first().map(|s| s.as_str()).unwrap_or("");
+                        let field_name = condition.fields.first().map(|s| s.as_str()).unwrap_or("");
                         let field_idx = child_mapping.first_index_of_name(field_name);
                         if let Some(idx) = field_idx {
-                            let cmp =
-                                compare_json_values(a.get(idx), b.get(idx));
+                            let cmp = compare_json_values(a.get(idx), b.get(idx));
                             let cmp = match condition.direction {
                                 OrderDirection::Asc => cmp,
                                 OrderDirection::Desc => cmp.reverse(),
