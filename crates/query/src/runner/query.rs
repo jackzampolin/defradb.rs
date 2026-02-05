@@ -7,7 +7,7 @@ use schema::CollectionVersion;
 use serde_json::{Map, Value as JsonValue};
 use std::collections::HashSet;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, instrument, warn};
 
 use crate::document::{documents_to_plan_docs, documents_with_status_to_plan_docs};
 use crate::error::{QueryError, Result};
@@ -1571,6 +1571,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Execute already-parsed Select operations with a specific fetcher and identity.
+    #[instrument(
+        name = "query.execute",
+        skip(self, selects, fetcher, caller_identity),
+        fields(select_count = selects.len())
+    )]
     pub(crate) async fn execute_selects_internal(
         &self,
         selects: Vec<Select>,
@@ -2920,9 +2925,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 // Resolve the actual collection name from the relation field.
                 // nested_select.collection_name is the field name (e.g., "author"),
                 // but we need the collection type name (e.g., "Author").
-                let related_collection =
-                    self.resolve_relation_target_name(&collection, relation_name).await
-                        .unwrap_or_else(|| nested_select.collection_name.clone());
+                let related_collection = self
+                    .resolve_relation_target_name(&collection, relation_name)
+                    .await
+                    .unwrap_or_else(|| nested_select.collection_name.clone());
 
                 // Many-to-one: parent has FK field (e.g., Book._authorID → Author)
                 let fk_field_name = CollectionVersion::relation_id_field_name(relation_name);
@@ -2933,7 +2939,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         .unwrap_or_default();
 
                     if !fk_doc_id.is_empty() {
-                        let result = fetcher.get_by_ids(&related_collection, &[fk_doc_id]).await?;
+                        let result = fetcher
+                            .get_by_ids(&related_collection, &[fk_doc_id])
+                            .await?;
 
                         if let Some(related_doc) = result.docs().first() {
                             let related_obj =

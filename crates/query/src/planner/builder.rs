@@ -8,7 +8,7 @@ use std::sync::Arc;
 use acp::DocumentACP;
 use identity::Did;
 use schema::CollectionVersion;
-use tracing::{debug, warn};
+use tracing::{debug, instrument, warn};
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -173,6 +173,11 @@ impl Planner {
     ///
     /// Returns a `PlanResult` containing both the plan and optional `IndexScanParams`
     /// when an index can be used to optimize the query.
+    #[instrument(
+        name = "query.plan",
+        skip(self, select),
+        fields(collection = %select.collection_name)
+    )]
     pub fn plan_with_index_info(&self, select: &Select) -> Result<PlanResult> {
         let collection = self
             .collections
@@ -2142,7 +2147,9 @@ impl Planner {
                             combined.push(pc.clone());
                         }
                     }
-                    Some(OrderBy { conditions: combined })
+                    Some(OrderBy {
+                        conditions: combined,
+                    })
                 }
                 (Some(child), None) => Some(child.clone()),
                 (None, Some(parent)) => Some(parent.clone()),

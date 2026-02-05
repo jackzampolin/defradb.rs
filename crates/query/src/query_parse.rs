@@ -8,6 +8,7 @@ use graphql_parser::query::{
 };
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use tracing::instrument;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -306,6 +307,7 @@ fn is_introspection_query(doc: &Document<'_, String>) -> bool {
     false
 }
 
+#[instrument(name = "query.parse", skip(query, variables), fields(query_len = query.len()))]
 pub fn parse_request_with_variables(
     query: &str,
     variables: Option<&HashMap<String, JsonValue>>,
