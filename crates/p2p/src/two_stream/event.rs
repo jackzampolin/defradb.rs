@@ -1,0 +1,39 @@
+//! Two-stream protocol events.
+
+use libp2p::PeerId;
+
+use crate::message::{
+    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogRequest,
+};
+
+/// Event emitted by the two-stream handler.
+#[derive(Debug)]
+pub enum TwoStreamEvent {
+    /// Received a PushLog request from a peer.
+    InboundRequest {
+        peer_id: PeerId,
+        request: PushLogRequest,
+    },
+    /// Received a DocSync request from a peer.
+    DocSyncRequest {
+        peer_id: PeerId,
+        request: DocSyncRequest,
+    },
+    /// Received a DocSync reply from a peer.
+    DocSyncReply {
+        peer_id: PeerId,
+        reply: DocSyncReply,
+    },
+    /// Received a BranchableSync request from a peer.
+    BranchableSyncRequest {
+        peer_id: PeerId,
+        request: BranchableSyncRequest,
+    },
+    /// Received a BranchableSync reply from a peer.
+    BranchableSyncReply {
+        peer_id: PeerId,
+        reply: BranchableSyncReply,
+    },
+    /// Failed to decode an incoming message.
+    DecodeError { peer_id: PeerId, error: String },
+}
