@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 
 use crate::store::TransformStore;
 use crate::{Error, LensDoc, Result, TargetedHistoryLink, TransformId};
@@ -383,16 +383,13 @@ async fn apply_transform(
         store.transform(transform_id, input_stream)?
     };
 
-    let result = output_stream
-        .next()
-        .await
-        .ok_or_else(|| {
-            warn!(
-                transform_id = %transform_id,
-                "Transform produced no output"
-            );
-            Error::Pipeline("transform produced no output".to_string())
-        })?;
+    let result = output_stream.next().await.ok_or_else(|| {
+        warn!(
+            transform_id = %transform_id,
+            "Transform produced no output"
+        );
+        Error::Pipeline("transform produced no output".to_string())
+    })?;
 
     match &result {
         Ok(output_doc) => {

@@ -1,4 +1,8 @@
-//! AverageNode for computing AVG aggregate
+//! AVG aggregate - special implementation due to unique explain structure
+//!
+//! AVG has custom explain output that decomposes into countNode → sumNode → source,
+//! which differs from other aggregates. This file provides a standalone implementation
+//! rather than using the generic AggregateNode.
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
@@ -8,60 +12,37 @@ use crate::error::Result;
 use crate::mapper::{Filter, Limit};
 use crate::planner::{Doc, ExecInfo, PlanNode};
 
-/// Source metadata for average explain output.
-#[derive(Debug, Clone)]
-pub struct AvgSourceMeta {
-    /// Field name (collection name or relation field name)
-    pub field_name: String,
-    /// Optional child field name for field-level aggregates
-    pub child_field_name: Option<String>,
-    /// Optional filter on this source
-    pub filter: Option<Filter>,
-    /// Whether this is an inline array aggregate (emits {_neq: null} filter in explain)
-    pub is_inline_array: bool,
-}
+use super::NumericSourceMeta;
+
+/// Source metadata alias for AVG
+pub type AvgSourceMeta = NumericSourceMeta;
+
+/// Marker type for AVG (for type aliases)
+pub struct AvgOp;
 
 /// AverageNode computes the average of a numeric field from its source.
 ///
-/// Operates in two modes:
-/// - Without GROUP BY: Computes average of all documents and yields a single result
-/// - With GROUP BY: For each group, adds the average to the document
-///
-/// Null values are skipped. Returns 0 if no values to average (Go DefraDB semantics).
-/// Always returns f64 for precision.
+/// Has custom explain output that decomposes into countNode → sumNode → source
+/// to match Go DefraDB's structure.
 pub struct AverageNode {
     source: Box<dyn PlanNode>,
     document_mapping: DocumentMapping,
-    /// Index of the field to average
     field_index: usize,
-    /// Index in the document where average result should be stored
     aggregate_index: usize,
-    /// The running sum (for non-grouped mode)
     sum: f64,
-    /// The running count (for non-grouped mode)
     count: usize,
-    /// Current document with average result
     current_doc: Doc,
-    /// Whether we've already yielded the result (for non-grouped mode)
     done: bool,
-    /// Whether start() has been called
     started: bool,
-    /// Whether we're in grouped mode (source provides group docs)
     grouped_mode: bool,
-    /// Optional filter to apply to group documents before averaging
     aggregate_filter: Option<Filter>,
-    /// Optional limit/offset to apply to group documents before averaging
     aggregate_limit: Option<Limit>,
-    /// If set, operate in "child aggregate" mode: read values from _group JSON array.
     child_aggregate_source: Option<(usize, String)>,
-    /// Execution statistics for explain execute mode
     exec_info: ExecInfo,
-    /// Source metadata for explain output
     sources: Vec<AvgSourceMeta>,
 }
 
 impl AverageNode {
-    /// Create a new AverageNode wrapping a source
     pub fn new(
         source: Box<dyn PlanNode>,
         document_mapping: DocumentMapping,
@@ -107,7 +88,6 @@ impl AverageNode {
         self
     }
 
-    /// Extract numeric value from JSON, returning None for nulls
     fn extract_numeric(value: Option<&JsonValue>) -> Option<f64> {
         match value {
             Some(JsonValue::Number(n)) => n.as_f64(),
@@ -115,8 +95,6 @@ impl AverageNode {
         }
     }
 
-    /// Compute average of a slice of documents
-    /// Returns 0.0 if no values (Go DefraDB semantics: AVG of empty set is 0)
     fn compute_average(&self, docs: &[Doc]) -> f64 {
         let mut sum = 0.0;
         let mut count = 0usize;
@@ -157,21 +135,17 @@ impl AverageNode {
         }
 
         if count == 0 {
-            0.0 // Go DefraDB returns 0 for empty set, not null
+            0.0
         } else {
             sum / count as f64
         }
     }
 
-    /// Build the filter JSON for an average source explain.
-    /// Go adds {child_field_name: {_neq: null}} to both sumNode and countNode sources,
-    /// but only for regular fields (not aggregate refs like _avg, _count, etc.).
     fn build_source_filter(source: &AvgSourceMeta) -> JsonValue {
         if source.is_inline_array {
             return serde_json::json!({"_neq": serde_json::Value::Null});
         }
 
-        // Aggregate field refs (starting with _) don't get {_neq: null} filter
         let is_aggregate_ref = source
             .child_field_name
             .as_ref()
@@ -184,7 +158,6 @@ impl AverageNode {
                 if conditions.is_empty() {
                     serde_json::json!({cfn: {"_neq": serde_json::Value::Null}})
                 } else {
-                    // Merge {_neq: null} into existing conditions on the same field
                     let mut merged = serde_json::Map::new();
                     let mut added_neq = false;
                     for (key, val) in conditions {
@@ -225,11 +198,7 @@ impl AverageNode {
         }
     }
 
-    /// Convert average to JSON value
-    /// Returns Null for NaN/Infinity to prevent silent data corruption
     fn avg_to_json(avg: f64) -> JsonValue {
-        // NaN and Infinity cannot be represented in JSON - return 0
-        // This matches Go DefraDB behavior
         serde_json::Number::from_f64(avg)
             .map(JsonValue::Number)
             .unwrap_or_else(|| JsonValue::Number(serde_json::Number::from(0)))
@@ -260,15 +229,12 @@ impl PlanNode for AverageNode {
             self.start().await?;
         }
 
-        // Early return when already done (Go checks isCompleted before calling source.next)
         if self.done {
             return Ok(false);
         }
 
-        // Track iterations (Go counts each call to next)
         self.exec_info.iterations += 1;
 
-        // Child aggregate mode: read from _group JSON array on each doc
         if let Some((group_index, ref field_name)) = self.child_aggregate_source {
             if !self.source.next().await? {
                 return Ok(false);
@@ -302,16 +268,12 @@ impl PlanNode for AverageNode {
         }
 
         loop {
-            // Try to get next from source
             if !self.source.next().await? {
-                // No more source documents
                 if !self.grouped_mode && !self.done {
                     if self.source.is_grouped_source() {
                         return Ok(false);
                     }
-                    // Non-grouped mode: Return the single result
                     self.done = true;
-                    // Go DefraDB returns 0 for empty set, not null
                     let avg = if self.count == 0 {
                         0.0
                     } else {
@@ -329,20 +291,16 @@ impl PlanNode for AverageNode {
                 return Ok(false);
             }
 
-            // Check if source provides group docs
             if let Some(group_docs) = self.source.current_group_docs() {
-                // Grouped mode: compute average for this group
                 self.grouped_mode = true;
                 let group_avg = self.compute_average(group_docs);
 
-                // Clone the current doc from source and add the average
                 let mut doc = self.source.value().deep_clone();
                 doc.set(self.aggregate_index, Self::avg_to_json(group_avg));
                 self.current_doc = doc;
                 return Ok(true);
             }
 
-            // Non-grouped mode: accumulate sum and count
             let doc = self.source.value();
             if !doc.hidden {
                 if let Some(val) = Self::extract_numeric(doc.get(self.field_index)) {
@@ -350,8 +308,6 @@ impl PlanNode for AverageNode {
                     self.count += 1;
                 }
             }
-
-            // Continue iterating (loop continues)
         }
     }
 
@@ -376,11 +332,8 @@ impl PlanNode for AverageNode {
     }
 
     fn explain_inner(&self) -> JsonValue {
-        // Go decomposes average into: averageNode → countNode → sumNode → source
-        // Get the source explain output
         let source_explain = self.source.explain();
 
-        // Build sumNode sources (includes childFieldName)
         let sum_sources: Vec<JsonValue> = self
             .sources
             .iter()
@@ -406,7 +359,6 @@ impl PlanNode for AverageNode {
             })
             .collect();
 
-        // Build countNode sources (NO childFieldName)
         let count_sources: Vec<JsonValue> = self
             .sources
             .iter()
@@ -421,7 +373,6 @@ impl PlanNode for AverageNode {
             })
             .collect();
 
-        // Wrap in: countNode { sources: [...], sumNode { sources: [...], ...source... } }
         let mut sum_inner = serde_json::Map::new();
         sum_inner.insert("sources".to_string(), JsonValue::Array(sum_sources));
         if let Some(source_obj) = source_explain.as_object() {
@@ -441,8 +392,6 @@ impl PlanNode for AverageNode {
     }
 
     fn explain_debug_inner(&self) -> JsonValue {
-        // Debug mode: only show node hierarchy, no attributes (sources, filter, etc.)
-        // Structure: averageNode → countNode → sumNode → source
         let source_explain = self.source.explain_debug();
 
         let mut sum_inner = serde_json::Map::new();
@@ -462,7 +411,6 @@ impl PlanNode for AverageNode {
     }
 
     fn current_group_docs(&self) -> Option<&[Doc]> {
-        // Pass through from source for stacked aggregates
         self.source.current_group_docs()
     }
 
@@ -477,18 +425,12 @@ impl PlanNode for AverageNode {
     fn explain_execute_inner(&self) -> JsonValue {
         let mut obj = serde_json::Map::new();
 
-        // Go DefraDB execute format: iterations
         obj.insert(
             "iterations".to_string(),
             serde_json::json!(self.exec_info.iterations as u64),
         );
 
-        // Go decomposes average execute into: averageNode → countNode → sumNode → source
         let source_explain = self.source.explain_execute();
-
-        // Wrap in: countNode { iterations: N, sumNode { iterations: N, ...source... } }
-        // Go's decomposed countNode/sumNode process the same documents as averageNode,
-        // so their iteration counts match.
         let iterations = self.exec_info.iterations as u64;
         let mut sum_inner = serde_json::Map::new();
         sum_inner.insert("iterations".to_string(), serde_json::json!(iterations));
