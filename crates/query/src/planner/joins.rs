@@ -1179,6 +1179,7 @@ impl Planner {
                 // Build child scan, using an index if the filter is index-eligible.
                 let child_index_result =
                     self.try_select_child_index(Some(&nested_conditions), None, &target_collection);
+                let child_has_index = child_index_result.is_some();
                 let child_plan: Box<dyn PlanNode> = if let Some((params, _)) = child_index_result {
                     let mut index_scan = IndexScanNode::new(
                         (*target_collection).clone(),
@@ -1255,16 +1256,58 @@ impl Planner {
                     .with_relation_filter(rel_filter);
                     plan = Box::new(join_many);
                 } else {
-                    // One-to-one: TypeJoinOne with filter
-                    let join = TypeJoinOne::new(
-                        plan,
-                        child_plan,
-                        parent_side,
-                        child_side,
-                        mapping.clone(),
-                    )
-                    .with_relation_filter(rel_filter);
-                    plan = Box::new(join);
+                    // One-to-one (or many-to-one): TypeJoinOne with filter
+                    // Check if we should use inverted index join:
+                    // child has index on filtered field AND parent has index on FK field.
+                    let parent_fk_field_name =
+                        schema::CollectionVersion::relation_id_field_name(&relation_field.name);
+                    let parent_fk_index = if child_has_index {
+                        parent_collection.indexes.iter().find(|idx| {
+                            idx.fields
+                                .first()
+                                .map_or(false, |f| f.name == parent_fk_field_name)
+                        })
+                    } else {
+                        None
+                    };
+
+                    if let Some(fk_index) = parent_fk_index {
+                        // Inverted index join: child scanned with index, parent looked up per-child
+                        let fk_index_name = fk_index.name.clone();
+                        let parent_scan_mapping = plan.document_map().clone();
+                        let parent_col = parent_collection.clone();
+                        let fk_field_index = parent_scan_mapping
+                            .first_index_of_name(&parent_fk_field_name)
+                            .unwrap_or(0);
+                        let fetcher = self.fetcher.clone().unwrap();
+
+                        let join = TypeJoinOne::new(
+                            plan,
+                            child_plan,
+                            parent_side,
+                            child_side,
+                            mapping.clone(),
+                        )
+                        .with_relation_filter(rel_filter)
+                        .with_inverted_index(
+                            fk_index_name,
+                            fk_field_index,
+                            parent_col,
+                            parent_scan_mapping,
+                            fetcher,
+                        );
+                        plan = Box::new(join);
+                    } else {
+                        let join = TypeJoinOne::new(
+                            plan,
+                            child_plan,
+                            parent_side,
+                            child_side,
+                            mapping.clone(),
+                        )
+                        .with_relation_filter(rel_filter);
+                        plan = Box::new(join);
+                    }
                 }
             }
         }

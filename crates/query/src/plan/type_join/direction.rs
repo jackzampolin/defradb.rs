@@ -18,4 +18,13 @@ pub enum JoinDirection {
     /// Inverted join: child has FK field, parent does not.
     /// Lookup: child.FK_field == parent._docID
     Inverted,
+    /// Inverted index join: child scanned first with index, parent looked up
+    /// per-child via FK index. Used when both child's filtered field and
+    /// parent's FK field are indexed.
+    InvertedIndex {
+        /// Name of the index on the parent's FK field
+        parent_fk_index_name: String,
+        /// Index of the FK field in the parent's document mapping
+        parent_fk_field_index: usize,
+    },
 }
