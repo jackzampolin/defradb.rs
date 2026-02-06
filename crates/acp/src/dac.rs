@@ -79,6 +79,7 @@ pub trait DocumentACP: MaybeSendSync {
     /// # Arguments
     /// * `requestor` - The DID making the request (must be owner or manager)
     /// * `target` - The DID to grant the relation to
+    /// * `policy_id` - The policy ID from the collection schema
     /// * `collection_id` - The collection ID (used as resource identifier)
     /// * `doc_id` - The document ID
     /// * `relation` - The relation to grant (e.g., "reader", "updater")
@@ -91,6 +92,7 @@ pub trait DocumentACP: MaybeSendSync {
         &self,
         requestor: &Did,
         target: &Did,
+        policy_id: &str,
         collection_id: &str,
         doc_id: &str,
         relation: &str,
@@ -105,6 +107,7 @@ pub trait DocumentACP: MaybeSendSync {
     /// # Arguments
     /// * `requestor` - The DID making the request (must be owner or manager)
     /// * `target` - The DID to remove the relation from
+    /// * `policy_id` - The policy ID from the collection schema
     /// * `collection_id` - The collection ID
     /// * `doc_id` - The document ID
     /// * `relation` - The relation to remove
@@ -117,6 +120,7 @@ pub trait DocumentACP: MaybeSendSync {
         &self,
         requestor: &Did,
         target: &Did,
+        policy_id: &str,
         collection_id: &str,
         doc_id: &str,
         relation: &str,

@@ -96,6 +96,16 @@ impl SourceHubDocumentACP {
     }
 }
 
+/// Build a JSON subject for SourceHub protobuf encoding.
+/// Wildcard DID (`*`) maps to `all_actors`, regular DIDs map to `actor`.
+fn build_subject_json(target: &Did) -> serde_json::Value {
+    if target.as_str() == "*" {
+        serde_json::json!({ "all_actors": {} })
+    } else {
+        serde_json::json!({ "actor": { "id": target.as_str() } })
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl DocumentACP for SourceHubDocumentACP {
@@ -151,82 +161,109 @@ impl DocumentACP for SourceHubDocumentACP {
             return Ok(true);
         }
 
-        // Anonymous cannot access registered docs
-        let did = match identity.did() {
-            Some(did) => did,
-            None => return Ok(false),
+        let actor_did = match identity.did() {
+            Some(did) => did.as_str().to_string(),
+            None => {
+                // Anonymous user: use a synthetic DID to check if all_actors grants access.
+                // If all_actors was set, SourceHub returns true for any valid DID.
+                "did:key:anonymous".to_string()
+            }
         };
 
-        self.client
-            .verify_access(
-                policy_id,
-                resource_name,
-                doc_id,
-                permission.as_str(),
-                did.as_str(),
-            )
-            .await
-            .map_err(|e| acp::Error::Storage(format!("SourceHub query failed: {}", e)))
+        // For read permission, also check update and delete (implied read access).
+        // Go's bridge.go: "if identity has access to any write permission,
+        // they don't need to explicitly have read permission to read."
+        let permissions_to_check = if permission == DocumentPermission::Read {
+            vec![
+                DocumentPermission::Read,
+                DocumentPermission::Update,
+                DocumentPermission::Delete,
+            ]
+        } else {
+            vec![permission]
+        };
+
+        for perm in permissions_to_check {
+            let has_access = self
+                .client
+                .verify_access(policy_id, resource_name, doc_id, perm.as_str(), &actor_did)
+                .await
+                .map_err(|e| acp::Error::Storage(format!("SourceHub query failed: {}", e)))?;
+
+            if has_access {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     async fn add_actor_relationship(
         &self,
         requestor: &Did,
         target: &Did,
-        collection_id: &str,
+        policy_id: &str,
+        resource_name: &str,
         doc_id: &str,
         relation: &str,
         _managing_relations: &[String],
     ) -> Result<bool> {
+        let subject = build_subject_json(target);
         let cmd = serde_json::json!({
             "set_relationship_cmd": {
                 "relationship": {
                     "object": {
-                        "resource": collection_id,
+                        "resource": resource_name,
                         "id": doc_id,
                     },
                     "relation": relation,
-                    "subject": {
-                        "actor": {
-                            "id": target.as_str(),
-                        }
-                    }
+                    "subject": subject,
                 }
             }
         });
-        self.bearer_cmd(requestor.as_str(), collection_id, cmd)
-            .await?;
-        Ok(true)
+        let result = self.bearer_cmd(requestor.as_str(), policy_id, cmd).await?;
+
+        // SourceHub returns RecordExisted in the tx result.
+        // Go wrapper: ExistedAlready = !added. So added = !record_existed.
+        let record_existed = result
+            .get("record_existed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        Ok(!record_existed)
     }
 
     async fn delete_actor_relationship(
         &self,
         requestor: &Did,
         target: &Did,
-        collection_id: &str,
+        policy_id: &str,
+        resource_name: &str,
         doc_id: &str,
         relation: &str,
         _managing_relations: &[String],
     ) -> Result<bool> {
+        let subject = build_subject_json(target);
         let cmd = serde_json::json!({
             "delete_relationship_cmd": {
                 "relationship": {
                     "object": {
-                        "resource": collection_id,
+                        "resource": resource_name,
                         "id": doc_id,
                     },
                     "relation": relation,
-                    "subject": {
-                        "actor": {
-                            "id": target.as_str(),
-                        }
-                    }
+                    "subject": subject,
                 }
             }
         });
-        self.bearer_cmd(requestor.as_str(), collection_id, cmd)
-            .await?;
-        Ok(true)
+        let result = self.bearer_cmd(requestor.as_str(), policy_id, cmd).await?;
+
+        // SourceHub returns RecordFound in the tx result.
+        // Go wrapper: RecordFound = deleted. No negation needed.
+        let record_found = result
+            .get("record_found")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        Ok(record_found)
     }
 
     async fn unregister_doc_object(

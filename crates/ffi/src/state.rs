@@ -61,6 +61,13 @@ impl PolicyStore {
         policy_id
     }
 
+    /// Store a policy with a known ID (used for SourceHub-created policies).
+    pub fn store_policy(&self, id: &str, policy: &str) {
+        self.policies
+            .write()
+            .insert(id.to_string(), policy.to_string());
+    }
+
     /// Get a policy by ID.
     pub fn get_policy(&self, id: &str) -> Option<String> {
         self.policies.read().get(id).cloned()

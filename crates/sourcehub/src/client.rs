@@ -84,6 +84,9 @@ impl SourceHubClient {
     }
 
     /// Verify if an actor has access to an object.
+    ///
+    /// Uses CometBFT ABCI query with protobuf-encoded request since
+    /// the REST/LCD endpoint doesn't support repeated nested fields in GET params.
     pub async fn verify_access(
         &self,
         policy_id: &str,
@@ -92,76 +95,15 @@ impl SourceHubClient {
         permission: &str,
         actor_did: &str,
     ) -> Result<bool, ClientError> {
-        // Use POST for complex query parameters
-        let url = format!(
-            "{}/sourcenetwork/sourcehub/acp/verify_access_request/{}",
-            self.rest_base_url(),
-            policy_id
-        );
-        let body = serde_json::json!({
-            "policy_id": policy_id,
-            "access_request": {
-                "operations": [{
-                    "object": {
-                        "resource": resource,
-                        "id": object_id,
-                    },
-                    "permission": permission,
-                }],
-                "actor": {
-                    "id": actor_did,
-                },
-            }
-        });
-        // The REST API uses GET with query params, but for complex nested objects
-        // we encode as query parameters. Let's use the gRPC-gateway JSON approach.
-        let resp = self.http.get(&url).json(&body).send().await;
-        // Fallback: try ABCI query if REST doesn't work
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                let body: serde_json::Value = r.json().await?;
-                Ok(body["valid"].as_bool().unwrap_or(false))
-            }
-            _ => {
-                // Use ABCI query path for complex parameters
-                self.verify_access_abci(policy_id, resource, object_id, permission, actor_did)
-                    .await
-            }
-        }
-    }
-
-    /// Verify access using ABCI query (for complex parameters).
-    async fn verify_access_abci(
-        &self,
-        policy_id: &str,
-        resource: &str,
-        object_id: &str,
-        permission: &str,
-        actor_did: &str,
-    ) -> Result<bool, ClientError> {
-        // Construct the protobuf-JSON encoded query and send via ABCI query
-        let query_data = serde_json::json!({
-            "policy_id": policy_id,
-            "access_request": {
-                "operations": [{
-                    "object": {
-                        "resource": resource,
-                        "id": object_id,
-                    },
-                    "permission": permission,
-                }],
-                "actor": {
-                    "id": actor_did,
-                },
-            }
-        });
-        let query_bytes = serde_json::to_vec(&query_data)?;
-        let query_hex = hex::encode(&query_bytes);
+        // Protobuf-encode the QueryVerifyAccessRequestRequest
+        let request_bytes =
+            encode_verify_access_request(policy_id, resource, object_id, permission, actor_did);
+        let request_hex = hex::encode(&request_bytes);
 
         let url = format!(
             "{}/abci_query?path=\"/sourcehub.acp.Query/VerifyAccessRequest\"&data=0x{}",
             self.comet_rpc_base_url(),
-            query_hex
+            request_hex
         );
         let resp = self.http.get(&url).send().await?;
         if !resp.status().is_success() {
@@ -170,23 +112,38 @@ impl SourceHubClient {
             ));
         }
         let body: serde_json::Value = resp.json().await?;
-        // ABCI response is base64-encoded protobuf
+
+        // Check ABCI response code
+        let abci_code = body["result"]["response"]["code"].as_u64().unwrap_or(0);
+        if abci_code != 0 {
+            let log = body["result"]["response"]["log"]
+                .as_str()
+                .unwrap_or("unknown");
+            eprintln!("[SH-DEBUG] verify_access ABCI error: code={} log={}", abci_code, log);
+            return Ok(false);
+        }
+
+        // Decode base64-encoded protobuf response
         let result_b64 = body["result"]["response"]["value"]
             .as_str()
             .unwrap_or("");
         if result_b64.is_empty() {
             return Ok(false);
         }
-        // Decode base64 and parse the response
         let result_bytes = base64::Engine::decode(
             &base64::engine::general_purpose::STANDARD,
             result_b64,
         )
         .map_err(|e| ClientError::QueryFailed(format!("base64 decode: {}", e)))?;
-        // The protobuf response has `valid` as field 1 (varint)
-        // Simple protobuf parsing: field 1, wire type 0 (varint)
-        // byte 0x08 = field 1, wire type 0; byte 0x01 = true
-        Ok(result_bytes.len() >= 2 && result_bytes[0] == 0x08 && result_bytes[1] == 0x01)
+
+        // QueryVerifyAccessRequestResponse: field 1 (bool) valid
+        // Protobuf: tag 0x08 (field 1, varint), value 0x01 (true)
+        let valid = result_bytes.len() >= 2 && result_bytes[0] == 0x08 && result_bytes[1] == 0x01;
+        eprintln!(
+            "[SH-DEBUG] verify_access: perm={} actor={} => valid={}",
+            permission, actor_did, valid
+        );
+        Ok(valid)
     }
 
     /// Query account number and sequence for transaction signing.
@@ -227,7 +184,7 @@ impl SourceHubClient {
             &base64::engine::general_purpose::STANDARD,
             tx_bytes,
         );
-        let url = format!("{}/broadcast_tx_sync", self.comet_rpc_base_url());
+        let url = self.comet_rpc_base_url();
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -258,7 +215,12 @@ impl SourceHubClient {
     }
 
     /// Wait for a transaction to be included in a block.
-    pub async fn await_tx(&self, tx_hash: &str, timeout_ms: u64) -> Result<(), ClientError> {
+    /// Returns the full CometBFT tx query response on success.
+    pub async fn await_tx(
+        &self,
+        tx_hash: &str,
+        timeout_ms: u64,
+    ) -> Result<serde_json::Value, ClientError> {
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_millis(timeout_ms);
         loop {
@@ -271,10 +233,9 @@ impl SourceHubClient {
                 if r.status().is_success() {
                     let body: serde_json::Value =
                         r.json().await.unwrap_or(serde_json::Value::Null);
-                    // Check tx_result.code == 0
                     let code = body["result"]["tx_result"]["code"].as_u64();
                     if let Some(0) = code {
-                        return Ok(());
+                        return Ok(body);
                     }
                     if let Some(c) = code {
                         let log = body["result"]["tx_result"]["log"]
@@ -343,4 +304,82 @@ pub enum ClientError {
 
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+// === Protobuf encoding helpers for ABCI queries ===
+
+/// Encode QueryVerifyAccessRequestRequest as protobuf bytes.
+///
+/// Proto definition:
+///   message QueryVerifyAccessRequestRequest {
+///     string policy_id = 1;
+///     AccessRequest access_request = 2;
+///   }
+///   message AccessRequest { repeated Operation operations = 1; Actor actor = 2; }
+///   message Operation { Object object = 1; string permission = 2; }
+///   message Object { string resource = 1; string id = 2; }
+///   message Actor { string id = 1; }
+fn encode_verify_access_request(
+    policy_id: &str,
+    resource: &str,
+    object_id: &str,
+    permission: &str,
+    actor_did: &str,
+) -> Vec<u8> {
+    // Build Object { resource, id }
+    let mut object_buf = Vec::new();
+    pb_string(&mut object_buf, 1, resource);
+    pb_string(&mut object_buf, 2, object_id);
+
+    // Build Operation { object, permission }
+    let mut operation_buf = Vec::new();
+    pb_bytes(&mut operation_buf, 1, &object_buf);
+    pb_string(&mut operation_buf, 2, permission);
+
+    // Build Actor { id }
+    let mut actor_buf = Vec::new();
+    pb_string(&mut actor_buf, 1, actor_did);
+
+    // Build AccessRequest { operations: [operation], actor }
+    let mut access_request_buf = Vec::new();
+    pb_bytes(&mut access_request_buf, 1, &operation_buf);
+    pb_bytes(&mut access_request_buf, 2, &actor_buf);
+
+    // Build QueryVerifyAccessRequestRequest { policy_id, access_request }
+    let mut buf = Vec::new();
+    pb_string(&mut buf, 1, policy_id);
+    pb_bytes(&mut buf, 2, &access_request_buf);
+
+    buf
+}
+
+// Minimal protobuf encoding helpers (duplicated from tx.rs to avoid coupling)
+
+fn pb_varint(buf: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let byte = (value & 0x7F) as u8;
+        value >>= 7;
+        if value == 0 {
+            buf.push(byte);
+            break;
+        }
+        buf.push(byte | 0x80);
+    }
+}
+
+fn pb_string(buf: &mut Vec<u8>, field_num: u32, value: &str) {
+    if value.is_empty() {
+        return;
+    }
+    let tag = (field_num << 3) | 2;
+    pb_varint(buf, tag as u64);
+    pb_varint(buf, value.len() as u64);
+    buf.extend_from_slice(value.as_bytes());
+}
+
+fn pb_bytes(buf: &mut Vec<u8>, field_num: u32, value: &[u8]) {
+    let tag = (field_num << 3) | 2;
+    pb_varint(buf, tag as u64);
+    pb_varint(buf, value.len() as u64);
+    buf.extend_from_slice(value);
 }

@@ -405,7 +405,7 @@ async fn test_zanzibar_document_acp_sharing() {
         .unwrap());
 
     // Owner shares with reader
-    acp.add_actor_relationship(&owner, &reader, "collection1", "doc1", "reader", &[])
+    acp.add_actor_relationship(&owner, &reader, "collection1", "collection1", "doc1", "reader", &[])
         .await
         .unwrap();
 
