@@ -683,10 +683,35 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     Some(collection) => {
                         is_branchable = collection.schema().is_branchable;
                         if is_delete {
-                            // Handle delete: write the deletion marker so queries
-                            // exclude this document (or show _deleted:true).
-                            // The delete composite has no field links, so field_values
-                            // is empty — but we still need to mark the doc as deleted.
+                            // Handle delete: remove index entries, then write deletion marker.
+                            // Must load the old document first so we know which index
+                            // entries to remove (Go's syncIndexedDoc does the same).
+                            if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
+                                if let Ok(Some(old_doc)) =
+                                    collection.get_with_datastore(&datastore, &doc_id).await
+                                {
+                                    let short_id = collection_short_id(collection.collection_id());
+                                    if let Ok(index_manager) =
+                                        IndexManager::from_collection(short_id, collection.schema())
+                                    {
+                                        if let Err(e) = index_manager
+                                            .on_document_delete(
+                                                &datastore,
+                                                &old_doc,
+                                                collection.schema(),
+                                            )
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                doc_id = %doc_id_str,
+                                                error = %e,
+                                                "Failed to delete indexes after merge"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
                             let deleted_key =
                                 build_deleted_key(collection.collection_id(), &doc_id_str);
                             if let Err(e) = datastore.set(&deleted_key, &[DELETED_MARKER]).await {
