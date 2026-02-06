@@ -186,6 +186,16 @@ pub fn build_introspection_schema(
         }));
     }
 
+    // Add a hidden field referencing ExplainType so it appears in introspection.
+    // async-graphql only includes registered types that are reachable from the type graph.
+    // ExplainType is used as a directive argument in Go but we need it in __schema.types.
+    query_type = query_type.field(
+        Field::new("_explainType", TypeRef::named("ExplainType"), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+        })
+        .argument(InputValue::new("type", TypeRef::named("ExplainType"))),
+    );
+
     schema_builder = schema_builder.register(query_type);
 
     // Add mutation type if we have collections

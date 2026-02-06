@@ -9,7 +9,7 @@ use schema::CollectionVersion;
 use std::collections::HashMap;
 
 use super::directives::ParsedDirectives;
-use super::helpers::preprocess_empty_types;
+use super::helpers::{detect_missing_field_types, preprocess_empty_types};
 use super::warnings::{ParseOutput, ParseWarning};
 
 /// Placeholder field name used to make empty types parseable.
@@ -29,6 +29,8 @@ pub struct SdlParser<'a> {
     /// External type names (e.g. existing collection types) that can be referenced
     /// in field types but are not defined in the SDL being parsed.
     pub(super) known_external_types: std::collections::HashSet<String>,
+    /// Accumulated errors from parsing (for multi-error reporting)
+    pub(super) errors: Vec<String>,
 }
 
 /// A parsed type definition (either type or interface) with its fields and type-level directives.
@@ -100,6 +102,7 @@ impl<'a> SdlParser<'a> {
             warnings: Vec::new(),
             current_type: None,
             known_external_types: std::collections::HashSet::new(),
+            errors: Vec::new(),
         }
     }
 
@@ -125,6 +128,9 @@ impl<'a> SdlParser<'a> {
             });
         }
 
+        // Detect fields with missing types before graphql_parser (Go compatibility)
+        detect_missing_field_types(self.sdl)?;
+
         // Preprocess SDL to handle empty type definitions (Go compatibility)
         let preprocessed = preprocess_empty_types(self.sdl);
 
@@ -144,6 +150,11 @@ impl<'a> SdlParser<'a> {
             }
         }
 
+        // Return accumulated errors from first pass (e.g., duplicate type names)
+        if !self.errors.is_empty() {
+            return Err(QueryError::parse(self.errors.join("\n")));
+        }
+
         // Second pass: validate parsed types before building
         self.validate_types()?;
 
@@ -159,12 +170,11 @@ impl<'a> SdlParser<'a> {
     fn parse_object_type(&mut self, obj: &ObjectType<'_, String>) -> Result<()> {
         let name = obj.name.clone();
 
-        // Check for duplicate type names (Go compatibility: error on duplicates in same SDL)
+        // Check for duplicate type names (Go compatibility: accumulate all duplicate errors)
         if self.type_defs.contains_key(&name) {
-            return Err(QueryError::parse(format!(
-                "collection already exists. Name: {}",
-                name
-            )));
+            self.errors
+                .push(format!("collection already exists. Name: {}", name));
+            return Ok(());
         }
 
         self.current_type = Some(name.clone());
@@ -202,10 +212,9 @@ impl<'a> SdlParser<'a> {
         let name = iface.name.clone();
 
         if self.type_defs.contains_key(&name) {
-            return Err(QueryError::parse(format!(
-                "collection already exists. Name: {}",
-                name
-            )));
+            self.errors
+                .push(format!("collection already exists. Name: {}", name));
+            return Ok(());
         }
 
         self.current_type = Some(name.clone());

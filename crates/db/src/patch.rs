@@ -205,8 +205,25 @@ impl<S: Store> crate::database::DB<S> {
                                         .to_string(),
                                 ));
                             }
-                            // Known CIDs proceed - sources/ownership validation
-                            // is handled by definition_validation post-patch.
+                            // Replacing a VersionID to point at an existing version
+                            // constitutes a source redefinition. Go rejects this because
+                            // it changes the version's PreviousVersion pointer.
+                            // Check if the target belongs to the same collection root.
+                            let target_version =
+                                all_versions.iter().find(|c| c.version_id == version_id_str);
+                            if let Some(target) = target_version {
+                                if target.collection_id == collection_id {
+                                    return Err(Error::InvalidPatch(
+                                        "collection sources cannot be added or removed."
+                                            .to_string(),
+                                    ));
+                                } else {
+                                    return Err(Error::InvalidPatch(
+                                        "collection source must belong to host collection."
+                                            .to_string(),
+                                    ));
+                                }
+                            }
                         }
 
                         // Go compatibility: validate Kind value when replacing a field's Kind directly

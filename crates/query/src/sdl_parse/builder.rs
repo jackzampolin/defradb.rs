@@ -59,6 +59,34 @@ impl<'a> SdlParser<'a> {
         let mut type_names: std::collections::HashSet<_> = self.type_defs.keys().cloned().collect();
         type_names.extend(self.known_external_types.iter().cloned());
 
+        // Pre-validate all field types to accumulate multiple errors (Go compatibility).
+        // Go collects ALL "no type found" errors before returning, rather than stopping at first.
+        let scalar_types: std::collections::HashSet<&str> = [
+            "String", "Int", "Float", "Float64", "Float32", "Boolean", "ID", "DateTime", "JSON",
+            "Blob", "Self",
+        ]
+        .into_iter()
+        .collect();
+        let mut field_type_errors = Vec::new();
+        for type_def in self.type_defs.values() {
+            for field in &type_def.fields {
+                let base = &field.field_type.base_type;
+                if !scalar_types.contains(base.as_str())
+                    && !type_names.contains(base)
+                    && base != &type_def.name
+                {
+                    field_type_errors.push(format!(
+                        "no type found for given name. Field: {}, Kind: {}",
+                        field.name, base
+                    ));
+                }
+            }
+        }
+        if !field_type_errors.is_empty() {
+            field_type_errors.sort();
+            return Err(QueryError::parse(field_type_errors.join("\n")));
+        }
+
         // Collect @primary directive information for determining actual primaryness
         let primary_directives = self.collect_primary_directives(&type_names);
 
@@ -428,7 +456,7 @@ impl<'a> SdlParser<'a> {
         let mut fields = Vec::new();
         let mut indexes = Vec::new();
         let mut existing_index_names: Vec<String> = Vec::new();
-        let mut field_id_counter = 1u32;
+        let mut index_id_counter = 0u32;
 
         // Track one-to-one FK fields that may need auto-created unique indexes.
         // We defer auto-index creation until after type-level indexes are processed
@@ -443,7 +471,6 @@ impl<'a> SdlParser<'a> {
             FieldDescription::new(&doc_id_field_id, "_docID", doc_id_kind)
                 .with_crdt_type(CType::None),
         );
-        field_id_counter += 1;
 
         // Process user-defined fields
         for parsed_field in &type_def.fields {
@@ -620,7 +647,6 @@ impl<'a> SdlParser<'a> {
                         }
                     }
                     fields.push(id_field);
-                    field_id_counter += 1;
                 }
             }
 
@@ -695,16 +721,16 @@ impl<'a> SdlParser<'a> {
                 });
                 existing_index_names.push(idx_name.clone());
 
+                index_id_counter += 1;
                 indexes.push(IndexDescription {
                     name: idx_name,
-                    id: field_id_counter,
+                    id: index_id_counter,
                     fields: index_fields,
                     unique: idx_config.unique,
                 });
             }
 
             fields.push(field);
-            field_id_counter += 1;
         }
 
         // Handle type-level @index directives (composite indexes)
@@ -744,9 +770,10 @@ impl<'a> SdlParser<'a> {
                 })
                 .collect();
 
+            index_id_counter += 1;
             indexes.push(IndexDescription {
                 name: idx_name,
-                id: field_id_counter,
+                id: index_id_counter,
                 fields: indexed_fields,
                 unique: composite_idx.unique,
             });
@@ -791,16 +818,16 @@ impl<'a> SdlParser<'a> {
             let idx_name =
                 generate_index_name(&type_def.name, fk_field_name, &existing_index_names);
             existing_index_names.push(idx_name.clone());
+            index_id_counter += 1;
             indexes.push(IndexDescription {
                 name: idx_name,
-                id: field_id_counter,
+                id: index_id_counter,
                 fields: vec![IndexedFieldDescription {
                     name: fk_field_name.clone(),
                     descending: false,
                 }],
                 unique: true,
             });
-            field_id_counter += 1;
         }
 
         // INTEROP CRITICAL: Sort fields alphabetically after _docID (like Go does).
