@@ -210,15 +210,15 @@ impl CollectionIndex for UniqueIndex {
 
         let key = self.build_key(values)?;
 
-        // Check for existing entry (uniqueness constraint)
-        if let Some(existing) = txn.get(&key).await? {
-            let existing_doc_id = String::from_utf8(existing)
-                .map_err(|e| crate::corekv::Error::Other(e.to_string()))?;
-            if existing_doc_id != doc_id {
-                return Err(crate::corekv::Error::Other(
-                    "can not index a doc's field(s) that violates unique index.".to_string(),
-                ));
-            }
+        // Check for existing entry (uniqueness constraint).
+        // Any existing key is a violation during save (create). Unlike update(),
+        // save() should never encounter the same key for the same doc_id — that
+        // would indicate duplicate values within the same document (e.g., JSON
+        // array self-duplicates like [5, 8, 5]).
+        if txn.has(&key).await? {
+            return Err(crate::corekv::Error::Other(
+                "can not index a doc's field(s) that violates unique index.".to_string(),
+            ));
         }
 
         // Store doc_id as the value

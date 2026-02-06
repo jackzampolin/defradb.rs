@@ -15,7 +15,7 @@ use tracing::{debug, warn};
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
-use crate::mapper::{AggregateType, Filter, OrderBy, OrderCondition, Requestable, Select};
+use crate::mapper::{AggregateType, Field, Filter, OrderBy, OrderCondition, Requestable, Select};
 use crate::plan::{
     IndexScanNode, JoinSide, RelationFilter, ScanNode, SelectNode, TypeJoinMany, TypeJoinOne,
 };
@@ -23,11 +23,13 @@ use crate::planner::PlanNode;
 
 use super::builder::{Planner, MAX_NESTING_DEPTH};
 
-/// Result of applying joins: the updated plan node, document mapping, and aggregate internal keys.
+/// Result of applying joins: the updated plan node, document mapping, aggregate internal keys,
+/// and whether a child index scan provides the parent's ORDER BY.
 type JoinResult = Result<(
     Box<dyn PlanNode>,
     DocumentMapping,
     HashMap<String, (String, String)>,
+    bool, // join_provides_ordering
 )>;
 
 impl Planner {
@@ -49,6 +51,7 @@ impl Planner {
     ) -> JoinResult {
         // Internal keys for aggregate relation data when there's a collision with a relation selection.
         let mut aggregate_internal_keys: HashMap<String, (String, String)> = HashMap::new();
+        let mut join_provides_ordering = false;
 
         // Check recursion depth to prevent stack overflow
         if depth > MAX_NESTING_DEPTH {
@@ -82,6 +85,37 @@ impl Planner {
                     selects_to_process.push((nested_select, None));
                 }
             }
+        }
+
+        // Add synthetic selects for ORDER BY relation fields not already in the selection.
+        // Go's resolveOrderDependencies creates joins for relations referenced in ORDER BY
+        // even when they're not explicitly selected in the query.
+        let mut synthetic_order_selects: Vec<Select> = Vec::new();
+        if let Some(ref order_by) = select.order_by {
+            let already_selected: std::collections::HashSet<&str> = selects_to_process
+                .iter()
+                .map(|(s, _)| s.field.name.as_str())
+                .collect();
+
+            for condition in &order_by.conditions {
+                // Path like ["device", "model"] — first element is the relation field
+                if condition.fields.len() >= 2 {
+                    let relation_name = &condition.fields[0];
+                    if !already_selected.contains(relation_name.as_str()) {
+                        // Check this is actually a relation field
+                        if let Some(field) = parent_collection.field_by_name(relation_name) {
+                            if field.kind.is_relation() {
+                                let mut syn_select = Select::new("");
+                                syn_select.field = Field::new(relation_name);
+                                synthetic_order_selects.push(syn_select);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for syn_select in &synthetic_order_selects {
+            selects_to_process.push((syn_select, None));
         }
 
         // Collect info about selection joins so aggregates can share when compatible.
@@ -1085,12 +1119,129 @@ impl Planner {
                 plan = Box::new(join_many);
             } else {
                 // One-to-one: TypeJoinOne
-                let mut join =
-                    TypeJoinOne::new(plan, child_plan, parent_side, child_side, mapping.clone());
-                if let Some(rel_filter) = relation_filter {
-                    join = join.with_relation_filter(rel_filter);
+                //
+                // Check if we should invert the join for ordering:
+                // When the parent's ORDER BY references a child field with an index,
+                // invert the join so the child's sorted index scan drives iteration.
+                let should_invert_for_ordering = parent_order_for_child.is_some()
+                    && child_uses_index
+                    && relation_filter.is_none(); // Don't invert if there's also a relation filter
+
+                tracing::debug!(
+                    parent_order_for_child_is_some = parent_order_for_child.is_some(),
+                    child_uses_index = child_uses_index,
+                    relation_filter_is_none = relation_filter.is_none(),
+                    should_invert_for_ordering = should_invert_for_ordering,
+                    relation_field_name = %relation_field.name,
+                    "TypeJoinOne: checking ordering inversion"
+                );
+
+                if should_invert_for_ordering {
+                    // Inverted join for ordering: child index scan drives iteration.
+                    // Determine how to look up the parent for each child:
+                    //
+                    // Case 1 (primary-first): Child has FK (e.g., Device._ownerID → User)
+                    //   - Read FK from child doc → direct docID lookup on parent
+                    //
+                    // Case 2 (secondary-first): Parent has FK (e.g., User._deviceID → Device)
+                    //   - Scan parent's FK index for child._docID
+                    let child_has_fk = target_relation_field
+                        .map(|f| f.is_primary)
+                        .unwrap_or(false);
+
+                    if child_has_fk {
+                        // Case 1: Child has FK → use InvertedIndex with docID-based parent lookup.
+                        // The child's FK field (e.g., _ownerID) contains the parent's _docID.
+                        let child_fk_field_name = target_relation_field
+                            .map(|f| schema::CollectionVersion::relation_id_field_name(&f.name))
+                            .unwrap_or_default();
+                        let child_fk_idx = child_scan_mapping
+                            .first_index_of_name(&child_fk_field_name)
+                            .unwrap_or(0);
+
+                        let parent_scan_mapping = plan.document_map().clone();
+                        let parent_col = parent_collection.clone();
+                        let fetcher = self.fetcher.clone().unwrap();
+
+                        let join = TypeJoinOne::new(
+                            plan,
+                            child_plan,
+                            parent_side,
+                            child_side,
+                            mapping.clone(),
+                        )
+                        .with_ordered_inverted_primary(
+                            child_fk_idx,
+                            parent_col,
+                            parent_scan_mapping,
+                            fetcher,
+                        );
+                        plan = Box::new(join);
+                        join_provides_ordering = true;
+                    } else {
+                        // Case 2: Parent has FK → use InvertedIndex with FK index scan on parent.
+                        // Same mechanism as filter-based InvertedIndex.
+                        let parent_fk_field_name =
+                            schema::CollectionVersion::relation_id_field_name(&relation_field.name);
+                        let parent_fk_index = parent_collection.indexes.iter().find(|idx| {
+                            idx.fields
+                                .first()
+                                .map_or(false, |f| f.name == parent_fk_field_name)
+                        });
+
+                        if let Some(fk_index) = parent_fk_index {
+                            let fk_index_name = fk_index.name.clone();
+                            let parent_scan_mapping = plan.document_map().clone();
+                            let parent_col = parent_collection.clone();
+                            let fk_field_index = parent_scan_mapping
+                                .first_index_of_name(&parent_fk_field_name)
+                                .unwrap_or(0);
+                            let fetcher = self.fetcher.clone().unwrap();
+
+                            let join = TypeJoinOne::new(
+                                plan,
+                                child_plan,
+                                parent_side,
+                                child_side,
+                                mapping.clone(),
+                            )
+                            .with_inverted_index(
+                                fk_index_name,
+                                fk_field_index,
+                                parent_col,
+                                parent_scan_mapping,
+                                fetcher,
+                            );
+                            plan = Box::new(join);
+                            join_provides_ordering = true;
+                        } else {
+                            // No FK index on parent → fall back to normal join + OrderByNode
+                            let mut join = TypeJoinOne::new(
+                                plan,
+                                child_plan,
+                                parent_side,
+                                child_side,
+                                mapping.clone(),
+                            );
+                            if let Some(rel_filter) = relation_filter {
+                                join = join.with_relation_filter(rel_filter);
+                            }
+                            plan = Box::new(join);
+                        }
+                    }
+                } else {
+                    let mut join = TypeJoinOne::new(
+                        plan,
+                        child_plan,
+                        parent_side,
+                        child_side,
+                        mapping.clone(),
+                    );
+                    if let Some(rel_filter) = relation_filter {
+                        join = join.with_relation_filter(rel_filter);
+                    }
+                    plan = Box::new(join);
                 }
-                plan = Box::new(join);
             }
         }
 
@@ -1949,7 +2100,7 @@ impl Planner {
             }
         }
 
-        Ok((plan, mapping, aggregate_internal_keys))
+        Ok((plan, mapping, aggregate_internal_keys, join_provides_ordering))
     }
 
     /// Build a scan mapping for join child plans that includes ALL fields at schema indices.

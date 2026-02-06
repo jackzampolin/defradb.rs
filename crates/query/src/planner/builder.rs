@@ -399,14 +399,13 @@ impl Planner {
                     if scan_mapping.first_index_of_name(field_name).is_some() {
                         continue;
                     }
-                    // Find field in collection schema and add to mapping
-                    if let Some((schema_idx, _)) = collection
-                        .fields
-                        .iter()
-                        .enumerate()
-                        .find(|(_, f)| &f.name == field_name)
-                    {
-                        scan_mapping.add(schema_idx, field_name);
+                    // Verify the field exists in the collection schema
+                    if collection.field_by_name(field_name).is_some() {
+                        // Use next_index to avoid collisions with existing mapping positions.
+                        // Using schema_idx would overwrite fields if a schema position
+                        // is already occupied (e.g., _ownerID at schema pos 1 overwriting model).
+                        let next_idx = scan_mapping.next_index();
+                        scan_mapping.add(next_idx, field_name);
                     }
                 }
             }
@@ -744,6 +743,7 @@ impl Planner {
         plan = joins_result.0;
         scan_mapping = joins_result.1;
         aggregate_internal_keys = joins_result.2;
+        let join_provides_ordering = joins_result.3;
 
         // 3b. Apply joins for multi-level relation filter paths where the first relation
         // is NOT in the selection set. If the first relation IS selected, then apply_joins
@@ -847,53 +847,8 @@ impl Planner {
             }
         }
 
-        // 3c. Apply joins for relation fields referenced in order but NOT in selection set or filter.
-        // This allows ordering through relations even when those relations aren't being returned.
-        // Example: Book(order: {author: {age: DESC}}) { name rating }
-        // The `author` relation must be joined for ordering even though it's not selected.
-        if order_has_relations {
-            // Get the names of relation fields already joined from selection or filter
-            let mut already_joined: Vec<&str> = select
-                .fields
-                .iter()
-                .filter_map(|f| {
-                    if let Requestable::Select(s) = f {
-                        Some(s.field.name.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            // Add filter relations that were joined
-            for f in &filter_relation_fields {
-                if !already_joined.contains(&f.as_str()) {
-                    already_joined.push(f.as_str());
-                }
-            }
-
-            // Create joins for order relations not already joined
-            for relation_field_name in &order_relation_fields {
-                if already_joined.contains(&relation_field_name.as_str()) {
-                    continue; // Already joined
-                }
-
-                // Find the relation field in the parent collection
-                let relation_field = match collection.field_by_name(relation_field_name) {
-                    Some(f) if f.kind.is_relation() => f,
-                    _ => continue, // Not a valid relation field
-                };
-
-                let (new_plan, new_mapping) = self.apply_filter_relation_join(
-                    plan,
-                    &collection,
-                    relation_field,
-                    relation_field_name,
-                    scan_mapping.clone(),
-                )?;
-                plan = new_plan;
-                scan_mapping = new_mapping;
-            }
-        }
+        // 3c. ORDER BY relation joins are now handled by apply_joins via synthetic selects,
+        // which also enables join direction inversion for index-based ordering.
 
         // 3d. Apply SelectNode AFTER all joins (matches Go DefraDB plan order).
         // The SelectNode wraps the joined plan and applies scalar filters.
@@ -1237,9 +1192,9 @@ impl Planner {
             }
 
             // 6. Apply order by (after grouping/aggregation)
-            // Skip if index already provides the ordering
+            // Skip if index (own or via join) already provides the ordering
             if let Some(ref order_by) = select.order_by {
-                if !index_provides_ordering {
+                if !index_provides_ordering && !join_provides_ordering {
                     plan = Box::new(OrderByNode::new(
                         plan,
                         order_by.clone(),
@@ -1264,9 +1219,9 @@ impl Planner {
             // not the documents fed to aggregation.
 
             // 5. Apply order by (before aggregates)
-            // Skip if index already provides the ordering
+            // Skip if index (own or via join) already provides the ordering
             if let Some(ref order_by) = select.order_by {
-                if !index_provides_ordering {
+                if !index_provides_ordering && !join_provides_ordering {
                     plan = Box::new(OrderByNode::new(
                         plan,
                         order_by.clone(),

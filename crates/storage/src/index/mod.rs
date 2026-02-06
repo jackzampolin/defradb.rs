@@ -395,14 +395,14 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("constraint violation"),
-            "error should mention constraint violation: {}",
+            err_msg.contains("violates unique index"),
+            "error should mention unique index violation: {}",
             err_msg
         );
     }
 
     #[tokio::test]
-    async fn test_unique_index_allows_same_doc_update() {
+    async fn test_unique_index_rejects_same_doc_duplicate() {
         let store = MemoryStore::new();
         let mut txn = store.new_txn(false).await.unwrap();
 
@@ -411,8 +411,9 @@ mod tests {
 
         index.save(&mut txn, "doc1", &values).await.unwrap();
 
-        // Same value, same doc ID - should work (idempotent)
-        index.save(&mut txn, "doc1", &values).await.unwrap();
+        // Same value, same doc ID - should fail (e.g., JSON array self-duplicates)
+        let result = index.save(&mut txn, "doc1", &values).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -587,13 +588,8 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("constraint violation"),
-            "error should mention constraint violation: {}",
-            err_msg
-        );
-        assert!(
-            err_msg.contains("doc2"),
-            "error should mention conflicting document: {}",
+            err_msg.contains("violates unique index"),
+            "error should mention unique index violation: {}",
             err_msg
         );
     }

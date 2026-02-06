@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::warn;
 
-use crate::document::DocumentMapping;
+use crate::document::{documents_to_plan_docs, DocumentMapping};
 use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
 use crate::mapper::Filter;
@@ -186,6 +186,25 @@ impl TypeJoinOne {
         self
     }
 
+    /// Configure for ordered inverted join (primary-first) mode.
+    ///
+    /// In this mode, the child drives iteration in sorted order (via index scan).
+    /// For each child, the parent is found by reading the child's FK field value
+    /// (which is the parent's _docID) and doing a direct prefix-based lookup.
+    pub fn with_ordered_inverted_primary(
+        mut self,
+        child_fk_index: usize,
+        parent_collection: schema::CollectionVersion,
+        parent_scan_mapping: DocumentMapping,
+        fetcher: Arc<dyn DocFetcher>,
+    ) -> Self {
+        self.direction = JoinDirection::OrderedInvertedPrimary { child_fk_index };
+        self.parent_collection = Some(parent_collection);
+        self.parent_scan_mapping = Some(parent_scan_mapping);
+        self.fetcher = Some(fetcher);
+        self
+    }
+
     /// Returns the direction of this join.
     pub fn direction(&self) -> &JoinDirection {
         &self.direction
@@ -199,8 +218,8 @@ impl TypeJoinOne {
     /// Logs a warning if the FK field has an unexpected type or is missing.
     fn extract_fk(&self, parent_doc: &Doc) -> Option<String> {
         match &self.direction {
-            JoinDirection::InvertedIndex { .. } => {
-                // Not used in inverted index mode (child drives the loop)
+            JoinDirection::InvertedIndex { .. } | JoinDirection::OrderedInvertedPrimary { .. } => {
+                // Not used in inverted index / ordered inverted modes (child drives the loop)
                 None
             }
             JoinDirection::Inverted => {
@@ -285,8 +304,9 @@ impl TypeJoinOne {
                     let fk_value = child_fk_idx.and_then(|idx| child_doc.get(idx).cloned());
                     fk_value.and_then(|v| v.as_str().map(String::from))
                 }
-                JoinDirection::InvertedIndex { .. } => {
-                    // build_child_cache is not called in InvertedIndex mode
+                JoinDirection::InvertedIndex { .. }
+                | JoinDirection::OrderedInvertedPrimary { .. } => {
+                    // build_child_cache is not called in inverted/ordered modes
                     unreachable!()
                 }
             };
@@ -402,6 +422,68 @@ impl TypeJoinOne {
         Ok(false)
     }
 
+    /// Execute one step of the ordered inverted primary join.
+    ///
+    /// In this mode, the child plan (sorted index scan) drives iteration.
+    /// For each child doc, we read its FK field (which contains the parent's _docID),
+    /// then fetch the parent directly by docID using the fetcher.
+    async fn next_ordered_primary(&mut self) -> Result<bool> {
+        let child_fk_index = match &self.direction {
+            JoinDirection::OrderedInvertedPrimary { child_fk_index } => *child_fk_index,
+            _ => unreachable!(),
+        };
+
+        while self.child_plan.next().await? {
+            let child_doc = self.child_plan.value().deep_clone();
+
+            // Read the FK value from the child doc (e.g., _ownerID = parent's docID)
+            let parent_doc_id = match child_doc.get(child_fk_index) {
+                Some(val) => match val.as_str() {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                },
+                None => continue,
+            };
+
+            // Fetch the parent doc by docID
+            let parent_collection = self.parent_collection.as_ref().unwrap();
+            let parent_mapping = self.parent_scan_mapping.as_ref().unwrap();
+            let fetcher = self.fetcher.as_ref().unwrap();
+
+            let result = fetcher
+                .get_by_ids(&parent_collection.name, &[parent_doc_id])
+                .await?;
+
+            let parent_docs = documents_to_plan_docs(result.docs(), parent_mapping)?;
+
+            // Track parent lookup metrics (Go counts this as child metrics)
+            self.go_child_metrics.iterations += 1;
+            if let Some(parent) = parent_docs.first() {
+                self.go_child_metrics.doc_fetches += 1;
+                self.go_child_metrics.field_fetches += parent.stored_field_count as u64;
+            }
+
+            if parent_docs.is_empty() {
+                continue;
+            }
+
+            let mut parent_doc = parent_docs.into_iter().next().unwrap();
+
+            // Apply relation filter if present
+            if let Some(ref rel_filter) = self.relation_filter {
+                if !self.check_relation_filter(&Some(child_doc.deep_clone()), rel_filter)? {
+                    continue;
+                }
+            }
+
+            self.merge_child(&mut parent_doc, Some(child_doc));
+            self.current_doc = parent_doc;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
     /// Merge child document into parent at the relation field index.
     ///
     /// For inverted joins (secondary side), this also populates the parent's
@@ -431,7 +513,9 @@ impl TypeJoinOne {
         // secondary side's relation ID is dynamically populated at query time.
         if matches!(
             self.direction,
-            JoinDirection::Inverted | JoinDirection::InvertedIndex { .. }
+            JoinDirection::Inverted
+                | JoinDirection::InvertedIndex { .. }
+                | JoinDirection::OrderedInvertedPrimary { .. }
         ) {
             let rel_id_field_name = schema::CollectionVersion::relation_id_field_name(
                 &self.parent_side.relation_field().name,
@@ -510,9 +594,12 @@ impl PlanNode for TypeJoinOne {
         self.go_child_metrics.reset();
         self.docs_to_yield.clear();
 
-        if matches!(self.direction, JoinDirection::InvertedIndex { .. }) {
-            // InvertedIndex mode: only init the child plan (index scan on child).
-            // Parent lookups happen per-child in next_inverted_index().
+        if matches!(
+            self.direction,
+            JoinDirection::InvertedIndex { .. } | JoinDirection::OrderedInvertedPrimary { .. }
+        ) {
+            // Inverted/ordered mode: only init the child plan (index scan on child).
+            // Parent lookups happen per-child in next_inverted_index() / next_ordered_primary().
             self.child_plan.init().await?;
             self.child_plan.start().await?;
             // Capture child's index fetches from init (the initial index scan)
@@ -527,7 +614,10 @@ impl PlanNode for TypeJoinOne {
     }
 
     async fn start(&mut self) -> Result<()> {
-        if matches!(self.direction, JoinDirection::InvertedIndex { .. }) {
+        if matches!(
+            self.direction,
+            JoinDirection::InvertedIndex { .. } | JoinDirection::OrderedInvertedPrimary { .. }
+        ) {
             // Child plan already started in init()
             Ok(())
         } else {
@@ -547,6 +637,9 @@ impl PlanNode for TypeJoinOne {
 
         if matches!(self.direction, JoinDirection::InvertedIndex { .. }) {
             return self.next_inverted_index().await;
+        }
+        if matches!(self.direction, JoinDirection::OrderedInvertedPrimary { .. }) {
+            return self.next_ordered_primary().await;
         }
 
         loop {
@@ -610,8 +703,11 @@ impl PlanNode for TypeJoinOne {
     }
 
     async fn close(&mut self) -> Result<()> {
-        if matches!(self.direction, JoinDirection::InvertedIndex { .. }) {
-            // InvertedIndex mode: child_plan is still open, parent_plan was never used
+        if matches!(
+            self.direction,
+            JoinDirection::InvertedIndex { .. } | JoinDirection::OrderedInvertedPrimary { .. }
+        ) {
+            // Inverted/ordered modes: child_plan is still open, parent_plan was never used
             self.child_plan.close().await?;
         } else {
             self.parent_plan.close().await?;
@@ -643,7 +739,9 @@ impl PlanNode for TypeJoinOne {
         // direction: primary or secondary (Go uses "secondary" not "inverted")
         let direction = match self.direction {
             JoinDirection::Primary { .. } => "primary",
-            JoinDirection::Inverted | JoinDirection::InvertedIndex { .. } => "secondary",
+            JoinDirection::Inverted
+            | JoinDirection::InvertedIndex { .. }
+            | JoinDirection::OrderedInvertedPrimary { .. } => "secondary",
         };
         obj.insert("direction".to_string(), serde_json::json!(direction));
 
@@ -756,16 +854,19 @@ impl PlanNode for TypeJoinOne {
             serde_json::json!(self.exec_info.iterations),
         );
 
-        if matches!(self.direction, JoinDirection::InvertedIndex { .. }) {
-            // InvertedIndex mode: child index scan is the "root" scanNode,
-            // parent FK lookups are the "subType" scanNode.
+        if matches!(
+            self.direction,
+            JoinDirection::InvertedIndex { .. } | JoinDirection::OrderedInvertedPrimary { .. }
+        ) {
+            // Inverted/ordered modes: child index scan is the "root" scanNode,
+            // parent lookups are the "subType" scanNode.
             let child_execute = self.child_plan.explain_execute();
             if let Some(child_obj) = child_execute.as_object() {
                 for (key, value) in child_obj {
                     obj.insert(key.clone(), value.clone());
                 }
             }
-            // Parent FK lookup metrics accumulated per-child
+            // Parent lookup metrics accumulated per-child
             obj.insert(
                 "subTypeScanNode".to_string(),
                 self.go_child_metrics.to_json(),

@@ -553,17 +553,21 @@ pub fn filter_to_index_scan(
 
         match cond.op {
             FilterOp::Eq => {
-                if let ConditionValue::Single(v) = &cond.value {
-                    has_eq = true;
-                    eq_value = Some(v.clone());
-                    eq_json_path = cond.json_path.clone();
+                if !has_eq {
+                    if let ConditionValue::Single(v) = &cond.value {
+                        has_eq = true;
+                        eq_value = Some(v.clone());
+                        eq_json_path = cond.json_path.clone();
+                    }
                 }
             }
             FilterOp::In => {
-                if let ConditionValue::Multiple(vs) = &cond.value {
-                    has_in = true;
-                    in_values = Some(vs.clone());
-                    in_json_path = cond.json_path.clone();
+                if !has_in {
+                    if let ConditionValue::Multiple(vs) = &cond.value {
+                        has_in = true;
+                        in_values = Some(vs.clone());
+                        in_json_path = cond.json_path.clone();
+                    }
                 }
             }
             FilterOp::Gt => {
@@ -770,12 +774,18 @@ pub fn filter_to_index_scan(
                 Bound::Exclusive(wrap_value_for_json_path(v, range_json_path.as_ref()))
             }
             Bound::Unbounded => {
-                // For JSON paths, use PathMin to constrain lower bound
+                // For JSON paths with non-empty path, use PathMin to constrain lower bound.
+                // For empty paths (top-level JSON), leave unbounded to match Go behavior:
+                // Go scans from value to end of entire index, counting all keys.
                 if let Some(path) = &range_json_path {
-                    Bound::Inclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
-                        path.clone(),
-                        JsonScalarValue::PathMin,
-                    )))
+                    if !path.is_empty() {
+                        Bound::Inclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
+                            path.clone(),
+                            JsonScalarValue::PathMin,
+                        )))
+                    } else {
+                        Bound::Unbounded
+                    }
                 } else {
                     Bound::Unbounded
                 }
@@ -789,12 +799,17 @@ pub fn filter_to_index_scan(
                 Bound::Exclusive(wrap_value_for_json_path(v, range_json_path.as_ref()))
             }
             Bound::Unbounded => {
-                // For JSON paths, use PathMax to constrain upper bound
+                // For JSON paths with non-empty path, use PathMax to constrain upper bound.
+                // For empty paths (top-level JSON), leave unbounded to match Go behavior.
                 if let Some(path) = &range_json_path {
-                    Bound::Exclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
-                        path.clone(),
-                        JsonScalarValue::PathMax,
-                    )))
+                    if !path.is_empty() {
+                        Bound::Exclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
+                            path.clone(),
+                            JsonScalarValue::PathMax,
+                        )))
+                    } else {
+                        Bound::Unbounded
+                    }
                 } else {
                     Bound::Unbounded
                 }
@@ -808,19 +823,27 @@ pub fn filter_to_index_scan(
         }
     } else if has_scan_all {
         // Full index scan with residual filter (for _ne, _like, etc.)
-        // For JSON fields, constrain the scan to the specific path
+        // For JSON fields with non-empty path, constrain scan to that path.
+        // For empty path (top-level JSON), use full prefix scan to match Go.
         if let Some(path) = &range_json_path {
-            IndexScanType::RangeScan {
-                prefix_values: vec![],
-                lower: Bound::Inclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
-                    path.clone(),
-                    JsonScalarValue::PathMin,
-                ))),
-                upper: Bound::Exclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
-                    path.clone(),
-                    JsonScalarValue::PathMax,
-                ))),
-                reverse,
+            if !path.is_empty() {
+                IndexScanType::RangeScan {
+                    prefix_values: vec![],
+                    lower: Bound::Inclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
+                        path.clone(),
+                        JsonScalarValue::PathMin,
+                    ))),
+                    upper: Bound::Exclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
+                        path.clone(),
+                        JsonScalarValue::PathMax,
+                    ))),
+                    reverse,
+                }
+            } else {
+                IndexScanType::PrefixScan {
+                    prefix_values: vec![],
+                    reverse,
+                }
             }
         } else {
             IndexScanType::PrefixScan {
