@@ -988,22 +988,28 @@ impl<S: Store> crate::database::DB<S> {
 
         txn.commit().await?;
 
-        // Update the process-wide cache
-        let mut cache = self.collections.write().map_err(|e| {
-            tracing::error!(
-                error = ?e,
-                version_id = %version_id,
-                "Collection cache lock poisoned during set_active_collection_version"
-            );
-            Error::CacheUpdateFailedAfterCommit(name.clone())
-        })?;
-        cache.insert(name.clone(), Collection::new(target_schema));
+        // Update the process-wide cache (scoped to drop lock before reindex)
+        {
+            let mut cache = self.collections.write().map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    version_id = %version_id,
+                    "Collection cache lock poisoned during set_active_collection_version"
+                );
+                Error::CacheUpdateFailedAfterCommit(name.clone())
+            })?;
+            cache.insert(name.clone(), Collection::new(target_schema));
+        }
 
         tracing::info!(
             collection_name = %name,
             version_id = %version_id,
             "Set active collection version"
         );
+
+        // After switching the active version, rebuild indexes with migrated values
+        // if the new version's history chain contains any migrations.
+        self.reindex_collection_with_migrations(&name).await?;
 
         Ok(())
     }

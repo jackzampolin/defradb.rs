@@ -130,14 +130,35 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     }
 
     /// Convert a LensDoc back to a Document.
+    ///
+    /// LensDoc values are serde_json::Value. We convert primitive JSON types
+    /// to native NormalValues so they match the schema's expected types
+    /// (e.g., Bool instead of Json(Bool)).
     fn lens_doc_to_doc(lens_doc: LensDoc, original_doc: &Document) -> Document {
+        use document::NormalValue;
+
         let mut doc = Document::new();
         if let Some(id) = original_doc.id() {
             doc.set_id(id.clone());
         }
         for (field_name, value) in lens_doc {
             if field_name != DOC_ID_FIELD {
-                doc.set(&field_name, value);
+                let normal = match value {
+                    serde_json::Value::Null => NormalValue::Null,
+                    serde_json::Value::Bool(b) => NormalValue::Bool(b),
+                    serde_json::Value::Number(ref n) => {
+                        if let Some(i) = n.as_i64() {
+                            NormalValue::Int(i)
+                        } else if let Some(f) = n.as_f64() {
+                            NormalValue::Float64(f)
+                        } else {
+                            NormalValue::Json(value)
+                        }
+                    }
+                    serde_json::Value::String(s) => NormalValue::String(s),
+                    other => NormalValue::Json(other),
+                };
+                doc.set(&field_name, normal);
             }
         }
         doc

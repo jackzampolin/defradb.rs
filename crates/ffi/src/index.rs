@@ -184,6 +184,14 @@ pub unsafe extern "C" fn create_index(
             .await
             .map_err(|e| format!("failed to reload cache: {}", e))?;
 
+        // If the collection has migrations, rebuild the index with migrated values.
+        // The initial bulk_index above uses raw document values, but if a lens migration
+        // exists, the index should contain migrated values for the active version.
+        database
+            .reindex_collection_with_migrations(&collection_name_str)
+            .await
+            .map_err(|e| format!("failed to reindex after migration: {}", e))?;
+
         // Return the created index description
         let json = serde_json::to_string(&index_desc)
             .map_err(|e| format!("failed to serialize result: {}", e))?;

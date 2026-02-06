@@ -1208,20 +1208,33 @@ impl<S: Store> crate::database::DB<S> {
         }
 
         // Update cache based on which version is active
-        let mut cache = self.collections.write().map_err(|e| {
-            tracing::error!(
-                error = ?e,
-                collection_name = %collection_name,
-                "Collection cache lock poisoned during patch_collection update"
-            );
-            Error::CacheUpdateFailedAfterCommit(collection_name.to_string())
-        })?;
-        if new_schema.is_active {
-            // New version is active - cache it under the actual collection name
-            // (not collection_name, which might be a version_id for branching patches)
-            cache.insert(actual_name.clone(), Collection::new(new_schema.clone()));
+        {
+            let mut cache = self.collections.write().map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    collection_name = %collection_name,
+                    "Collection cache lock poisoned during patch_collection update"
+                );
+                Error::CacheUpdateFailedAfterCommit(collection_name.to_string())
+            })?;
+            if new_schema.is_active {
+                // New version is active - cache it under the actual collection name
+                // (not collection_name, which might be a version_id for branching patches)
+                cache.insert(actual_name.clone(), Collection::new(new_schema.clone()));
+            }
+            // If new version is inactive, old version stays in cache (already there)
         }
-        // If new version is inactive, old version stays in cache (already there)
+
+        // After switching active versions, reindex if the new version's history has migrations
+        if new_schema.is_active {
+            if let Err(e) = self.maybe_reindex_on_version_switch(&actual_name).await {
+                tracing::warn!(
+                    error = %e,
+                    collection = %actual_name,
+                    "Failed to reindex after version switch"
+                );
+            }
+        }
 
         Ok(new_schema)
     }

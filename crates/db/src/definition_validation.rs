@@ -457,14 +457,18 @@ fn validate_sources_not_redefined(
     errs
 }
 
-/// Matches Go's validateSourceBelongsToHost.
+/// Matches Go's validateCollectionSourceFromSameCollection.
 /// The PreviousVersion source must point to a version belonging to the same root collection.
+/// Skips collections with empty names (orphan placeholders), matching Go's behavior.
 fn validate_source_belongs_to_host(
     new_state: &DefinitionState,
     _old_state: &DefinitionState,
 ) -> Vec<String> {
     let mut errs = Vec::new();
     for col in &new_state.collections {
+        if col.name.is_empty() {
+            continue;
+        }
         if let Some(ref prev) = col.previous_version {
             if !prev.source_collection_id.is_empty() {
                 // Look up the source version to check its collection_id
