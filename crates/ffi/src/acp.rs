@@ -555,20 +555,43 @@ pub unsafe extern "C" fn add_dac_policy(
         return FfiResult::error(e);
     }
 
-    // Step 5: Store with Go-compatible ID generation
-    let result = NODES
-        .get(node_ptr, |state| {
-            let policy_id = state.policy_store.add_policy(&policy_str, &parsed);
-            serde_json::json!({
-                "PolicyID": policy_id
-            })
-            .to_string()
-        })
-        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string());
+    // Step 5: Store policy - route through SourceHub when configured, else local
+    let sh_acp = match NODES.get(node_ptr, |state| state.sourcehub_acp.clone()) {
+        Some(opt) => opt,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
+    if let Some(sh_acp) = sh_acp {
+        // SourceHub mode: submit MsgCreatePolicy transaction
+        let result = rt.block_on(async {
+            let tx_hash = sh_acp
+                .add_policy(&identity_str, &policy_str)
+                .await
+                .map_err(|e| format!("SourceHub create policy failed: {}", e))?;
+            Ok::<String, String>(
+                serde_json::json!({ "PolicyID": tx_hash }).to_string(),
+            )
+        });
+        match result {
+            Ok(json) => FfiResult::success(json),
+            Err(e) => FfiResult::error(e),
+        }
+    } else {
+        // Local mode: Go-compatible ID generation
+        let result = NODES
+            .get(node_ptr, |state| {
+                let policy_id = state.policy_store.add_policy(&policy_str, &parsed);
+                serde_json::json!({
+                    "PolicyID": policy_id
+                })
+                .to_string()
+            })
+            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string());
+
+        match result {
+            Ok(json) => FfiResult::success(json),
+            Err(e) => FfiResult::error(e),
+        }
     }
 }
 

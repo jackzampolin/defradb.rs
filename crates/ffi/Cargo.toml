@@ -48,6 +48,7 @@ query = { path = "../query" }
 schema = { path = "../schema" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
+sourcehub = { path = "../sourcehub" }
 lens = { path = "../lens" }
 p2p = { path = "../p2p" }
 blockstore = { path = "../blockstore" }

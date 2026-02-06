@@ -143,6 +143,16 @@ pub struct NodeInitOptions {
     pub signing_private_key: *const u8,
     /// Length of signing_private_key in bytes. 0 if null.
     pub signing_private_key_len: usize,
+    /// SourceHub gRPC/LCD address (null = use local ACP).
+    pub sourcehub_grpc_address: *const c_char,
+    /// SourceHub CometBFT RPC address.
+    pub sourcehub_comet_rpc_address: *const c_char,
+    /// SourceHub chain ID (e.g., "sourcehub-test").
+    pub sourcehub_chain_id: *const c_char,
+    /// SourceHub secp256k1 signer key bytes (raw 32-byte private key).
+    pub sourcehub_signer_key: *const u8,
+    /// Length of sourcehub_signer_key. 0 if null.
+    pub sourcehub_signer_key_len: usize,
 }
 
 impl Default for NodeInitOptions {
@@ -154,6 +164,11 @@ impl Default for NodeInitOptions {
             signing_key_type: ptr::null(),
             signing_private_key: ptr::null(),
             signing_private_key_len: 0,
+            sourcehub_grpc_address: ptr::null(),
+            sourcehub_comet_rpc_address: ptr::null(),
+            sourcehub_chain_id: ptr::null(),
+            sourcehub_signer_key: ptr::null(),
+            sourcehub_signer_key_len: 0,
         }
     }
 }
