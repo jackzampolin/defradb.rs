@@ -12,7 +12,24 @@ use tracing::{debug, instrument, warn};
 
 use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
-use crate::mapper::{AggregateType, Filter, OrderBy, OrderCondition, OrderDirection, Requestable, Select};
+use crate::mapper::{
+    AggregateType, Filter, OrderBy, OrderCondition, OrderDirection, Requestable, Select,
+};
+
+/// Format an order condition as a Go-style value string for error messages.
+///
+/// For `fields: ["articles", "pages"], direction: Asc`, produces `{articles: {pages: ASC}}`.
+fn format_order_value(condition: &OrderCondition) -> String {
+    let dir = match condition.direction {
+        OrderDirection::Asc => "ASC",
+        OrderDirection::Desc => "DESC",
+    };
+    let mut result = dir.to_string();
+    for field in condition.fields.iter().rev() {
+        result = format!("{{{}: {}}}", field, result);
+    }
+    result
+}
 use crate::plan::groupby::ChildSelectMeta;
 use crate::plan::{
     AllDocsNode, GroupAlias, GroupByNode, IndexScanNode, InnerAggregateDef, LimitNode, OrderByNode,
@@ -102,23 +119,6 @@ impl Planner {
             acp: None,
             identity_did: None,
         }
-    }
-
-    /// Format an order condition as a Go-style value string.
-    ///
-    /// For `fields: ["articles", "pages"], direction: Asc`, produces `{articles: {pages: ASC}}`.
-    fn format_order_condition(condition: &OrderCondition) -> String {
-        let dir = match condition.direction {
-            OrderDirection::Asc => "ASC",
-            OrderDirection::Desc => "DESC",
-        };
-
-        // Build from innermost to outermost
-        let mut result = dir.to_string();
-        for field in condition.fields.iter().rev() {
-            result = format!("{{{}: {}}}", field, result);
-        }
-        result
     }
 
     /// Set a document fetcher for on-demand data loading.
@@ -231,18 +231,24 @@ impl Planner {
             .unwrap_or_default();
         let order_has_relations = !order_relation_fields.is_empty();
 
+        // One-to-one relation ordering (e.g., User(order: {device: {model: ASC}})) is handled
+        // by the ordered inverted join in apply_joins().
+        // One-to-many (array) relation ordering is rejected — ambiguous which child to sort by.
         if order_has_relations {
             if let Some(ref order_by) = select.order_by {
-                // Find the first relation condition and build Go-compatible error
                 for condition in &order_by.conditions {
                     if condition.fields.len() > 1 {
-                        let relation_field = &condition.fields[0];
-                        let order_value_str = Self::format_order_condition(condition);
-                        return Err(QueryError::parse(format!(
-                            "Argument \"order\" has invalid value {}.\n\
-                             In field \"{}\": Unknown field.",
-                            order_value_str, relation_field
-                        )));
+                        let relation_name = &condition.fields[0];
+                        if let Some(field) = collection.field_by_name(relation_name) {
+                            if field.kind.is_array() {
+                                let order_value_str = format_order_value(condition);
+                                return Err(QueryError::parse(format!(
+                                    "Argument \"order\" has invalid value {}.\n\
+                                     In field \"{}\": Unknown field.",
+                                    order_value_str, relation_name
+                                )));
+                            }
+                        }
                     }
                 }
             }

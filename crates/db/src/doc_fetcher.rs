@@ -305,8 +305,10 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                         })?;
                         all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
                     } else {
-                        let mut iter =
-                            index.get(&datastore, std::slice::from_ref(value)).await.map_err(|e| {
+                        let mut iter = index
+                            .get(&datastore, std::slice::from_ref(value))
+                            .await
+                            .map_err(|e| {
                                 query::error::QueryError::execution(format!("index error: {}", e))
                             })?;
                         let entries = iter.collect_all().await.map_err(|e| {

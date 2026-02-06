@@ -326,7 +326,12 @@ impl TypeJoinOne {
 
         // Capture child plan's execution info before closing
         self.child_exec_info = self.child_plan.exec_info();
-        self.go_child_metrics.index_fetches = self.child_exec_info.indexes_fetched;
+        // For JoinDirection::Primary, set initial index_fetches from child scan.
+        // For Inverted, the child scan's index fetches go in the child plan's own metrics,
+        // NOT in go_child_metrics (which tracks per-parent lookups only).
+        if matches!(self.direction, JoinDirection::Primary { .. }) {
+            self.go_child_metrics.index_fetches = self.child_exec_info.indexes_fetched;
+        }
 
         self.child_plan.close().await?;
         Ok(())
@@ -673,6 +678,10 @@ impl PlanNode for TypeJoinOne {
                         self.go_child_metrics.iterations += 2;
                         self.go_child_metrics.index_fetches += 1;
                     }
+                    // InvertedIndex and OrderedInvertedPrimary early-return
+                    // via next_inverted_index() / next_ordered_primary() above
+                    JoinDirection::InvertedIndex { .. }
+                    | JoinDirection::OrderedInvertedPrimary { .. } => unreachable!(),
                 }
                 self.go_child_metrics.doc_fetches += 1;
                 if let Some(ref doc) = child_doc {

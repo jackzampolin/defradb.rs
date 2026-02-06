@@ -962,10 +962,11 @@ pub async fn read_latest_composite_block<S: storage::corekv::Store>(
         .headstore()
         .map_err(|e| format!("Failed to get headstore: {}", e))?;
 
-    let composite_head = get_field_head(&headstore, doc_id, "C").await?;
+    let composite_heads = get_all_field_heads(&headstore, doc_id, "C").await?;
 
-    let composite_cid = composite_head
-        .cid
+    let composite_cid = composite_heads
+        .first()
+        .map(|entry| entry.cid)
         .ok_or_else(|| format!("No composite head found for doc {}", doc_id))?;
 
     let blockstore = txn

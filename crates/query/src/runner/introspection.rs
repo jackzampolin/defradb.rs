@@ -611,17 +611,33 @@ fn build_order_input_type(
         InputValue::new("_docID", TypeRef::named("Ordering")),
     ));
 
-    // Add order fields for each collection field (scalars and scalar arrays only).
-    // Relation fields are excluded — Go rejects ordering by related child fields
-    // (e.g., `Author(order: {articles: {name: ASC}})` produces a validation error).
+    // Add order fields for each collection field.
+    // One-to-one relation fields reference the related collection's OrderArg type to allow
+    // nested ordering like `User(order: {device: {model: ASC}})`.
+    // One-to-many relations (arrays) are excluded — ordering by an array relation is ambiguous.
     for field in &collection.fields {
-        if field.name == "_docID" || field.kind.is_relation() {
+        if field.name == "_docID" {
             continue;
         }
-        fields.push((
-            field.name.clone(),
-            InputValue::new(&field.name, TypeRef::named("Ordering")),
-        ));
+        if field.kind.is_relation() && !field.kind.is_array() {
+            // One-to-one relation: reference the related collection's OrderArg type
+            if let Some(related_collection_id) = field.kind.relation_collection_id() {
+                if let Some(related_name) = _id_to_name.get(related_collection_id) {
+                    fields.push((
+                        field.name.clone(),
+                        InputValue::new(
+                            &field.name,
+                            TypeRef::named(format!("{}OrderArg", related_name)),
+                        ),
+                    ));
+                }
+            }
+        } else if !field.kind.is_relation() {
+            fields.push((
+                field.name.clone(),
+                InputValue::new(&field.name, TypeRef::named("Ordering")),
+            ));
+        }
     }
 
     // Sort alphabetically to match Go introspection output
