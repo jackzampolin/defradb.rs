@@ -108,18 +108,14 @@ impl Filter {
                         if let Some(obj) = item.as_object() {
                             if let Some(rel_value) = obj.get(relation_field) {
                                 if let Some(rel_obj) = rel_value.as_object() {
-                                    let is_nested = rel_obj
-                                        .keys()
-                                        .any(|k| FilterOp::parse(k).is_none());
+                                    let is_nested =
+                                        rel_obj.keys().any(|k| FilterOp::parse(k).is_none());
                                     if is_nested {
-                                        let nested_conditions: HashMap<String, JsonValue> =
-                                            rel_obj
-                                                .iter()
-                                                .map(|(k, v)| (k.clone(), v.clone()))
-                                                .collect();
-                                        return Some(Filter::from_conditions(
-                                            nested_conditions,
-                                        ));
+                                        let nested_conditions: HashMap<String, JsonValue> = rel_obj
+                                            .iter()
+                                            .map(|(k, v)| (k.clone(), v.clone()))
+                                            .collect();
+                                        return Some(Filter::from_conditions(nested_conditions));
                                     }
                                 }
                             }
@@ -281,9 +277,7 @@ impl Filter {
                         if let Some(obj) = item.as_object() {
                             let nested: HashMap<String, JsonValue> =
                                 obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                            if let Some(filter) =
-                                Self::extract_at_path_recursive(&nested, path)
-                            {
+                            if let Some(filter) = Self::extract_at_path_recursive(&nested, path) {
                                 return Some(filter);
                             }
                         }

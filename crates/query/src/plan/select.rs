@@ -130,7 +130,7 @@ impl SelectNode {
 
         // Check if root contains another typeIndexJoin (indicating a chain)
         let root_obj = root.as_object()?;
-        root_obj.get("typeIndexJoin")?; // Single join if absent, no parallelNode needed
+        root_obj.get("typeIndexJoin")?;
 
         // Walk the chain collecting all joins and finding the innermost root
         let mut joins_data: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
@@ -187,7 +187,7 @@ impl SelectNode {
         let join_content = obj.get("typeIndexJoin")?.as_object()?;
 
         // Check if this join contains another typeIndexJoin (indicating a chain)
-        join_content.get("typeIndexJoin")?; // Single join if absent, no parallelNode needed
+        join_content.get("typeIndexJoin")?;
 
         // Walk the chain collecting all joins
         let mut joins_data: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();

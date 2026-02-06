@@ -428,8 +428,10 @@ pub unsafe extern "C" fn new_node_with_p2p(
 
         // Create mutator with P2P broadcast support
         // BroadcastMutator handles push_to_replicators + GossipSub broadcast with retry
-        let mutator: Arc<dyn query::DocMutator> =
-            Arc::new(db::BroadcastMutator::new(database.clone(), coordinator.clone()));
+        let mutator: Arc<dyn query::DocMutator> = Arc::new(db::BroadcastMutator::new(
+            database.clone(),
+            coordinator.clone(),
+        ));
 
         // Create ACP store
         let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());

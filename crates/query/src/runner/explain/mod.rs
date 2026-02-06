@@ -999,10 +999,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // Check if this object contains scanNode
             if let Some(scan_node) = obj.get_mut("scanNode") {
                 if let Some(scan_obj) = scan_node.as_object_mut() {
-                    scan_obj.insert(
-                        "iterations".to_string(),
-                        serde_json::json!(iterations),
-                    );
+                    scan_obj.insert("iterations".to_string(), serde_json::json!(iterations));
                     scan_obj.insert(
                         "docFetches".to_string(),
                         serde_json::json!(doc_fetches as u64),

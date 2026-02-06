@@ -1334,7 +1334,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         Ok(JsonValue::Array(results))
     }
 
-    ///
     /// Top-level aggregates compute a single value over all documents in a collection.
     /// Unlike regular collection queries that return an array, top-level aggregates
     /// return a single value (the computed aggregate).

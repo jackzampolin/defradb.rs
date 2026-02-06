@@ -553,33 +553,31 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         for item in &reply.results {
             for head_bytes in &item.heads {
                 match Cid::try_from(head_bytes.as_slice()) {
-                    Ok(cid) => {
-                        match self.manager.blockstore().has(&cid).await {
-                            Ok(true) => {
-                                tracing::debug!(
-                                    cid = %cid,
-                                    doc_id = %item.doc_id,
-                                    "Already have block, skipping fetch"
-                                );
-                            }
-                            Ok(false) => {
-                                tracing::debug!(
-                                    cid = %cid,
-                                    doc_id = %item.doc_id,
-                                    "Need to fetch block via Bitswap"
-                                );
-                                cids_to_fetch.push((cid, item.doc_id.clone()));
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    cid = %cid,
-                                    error = %e,
-                                    "Failed to check if block exists"
-                                );
-                                cids_to_fetch.push((cid, item.doc_id.clone()));
-                            }
+                    Ok(cid) => match self.manager.blockstore().has(&cid).await {
+                        Ok(true) => {
+                            tracing::debug!(
+                                cid = %cid,
+                                doc_id = %item.doc_id,
+                                "Already have block, skipping fetch"
+                            );
                         }
-                    }
+                        Ok(false) => {
+                            tracing::debug!(
+                                cid = %cid,
+                                doc_id = %item.doc_id,
+                                "Need to fetch block via Bitswap"
+                            );
+                            cids_to_fetch.push((cid, item.doc_id.clone()));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                cid = %cid,
+                                error = %e,
+                                "Failed to check if block exists"
+                            );
+                            cids_to_fetch.push((cid, item.doc_id.clone()));
+                        }
+                    },
                     Err(e) => {
                         tracing::warn!(
                             doc_id = %item.doc_id,

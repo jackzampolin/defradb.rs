@@ -1044,11 +1044,10 @@ impl Planner {
                                 )
                         })?;
                         // Check if any index covers this FK field
-                        target_collection.indexes.iter().find(|idx| {
-                            idx.fields
-                                .first()
-                                .map_or(false, |f| f.name == fk_field.name)
-                        })
+                        target_collection
+                            .indexes
+                            .iter()
+                            .find(|idx| idx.fields.first().is_some_and(|f| f.name == fk_field.name))
                     })
                     .is_some();
 
@@ -1145,9 +1144,7 @@ impl Planner {
                     //
                     // Case 2 (secondary-first): Parent has FK (e.g., User._deviceID → Device)
                     //   - Scan parent's FK index for child._docID
-                    let child_has_fk = target_relation_field
-                        .map(|f| f.is_primary)
-                        .unwrap_or(false);
+                    let child_has_fk = target_relation_field.map(|f| f.is_primary).unwrap_or(false);
 
                     if child_has_fk {
                         // Case 1: Child has FK → use InvertedIndex with docID-based parent lookup.
@@ -1186,7 +1183,7 @@ impl Planner {
                         let parent_fk_index = parent_collection.indexes.iter().find(|idx| {
                             idx.fields
                                 .first()
-                                .map_or(false, |f| f.name == parent_fk_field_name)
+                                .is_some_and(|f| f.name == parent_fk_field_name)
                         });
 
                         if let Some(fk_index) = parent_fk_index {
@@ -1416,7 +1413,7 @@ impl Planner {
                         parent_collection.indexes.iter().find(|idx| {
                             idx.fields
                                 .first()
-                                .map_or(false, |f| f.name == parent_fk_field_name)
+                                .is_some_and(|f| f.name == parent_fk_field_name)
                         })
                     } else {
                         None
@@ -2100,7 +2097,12 @@ impl Planner {
             }
         }
 
-        Ok((plan, mapping, aggregate_internal_keys, join_provides_ordering))
+        Ok((
+            plan,
+            mapping,
+            aggregate_internal_keys,
+            join_provides_ordering,
+        ))
     }
 
     /// Build a scan mapping for join child plans that includes ALL fields at schema indices.

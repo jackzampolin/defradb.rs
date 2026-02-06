@@ -290,9 +290,7 @@ impl Planner {
                             .collect();
 
                         // If nested_field is not in the selected fields, it's ordering-only
-                        if !nested_selection_fields
-                            .contains(&nested_field_name)
-                        {
+                        if !nested_selection_fields.contains(&nested_field_name) {
                             result.push((relation_field_name.clone(), nested_field_name.clone()));
                         }
                     }
@@ -1300,11 +1298,11 @@ impl Planner {
         // because the relation join already narrows the parent set.
         // This check uses schema field_kind.is_relation() to avoid confusing JSON field
         // access ({custom: {title: ...}}) with relation traversal ({devices: {model: ...}}).
-        let has_relation_filter = select.filter.as_ref().map_or(false, |f| {
+        let has_relation_filter = select.filter.as_ref().is_some_and(|f| {
             f.conditions().keys().any(|field_name| {
                 collection
                     .field_by_name(field_name)
-                    .map_or(false, |field| field.kind.is_relation())
+                    .is_some_and(|field| field.kind.is_relation())
             })
         });
 
