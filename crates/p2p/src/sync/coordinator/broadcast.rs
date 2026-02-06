@@ -7,8 +7,8 @@ use super::SyncCoordinator;
 use crate::error::Result;
 use crate::message::PushLogRequest;
 use crate::signing::sign_message;
-use crate::sync::BroadcastResult;
 use crate::sync::broadcaster::Broadcaster;
+use crate::sync::BroadcastResult;
 
 impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// Broadcast a local update to the network.

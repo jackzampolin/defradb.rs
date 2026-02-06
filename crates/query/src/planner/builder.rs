@@ -12,7 +12,9 @@ use tracing::{debug, instrument, warn};
 
 use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
-use crate::mapper::{AggregateType, Filter, OrderBy, OrderCondition, OrderDirection, Requestable, Select};
+use crate::mapper::{
+    AggregateType, Filter, OrderBy, OrderCondition, OrderDirection, Requestable, Select,
+};
 use crate::plan::groupby::ChildSelectMeta;
 use crate::plan::{
     AllDocsNode, GroupAlias, GroupByNode, IndexScanNode, InnerAggregateDef, LimitNode, OrderByNode,
@@ -290,9 +292,7 @@ impl Planner {
                             .collect();
 
                         // If nested_field is not in the selected fields, it's ordering-only
-                        if !nested_selection_fields
-                            .contains(&nested_field_name)
-                        {
+                        if !nested_selection_fields.contains(&nested_field_name) {
                             result.push((relation_field_name.clone(), nested_field_name.clone()));
                         }
                     }

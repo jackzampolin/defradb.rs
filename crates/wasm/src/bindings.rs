@@ -26,7 +26,6 @@ pub struct ClientConfig {
     pub db_name: Option<String>,
 }
 
-
 /// Collection info returned to JavaScript.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CollectionInfo {
