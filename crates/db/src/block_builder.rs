@@ -288,26 +288,24 @@ fn decode_priority_varint(buf: &[u8]) -> u64 {
     n
 }
 
-/// Information about existing heads for a document field.
-struct FieldHeadInfo {
-    /// The CID of the existing head (if any)
-    cid: Option<Cid>,
-    /// The priority of the existing head (0 if none)
-    #[allow(dead_code)] // May be used for priority-based conflict resolution
-    priority: u64,
+/// A single head entry for a document field.
+struct FieldHeadEntry {
+    /// The CID of the head
+    cid: Cid,
     /// The full key (for deletion when replacing)
-    key: Option<Vec<u8>>,
+    key: Vec<u8>,
 }
 
-/// Get existing head info for a specific field of a document.
+/// Get all existing heads for a specific field of a document.
 ///
-/// Returns the current head CID and priority for the field.
-/// Used to build proper head links when creating update blocks.
-async fn get_field_head(
+/// During concurrent P2P updates, a field can have multiple heads (branches).
+/// Returns all current head CIDs for the field, sorted by CID string
+/// representation to match Go's deterministic head ordering.
+async fn get_all_field_heads(
     headstore: &NamespaceView,
     doc_id: &str,
     field_id: &str,
-) -> Result<FieldHeadInfo, String> {
+) -> Result<Vec<FieldHeadEntry>, String> {
     use storage::corekv::IterOptions;
 
     let prefix = HeadstoreDocKey::field_prefix(doc_id, field_id);
@@ -318,32 +316,28 @@ async fn get_field_head(
         .await
         .map_err(|e| format!("Failed to create headstore iterator: {}", e))?;
 
-    // There should be at most one head per field
-    if let Some(kv_pair) = iter
+    let mut entries = Vec::new();
+    while let Some(kv_pair) = iter
         .next()
         .await
         .map_err(|e| format!("Failed to iterate headstore: {}", e))?
     {
-        let priority = decode_priority_varint(&kv_pair.value);
         // Parse CID from key: /d/{doc_id}/{field_id}/{cid}
         let key_str = String::from_utf8_lossy(&kv_pair.key);
         let parts: Vec<&str> = key_str.split('/').collect();
         if let Some(cid_str) = parts.last() {
             if let Ok(cid) = cid_str.parse::<Cid>() {
-                return Ok(FieldHeadInfo {
-                    cid: Some(cid),
-                    priority,
-                    key: Some(kv_pair.key.clone()),
+                entries.push(FieldHeadEntry {
+                    cid,
+                    key: kv_pair.key.clone(),
                 });
             }
         }
     }
 
-    Ok(FieldHeadInfo {
-        cid: None,
-        priority: 0,
-        key: None,
-    })
+    // Sort by CID string representation to match Go's Block.New() sorting
+    entries.sort_by(|a, b| a.cid.to_string().cmp(&b.cid.to_string()));
+    Ok(entries)
 }
 
 /// Get the maximum priority from existing heads for a document.
@@ -438,12 +432,12 @@ pub async fn write_document_blocks(
             Some(fields) => fields.contains(field_name), // Update: only modified fields
         };
 
-        // Get existing head for this field (if any)
-        let field_head = get_field_head(headstore, &doc_id_str, field_name).await?;
+        // Get all existing heads for this field (may have multiple during concurrent updates)
+        let field_head_entries = get_all_field_heads(headstore, &doc_id_str, field_name).await?;
 
         if should_create_block {
             // Create new block for this field (LWW or Counter depending on CRDT type)
-            let heads: Vec<Cid> = field_head.cid.into_iter().collect();
+            let heads: Vec<Cid> = field_head_entries.iter().map(|h| h.cid).collect();
 
             // For counter fields during updates, use the raw increment delta
             // (not the accumulated value) to match Go behavior.
@@ -595,10 +589,10 @@ pub async fn write_document_blocks(
                 .await
                 .map_err(|e| format!("Failed to store field block: {}", e))?;
 
-            // Delete old head entry if it exists (replace, not accumulate)
-            if let Some(old_key) = field_head.key {
+            // Delete all old head entries (replace all branches with single new head)
+            for old_head in &field_head_entries {
                 headstore
-                    .delete(&old_key)
+                    .delete(&old_head.key)
                     .await
                     .map_err(|e| format!("Failed to delete old field head: {}", e))?;
             }
@@ -627,10 +621,12 @@ pub async fn write_document_blocks(
         // Go only includes newly created field blocks in the composite's links array.
     }
 
-    // Get existing composite head (if any) to build proper DAG links
-    // "C" is the marker for composite/document-level commits (matches Go)
-    let composite_head = get_field_head(headstore, &doc_id_str, "C").await?;
-    let composite_heads: Vec<Cid> = composite_head.cid.into_iter().collect();
+    // Get all existing composite heads to build proper DAG links.
+    // "C" is the marker for composite/document-level commits (matches Go).
+    // During concurrent P2P updates, there can be multiple composite heads
+    // (branches) that this new composite must merge.
+    let composite_head_entries = get_all_field_heads(headstore, &doc_id_str, "C").await?;
+    let composite_heads: Vec<Cid> = composite_head_entries.iter().map(|h| h.cid).collect();
 
     // Create the Composite delta payload
     let composite_payload = CompositeDeltaPayload {
@@ -701,10 +697,10 @@ pub async fn write_document_blocks(
         .await
         .map_err(|e| format!("Failed to store composite block: {}", e))?;
 
-    // Delete old composite head entry if it exists (replace, not accumulate)
-    if let Some(old_key) = composite_head.key {
+    // Delete all old composite head entries (replace all branches with single new head)
+    for old_head in &composite_head_entries {
         headstore
-            .delete(&old_key)
+            .delete(&old_head.key)
             .await
             .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
     }
@@ -721,7 +717,7 @@ pub async fn write_document_blocks(
         doc_id = %doc_id_str,
         cid = %composite_cid,
         field_count = field_cids.len(),
-        has_prev_head = composite_head.cid.is_some(),
+        prev_heads = composite_head_entries.len(),
         "Built composite block with field links and wrote heads"
     );
 
@@ -751,9 +747,9 @@ pub async fn write_delete_block(
     let max_priority = get_max_priority(headstore, doc_id).await?;
     let priority: u64 = max_priority + 1;
 
-    // Get existing composite head (if any) to build proper DAG links
-    let composite_head = get_field_head(headstore, doc_id, "C").await?;
-    let composite_heads: Vec<Cid> = composite_head.cid.into_iter().collect();
+    // Get all existing composite heads to build proper DAG links
+    let composite_head_entries = get_all_field_heads(headstore, doc_id, "C").await?;
+    let composite_heads: Vec<Cid> = composite_head_entries.iter().map(|h| h.cid).collect();
 
     // Create the Composite delta payload with status=2 (deleted)
     let composite_payload = CompositeDeltaPayload {
@@ -791,10 +787,10 @@ pub async fn write_delete_block(
         .await
         .map_err(|e| format!("Failed to store delete composite block: {}", e))?;
 
-    // Delete old composite head entry if it exists (replace, not accumulate)
-    if let Some(old_key) = composite_head.key {
+    // Delete all old composite head entries (replace all branches with single new head)
+    for old_head in &composite_head_entries {
         headstore
-            .delete(&old_key)
+            .delete(&old_head.key)
             .await
             .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
     }
@@ -836,7 +832,7 @@ pub async fn write_collection_block(
     schema_version_id: &str,
     doc_composite_cid: Cid,
     signing_config: Option<&SigningConfig>,
-) -> Result<Cid, String> {
+) -> Result<(Cid, Vec<u8>), String> {
     use storage::corekv::IterOptions;
 
     // Get existing collection head (if any)
@@ -873,6 +869,9 @@ pub async fn write_collection_block(
     }
 
     let priority: u64 = max_priority + 1;
+
+    // Sort heads by CID string representation to match Go's Block.New() sorting
+    col_heads.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
 
     // Create the Collection delta payload
     let collection_payload = CollectionDeltaPayload {
@@ -933,7 +932,7 @@ pub async fn write_collection_block(
         "Built collection block for branchable collection"
     );
 
-    Ok(collection_cid)
+    Ok((collection_cid, collection_bytes))
 }
 
 // === Legacy function for backwards compatibility ===

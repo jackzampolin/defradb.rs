@@ -117,7 +117,8 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                 // Build blocks and write to blockstore/headstore in a scoped block
                 // This enables _commits queries to find the document's version history
                 // The stores must be dropped before commit, so scope them
-                let commit_result: Option<(Cid, Vec<u8>)> = {
+                // (composite_cid, composite_bytes, optional (collection_cid, collection_bytes))
+                let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
                     let blockstore = txn.blockstore().map_err(|e| {
                         query::error::QueryError::execution(format!(
                             "failed to get blockstore: {}",
@@ -163,9 +164,10 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                             }
 
                             // For branchable collections, create a collection-level block
+                            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
                             if collection.schema().is_branchable {
                                 let short_id = collection_short_id(collection.collection_id());
-                                if let Err(e) = write_collection_block(
+                                match write_collection_block(
                                     &blockstore,
                                     &headstore,
                                     short_id,
@@ -175,15 +177,20 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                 )
                                 .await
                                 {
-                                    warn!(
-                                        collection = %collection_name,
-                                        error = %e,
-                                        "Failed to write collection block for branchable create"
-                                    );
+                                    Ok((col_cid, col_bytes)) => {
+                                        col_block_data = Some((col_cid, col_bytes));
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            collection = %collection_name,
+                                            error = %e,
+                                            "Failed to write collection block for branchable create"
+                                        );
+                                    }
                                 }
                             }
 
-                            Some((block_result.cid, block_result.block))
+                            Some((block_result.cid, block_result.block, col_block_data))
                         }
                         Err(e) => {
                             warn!(
@@ -215,7 +222,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                 if let Some(bus) = self.db.event_bus() {
                     let (cid, block) = commit_result
                         .as_ref()
-                        .map(|(c, b)| (*c, b.clone()))
+                        .map(|(c, b, _)| (*c, b.clone()))
                         .unwrap_or_default();
                     let update = Update::new(
                         doc_id.to_string(),
@@ -243,9 +250,16 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     }
                 }
 
-                // Return result with commit CID if available
+                // Return result with commit CID and block if available
                 match commit_result {
-                    Some((cid, _)) => Ok(CreateResult::with_commit_cid(doc_id, doc, cid)),
+                    Some((cid, block, col_data)) => {
+                        let mut result = CreateResult::with_commit(doc_id, doc, cid, block);
+                        if let Some((col_cid, col_bytes)) = col_data {
+                            result.broadcast_cid = Some(col_cid);
+                            result.broadcast_block = Some(col_bytes);
+                        }
+                        Ok(result)
+                    }
                     None => Ok(CreateResult::new(doc_id, doc)),
                 }
             }
@@ -328,7 +342,8 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
             Ok(()) => {
                 // Build blocks and write to blockstore/headstore in a scoped block
                 // This enables _commits queries to find the document's version history
-                let commit_result: Option<(Cid, Vec<u8>)> = {
+                // (composite_cid, composite_bytes, optional (collection_cid, collection_bytes))
+                let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
                     let blockstore = txn.blockstore().map_err(|e| {
                         query::error::QueryError::execution(format!(
                             "failed to get blockstore: {}",
@@ -368,9 +383,10 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     {
                         Ok(block_result) => {
                             // For branchable collections, create a collection-level block
+                            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
                             if collection.schema().is_branchable {
                                 let short_id = collection_short_id(collection.collection_id());
-                                if let Err(e) = write_collection_block(
+                                match write_collection_block(
                                     &blockstore,
                                     &headstore,
                                     short_id,
@@ -380,14 +396,19 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                 )
                                 .await
                                 {
-                                    warn!(
-                                        collection = %collection_name,
-                                        error = %e,
-                                        "Failed to write collection block for branchable update"
-                                    );
+                                    Ok((col_cid, col_bytes)) => {
+                                        col_block_data = Some((col_cid, col_bytes));
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            collection = %collection_name,
+                                            error = %e,
+                                            "Failed to write collection block for branchable update"
+                                        );
+                                    }
                                 }
                             }
-                            Some((block_result.cid, block_result.block))
+                            Some((block_result.cid, block_result.block, col_block_data))
                         }
                         Err(e) => {
                             warn!(
@@ -419,7 +440,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                     if let Some(doc_id) = doc.id() {
                         let (cid, block) = commit_result
                             .as_ref()
-                            .map(|(c, b)| (*c, b.clone()))
+                            .map(|(c, b, _)| (*c, b.clone()))
                             .unwrap_or_default();
                         let update = Update::new(
                             doc_id.to_string(),
@@ -449,7 +470,17 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
                 // Count modified fields
                 let fields_modified = doc.values().len();
-                Ok(UpdateResult::new(doc, fields_modified))
+                match commit_result {
+                    Some((cid, block, col_data)) => {
+                        let mut result = UpdateResult::with_commit(doc, fields_modified, cid, block);
+                        if let Some((col_cid, col_bytes)) = col_data {
+                            result.broadcast_cid = Some(col_cid);
+                            result.broadcast_block = Some(col_bytes);
+                        }
+                        Ok(result)
+                    }
+                    None => Ok(UpdateResult::new(doc, fields_modified)),
+                }
             }
             Err(e) => {
                 // Discard the transaction on error
@@ -554,6 +585,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                                     sign_config.as_ref(),
                                 )
                                 .await
+                                .map(|_| ())
                                 {
                                     warn!(
                                         collection = %collection_name,

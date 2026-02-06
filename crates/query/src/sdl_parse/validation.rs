@@ -115,11 +115,12 @@ impl<'a> SdlParser<'a> {
                             if f.field_type.base_type != type_def.name || f.field_type.is_list {
                                 return false;
                             }
-                            // If both fields have explicit relation names, they must match
-                            // to be considered part of the same relation
+                            // Only match fields as counterparts of the same relation
+                            // when their explicit relation names align
                             match (&field.directives.relation_name, &f.directives.relation_name) {
                                 (Some(a), Some(b)) => a == b,
-                                _ => true, // At least one has no explicit name → same relation
+                                (None, None) => true,
+                                _ => false, // One named, one not → separate relations
                             }
                         })
                     });
