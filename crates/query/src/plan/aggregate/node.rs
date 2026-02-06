@@ -339,7 +339,7 @@ impl<Op: AggregateOp> PlanNode for AggregateNode<Op> {
 
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations as u64),
+            serde_json::json!(self.exec_info.iterations),
         );
 
         let child_explain = self.source.explain_execute();

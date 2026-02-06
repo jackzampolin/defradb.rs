@@ -267,7 +267,7 @@ pub fn decode_json_descending(buf: &[u8]) -> Result<(&[u8], JsonLeafValue)> {
         // For descending, check if this looks like an inverted uvarint or string
         // Inverted bytes for INT_MIN..INT_MAX would be !INT_MAX..!INT_MIN
         let inverted_byte = !rest[0];
-        if inverted_byte >= INT_MIN && inverted_byte <= INT_MAX {
+        if (INT_MIN..=INT_MAX).contains(&inverted_byte) {
             // Array index - decode descending uvarint
             let (remaining, _idx) = decode_uvarint_descending(rest)?;
             path = path.append_index();

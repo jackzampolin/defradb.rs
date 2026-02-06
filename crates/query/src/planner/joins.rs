@@ -23,6 +23,13 @@ use crate::planner::PlanNode;
 
 use super::builder::{Planner, MAX_NESTING_DEPTH};
 
+/// Result of applying joins: the updated plan node, document mapping, and aggregate internal keys.
+type JoinResult = Result<(
+    Box<dyn PlanNode>,
+    DocumentMapping,
+    HashMap<String, (String, String)>,
+)>;
+
 impl Planner {
     /// Apply join nodes for nested selects (relation fields)
     ///
@@ -39,11 +46,7 @@ impl Planner {
         mut mapping: DocumentMapping,
         depth: usize,
         parent_filter: Option<&crate::mapper::Filter>,
-    ) -> Result<(
-        Box<dyn PlanNode>,
-        DocumentMapping,
-        HashMap<String, (String, String)>,
-    )> {
+    ) -> JoinResult {
         // Internal keys for aggregate relation data when there's a collision with a relation selection.
         let mut aggregate_internal_keys: HashMap<String, (String, String)> = HashMap::new();
 
@@ -95,7 +98,7 @@ impl Planner {
                         .filter
                         .as_ref()
                         .map(|f| serde_json::to_string(f.conditions()).unwrap_or_default());
-                    let has_limit = s.limit.as_ref().map_or(false, |l| l.limit.is_some());
+                    let has_limit = s.limit.as_ref().is_some_and(|l| l.limit.is_some());
                     (
                         s.field.name.clone(),
                         SelectionJoinInfo {
@@ -255,7 +258,7 @@ impl Planner {
             // If so, add those fields to child_scan_mapping so the filter can be evaluated.
             // For example, Author(filter: {published: {rating: {_gt: 3}}}) needs the 'rating'
             // field to be included even if it's not in the selection set.
-            if let Some(ref pf) = parent_filter {
+            if let Some(pf) = parent_filter {
                 if let Some(nested_filter) = pf.extract_relation_filter(relation_field_name) {
                     for filter_field in nested_filter.referenced_fields() {
                         // Skip special fields
@@ -324,7 +327,7 @@ impl Planner {
                         .into_iter()
                         .filter(|path| {
                             path.first()
-                                .map_or(false, |first| first == relation_field_name)
+                                .is_some_and(|first| first == relation_field_name)
                         })
                         .map(|path| path[1..].to_vec()) // Get remaining path after this relation
                         .filter(|remaining| !remaining.is_empty())
@@ -432,7 +435,7 @@ impl Planner {
                             // Convert nested path to child-relative path
                             Some(OrderCondition {
                                 fields: c.fields[1..].to_vec(),
-                                direction: c.direction.clone(),
+                                direction: c.direction,
                             })
                         } else {
                             None
@@ -1014,7 +1017,7 @@ impl Planner {
                 child_mapping.add_render_key(0, "_docID");
 
                 // Add the FK field (e.g., _authorID) - needed for TypeJoinMany cache indexing
-                let fk_field_name = if let Some(ref target_rel) = target_relation_field {
+                let fk_field_name = if let Some(target_rel) = target_relation_field {
                     schema::CollectionVersion::relation_id_field_name(&target_rel.name)
                 } else {
                     schema::CollectionVersion::relation_id_field_name(&relation_name)
@@ -1304,7 +1307,7 @@ impl Planner {
                         .contains(relation_field_name.as_str())
                         || selection_join_info
                             .get(relation_field_name.as_str())
-                            .map_or(false, |info| {
+                            .is_some_and(|info| {
                                 if info.has_limit {
                                     return false;
                                 }

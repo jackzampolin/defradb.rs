@@ -16,7 +16,7 @@ pub enum ExplainType {
 
 impl ExplainType {
     /// Parse explain type from string.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "simple" => Some(Self::Simple),
             "execute" => Some(Self::Execute),
@@ -44,7 +44,7 @@ pub enum ParsedOperation {
     /// Subscription operations (single root field only per GraphQL spec)
     Subscription {
         /// The single select for the subscription.
-        select: Select,
+        select: Box<Select>,
     },
     /// Introspection query (__schema or __type)
     ///

@@ -22,6 +22,7 @@ use crate::ERR_INVALID_NODE_HANDLE;
 /// - NAC enabled + no identity -> Err (not authorized)
 /// - NAC enabled + identity lacks permission -> Err (not authorized)
 /// - NAC enabled + identity has permission -> Ok
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn check_nac_permission(
     rt: &tokio::runtime::Runtime,
     nac_manager: &Arc<FfiNacManager>,

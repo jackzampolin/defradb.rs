@@ -764,7 +764,7 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
                         all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
                     } else if is_composite {
                         let mut iter = index
-                            .scan_prefix(&datastore, &[value.clone()], false)
+                            .scan_prefix(&datastore, std::slice::from_ref(value), false)
                             .await
                             .map_err(|e| {
                                 query::error::QueryError::execution(format!("index error: {}", e))
@@ -778,7 +778,7 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
                         all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
                     } else {
                         let mut iter =
-                            index.get(&datastore, &[value.clone()]).await.map_err(|e| {
+                            index.get(&datastore, std::slice::from_ref(value)).await.map_err(|e| {
                                 query::error::QueryError::execution(format!("index error: {}", e))
                             })?;
                         let entries = iter.collect_all().await.map_err(|e| {

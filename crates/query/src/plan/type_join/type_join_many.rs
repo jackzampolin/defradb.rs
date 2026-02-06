@@ -82,6 +82,10 @@ pub struct TypeJoinMany {
     /// Used when the child plan uses an index for ordering, matching Go's per-parent
     /// scan behavior for correct metrics and limit support.
     per_parent_child_scan: bool,
+    /// Child documents in storage scan order: (fk_value, stored_field_count).
+    /// Used to simulate Go's per-parent filteredFetcher behavior for explain metrics
+    /// when a child limit is set.
+    child_scan_order: Vec<(String, u64)>,
 }
 
 impl std::fmt::Debug for TypeJoinMany {
@@ -154,6 +158,7 @@ impl TypeJoinMany {
             total_children_in_cache: 0,
             total_fields_per_scan: 0,
             per_parent_child_scan: false,
+            child_scan_order: Vec::new(),
         })
     }
 
@@ -284,12 +289,21 @@ impl TypeJoinMany {
     /// Indexes children by their FK field value.
     async fn build_child_cache(&mut self) -> Result<()> {
         self.child_cache.clear();
+        self.child_scan_order.clear();
         self.child_plan.init().await?;
         self.child_plan.start().await?;
 
         while self.child_plan.next().await? {
             let child_doc = self.child_plan.value();
             let child_fk_value = child_doc.get(self.child_fk_index);
+
+            // Record scan order for per-parent metric simulation (used when child_limit is set)
+            let fk_str = child_fk_value
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            self.child_scan_order
+                .push((fk_str, child_doc.stored_field_count as u64));
 
             // Log type mismatch for non-null, non-string FK values
             if let Some(v) = child_fk_value {
@@ -690,6 +704,7 @@ impl PlanNode for TypeJoinMany {
         self.go_child_metrics.reset();
         self.total_children_in_cache = 0;
         self.total_fields_per_scan = 0;
+        self.child_scan_order.clear();
 
         if self.per_parent_child_scan {
             // Per-parent mode: don't cache, we'll re-scan per parent in next()
@@ -766,16 +781,52 @@ impl PlanNode for TypeJoinMany {
             // Simulate Go's per-parent child scan metrics.
             // In Go, fetchPrimaryDocsReferencingSecondaryDoc re-initializes the child
             // scan for each parent, reading ALL children from the collection. The scanNode
-            // filters by FK, counting iterations for each outer Next() call (matching + 1 false).
-            // docFetches/fieldFetches count ALL docs read from storage per scan.
-            let matching_count = self
-                .child_cache
-                .get(&parent_doc_id)
-                .map(|v| v.len() as u64)
-                .unwrap_or(0);
-            self.go_child_metrics.iterations += matching_count + 1; // matching children + 1 false
-            self.go_child_metrics.doc_fetches += self.total_children_in_cache;
-            self.go_child_metrics.field_fetches += self.total_fields_per_scan;
+            // uses a filteredFetcher that skips non-matching docs inside FetchNext().
+            if let Some(limit) = self.child_limit {
+                // With a child limit, Go's collectDocs(limit) stops after finding
+                // enough matches. The filteredFetcher reads docs from storage in CID
+                // order, skipping non-matching docs internally. We simulate this by
+                // walking the recorded scan order.
+                let effective_limit = self.child_offset + limit;
+                let mut matches_found = 0u64;
+                let mut docs_read = 0u64;
+                let mut fields_read = 0u64;
+                let mut iterations = 0u64;
+
+                for (fk, field_count) in &self.child_scan_order {
+                    docs_read += 1;
+                    fields_read += field_count;
+                    if fk == &parent_doc_id {
+                        matches_found += 1;
+                        iterations += 1; // Each match ends a FetchNext call → Next() returns true
+                        if matches_found >= effective_limit {
+                            break; // collectDocs stops when limit reached
+                        }
+                    }
+                }
+
+                // If collection exhausted without hitting limit, add 1 for the final
+                // false Next() call (FetchNext returns nil → Next returns false).
+                if matches_found < effective_limit {
+                    iterations += 1;
+                }
+
+                self.go_child_metrics.iterations += iterations;
+                self.go_child_metrics.doc_fetches += docs_read;
+                self.go_child_metrics.field_fetches += fields_read;
+            } else {
+                // Without a child limit, Go scans ALL children per parent.
+                // Each FetchNext reads until finding a match (or end), so iterations
+                // = matching children + 1 (for the final false Next()).
+                let matching_count = self
+                    .child_cache
+                    .get(&parent_doc_id)
+                    .map(|v| v.len() as u64)
+                    .unwrap_or(0);
+                self.go_child_metrics.iterations += matching_count + 1;
+                self.go_child_metrics.doc_fetches += self.total_children_in_cache;
+                self.go_child_metrics.field_fetches += self.total_fields_per_scan;
+            }
 
             // Merge children array into parent
             self.merge_children(&mut parent_doc, children);
@@ -793,6 +844,7 @@ impl PlanNode for TypeJoinMany {
         self.parent_plan.close().await?;
         // child_plan was already closed in build_child_cache()
         self.child_cache.clear();
+        self.child_scan_order.clear();
         self.initialized = false;
         Ok(())
     }
@@ -1020,7 +1072,7 @@ impl PlanNode for TypeJoinMany {
 
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations as u64),
+            serde_json::json!(self.exec_info.iterations),
         );
 
         let parent_execute = self.parent_plan.explain_execute();

@@ -191,7 +191,7 @@ pub unsafe extern "C" fn basic_export(node_ptr: usize, config_json: *const c_cha
             .map_err(|e| format!("failed to list collections: {}", e))?;
 
         // Filter to requested collections (or all)
-        let collection_names: Vec<String> = if config.collections.is_empty() {
+        let filtered_names: Vec<String> = if config.collections.is_empty() {
             all_names
         } else {
             for name in &config.collections {
@@ -204,6 +204,22 @@ pub unsafe extern "C" fn basic_export(node_ptr: usize, config_json: *const c_cha
             }
             config.collections.clone()
         };
+
+        // Sort collections by collection_id (CID) to match Go's ordering.
+        // Go's getCollections iterates by storage key which orders by collection_id.
+        let mut name_cid_pairs: Vec<(String, String)> = Vec::new();
+        for name in &filtered_names {
+            let col = database
+                .get_collection(name)
+                .map_err(|e| format!("failed to get collection '{}': {}", name, e))?
+                .ok_or_else(|| {
+                    format!("failed to get collection: key not found. Name: {}", name)
+                })?;
+            name_cid_pairs.push((name.clone(), col.schema().collection_id.clone()));
+        }
+        name_cid_pairs.sort_by(|a, b| a.1.cmp(&b.1));
+        let collection_names: Vec<String> =
+            name_cid_pairs.into_iter().map(|(n, _)| n).collect();
 
         // Three-phase export:
         // Phase 1: Query all docs, compute initial _docIDNew (including FK fields)
@@ -387,23 +403,38 @@ pub unsafe extern "C" fn basic_export(node_ptr: usize, config_json: *const c_cha
         }
 
         // Phase 3: Build export output
-        let mut export_data = Map::new();
+        // Build JSON manually to preserve collection ordering (matching Go).
+        // Go builds JSON by iterating collections and writing each one in order,
+        // not by marshaling a map (which would sort keys alphabetically).
+        let mut collection_json_parts: Vec<String> = Vec::new();
         for col_data in all_collections {
             let export_docs: Vec<JsonValue> = col_data
                 .docs
                 .into_iter()
                 .map(|entry| JsonValue::Object(entry.doc_map))
                 .collect();
-            export_data.insert(col_data.name, JsonValue::Array(export_docs));
+            let docs_json = serde_json::to_string(&export_docs)
+                .map_err(|e| format!("failed to serialize docs: {}", e))?;
+            collection_json_parts.push(format!("\"{}\":{}", col_data.name, docs_json));
         }
 
-        // Serialize to JSON
         let json_output = if config.pretty {
-            serde_json::to_string_pretty(&JsonValue::Object(export_data))
-                .map_err(|e| format!("failed to serialize export: {}", e))?
+            // For pretty output, re-serialize each collection's docs with indentation
+            let mut pretty_parts: Vec<String> = Vec::new();
+            for part in &collection_json_parts {
+                // Parse and re-serialize with pretty printing
+                let val: JsonValue = serde_json::from_str(&format!("{{{}}}", part))
+                    .map_err(|e| format!("failed to parse for pretty print: {}", e))?;
+                let pretty = serde_json::to_string_pretty(&val)
+                    .map_err(|e| format!("failed to pretty print: {}", e))?;
+                // Strip outer braces and newlines, keeping inner content
+                let inner = pretty.trim().strip_prefix('{').unwrap_or(&pretty);
+                let inner = inner.strip_suffix('}').unwrap_or(inner);
+                pretty_parts.push(inner.trim_end().to_string());
+            }
+            format!("{{\n{}\n}}", pretty_parts.join(",\n"))
         } else {
-            serde_json::to_string(&JsonValue::Object(export_data))
-                .map_err(|e| format!("failed to serialize export: {}", e))?
+            format!("{{{}}}", collection_json_parts.join(","))
         };
 
         // Write via temp file for atomic operation
@@ -505,6 +536,16 @@ pub unsafe extern "C" fn basic_import(node_ptr: usize, filepath: *const c_char) 
                 .map(|f| format!("_{}ID", f.name))
                 .collect();
 
+            // Build map of relation field name → FK field name for non-array relations.
+            // Import data may use relation names (e.g., "author": "bae-...")
+            // which need to be converted to FK names (e.g., "_authorID": "bae-...").
+            // Go's NewDocFromMap handles this internally; we do it explicitly here.
+            let relation_to_fk: Vec<(String, String)> = fields
+                .iter()
+                .filter(|f| f.is_relation && !f.is_array)
+                .map(|f| (f.name.clone(), format!("_{}ID", f.name)))
+                .collect();
+
             // Documents must be an array
             let docs = match docs_value.as_array() {
                 Some(arr) => arr,
@@ -545,6 +586,16 @@ pub unsafe extern "C" fn basic_import(node_ptr: usize, filepath: *const c_char) 
                 // Strip backup metadata fields
                 doc_map.remove("_docID");
                 doc_map.remove("_docIDNew");
+
+                // Convert relation field names to FK field names.
+                // e.g., "author": "bae-..." → "_authorID": "bae-..."
+                for (rel_name, fk_name) in &relation_to_fk {
+                    if let Some(value) = doc_map.remove(rel_name) {
+                        if !value.is_null() {
+                            doc_map.insert(fk_name.clone(), value);
+                        }
+                    }
+                }
 
                 // Extract self-referencing FK fields (strip before create, apply after)
                 let mut self_ref_values: Vec<(String, JsonValue)> = Vec::new();

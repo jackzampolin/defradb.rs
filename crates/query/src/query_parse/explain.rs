@@ -27,7 +27,7 @@ pub(crate) fn parse_explain_directive(
                             ));
                         }
                     };
-                    if let Some(explain_type) = ExplainType::from_str(type_str) {
+                    if let Some(explain_type) = ExplainType::parse_str(type_str) {
                         return Ok(Some(explain_type));
                     }
                     return Err(QueryError::parse(format!(

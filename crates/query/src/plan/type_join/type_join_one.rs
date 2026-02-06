@@ -403,11 +403,26 @@ impl PlanNode for TypeJoinOne {
             let child_doc = fk.and_then(|fk| self.find_child_doc(&fk));
 
             // Simulate Go's per-parent child scan metrics.
-            // In Go, fetchDocWithIDAndItsSubDocs calls Init() + Next() once per parent
-            // with a docID-specific prefix. Next() is called exactly once.
+            // The behavior differs by join direction:
+            //
+            // Primary: fetchDocWithIDAndItsSubDocs calls Init() + Next() once per parent
+            // with a docID-specific prefix. Next() is called exactly once (no false call).
+            //
+            // Inverted: fetchPrimaryDocsReferencingSecondaryDoc sets a filter + unique index
+            // on the child scanNode, then calls collectDocs(0). This calls Next() twice
+            // per parent (true + false), and uses the index (1 indexFetch per match).
             if child_doc.is_some() {
-                // Found a child: 1 iteration (Next()=true), 1 doc fetched
-                self.go_child_metrics.iterations += 1;
+                match &self.direction {
+                    JoinDirection::Primary { .. } => {
+                        // 1 iteration (Next()=true only), no index
+                        self.go_child_metrics.iterations += 1;
+                    }
+                    JoinDirection::Inverted => {
+                        // 2 iterations (Next()=true, Next()=false), 1 indexFetch
+                        self.go_child_metrics.iterations += 2;
+                        self.go_child_metrics.index_fetches += 1;
+                    }
+                }
                 self.go_child_metrics.doc_fetches += 1;
                 if let Some(ref doc) = child_doc {
                     self.go_child_metrics.field_fetches += doc.stored_field_count as u64;
@@ -574,7 +589,7 @@ impl PlanNode for TypeJoinOne {
 
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations as u64),
+            serde_json::json!(self.exec_info.iterations),
         );
 
         let parent_execute = self.parent_plan.explain_execute();

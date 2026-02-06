@@ -287,15 +287,15 @@ impl PlanNode for IndexScanNode {
 
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations as u64),
+            serde_json::json!(self.exec_info.iterations),
         );
         obj.insert(
             "docFetches".to_string(),
-            serde_json::json!(self.exec_info.docs_fetched as u64),
+            serde_json::json!(self.exec_info.docs_fetched),
         );
         obj.insert(
             "fieldFetches".to_string(),
-            serde_json::json!(self.exec_info.fields_fetched as u64),
+            serde_json::json!(self.exec_info.fields_fetched),
         );
         obj.insert(
             "indexFetches".to_string(),

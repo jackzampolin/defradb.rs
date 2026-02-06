@@ -114,11 +114,11 @@ impl Planner {
 
         if let Some(ref filter) = select.filter {
             for field_name in filter.referenced_fields() {
-                if mapping.first_index_of_name(&field_name).is_none() {
-                    if collection.field_by_name(&field_name).is_some() {
-                        let index = mapping.next_index();
-                        mapping.add(index, &field_name);
-                    }
+                if mapping.first_index_of_name(&field_name).is_none()
+                    && collection.field_by_name(&field_name).is_some()
+                {
+                    let index = mapping.next_index();
+                    mapping.add(index, &field_name);
                 }
             }
         }

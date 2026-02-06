@@ -405,6 +405,10 @@ pub unsafe extern "C" fn get_indexes(
 ///     "Post": [{ "Name": "idx_title", ... }]
 /// }
 /// ```
+///
+/// # Safety
+///
+/// Caller must ensure all pointer arguments are valid, non-null, and point to valid C strings.
 #[no_mangle]
 pub unsafe extern "C" fn get_all_indexes(
     node_ptr: usize,

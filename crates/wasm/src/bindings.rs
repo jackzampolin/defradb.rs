@@ -20,16 +20,12 @@ pub fn from_js<T: DeserializeOwned>(value: JsValue) -> Result<T> {
 /// Client configuration passed from JavaScript.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct ClientConfig {
     /// Database name for storage
     pub db_name: Option<String>,
 }
 
-impl Default for ClientConfig {
-    fn default() -> Self {
-        Self { db_name: None }
-    }
-}
 
 /// Collection info returned to JavaScript.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

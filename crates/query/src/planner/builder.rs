@@ -12,7 +12,7 @@ use tracing::{debug, instrument, warn};
 
 use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
-use crate::mapper::{AggregateType, Filter, OrderBy, Requestable, Select};
+use crate::mapper::{AggregateType, Filter, OrderBy, OrderCondition, OrderDirection, Requestable, Select};
 use crate::plan::groupby::ChildSelectMeta;
 use crate::plan::{
     AllDocsNode, GroupAlias, GroupByNode, IndexScanNode, InnerAggregateDef, LimitNode, OrderByNode,
@@ -102,6 +102,23 @@ impl Planner {
             acp: None,
             identity_did: None,
         }
+    }
+
+    /// Format an order condition as a Go-style value string.
+    ///
+    /// For `fields: ["articles", "pages"], direction: Asc`, produces `{articles: {pages: ASC}}`.
+    fn format_order_condition(condition: &OrderCondition) -> String {
+        let dir = match condition.direction {
+            OrderDirection::Asc => "ASC",
+            OrderDirection::Desc => "DESC",
+        };
+
+        // Build from innermost to outermost
+        let mut result = dir.to_string();
+        for field in condition.fields.iter().rev() {
+            result = format!("{{{}: {}}}", field, result);
+        }
+        result
     }
 
     /// Set a document fetcher for on-demand data loading.
@@ -204,13 +221,32 @@ impl Planner {
             .unwrap_or_default();
         let filter_has_relations = !filter_relation_fields.is_empty();
 
-        // Check if order references relation fields (needs joins even if not selected)
+        // Check if order references relation fields.
+        // Go rejects ordering by relation fields at the GraphQL validation level
+        // (the relation field doesn't exist in the OrderArg input type).
         let order_relation_fields: Vec<String> = select
             .order_by
             .as_ref()
             .map(|o| o.relation_field_names())
             .unwrap_or_default();
         let order_has_relations = !order_relation_fields.is_empty();
+
+        if order_has_relations {
+            if let Some(ref order_by) = select.order_by {
+                // Find the first relation condition and build Go-compatible error
+                for condition in &order_by.conditions {
+                    if condition.fields.len() > 1 {
+                        let relation_field = &condition.fields[0];
+                        let order_value_str = Self::format_order_condition(condition);
+                        return Err(QueryError::parse(format!(
+                            "Argument \"order\" has invalid value {}.\n\
+                             In field \"{}\": Unknown field.",
+                            order_value_str, relation_field
+                        )));
+                    }
+                }
+            }
+        }
 
         // Compute ordering-only fields: nested relation fields used in ORDER BY but not in selection.
         // These will be stripped from the final output.
@@ -255,8 +291,7 @@ impl Planner {
 
                         // If nested_field is not in the selected fields, it's ordering-only
                         if !nested_selection_fields
-                            .iter()
-                            .any(|f| *f == nested_field_name)
+                            .contains(&nested_field_name)
                         {
                             result.push((relation_field_name.clone(), nested_field_name.clone()));
                         }
@@ -387,7 +422,7 @@ impl Planner {
                 let output_name = agg.output_name();
                 // Add a new index if this specific output name isn't already registered
                 if scan_mapping
-                    .try_find_index_from_render_key(&output_name)
+                    .try_find_index_from_render_key(output_name)
                     .is_none()
                 {
                     let scan_index = scan_mapping.next_index();
@@ -462,11 +497,10 @@ impl Planner {
                 if scan_mapping
                     .first_index_of_name(&sim.target_field)
                     .is_none()
+                    && collection.field_by_name(&sim.target_field).is_some()
                 {
-                    if collection.field_by_name(&sim.target_field).is_some() {
-                        let idx = scan_mapping.next_index();
-                        scan_mapping.add(idx, &sim.target_field);
-                    }
+                    let idx = scan_mapping.next_index();
+                    scan_mapping.add(idx, &sim.target_field);
                 }
             }
         }

@@ -63,11 +63,7 @@ pub async fn execute(
             for line in &test.output {
                 // Trim trailing newlines for cleaner output
                 print!("  {}", line.trim_end_matches('\n'));
-                if !line.ends_with('\n') {
-                    println!();
-                } else {
-                    println!();
-                }
+                println!();
             }
             println!("\x1b[90m{}\x1b[0m", "─".repeat(60));
             println!();
