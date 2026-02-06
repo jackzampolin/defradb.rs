@@ -57,6 +57,12 @@ pub struct CreateResult {
     /// The CID of the commit block (for _version queries)
     /// This is the dag-cbor encoded Block CID, not the document data CID.
     pub commit_cid: Option<Cid>,
+    /// The raw bytes of the committed composite block (for P2P broadcast)
+    pub commit_block: Option<Vec<u8>>,
+    /// For branchable collections: the collection block CID to broadcast instead of composite.
+    pub broadcast_cid: Option<Cid>,
+    /// For branchable collections: the collection block bytes to broadcast.
+    pub broadcast_block: Option<Vec<u8>>,
 }
 
 impl CreateResult {
@@ -67,16 +73,27 @@ impl CreateResult {
             document,
             broadcast_status: BroadcastStatus::NotAttempted,
             commit_cid: None,
+            commit_block: None,
+            broadcast_cid: None,
+            broadcast_block: None,
         }
     }
 
-    /// Create a result with commit CID (for _version support).
-    pub fn with_commit_cid(doc_id: DocID, document: Document, commit_cid: Cid) -> Self {
+    /// Create a result with commit CID and block data (for _version + P2P broadcast).
+    pub fn with_commit(
+        doc_id: DocID,
+        document: Document,
+        commit_cid: Cid,
+        commit_block: Vec<u8>,
+    ) -> Self {
         Self {
             doc_id,
             document,
             broadcast_status: BroadcastStatus::NotAttempted,
             commit_cid: Some(commit_cid),
+            commit_block: Some(commit_block),
+            broadcast_cid: None,
+            broadcast_block: None,
         }
     }
 
@@ -91,6 +108,9 @@ impl CreateResult {
             document,
             broadcast_status,
             commit_cid: None,
+            commit_block: None,
+            broadcast_cid: None,
+            broadcast_block: None,
         }
     }
 
@@ -99,6 +119,7 @@ impl CreateResult {
         doc_id: DocID,
         document: Document,
         commit_cid: Cid,
+        commit_block: Vec<u8>,
         broadcast_status: BroadcastStatus,
     ) -> Self {
         Self {
@@ -106,6 +127,9 @@ impl CreateResult {
             document,
             broadcast_status,
             commit_cid: Some(commit_cid),
+            commit_block: Some(commit_block),
+            broadcast_cid: None,
+            broadcast_block: None,
         }
     }
 }
@@ -119,6 +143,14 @@ pub struct UpdateResult {
     pub fields_modified: usize,
     /// Status of P2P broadcast (if applicable)
     pub broadcast_status: BroadcastStatus,
+    /// The CID of the committed composite block (for P2P broadcast)
+    pub commit_cid: Option<Cid>,
+    /// The raw bytes of the committed composite block (for P2P broadcast)
+    pub commit_block: Option<Vec<u8>>,
+    /// For branchable collections: the collection block CID to broadcast instead of composite.
+    pub broadcast_cid: Option<Cid>,
+    /// For branchable collections: the collection block bytes to broadcast.
+    pub broadcast_block: Option<Vec<u8>>,
 }
 
 impl UpdateResult {
@@ -128,6 +160,28 @@ impl UpdateResult {
             document,
             fields_modified,
             broadcast_status: BroadcastStatus::NotAttempted,
+            commit_cid: None,
+            commit_block: None,
+            broadcast_cid: None,
+            broadcast_block: None,
+        }
+    }
+
+    /// Create a result with committed block data (for P2P broadcast).
+    pub fn with_commit(
+        document: Document,
+        fields_modified: usize,
+        commit_cid: Cid,
+        commit_block: Vec<u8>,
+    ) -> Self {
+        Self {
+            document,
+            fields_modified,
+            broadcast_status: BroadcastStatus::NotAttempted,
+            commit_cid: Some(commit_cid),
+            commit_block: Some(commit_block),
+            broadcast_cid: None,
+            broadcast_block: None,
         }
     }
 
@@ -141,6 +195,10 @@ impl UpdateResult {
             document,
             fields_modified,
             broadcast_status,
+            commit_cid: None,
+            commit_block: None,
+            broadcast_cid: None,
+            broadcast_block: None,
         }
     }
 }
