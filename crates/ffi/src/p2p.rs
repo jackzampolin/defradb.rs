@@ -615,43 +615,39 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
                     .await
                     .map_err(|e| format!("failed to get connected peers: {}", e))?;
 
-                // Get host-resolved addresses (populated by ConnectionEstablished events).
-                let mut host_addrs = p2p
-                    .handle
-                    .peer_addresses()
-                    .await
-                    .map_err(|e| format!("failed to get peer addresses: {}", e))?;
-
-                // Build a set of peer IDs already covered by host_addrs
+                // Wait for identify protocol to resolve addresses for all connected
+                // peers. Incoming connections initially have no address in peer_addrs
+                // (we skip storing the ephemeral send_back_addr). The identify protocol
+                // updates peer_addrs with the correct listen address, typically within
+                // a few milliseconds on localhost.
+                let mut host_addrs = Vec::new();
                 let mut covered: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
-                for addr_str in &host_addrs {
-                    if let Some(pid) = addr_str.rsplit("/p2p/").next() {
-                        covered.insert(pid.to_string());
-                    }
-                }
 
-                // Check if any connected peers are missing from host_addrs.
-                // This can happen when incoming ConnectionEstablished events
-                // haven't been processed yet by the host event loop.
-                let has_missing = connected.iter().any(|pid| {
-                    let pid_str = pid.to_string();
-                    !covered.contains(&pid_str) && p2p.get_peer_address(&pid_str).is_none()
-                });
+                for attempt in 0..5 {
+                    host_addrs = p2p
+                        .handle
+                        .peer_addresses()
+                        .await
+                        .map_err(|e| format!("failed to get peer addresses: {}", e))?;
 
-                if has_missing {
-                    // Brief yield to let the host process pending events
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    // Retry peer_addresses
-                    if let Ok(retry) = p2p.handle.peer_addresses().await {
-                        covered.clear();
-                        for addr_str in &retry {
-                            if let Some(pid) = addr_str.rsplit("/p2p/").next() {
-                                covered.insert(pid.to_string());
-                            }
+                    covered.clear();
+                    for addr_str in &host_addrs {
+                        if let Some(pid) = addr_str.rsplit("/p2p/").next() {
+                            covered.insert(pid.to_string());
                         }
-                        host_addrs = retry;
                     }
+
+                    let all_resolved = connected.iter().all(|pid| {
+                        let pid_str = pid.to_string();
+                        covered.contains(&pid_str)
+                            || p2p.get_peer_address(&pid_str).is_some()
+                    });
+
+                    if all_resolved || attempt == 4 {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
 
                 // Merge FFI-stored addresses for connected peers not in host map

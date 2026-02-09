@@ -256,15 +256,17 @@ impl TwoStreamHandler {
         ))
     }
 
-    /// Send a request to a peer and wait for response.
+    /// Send a request to a peer and return a receiver for the response.
     ///
-    /// This opens a stream on the request protocol, sends the request,
-    /// then waits for the response to arrive on a separate stream.
-    pub async fn send_request(
+    /// Opens a stream on the request protocol, sends the request, and returns
+    /// the oneshot receiver. The caller MUST drop the handler lock before
+    /// awaiting the receiver — otherwise the response handler cannot route
+    /// the reply back (deadlock).
+    pub async fn start_request(
         &mut self,
         peer_id: PeerId,
         request: PushLogRequest,
-    ) -> Result<PushLogReply> {
+    ) -> Result<(String, oneshot::Receiver<PushLogReply>)> {
         let message_id = request.metadata.message_id.clone();
 
         // Create response channel
@@ -302,22 +304,13 @@ impl TwoStreamHandler {
             "Sent PushLog request on two-stream protocol"
         );
 
-        // Wait for response with timeout
-        match timeout(RESPONSE_TIMEOUT, rx).await {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(_)) => {
-                // Channel closed without response
-                let mut pending = self.pending.lock();
-                pending.channels.remove(&message_id);
-                Err(Error::Transport("response channel closed".into()))
-            }
-            Err(_) => {
-                // Timeout
-                let mut pending = self.pending.lock();
-                pending.channels.remove(&message_id);
-                Err(Error::Transport("timeout waiting for response".into()))
-            }
-        }
+        Ok((message_id, rx))
+    }
+
+    /// Clean up a pending response channel (used on timeout or cancellation).
+    pub fn cleanup_pending(&self, message_id: &str) {
+        let mut pending = self.pending.lock();
+        pending.channels.remove(message_id);
     }
 
     /// Send a response to a peer.
