@@ -72,6 +72,10 @@ pub unsafe extern "C" fn add_schema(
         let collections = query::parse_sdl_with_known_types(&schema_str, known_types)
             .map_err(|e| format!("failed to parse schema: {}", e))?;
 
+        // Run global validators (embedding type checks, etc.)
+        db::definition_validation::validate_new_collections(&collections)
+            .map_err(|e| format!("failed to validate schema: {}", e))?;
+
         // Validate policies on collections before creating them
         for collection in &collections {
             if let Some(ref policy) = collection.policy {
