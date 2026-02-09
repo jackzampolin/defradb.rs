@@ -15,8 +15,9 @@ use query::rest::RestOperations;
 
 use crate::error::Result;
 use crate::router::{
-    create_router_with_state, AppStateBuilder, CollectionManagementOperations,
-    DocumentAcpOperations, LensOperations, NodeAcpOperations, P2POperations, SchemaOperations,
+    create_router_with_state, AcpOperations, AppStateBuilder, CollectionManagementOperations,
+    DocumentAcpOperations, IndexOperations, LensOperations, NodeAcpOperations, P2POperations,
+    SchemaOperations,
 };
 
 /// Server configuration options.
@@ -44,6 +45,8 @@ pub struct Server {
     executor: Arc<dyn QueryExecutor>,
     rest: Option<Arc<dyn RestOperations>>,
     p2p: Option<Arc<dyn P2POperations>>,
+    acp: Option<Arc<dyn AcpOperations>>,
+    index: Option<Arc<dyn IndexOperations>>,
     schema: Option<Arc<dyn SchemaOperations>>,
     lens: Option<Arc<dyn LensOperations>>,
     nac: Option<Arc<dyn NodeAcpOperations>>,
@@ -60,6 +63,8 @@ impl Server {
             executor: Arc::new(executor),
             rest: None,
             p2p: None,
+            acp: None,
+            index: None,
             schema: None,
             lens: None,
             nac: None,
@@ -76,6 +81,8 @@ impl Server {
             executor: Arc::new(executor),
             rest: None,
             p2p: None,
+            acp: None,
+            index: None,
             schema: None,
             lens: None,
             nac: None,
@@ -92,6 +99,8 @@ impl Server {
             executor,
             rest: None,
             p2p: None,
+            acp: None,
+            index: None,
             schema: None,
             lens: None,
             nac: None,
@@ -108,6 +117,8 @@ impl Server {
             executor,
             rest: None,
             p2p: None,
+            acp: None,
+            index: None,
             schema: None,
             lens: None,
             nac: None,
@@ -152,6 +163,18 @@ impl Server {
     /// Set P2P operations from an Arc.
     pub fn with_p2p_arc(mut self, p2p: Arc<dyn P2POperations>) -> Self {
         self.p2p = Some(p2p);
+        self
+    }
+
+    /// Set ACP operations from an Arc.
+    pub fn with_acp_arc(mut self, acp: Arc<dyn AcpOperations>) -> Self {
+        self.acp = Some(acp);
+        self
+    }
+
+    /// Set index operations from an Arc.
+    pub fn with_index_arc(mut self, index: Arc<dyn IndexOperations>) -> Self {
+        self.index = Some(index);
         self
     }
 
@@ -235,6 +258,12 @@ impl Server {
         }
         if let Some(ref p2p) = self.p2p {
             builder = builder.with_p2p(Arc::clone(p2p));
+        }
+        if let Some(ref acp) = self.acp {
+            builder = builder.with_acp(Arc::clone(acp));
+        }
+        if let Some(ref index) = self.index {
+            builder = builder.with_index(Arc::clone(index));
         }
         if let Some(ref schema) = self.schema {
             builder = builder.with_schema(Arc::clone(schema));

@@ -640,8 +640,7 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
 
                     let all_resolved = connected.iter().all(|pid| {
                         let pid_str = pid.to_string();
-                        covered.contains(&pid_str)
-                            || p2p.get_peer_address(&pid_str).is_some()
+                        covered.contains(&pid_str) || p2p.get_peer_address(&pid_str).is_some()
                     });
 
                     if all_resolved || attempt == 4 {

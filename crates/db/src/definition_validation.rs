@@ -74,9 +74,7 @@ const GLOBAL_VALIDATORS: &[Validator] = &[
 ///
 /// Only runs embedding-specific validators (type, fields, provider/model).
 /// Other global validators are not appropriate at create time.
-pub fn validate_new_collections(
-    new_collections: &[CollectionVersion],
-) -> Result<(), String> {
+pub fn validate_new_collections(new_collections: &[CollectionVersion]) -> Result<(), String> {
     let new_state = DefinitionState::new(new_collections);
     let old_state = DefinitionState::new(&[]);
 

@@ -730,6 +730,11 @@ impl Node {
             server = server.with_nac_arc(nac_adapter);
             info!("NAC HTTP endpoints enabled");
 
+            // Wire ACP policy operations to HTTP server
+            let acp_adapter = crate::acp_adapter::AcpAdapter::new_arc();
+            server = server.with_acp_arc(acp_adapter);
+            info!("ACP policy HTTP endpoints enabled");
+
             // Wire document ACP operations to HTTP server
             let doc_acp_adapter = crate::doc_acp_adapter::DocumentAcpAdapter::new_arc(
                 database.clone(),
@@ -745,6 +750,11 @@ impl Node {
                 );
             server = server.with_collection_mgmt_arc(collection_mgmt_adapter);
             info!("Collection management HTTP endpoints enabled");
+
+            // Wire index operations to HTTP server
+            let index_adapter = crate::index_adapter::IndexAdapter::new_arc(database.clone());
+            server = server.with_index_arc(index_adapter);
+            info!("Index HTTP endpoints enabled");
 
             // Wire event bus to HTTP server for GraphQL subscriptions
             server = server.with_event_bus_arc(event_bus);
