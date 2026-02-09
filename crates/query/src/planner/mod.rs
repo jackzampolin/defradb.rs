@@ -20,6 +20,6 @@ mod view_builder;
 pub use builder::{PlanResult, Planner};
 pub use index_selection::{
     can_use_index, extract_field_conditions, filter_to_index_scan, select_best_index,
-    ConditionValue, FieldCondition, IndexScanParams, IndexScanType,
+    ConditionValue, FieldCondition, IndexScanParams, IndexScanType, ScanValueFilter,
 };
 pub use traits::{Doc, DocFields, DocStatus, ExecInfo, PlanNode};

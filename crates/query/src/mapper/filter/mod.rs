@@ -25,4 +25,5 @@ mod split;
 pub use op::FilterOp;
 
 // Re-export everything from filter_impl for backwards compatibility
+pub use eval::like_pattern_match;
 pub use filter_impl::*;

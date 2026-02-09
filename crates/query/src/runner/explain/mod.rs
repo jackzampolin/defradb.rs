@@ -830,7 +830,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .map(|f| f.has_relation_filters())
             .unwrap_or(false);
 
-        let _order_has_relations = select
+        let order_has_relations = select
             .order_by
             .as_ref()
             .map(|o| o.has_relation_order())
@@ -845,6 +845,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             || has_relation_aggregates
             || has_nested
             || filter_has_relations
+            || order_has_relations
             || has_similarity
         {
             // Use Planner path for index-based queries, relation aggregates,

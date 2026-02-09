@@ -1035,12 +1035,20 @@ impl<S: Store> crate::database::DB<S> {
             }
         };
 
+        // Build collection name → collection_id map for resolving FieldKind::Named
+        let collection_id_map: std::collections::HashMap<String, String> = all_existing
+            .iter()
+            .filter(|c| c.is_active)
+            .map(|c| (c.name.clone(), c.collection_id.clone()))
+            .collect();
+
         // Generate new version_id from schema content with headstore heads and priority
         let new_version_id = Self::generate_patch_version_id_with_heads(
             &mut new_schema,
             &old_schema,
             collection_priority,
             &collection_heads,
+            &collection_id_map,
         );
 
         // Update new schema with version info
@@ -1265,9 +1273,24 @@ impl<S: Store> crate::database::DB<S> {
         old_schema: &CollectionVersion,
         collection_priority: u64,
         collection_heads: &[cid::Cid],
+        collection_id_map: &std::collections::HashMap<String, String>,
     ) -> String {
         use cid::Cid;
         use sha2::{Digest, Sha256};
+
+        // Resolve FieldKind::Named to FieldKind::Relation before CID generation.
+        // Go's substituteRelationFieldKinds resolves named kinds to CollectionKind
+        // with the actual collection_id before generating field deltas.
+        for field in &mut schema.fields {
+            if let schema::FieldKind::Named { name, is_array } = &field.kind {
+                if let Some(col_id) = collection_id_map.get(name.as_str()) {
+                    field.kind = schema::FieldKind::Relation {
+                        collection_id: col_id.clone(),
+                        is_array: *is_array,
+                    };
+                }
+            }
+        }
 
         // Build set of old field names for detecting which fields are new
         let old_field_names: std::collections::HashSet<&str> = old_schema

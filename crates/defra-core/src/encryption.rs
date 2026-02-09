@@ -62,19 +62,23 @@ pub fn get_encryption_config() -> Option<EncryptionConfig> {
 /// Global per-document encryption store.
 /// Maps docID → EncryptionConfig so updates can re-apply encryption
 /// that was set during document creation.
-static DOC_ENCRYPTION_STORE: std::sync::LazyLock<Mutex<HashMap<String, EncryptionConfig>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static DOC_ENCRYPTION_STORE: std::sync::OnceLock<Mutex<HashMap<String, EncryptionConfig>>> =
+    std::sync::OnceLock::new();
+
+fn doc_encryption_store() -> &'static Mutex<HashMap<String, EncryptionConfig>> {
+    DOC_ENCRYPTION_STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Store encryption config for a document.
 pub fn store_doc_encryption(doc_id: &str, config: EncryptionConfig) {
-    if let Ok(mut store) = DOC_ENCRYPTION_STORE.lock() {
+    if let Ok(mut store) = doc_encryption_store().lock() {
         store.insert(doc_id.to_string(), config);
     }
 }
 
 /// Retrieve stored encryption config for a document.
 pub fn get_doc_encryption(doc_id: &str) -> Option<EncryptionConfig> {
-    DOC_ENCRYPTION_STORE
+    doc_encryption_store()
         .lock()
         .ok()
         .and_then(|store| store.get(doc_id).cloned())
@@ -82,7 +86,7 @@ pub fn get_doc_encryption(doc_id: &str) -> Option<EncryptionConfig> {
 
 /// Clear all stored encryption configs (for node cleanup).
 pub fn clear_doc_encryption_store() {
-    if let Ok(mut store) = DOC_ENCRYPTION_STORE.lock() {
+    if let Ok(mut store) = doc_encryption_store().lock() {
         store.clear();
     }
 }

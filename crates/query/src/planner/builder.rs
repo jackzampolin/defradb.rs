@@ -15,6 +15,22 @@ use crate::fetcher::DocFetcher;
 use crate::mapper::{
     AggregateType, Filter, OrderBy, OrderCondition, OrderDirection, Requestable, Select,
 };
+
+/// Format an order condition as a Go-style value string for error messages.
+///
+/// For `fields: ["articles", "pages"], direction: Asc`, produces `{articles: {pages: ASC}}`.
+fn format_order_value(condition: &OrderCondition) -> String {
+    let dir = match condition.direction {
+        OrderDirection::Asc => "ASC",
+        OrderDirection::Desc => "DESC",
+    };
+    let mut result = dir.to_string();
+    for field in condition.fields.iter().rev() {
+        result = format!("{{{}: {}}}", field, result);
+    }
+    result
+}
+
 use crate::plan::groupby::ChildSelectMeta;
 use crate::plan::{
     AllDocsNode, GroupAlias, GroupByNode, IndexScanNode, InnerAggregateDef, LimitNode, OrderByNode,
@@ -104,23 +120,6 @@ impl Planner {
             acp: None,
             identity_did: None,
         }
-    }
-
-    /// Format an order condition as a Go-style value string.
-    ///
-    /// For `fields: ["articles", "pages"], direction: Asc`, produces `{articles: {pages: ASC}}`.
-    fn format_order_condition(condition: &OrderCondition) -> String {
-        let dir = match condition.direction {
-            OrderDirection::Asc => "ASC",
-            OrderDirection::Desc => "DESC",
-        };
-
-        // Build from innermost to outermost
-        let mut result = dir.to_string();
-        for field in condition.fields.iter().rev() {
-            result = format!("{{{}: {}}}", field, result);
-        }
-        result
     }
 
     /// Set a document fetcher for on-demand data loading.
@@ -233,18 +232,24 @@ impl Planner {
             .unwrap_or_default();
         let order_has_relations = !order_relation_fields.is_empty();
 
+        // One-to-one relation ordering (e.g., User(order: {device: {model: ASC}})) is handled
+        // by the ordered inverted join in apply_joins().
+        // One-to-many (array) relation ordering is rejected — ambiguous which child to sort by.
         if order_has_relations {
             if let Some(ref order_by) = select.order_by {
-                // Find the first relation condition and build Go-compatible error
                 for condition in &order_by.conditions {
                     if condition.fields.len() > 1 {
-                        let relation_field = &condition.fields[0];
-                        let order_value_str = Self::format_order_condition(condition);
-                        return Err(QueryError::parse(format!(
-                            "Argument \"order\" has invalid value {}.\n\
-                             In field \"{}\": Unknown field.",
-                            order_value_str, relation_field
-                        )));
+                        let relation_name = &condition.fields[0];
+                        if let Some(field) = collection.field_by_name(relation_name) {
+                            if field.kind.is_array() {
+                                let order_value_str = format_order_value(condition);
+                                return Err(QueryError::parse(format!(
+                                    "Argument \"order\" has invalid value {}.\n\
+                                     In field \"{}\": Unknown field.",
+                                    order_value_str, relation_name
+                                )));
+                            }
+                        }
                     }
                 }
             }
@@ -399,14 +404,13 @@ impl Planner {
                     if scan_mapping.first_index_of_name(field_name).is_some() {
                         continue;
                     }
-                    // Find field in collection schema and add to mapping
-                    if let Some((schema_idx, _)) = collection
-                        .fields
-                        .iter()
-                        .enumerate()
-                        .find(|(_, f)| &f.name == field_name)
-                    {
-                        scan_mapping.add(schema_idx, field_name);
+                    // Verify the field exists in the collection schema
+                    if collection.field_by_name(field_name).is_some() {
+                        // Use next_index to avoid collisions with existing mapping positions.
+                        // Using schema_idx would overwrite fields if a schema position
+                        // is already occupied (e.g., _ownerID at schema pos 1 overwriting model).
+                        let next_idx = scan_mapping.next_index();
+                        scan_mapping.add(next_idx, field_name);
                     }
                 }
             }
@@ -744,6 +748,7 @@ impl Planner {
         plan = joins_result.0;
         scan_mapping = joins_result.1;
         aggregate_internal_keys = joins_result.2;
+        let join_provides_ordering = joins_result.3;
 
         // 3b. Apply joins for multi-level relation filter paths where the first relation
         // is NOT in the selection set. If the first relation IS selected, then apply_joins
@@ -847,53 +852,8 @@ impl Planner {
             }
         }
 
-        // 3c. Apply joins for relation fields referenced in order but NOT in selection set or filter.
-        // This allows ordering through relations even when those relations aren't being returned.
-        // Example: Book(order: {author: {age: DESC}}) { name rating }
-        // The `author` relation must be joined for ordering even though it's not selected.
-        if order_has_relations {
-            // Get the names of relation fields already joined from selection or filter
-            let mut already_joined: Vec<&str> = select
-                .fields
-                .iter()
-                .filter_map(|f| {
-                    if let Requestable::Select(s) = f {
-                        Some(s.field.name.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            // Add filter relations that were joined
-            for f in &filter_relation_fields {
-                if !already_joined.contains(&f.as_str()) {
-                    already_joined.push(f.as_str());
-                }
-            }
-
-            // Create joins for order relations not already joined
-            for relation_field_name in &order_relation_fields {
-                if already_joined.contains(&relation_field_name.as_str()) {
-                    continue; // Already joined
-                }
-
-                // Find the relation field in the parent collection
-                let relation_field = match collection.field_by_name(relation_field_name) {
-                    Some(f) if f.kind.is_relation() => f,
-                    _ => continue, // Not a valid relation field
-                };
-
-                let (new_plan, new_mapping) = self.apply_filter_relation_join(
-                    plan,
-                    &collection,
-                    relation_field,
-                    relation_field_name,
-                    scan_mapping.clone(),
-                )?;
-                plan = new_plan;
-                scan_mapping = new_mapping;
-            }
-        }
+        // 3c. ORDER BY relation joins are now handled by apply_joins via synthetic selects,
+        // which also enables join direction inversion for index-based ordering.
 
         // 3d. Apply SelectNode AFTER all joins (matches Go DefraDB plan order).
         // The SelectNode wraps the joined plan and applies scalar filters.
@@ -905,11 +865,13 @@ impl Planner {
             if let Some(ref doc_ids) = select.doc_ids {
                 select_node = select_node.with_doc_ids(doc_ids.clone());
             }
-            // Set relation filter on SelectNode for explain display (matches Go DefraDB).
-            // The actual relation filtering is handled by TypeJoin's RelationFilter,
-            // but Go's selectNode stores the relation filter and shows it in explain output.
+            // Store relation filter on SelectNode for explain display only.
+            // The actual relation filtering is handled by TypeJoin's RelationFilter.
+            // We must NOT apply it as a real filter because after TypeJoinMany merges
+            // sub-filtered children, re-evaluating the parent's relation filter would
+            // fail when sub-filter and parent filter target different values.
             if let Some(ref rel_filter) = relation_filter {
-                select_node = select_node.with_filter(rel_filter.clone());
+                select_node = select_node.with_explain_filter(rel_filter.clone());
             }
             plan = Box::new(select_node);
         } else if is_complex_filter && !select.fields.is_empty() {
@@ -1235,9 +1197,9 @@ impl Planner {
             }
 
             // 6. Apply order by (after grouping/aggregation)
-            // Skip if index already provides the ordering
+            // Skip if index (own or via join) already provides the ordering
             if let Some(ref order_by) = select.order_by {
-                if !index_provides_ordering {
+                if !index_provides_ordering && !join_provides_ordering {
                     plan = Box::new(OrderByNode::new(
                         plan,
                         order_by.clone(),
@@ -1262,9 +1224,9 @@ impl Planner {
             // not the documents fed to aggregation.
 
             // 5. Apply order by (before aggregates)
-            // Skip if index already provides the ordering
+            // Skip if index (own or via join) already provides the ordering
             if let Some(ref order_by) = select.order_by {
-                if !index_provides_ordering {
+                if !index_provides_ordering && !join_provides_ordering {
                     plan = Box::new(OrderByNode::new(
                         plan,
                         order_by.clone(),
@@ -1338,24 +1300,39 @@ impl Planner {
         let limit = select.limit.as_ref().and_then(|l| l.limit);
         let offset = select.limit.as_ref().map(|l| l.offset).unwrap_or(0);
 
-        // Try filter-based index selection first
-        if let Some(filter) = select.filter.as_ref() {
-            if let Some(best_index) = select_best_index(filter, &collection.indexes) {
-                if let Some(params) = filter_to_index_scan(
-                    filter,
-                    best_index,
-                    select.order_by.as_ref(),
-                    &collection.fields,
-                    limit,
-                    offset,
-                ) {
-                    // Check if this index also provides ordering
-                    let provides_ordering = select
-                        .order_by
-                        .as_ref()
-                        .map(|o| can_be_ordered_by_index(o, best_index).0)
-                        .unwrap_or(false);
-                    return Some((params, provides_ordering));
+        // Check if filter has any true relation field conditions (using schema info).
+        // When relation filters are present, Go skips parent filter-based index selection
+        // because the relation join already narrows the parent set.
+        // This check uses schema field_kind.is_relation() to avoid confusing JSON field
+        // access ({custom: {title: ...}}) with relation traversal ({devices: {model: ...}}).
+        let has_relation_filter = select.filter.as_ref().is_some_and(|f| {
+            f.conditions().keys().any(|field_name| {
+                collection
+                    .field_by_name(field_name)
+                    .is_some_and(|field| field.kind.is_relation())
+            })
+        });
+
+        // Try filter-based index selection first (skip when relation filters are present)
+        if !has_relation_filter {
+            if let Some(filter) = select.filter.as_ref() {
+                if let Some(best_index) = select_best_index(filter, &collection.indexes) {
+                    if let Some(params) = filter_to_index_scan(
+                        filter,
+                        best_index,
+                        select.order_by.as_ref(),
+                        &collection.fields,
+                        limit,
+                        offset,
+                    ) {
+                        // Check if this index also provides ordering
+                        let provides_ordering = select
+                            .order_by
+                            .as_ref()
+                            .map(|o| can_be_ordered_by_index(o, best_index).0)
+                            .unwrap_or(false);
+                        return Some((params, provides_ordering));
+                    }
                 }
             }
         }
@@ -1374,6 +1351,7 @@ impl Planner {
                         // Pass limit/offset for early termination (index provides ordering)
                         limit,
                         offset,
+                        value_filter: None,
                     };
                     return Some((params, true));
                 }
@@ -1426,6 +1404,7 @@ impl Planner {
                             },
                             limit: None,
                             offset: 0,
+                            value_filter: None,
                         },
                         true,
                     ));

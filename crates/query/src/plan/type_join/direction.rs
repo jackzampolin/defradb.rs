@@ -18,4 +18,21 @@ pub enum JoinDirection {
     /// Inverted join: child has FK field, parent does not.
     /// Lookup: child.FK_field == parent._docID
     Inverted,
+    /// Inverted index join: child scanned first with index, parent looked up
+    /// per-child via FK index. Used when both child's filtered field and
+    /// parent's FK field are indexed.
+    InvertedIndex {
+        /// Name of the index on the parent's FK field
+        parent_fk_index_name: String,
+        /// Index of the FK field in the parent's document mapping
+        parent_fk_field_index: usize,
+    },
+    /// Ordered inverted join (primary-first): child has FK and drives iteration
+    /// in sorted order via index. Parent is looked up by docID for each child.
+    /// Used when ordering by a child field that has an index and the child
+    /// holds the FK to the parent (e.g., Device._ownerID → User).
+    OrderedInvertedPrimary {
+        /// Index of the FK field in the child's document mapping (e.g., _ownerID index)
+        child_fk_index: usize,
+    },
 }

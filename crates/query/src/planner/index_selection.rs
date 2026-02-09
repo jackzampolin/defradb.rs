@@ -25,6 +25,57 @@ pub struct IndexScanParams {
     pub limit: Option<u64>,
     /// Offset to skip before collecting results (for ORDER BY + LIMIT + OFFSET optimization)
     pub offset: u64,
+    /// Optional value filter applied to each index entry during scan.
+    /// Used for _like/_nlike on JSON fields where the index does a range scan
+    /// and non-string entries must be filtered at the scan level (matching Go's indexLikeMatcher).
+    pub value_filter: Option<ScanValueFilter>,
+}
+
+/// Value-level filter applied to individual index entries during scan iteration.
+/// Matches Go's `indexLikeMatcher` behavior: non-string values return false.
+#[derive(Debug, Clone)]
+pub enum ScanValueFilter {
+    Like(String),
+    Nlike(String),
+    Ilike(String),
+    Nilike(String),
+}
+
+impl ScanValueFilter {
+    /// Check if an index entry's first value matches this filter.
+    /// Non-string values always return false (matching Go's indexLikeMatcher).
+    pub fn matches_value(&self, value: &NormalValue) -> bool {
+        // Extract the string from the value (supports both String and JsonLeaf with string)
+        let s = match value {
+            NormalValue::String(s) => s.as_str(),
+            NormalValue::JsonLeaf(leaf) => match &leaf.value {
+                JsonScalarValue::String(s) => s.as_str(),
+                _ => return false, // Non-string JSON leaf: exclude
+            },
+            _ => return false, // Non-string value: exclude
+        };
+
+        let (pattern, is_like, case_insensitive) = match self {
+            ScanValueFilter::Like(p) => (p.as_str(), true, false),
+            ScanValueFilter::Nlike(p) => (p.as_str(), false, false),
+            ScanValueFilter::Ilike(p) => (p.as_str(), true, true),
+            ScanValueFilter::Nilike(p) => (p.as_str(), false, true),
+        };
+
+        let (s_cmp, p_cmp): (std::borrow::Cow<str>, std::borrow::Cow<str>) = if case_insensitive {
+            (s.to_lowercase().into(), pattern.to_lowercase().into())
+        } else {
+            (s.into(), pattern.into())
+        };
+
+        use crate::mapper::like_pattern_match;
+        let matches = like_pattern_match(&s_cmp, &p_cmp);
+        if is_like {
+            matches
+        } else {
+            !matches
+        }
+    }
 }
 
 /// Type of index scan to perform.
@@ -219,7 +270,13 @@ fn normal_value_to_json_scalar(value: &NormalValue) -> Option<JsonScalarValue> {
 /// Wrap a NormalValue in JsonLeafValue if a JSON path is present.
 fn wrap_value_for_json_path(value: NormalValue, json_path: Option<&JsonPath>) -> NormalValue {
     match json_path {
-        Some(path) if !path.0.is_empty() => {
+        Some(path) => {
+            // Top-level null JSON values (empty path) are stored as plain NormalValue::Null
+            // in the index (see NormalValue::json_leaves()). Null with non-empty path IS
+            // stored as JsonLeafValue { path, value: Null }.
+            if matches!(value, NormalValue::Null) && path.is_empty() {
+                return value;
+            }
             if let Some(scalar) = normal_value_to_json_scalar(&value) {
                 NormalValue::JsonLeaf(JsonLeafValue {
                     path: path.clone(),
@@ -229,7 +286,7 @@ fn wrap_value_for_json_path(value: NormalValue, json_path: Option<&JsonPath>) ->
                 value
             }
         }
-        _ => value,
+        None => value,
     }
 }
 
@@ -239,7 +296,7 @@ fn wrap_values_for_json_path(
     json_path: Option<&JsonPath>,
 ) -> Vec<NormalValue> {
     match json_path {
-        Some(path) if !path.0.is_empty() => values
+        Some(path) => values
             .into_iter()
             .filter_map(|v| {
                 normal_value_to_json_scalar(&v).map(|scalar| {
@@ -250,7 +307,7 @@ fn wrap_values_for_json_path(
                 })
             })
             .collect(),
-        _ => values,
+        None => values,
     }
 }
 
@@ -535,6 +592,7 @@ pub fn filter_to_index_scan(
     let mut in_values = None;
     let mut in_json_path: Option<JsonPath> = None;
     let mut has_scan_all = false;
+    let mut scan_value_filter: Option<ScanValueFilter> = None;
     let mut lower_bound = Bound::Unbounded;
     let mut upper_bound = Bound::Unbounded;
     let mut range_json_path: Option<JsonPath> = None;
@@ -547,17 +605,21 @@ pub fn filter_to_index_scan(
 
         match cond.op {
             FilterOp::Eq => {
-                if let ConditionValue::Single(v) = &cond.value {
-                    has_eq = true;
-                    eq_value = Some(v.clone());
-                    eq_json_path = cond.json_path.clone();
+                if !has_eq {
+                    if let ConditionValue::Single(v) = &cond.value {
+                        has_eq = true;
+                        eq_value = Some(v.clone());
+                        eq_json_path = cond.json_path.clone();
+                    }
                 }
             }
             FilterOp::In => {
-                if let ConditionValue::Multiple(vs) = &cond.value {
-                    has_in = true;
-                    in_values = Some(vs.clone());
-                    in_json_path = cond.json_path.clone();
+                if !has_in {
+                    if let ConditionValue::Multiple(vs) = &cond.value {
+                        has_in = true;
+                        in_values = Some(vs.clone());
+                        in_json_path = cond.json_path.clone();
+                    }
                 }
             }
             FilterOp::Gt => {
@@ -586,16 +648,28 @@ pub fn filter_to_index_scan(
             }
             // _ne/_nin/_like/_nlike use full index scan with post-filtering (matches Go behavior)
             // For JSON fields, we still need to track the path to constrain the scan
-            FilterOp::Ne
-            | FilterOp::Nin
-            | FilterOp::Like
-            | FilterOp::Nlike
-            | FilterOp::Ilike
-            | FilterOp::Nilike => {
+            FilterOp::Ne | FilterOp::Nin => {
                 has_scan_all = true;
-                // Track JSON path for scan_all so we can constrain to the path
                 if cond.json_path.is_some() {
                     range_json_path = cond.json_path.clone();
+                }
+            }
+            FilterOp::Like | FilterOp::Nlike | FilterOp::Ilike | FilterOp::Nilike => {
+                has_scan_all = true;
+                if cond.json_path.is_some() {
+                    range_json_path = cond.json_path.clone();
+                    // For JSON fields only: add scan-level value filter to exclude
+                    // non-string entries (matches Go's indexLikeMatcher behavior).
+                    // Regular string indexes don't need this because all entries are strings.
+                    if let ConditionValue::Pattern(pattern) = &cond.value {
+                        scan_value_filter = Some(match cond.op {
+                            FilterOp::Like => ScanValueFilter::Like(pattern.clone()),
+                            FilterOp::Nlike => ScanValueFilter::Nlike(pattern.clone()),
+                            FilterOp::Ilike => ScanValueFilter::Ilike(pattern.clone()),
+                            FilterOp::Nilike => ScanValueFilter::Nilike(pattern.clone()),
+                            _ => unreachable!(),
+                        });
+                    }
                 }
             }
             _ => {}
@@ -764,12 +838,18 @@ pub fn filter_to_index_scan(
                 Bound::Exclusive(wrap_value_for_json_path(v, range_json_path.as_ref()))
             }
             Bound::Unbounded => {
-                // For JSON paths, use PathMin to constrain lower bound
+                // For JSON paths with non-empty path, use PathMin to constrain lower bound.
+                // For empty paths (top-level JSON), leave unbounded to match Go behavior:
+                // Go scans from value to end of entire index, counting all keys.
                 if let Some(path) = &range_json_path {
-                    Bound::Inclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
-                        path.clone(),
-                        JsonScalarValue::PathMin,
-                    )))
+                    if !path.is_empty() {
+                        Bound::Inclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
+                            path.clone(),
+                            JsonScalarValue::PathMin,
+                        )))
+                    } else {
+                        Bound::Unbounded
+                    }
                 } else {
                     Bound::Unbounded
                 }
@@ -783,12 +863,17 @@ pub fn filter_to_index_scan(
                 Bound::Exclusive(wrap_value_for_json_path(v, range_json_path.as_ref()))
             }
             Bound::Unbounded => {
-                // For JSON paths, use PathMax to constrain upper bound
+                // For JSON paths with non-empty path, use PathMax to constrain upper bound.
+                // For empty paths (top-level JSON), leave unbounded to match Go behavior.
                 if let Some(path) = &range_json_path {
-                    Bound::Exclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
-                        path.clone(),
-                        JsonScalarValue::PathMax,
-                    )))
+                    if !path.is_empty() {
+                        Bound::Exclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
+                            path.clone(),
+                            JsonScalarValue::PathMax,
+                        )))
+                    } else {
+                        Bound::Unbounded
+                    }
                 } else {
                     Bound::Unbounded
                 }
@@ -802,19 +887,27 @@ pub fn filter_to_index_scan(
         }
     } else if has_scan_all {
         // Full index scan with residual filter (for _ne, _like, etc.)
-        // For JSON fields, constrain the scan to the specific path
+        // For JSON fields with non-empty path, constrain scan to that path.
+        // For empty path (top-level JSON), use full prefix scan to match Go.
         if let Some(path) = &range_json_path {
-            IndexScanType::RangeScan {
-                prefix_values: vec![],
-                lower: Bound::Inclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
-                    path.clone(),
-                    JsonScalarValue::PathMin,
-                ))),
-                upper: Bound::Exclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
-                    path.clone(),
-                    JsonScalarValue::PathMax,
-                ))),
-                reverse,
+            if !path.is_empty() {
+                IndexScanType::RangeScan {
+                    prefix_values: vec![],
+                    lower: Bound::Inclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
+                        path.clone(),
+                        JsonScalarValue::PathMin,
+                    ))),
+                    upper: Bound::Exclusive(NormalValue::JsonLeaf(JsonLeafValue::new(
+                        path.clone(),
+                        JsonScalarValue::PathMax,
+                    ))),
+                    reverse,
+                }
+            } else {
+                IndexScanType::PrefixScan {
+                    prefix_values: vec![],
+                    reverse,
+                }
             }
         } else {
             IndexScanType::PrefixScan {
@@ -837,6 +930,7 @@ pub fn filter_to_index_scan(
         scan_type,
         limit: if index_provides_ordering { limit } else { None },
         offset: if index_provides_ordering { offset } else { 0 },
+        value_filter: scan_value_filter,
     })
 }
 
@@ -887,6 +981,25 @@ fn score_index_for_filter(filter: &Filter, index: &IndexDescription) -> Option<u
                     && c.array_op != Some(FilterOp::None)
             }) {
                 score += 5;
+            }
+
+            // _in is multi-exact-match (better than range, worse than single eq)
+            if conditions
+                .iter()
+                .any(|c| c.field_name == field.name && c.op == FilterOp::In)
+            {
+                score += 4;
+            }
+
+            // Range operators narrow the scan (better than full-scan like _like/_ne)
+            if conditions.iter().any(|c| {
+                c.field_name == field.name
+                    && matches!(
+                        c.op,
+                        FilterOp::Gt | FilterOp::Gte | FilterOp::Lt | FilterOp::Lte
+                    )
+            }) {
+                score += 3;
             }
         } else {
             // Stop if we hit a gap in field coverage

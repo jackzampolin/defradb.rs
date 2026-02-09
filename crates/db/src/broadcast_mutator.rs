@@ -19,7 +19,7 @@ use std::sync::Arc;
 use storage::corekv::Store;
 
 use crate::auto_commit_mutator::AutoCommitMutator;
-use crate::block_builder::build_blocks_from_document;
+use crate::block_builder::{build_blocks_from_document, read_latest_composite_block};
 use crate::database::DB;
 
 /// Document mutator that broadcasts changes to P2P network.
@@ -29,8 +29,8 @@ use crate::database::DB;
 ///
 /// # Broadcast Behavior
 ///
-/// - **Create/Update**: Builds proper Block structures and broadcasts to network
-/// - **Delete**: Currently not broadcast (tombstone support pending)
+/// - **Create**: Builds proper Block structures and broadcasts to network
+/// - **Update/Delete**: Reads the committed composite block and broadcasts it
 ///
 /// # Error Handling
 ///
@@ -77,29 +77,39 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
         // Execute the create mutation
         let result = self.inner.create(collection_name, doc).await?;
 
-        // Build proper Block structures for P2P sync
-        // This creates LWW field blocks + Composite block matching Go's format
-        let block_result = match build_blocks_from_document(
-            &result.document,
-            &version_id, // Go uses VersionID() for collectionVersionID
-            self.sync.blockstore(),
-        )
-        .await
+        // Always broadcast the composite block first (ensures composite + field blocks
+        // are available on the receiver before any collection block processing).
+        let (cid, block, doc_id_str) = if let (Some(cid), Some(block)) =
+            (result.commit_cid, result.commit_block.as_ref())
         {
-            Ok(br) => br,
-            Err(e) => {
-                tracing::error!(
-                    doc_id = %result.doc_id,
-                    collection = %collection_name,
-                    error = %e,
-                    "Failed to build blocks for P2P broadcast - local mutation succeeded but broadcast aborted"
-                );
-                return Ok(CreateResult::with_broadcast(
-                    result.doc_id,
-                    result.document,
-                    BroadcastStatus::Failed(format!("Block build failed: {}", e)),
-                ));
+            (cid, block.clone(), result.doc_id.to_string())
+        } else {
+            // Fallback: build blocks if commit data not available
+            match build_blocks_from_document(&result.document, &version_id, self.sync.blockstore())
+                .await
+            {
+                Ok(br) => (br.cid, br.block, br.doc_id),
+                Err(e) => {
+                    tracing::error!(
+                        doc_id = %result.doc_id,
+                        collection = %collection_name,
+                        error = %e,
+                        "Failed to build blocks for P2P broadcast"
+                    );
+                    return Ok(CreateResult::with_broadcast(
+                        result.doc_id,
+                        result.document,
+                        BroadcastStatus::Failed(format!("Block build failed: {}", e)),
+                    ));
+                }
             }
+        };
+
+        let block_result = BlockResult {
+            cid,
+            block,
+            doc_id: doc_id_str,
+            field_cids: vec![],
         };
 
         // Push directly to registered replicators first (fast, fire-and-forget per peer)
@@ -112,13 +122,44 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
             )
             .await;
 
-        // Broadcast via GossipSub with retry for InsufficientPeers
+        // Broadcast composite via GossipSub with retry for InsufficientPeers
         let broadcast_status =
             broadcast_with_retry(&self.sync, &block_result, &collection_id, collection_name).await;
 
-        Ok(CreateResult::with_broadcast(
+        // For branchable collections, also broadcast the collection block so receivers
+        // get the sender's exact collection CID (critical for CID consistency across nodes).
+        // The composite broadcast above ensures the linked blocks are available first.
+        if let (Some(col_cid), Some(col_block)) =
+            (result.broadcast_cid, result.broadcast_block.as_ref())
+        {
+            let col_block_result = BlockResult {
+                cid: col_cid,
+                block: col_block.clone(),
+                doc_id: block_result.doc_id.clone(),
+                field_cids: vec![],
+            };
+            self.sync
+                .push_to_replicators(
+                    &col_block_result.cid,
+                    &col_block_result.block,
+                    &col_block_result.doc_id,
+                    &collection_id,
+                )
+                .await;
+            let _ = broadcast_with_retry(
+                &self.sync,
+                &col_block_result,
+                &collection_id,
+                collection_name,
+            )
+            .await;
+        }
+
+        Ok(CreateResult::with_commit_and_broadcast(
             result.doc_id,
             result.document,
+            block_result.cid,
+            block_result.block,
             broadcast_status,
         ))
     }
@@ -135,7 +176,6 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
             .get_collection(collection_name)
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
-        let version_id = collection.version_id().to_string();
         let collection_id = collection.collection_id().to_string();
 
         // Execute the update mutation
@@ -144,33 +184,41 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
             .update(collection_name, doc, modified_fields)
             .await?;
 
-        // Build proper Block structures for P2P sync
-        let block_result = match build_blocks_from_document(
-            &result.document,
-            &version_id,
-            self.sync.blockstore(),
-        )
-        .await
-        {
-            Ok(br) => br,
-            Err(e) => {
-                let doc_id = result
-                    .document
-                    .id()
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "<unknown>".to_string());
-                tracing::error!(
-                    doc_id = %doc_id,
-                    collection = %collection_name,
-                    error = %e,
-                    "Failed to build blocks for P2P broadcast - local mutation succeeded but broadcast aborted"
-                );
-                return Ok(UpdateResult::with_broadcast(
-                    result.document,
-                    result.fields_modified,
-                    BroadcastStatus::Failed(format!("Block build failed: {}", e)),
-                ));
-            }
+        // Use the committed block directly when available (from ffi/query),
+        // falling back to reading from storage.
+        let doc_id_for_broadcast = result
+            .document
+            .id()
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        let (cid, block, doc_id_str) =
+            if let (Some(cid), Some(block)) = (result.commit_cid, result.commit_block.as_ref()) {
+                (cid, block.clone(), doc_id_for_broadcast)
+            } else {
+                // Fallback: read committed composite block from storage
+                match read_latest_composite_block(&self.db, &doc_id_for_broadcast).await {
+                    Ok(br) => (br.cid, br.block, br.doc_id),
+                    Err(e) => {
+                        tracing::error!(
+                            doc_id = %doc_id_for_broadcast,
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to read composite block for P2P broadcast"
+                        );
+                        return Ok(UpdateResult::with_broadcast(
+                            result.document,
+                            result.fields_modified,
+                            BroadcastStatus::Failed(format!("Block read failed: {}", e)),
+                        ));
+                    }
+                }
+            };
+
+        let block_result = BlockResult {
+            cid,
+            block,
+            doc_id: doc_id_str,
+            field_cids: vec![],
         };
 
         // Push directly to registered replicators first (fast, fire-and-forget per peer)
@@ -183,9 +231,37 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
             )
             .await;
 
-        // Broadcast via GossipSub with retry for InsufficientPeers
+        // Broadcast composite via GossipSub with retry for InsufficientPeers
         let broadcast_status =
             broadcast_with_retry(&self.sync, &block_result, &collection_id, collection_name).await;
+
+        // For branchable collections, also broadcast the collection block so receivers
+        // get the sender's exact collection CID (critical for CID consistency across nodes).
+        if let (Some(col_cid), Some(col_block)) =
+            (result.broadcast_cid, result.broadcast_block.as_ref())
+        {
+            let col_block_result = BlockResult {
+                cid: col_cid,
+                block: col_block.clone(),
+                doc_id: block_result.doc_id.clone(),
+                field_cids: vec![],
+            };
+            self.sync
+                .push_to_replicators(
+                    &col_block_result.cid,
+                    &col_block_result.block,
+                    &col_block_result.doc_id,
+                    &collection_id,
+                )
+                .await;
+            let _ = broadcast_with_retry(
+                &self.sync,
+                &col_block_result,
+                &collection_id,
+                collection_name,
+            )
+            .await;
+        }
 
         Ok(UpdateResult::with_broadcast(
             result.document,
@@ -199,28 +275,53 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
-        // Execute the delete mutation
-        let result = self.inner.delete(collection_name, doc_id).await?;
-
-        // Get collection ID for logging
-        let _collection = self
+        // Get collection ID for broadcast
+        let collection = self
             .db
             .get_collection(collection_name)
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+        let collection_id = collection.collection_id().to_string();
 
-        // Delete broadcast requires tombstone block creation, which is not yet implemented.
-        // Return NotAttempted status so callers know delete was not broadcast.
-        tracing::debug!(
-            doc_id = %doc_id,
-            collection = %collection_name,
-            "Document deleted locally (P2P delete broadcast not yet implemented)"
-        );
+        // Execute the delete mutation
+        let result = self.inner.delete(collection_name, doc_id).await?;
+
+        // Read the delete composite block that was written during the mutation.
+        let doc_id_str = doc_id.to_string();
+        let block_result = match read_latest_composite_block(&self.db, &doc_id_str).await {
+            Ok(br) => br,
+            Err(e) => {
+                tracing::error!(
+                    doc_id = %doc_id,
+                    collection = %collection_name,
+                    error = %e,
+                    "Failed to read delete composite block for P2P broadcast"
+                );
+                return Ok(DeleteResult::with_broadcast(
+                    result.doc_id,
+                    result.existed,
+                    BroadcastStatus::Failed(format!("Block read failed: {}", e)),
+                ));
+            }
+        };
+
+        // Push to replicators and broadcast via GossipSub
+        self.sync
+            .push_to_replicators(
+                &block_result.cid,
+                &block_result.block,
+                &block_result.doc_id,
+                &collection_id,
+            )
+            .await;
+
+        let broadcast_status =
+            broadcast_with_retry(&self.sync, &block_result, &collection_id, collection_name).await;
 
         Ok(DeleteResult::with_broadcast(
             result.doc_id,
             result.existed,
-            BroadcastStatus::NotAttempted,
+            broadcast_status,
         ))
     }
 

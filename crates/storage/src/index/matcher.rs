@@ -188,6 +188,11 @@ impl NlikeMatcher {
 
 impl IndexMatcher for NlikeMatcher {
     fn matches(&self, value: &NormalValue) -> bool {
+        // Non-string values don't participate in LIKE matching at all (Go behavior).
+        // Both _like and _nlike return false for non-strings.
+        if value.as_str().is_none() {
+            return false;
+        }
         !self.inner.matches(value)
     }
 }

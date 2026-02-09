@@ -8,7 +8,7 @@ use cid::Cid;
 use defra_core::block::{Block, CrdtDelta, Signature};
 use document::Document;
 use serde_json::{json, Value as JsonValue};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use storage::corekv::{IterOptions, Store};
@@ -118,16 +118,18 @@ impl<S: Store> CommitsFetcher<S> {
                 continue;
             }
 
-            // BFS traversal with optional depth limit
-            let mut queue: VecDeque<(Cid, u64)> = VecDeque::new();
-            queue.push_back((cid, 0));
+            // DFS traversal (stack) to match Go's ordering.
+            // Go prepends heads in reverse order to the front of a queue, which
+            // is equivalent to pushing in order onto a stack and popping from top.
+            let mut stack: Vec<(Cid, u64)> = Vec::new();
+            stack.push((cid, 0));
 
-            while let Some((current_cid, current_depth)) = queue.pop_front() {
+            while let Some((current_cid, current_depth)) = stack.pop() {
                 let cid_str = current_cid.to_string();
                 if visited.contains(&cid_str) {
                     continue;
                 }
-                visited.insert(cid_str);
+                visited.insert(cid_str.clone());
 
                 let block = match self.load_block(txn, &current_cid).await {
                     Ok(b) => b,
@@ -156,10 +158,11 @@ impl<S: Store> CommitsFetcher<S> {
                 };
 
                 if should_traverse {
-                    // Add heads to queue
+                    // Push heads onto stack in original order so the last head
+                    // is popped first (LIFO), matching Go's reverse-prepend behavior.
                     if let Some(ref heads) = block.heads {
                         for head_cid in heads {
-                            queue.push_back((*head_cid, current_depth + 1));
+                            stack.push((*head_cid, current_depth + 1));
                         }
                     }
                 }

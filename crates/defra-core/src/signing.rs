@@ -40,19 +40,23 @@ pub fn get_signing_config() -> Option<SigningConfig> {
 /// Global identity store mapping DID → SigningConfig.
 /// When create_identity() generates a keypair, we store it here so that
 /// exec_request() can look up the signing key from just a DID string.
-static IDENTITY_STORE: std::sync::LazyLock<Mutex<HashMap<String, SigningConfig>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static IDENTITY_STORE: std::sync::OnceLock<Mutex<HashMap<String, SigningConfig>>> =
+    std::sync::OnceLock::new();
+
+fn identity_store() -> &'static Mutex<HashMap<String, SigningConfig>> {
+    IDENTITY_STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Store a signing config for a DID.
 pub fn store_identity(did: &str, config: SigningConfig) {
-    if let Ok(mut store) = IDENTITY_STORE.lock() {
+    if let Ok(mut store) = identity_store().lock() {
         store.insert(did.to_string(), config);
     }
 }
 
 /// Retrieve stored signing config for a DID.
 pub fn get_identity(did: &str) -> Option<SigningConfig> {
-    IDENTITY_STORE
+    identity_store()
         .lock()
         .ok()
         .and_then(|store| store.get(did).cloned())
@@ -60,7 +64,7 @@ pub fn get_identity(did: &str) -> Option<SigningConfig> {
 
 /// Clear all stored identities (for node cleanup).
 pub fn clear_identity_store() {
-    if let Ok(mut store) = IDENTITY_STORE.lock() {
+    if let Ok(mut store) = identity_store().lock() {
         store.clear();
     }
 }
