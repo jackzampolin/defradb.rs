@@ -1,7 +1,7 @@
 FROM rust:1.93-bookworm AS builder
 WORKDIR /build
 COPY . .
-RUN apt-get update && apt-get install -y libssl-dev pkg-config
+RUN apt-get update && apt-get install -y libssl-dev pkg-config protobuf-compiler
 RUN cargo build --release -p cli
 
 FROM debian:bookworm-slim
