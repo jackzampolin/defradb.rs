@@ -79,34 +79,31 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
 
         // Always broadcast the composite block first (ensures composite + field blocks
         // are available on the receiver before any collection block processing).
-        let (cid, block, doc_id_str) =
-            if let (Some(cid), Some(block)) = (result.commit_cid, result.commit_block.as_ref()) {
-                (cid, block.clone(), result.doc_id.to_string())
-            } else {
-                // Fallback: build blocks if commit data not available
-                match build_blocks_from_document(
-                    &result.document,
-                    &version_id,
-                    self.sync.blockstore(),
-                )
+        let (cid, block, doc_id_str) = if let (Some(cid), Some(block)) =
+            (result.commit_cid, result.commit_block.as_ref())
+        {
+            (cid, block.clone(), result.doc_id.to_string())
+        } else {
+            // Fallback: build blocks if commit data not available
+            match build_blocks_from_document(&result.document, &version_id, self.sync.blockstore())
                 .await
-                {
-                    Ok(br) => (br.cid, br.block, br.doc_id),
-                    Err(e) => {
-                        tracing::error!(
-                            doc_id = %result.doc_id,
-                            collection = %collection_name,
-                            error = %e,
-                            "Failed to build blocks for P2P broadcast"
-                        );
-                        return Ok(CreateResult::with_broadcast(
-                            result.doc_id,
-                            result.document,
-                            BroadcastStatus::Failed(format!("Block build failed: {}", e)),
-                        ));
-                    }
+            {
+                Ok(br) => (br.cid, br.block, br.doc_id),
+                Err(e) => {
+                    tracing::error!(
+                        doc_id = %result.doc_id,
+                        collection = %collection_name,
+                        error = %e,
+                        "Failed to build blocks for P2P broadcast"
+                    );
+                    return Ok(CreateResult::with_broadcast(
+                        result.doc_id,
+                        result.document,
+                        BroadcastStatus::Failed(format!("Block build failed: {}", e)),
+                    ));
                 }
-            };
+            }
+        };
 
         let block_result = BlockResult {
             cid,

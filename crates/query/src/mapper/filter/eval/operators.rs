@@ -293,17 +293,17 @@ fn like_match(
     negate: bool,
     case_insensitive: bool,
 ) -> Result<bool> {
-    // Null and non-string fields never match _like or _nlike (Go DefraDB behavior).
-    // Both _like and _nlike return false for non-string values.
+    // Null and non-string values can't match a LIKE pattern.
+    // For _like: false (no match). For _nlike: true (doesn't match the pattern).
     if actual.is_null() {
-        return Ok(false);
+        return Ok(negate);
     }
 
     let op_name = if case_insensitive { "_ilike" } else { "_like" };
 
     let actual_str = match actual.as_str() {
         Some(s) => s,
-        None => return Ok(false),
+        None => return Ok(negate),
     };
     let pattern_str = pattern.as_str().ok_or_else(|| {
         QueryError::invalid_filter(format!("{} requires string pattern", op_name))

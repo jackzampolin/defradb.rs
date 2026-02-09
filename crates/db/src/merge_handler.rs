@@ -885,12 +885,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         // Delete only the parent field heads (from the field block's heads)
                         if let Some(parent_cids) = field_block_heads.get(&dag_link.name) {
                             for parent_cid in parent_cids {
-                                let parent_key =
-                                    storage::keys::headstore::HeadstoreDocKey::new(
-                                        &doc_id_str,
-                                        &dag_link.name,
-                                        *parent_cid,
-                                    );
+                                let parent_key = storage::keys::headstore::HeadstoreDocKey::new(
+                                    &doc_id_str,
+                                    &dag_link.name,
+                                    *parent_cid,
+                                );
                                 let _ = headstore
                                     .delete(
                                         &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&parent_key),

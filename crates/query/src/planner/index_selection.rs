@@ -25,6 +25,57 @@ pub struct IndexScanParams {
     pub limit: Option<u64>,
     /// Offset to skip before collecting results (for ORDER BY + LIMIT + OFFSET optimization)
     pub offset: u64,
+    /// Optional value filter applied to each index entry during scan.
+    /// Used for _like/_nlike on JSON fields where the index does a range scan
+    /// and non-string entries must be filtered at the scan level (matching Go's indexLikeMatcher).
+    pub value_filter: Option<ScanValueFilter>,
+}
+
+/// Value-level filter applied to individual index entries during scan iteration.
+/// Matches Go's `indexLikeMatcher` behavior: non-string values return false.
+#[derive(Debug, Clone)]
+pub enum ScanValueFilter {
+    Like(String),
+    Nlike(String),
+    Ilike(String),
+    Nilike(String),
+}
+
+impl ScanValueFilter {
+    /// Check if an index entry's first value matches this filter.
+    /// Non-string values always return false (matching Go's indexLikeMatcher).
+    pub fn matches_value(&self, value: &NormalValue) -> bool {
+        // Extract the string from the value (supports both String and JsonLeaf with string)
+        let s = match value {
+            NormalValue::String(s) => s.as_str(),
+            NormalValue::JsonLeaf(leaf) => match &leaf.value {
+                JsonScalarValue::String(s) => s.as_str(),
+                _ => return false, // Non-string JSON leaf: exclude
+            },
+            _ => return false, // Non-string value: exclude
+        };
+
+        let (pattern, is_like, case_insensitive) = match self {
+            ScanValueFilter::Like(p) => (p.as_str(), true, false),
+            ScanValueFilter::Nlike(p) => (p.as_str(), false, false),
+            ScanValueFilter::Ilike(p) => (p.as_str(), true, true),
+            ScanValueFilter::Nilike(p) => (p.as_str(), false, true),
+        };
+
+        let (s_cmp, p_cmp): (std::borrow::Cow<str>, std::borrow::Cow<str>) = if case_insensitive {
+            (s.to_lowercase().into(), pattern.to_lowercase().into())
+        } else {
+            (s.into(), pattern.into())
+        };
+
+        use crate::mapper::like_pattern_match;
+        let matches = like_pattern_match(&s_cmp, &p_cmp);
+        if is_like {
+            matches
+        } else {
+            !matches
+        }
+    }
 }
 
 /// Type of index scan to perform.
@@ -541,6 +592,7 @@ pub fn filter_to_index_scan(
     let mut in_values = None;
     let mut in_json_path: Option<JsonPath> = None;
     let mut has_scan_all = false;
+    let mut scan_value_filter: Option<ScanValueFilter> = None;
     let mut lower_bound = Bound::Unbounded;
     let mut upper_bound = Bound::Unbounded;
     let mut range_json_path: Option<JsonPath> = None;
@@ -596,16 +648,28 @@ pub fn filter_to_index_scan(
             }
             // _ne/_nin/_like/_nlike use full index scan with post-filtering (matches Go behavior)
             // For JSON fields, we still need to track the path to constrain the scan
-            FilterOp::Ne
-            | FilterOp::Nin
-            | FilterOp::Like
-            | FilterOp::Nlike
-            | FilterOp::Ilike
-            | FilterOp::Nilike => {
+            FilterOp::Ne | FilterOp::Nin => {
                 has_scan_all = true;
-                // Track JSON path for scan_all so we can constrain to the path
                 if cond.json_path.is_some() {
                     range_json_path = cond.json_path.clone();
+                }
+            }
+            FilterOp::Like | FilterOp::Nlike | FilterOp::Ilike | FilterOp::Nilike => {
+                has_scan_all = true;
+                if cond.json_path.is_some() {
+                    range_json_path = cond.json_path.clone();
+                    // For JSON fields only: add scan-level value filter to exclude
+                    // non-string entries (matches Go's indexLikeMatcher behavior).
+                    // Regular string indexes don't need this because all entries are strings.
+                    if let ConditionValue::Pattern(pattern) = &cond.value {
+                        scan_value_filter = Some(match cond.op {
+                            FilterOp::Like => ScanValueFilter::Like(pattern.clone()),
+                            FilterOp::Nlike => ScanValueFilter::Nlike(pattern.clone()),
+                            FilterOp::Ilike => ScanValueFilter::Ilike(pattern.clone()),
+                            FilterOp::Nilike => ScanValueFilter::Nilike(pattern.clone()),
+                            _ => unreachable!(),
+                        });
+                    }
                 }
             }
             _ => {}
@@ -866,6 +930,7 @@ pub fn filter_to_index_scan(
         scan_type,
         limit: if index_provides_ordering { limit } else { None },
         offset: if index_provides_ordering { offset } else { 0 },
+        value_filter: scan_value_filter,
     })
 }
 

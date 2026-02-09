@@ -871,7 +871,7 @@ pub async fn write_collection_block(
     let priority: u64 = max_priority + 1;
 
     // Sort heads by CID string representation to match Go's Block.New() sorting
-    col_heads.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+    col_heads.sort_by_key(|a| a.to_string());
 
     // Create the Collection delta payload
     let collection_payload = CollectionDeltaPayload {

@@ -374,6 +374,7 @@ impl TypeJoinOne {
                 },
                 limit: None,
                 offset: 0,
+                value_filter: None,
             };
 
             // Create and run an IndexScanNode for the parent lookup

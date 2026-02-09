@@ -4,7 +4,7 @@ mod filter;
 mod mutation;
 mod types;
 
-pub use filter::{Filter, FilterOp};
+pub use filter::{like_pattern_match, Filter, FilterOp};
 pub use mutation::{parse_mutation_name, Mutation, MutationType};
 pub use types::{
     Aggregate, AggregateTarget, AggregateType, Field, GroupBy, Limit, OrderBy, OrderCondition,

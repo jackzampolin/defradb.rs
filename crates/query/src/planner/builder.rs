@@ -1350,6 +1350,7 @@ impl Planner {
                         // Pass limit/offset for early termination (index provides ordering)
                         limit,
                         offset,
+                        value_filter: None,
                     };
                     return Some((params, true));
                 }
@@ -1402,6 +1403,7 @@ impl Planner {
                             },
                             limit: None,
                             offset: 0,
+                            value_filter: None,
                         },
                         true,
                     ));
