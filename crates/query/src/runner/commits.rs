@@ -64,14 +64,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<JsonValue> {
         use crate::fetcher::CommitsQueryOptions;
 
-        // Fetch commits for this document
-        // When we have a target CID, we need to traverse all commits back to genesis
-        // by setting a large depth. Without a target CID (regular query), depth=None
-        // traverses all heads to genesis anyway.
+        // Fetch commits for this document.
+        // When we have a target CID, traverse all commits back to genesis.
+        // Without a target CID, only return the current heads (depth=1).
         let depth = if target_cid.is_some() {
-            Some(1000) // Reasonable max depth for version history traversal
+            Some(1000)
         } else {
-            None
+            Some(1)
         };
 
         let options = CommitsQueryOptions {

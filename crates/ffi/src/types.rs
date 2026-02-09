@@ -52,6 +52,15 @@ impl FfiResult {
             value: ptr::null_mut(),
         }
     }
+
+    /// Create a subscription result (status=2) with the subscription ID in value.
+    pub fn subscription(id: impl Into<String>) -> Self {
+        Self {
+            status: 2,
+            error: ptr::null_mut(),
+            value: sanitize_to_cstring(id, "0").into_raw(),
+        }
+    }
 }
 
 /// FFI result for node creation, containing a node handle.

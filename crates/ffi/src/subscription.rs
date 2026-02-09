@@ -10,7 +10,7 @@
 use std::ffi::{c_char, c_int};
 use std::ptr;
 
-use crate::state::{SubscriptionState, NODES, SUBSCRIPTIONS};
+use crate::state::{SubscriptionState, GRAPHQL_SUBSCRIPTIONS, NODES, SUBSCRIPTIONS};
 use crate::types::{c_str_to_string, sanitize_to_cstring};
 use crate::ERR_INVALID_NODE_HANDLE;
 
@@ -266,8 +266,10 @@ pub extern "C" fn poll_subscription(subscription_handle: usize) -> PollSubscript
     result.unwrap_or_else(|| PollSubscriptionResult::error("invalid subscription handle"))
 }
 
-/// Alias for poll_subscription (for Go compatibility)
-/// Accepts a string subscription ID and parses it as a numeric handle.
+/// Poll a GraphQL subscription for new results.
+///
+/// Results have already been processed by the background task at event time,
+/// so this function simply checks the result buffer.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn poll_graphql_subscription(
@@ -283,7 +285,36 @@ pub extern "C" fn poll_graphql_subscription(
         Ok(h) => h,
         Err(_) => return PollSubscriptionResult::error("invalid subscription id: not a number"),
     };
-    poll_subscription(handle)
+
+    let result =
+        GRAPHQL_SUBSCRIPTIONS.get_mut(handle, |state| match state.result_receiver.try_recv() {
+            Ok(json) => PollSubscriptionResult::event(json, 0),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                PollSubscriptionResult::no_event(0)
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                PollSubscriptionResult::closed()
+            }
+        });
+
+    result.unwrap_or_else(|| PollSubscriptionResult::error("invalid subscription handle"))
+}
+
+/// Check if a query response has any non-empty data.
+///
+/// Returns false if data is null/empty or all top-level collection arrays are empty
+/// (indicating the subscription's filter excluded the document).
+pub(crate) fn response_has_data(response: &query::QueryResponse) -> bool {
+    if let Some(serde_json::Value::Object(map)) = response.data.as_ref() {
+        for value in map.values() {
+            if let serde_json::Value::Array(arr) = value {
+                if !arr.is_empty() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Close a subscription and release resources.
@@ -315,7 +346,8 @@ pub extern "C" fn close_subscription(subscription_handle: usize) -> CloseSubscri
     CloseSubscriptionResult::success()
 }
 
-/// Alias for close_subscription (for Go compatibility)
+/// Close a GraphQL subscription and release resources.
+///
 /// Accepts a string subscription ID and parses it as a numeric handle.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
@@ -332,7 +364,22 @@ pub extern "C" fn close_graphql_subscription(
         Ok(h) => h,
         Err(_) => return CloseSubscriptionResult::error("invalid subscription id: not a number"),
     };
-    close_subscription(handle)
+
+    // Remove from GraphQL subscription registry
+    let state = match GRAPHQL_SUBSCRIPTIONS.remove(handle) {
+        Some(state) => state,
+        None => return CloseSubscriptionResult::error("invalid subscription handle"),
+    };
+
+    // Abort the background event processing task
+    state.task_abort.abort();
+
+    // Unsubscribe from the event bus
+    NODES.get(state.node_handle, |node_state| {
+        node_state.event_bus.unsubscribe(state.event_sub_id);
+    });
+
+    CloseSubscriptionResult::success()
 }
 
 /// Convert an event message to JSON.

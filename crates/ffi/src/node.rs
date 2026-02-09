@@ -270,16 +270,24 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
 /// All subscriptions associated with this node will be closed.
 #[no_mangle]
 pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
-    use crate::state::SUBSCRIPTIONS;
+    use crate::state::{GRAPHQL_SUBSCRIPTIONS, SUBSCRIPTIONS};
 
     let rt = get_runtime!(FfiResult);
 
-    // Remove all subscriptions for this node
+    // Remove all raw subscriptions for this node
     let removed_subs = SUBSCRIPTIONS.remove_for_node(node_ptr);
     for sub_state in removed_subs {
-        // Unsubscribe from the event bus
         NODES.get(node_ptr, |state| {
             state.event_bus.unsubscribe(sub_state.subscription.id());
+        });
+    }
+
+    // Remove all GraphQL subscriptions for this node
+    let removed_gql_subs = GRAPHQL_SUBSCRIPTIONS.remove_for_node(node_ptr);
+    for sub_state in removed_gql_subs {
+        sub_state.task_abort.abort();
+        NODES.get(node_ptr, |state| {
+            state.event_bus.unsubscribe(sub_state.event_sub_id);
         });
     }
 
