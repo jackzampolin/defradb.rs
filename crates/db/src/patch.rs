@@ -812,31 +812,23 @@ impl<S: Store> crate::database::DB<S> {
             || is_transform_only_change
             || is_metadata_only_change
         {
+            // True deletion: remove from store entirely (matches Go behavior)
             if is_deactivation {
+                self.delete_collection_version(&old_version_id, &[]).await?;
                 new_schema.is_active = false;
+                new_schema.version_id = old_version_id.clone();
+                if !is_transform_only_change {
+                    new_schema.previous_version = old_schema.previous_version.clone();
+                }
+                return Ok(new_schema);
             }
+
             // Keep original version_id
             new_schema.version_id = old_version_id.clone();
-            // For IsActive-only, metadata-only, or deactivation, restore original previous_version.
+            // For IsActive-only, metadata-only, restore original previous_version.
             // For Transform-only changes, keep the new previous_version (contains the transform).
             if !is_transform_only_change {
                 new_schema.previous_version = old_schema.previous_version.clone();
-            }
-
-            // Validate: can't remove a version that is a dependency of another version
-            // This check runs always for deactivation (even if already inactive),
-            // matching Go's validateCollectionDoesNotHaveHigherVersion
-            if is_deactivation {
-                let all_versions = self.get_all_collection_versions().await?;
-                for other in &all_versions {
-                    if let Some(ref prev) = other.previous_version {
-                        if prev.source_collection_id == old_version_id {
-                            return Err(Error::InvalidPatch(
-                                "cannot delete a version that is used by a newer version, first delete the new version".to_string(),
-                            ));
-                        }
-                    }
-                }
             }
 
             // Validate: can't remove a collection that has documents (only on active→inactive)
