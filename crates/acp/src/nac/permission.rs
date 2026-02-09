@@ -1,11 +1,11 @@
 //! Node-level permission types for NAC.
 //!
-//! Defines the 33 node-level permissions that control access to
+//! Defines the 34 node-level permissions that control access to
 //! database operations when Node Access Control is enabled.
 
 use serde::{Deserialize, Serialize};
 
-/// Node-level permissions (matches Go DefraDB's 33 node permissions).
+/// Node-level permissions (matches Go DefraDB's 34 node permissions).
 ///
 /// These permissions control access to node-level operations when NAC is enabled.
 /// By default (NAC disabled), all operations are allowed without authentication.

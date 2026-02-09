@@ -135,7 +135,7 @@ mod tests {
         let admin = resource.get_relation(ADMIN_RELATION).unwrap();
 
         // Admin should manage all 34 permissions
-        assert_eq!(admin.manages.len(), 33);
+        assert_eq!(admin.manages.len(), 34);
     }
 
     #[test]
