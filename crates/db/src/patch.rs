@@ -144,7 +144,7 @@ impl<S: Store> crate::database::DB<S> {
                 // Extract field name from path before substitution (for name mismatch validation)
                 let field_name_from_path = stripped_path
                     .as_deref()
-                    .and_then(|p| extract_field_name_from_path(p));
+                    .and_then(extract_field_name_from_path);
 
                 // Go compatibility: substitute field names for indices in /Fields/<name> paths
                 let path =
@@ -981,15 +981,12 @@ impl<S: Store> crate::database::DB<S> {
                 .collect();
             let mut depth = 0u64;
             let mut current_id = old_schema.version_id.as_str();
-            loop {
-                match versions_map.get(current_id) {
-                    Some(v) => match &v.previous_version {
-                        Some(prev) => {
-                            depth += 1;
-                            current_id = prev.source_collection_id.as_str();
-                        }
-                        None => break,
-                    },
+            while let Some(v) = versions_map.get(current_id) {
+                match &v.previous_version {
+                    Some(prev) => {
+                        depth += 1;
+                        current_id = prev.source_collection_id.as_str();
+                    }
                     None => break,
                 }
             }
@@ -998,9 +995,20 @@ impl<S: Store> crate::database::DB<S> {
             depth + 1
         };
 
+        // Build collection name → collection_id map for resolving FieldKind::Named
+        let collection_id_map: std::collections::HashMap<String, String> = all_existing
+            .iter()
+            .filter(|c| c.is_active)
+            .map(|c| (c.name.clone(), c.collection_id.clone()))
+            .collect();
+
         // Generate new version_id from schema content with proper priorities
-        let new_version_id =
-            Self::generate_patch_version_id(&mut new_schema, &old_schema, version_depth);
+        let new_version_id = Self::generate_patch_version_id(
+            &mut new_schema,
+            &old_schema,
+            version_depth,
+            &collection_id_map,
+        );
 
         // Update new schema with version info
         new_schema.version_id = new_version_id.clone();
@@ -1204,12 +1212,27 @@ impl<S: Store> crate::database::DB<S> {
         schema: &mut CollectionVersion,
         old_schema: &CollectionVersion,
         version_depth: u64,
+        collection_id_map: &std::collections::HashMap<String, String>,
     ) -> String {
         use cid::Cid;
         use sha2::{Digest, Sha256};
         use std::str::FromStr;
 
         let collection_priority = version_depth + 1;
+
+        // Resolve FieldKind::Named to FieldKind::Relation before CID generation.
+        // Go's substituteRelationFieldKinds resolves named kinds to CollectionKind
+        // with the actual collection_id before generating field deltas.
+        for field in &mut schema.fields {
+            if let schema::FieldKind::Named { name, is_array } = &field.kind {
+                if let Some(col_id) = collection_id_map.get(name.as_str()) {
+                    field.kind = schema::FieldKind::Relation {
+                        collection_id: col_id.clone(),
+                        is_array: *is_array,
+                    };
+                }
+            }
+        }
 
         // Build set of old field names for detecting which fields are new
         let old_field_names: std::collections::HashSet<&str> = old_schema
@@ -1378,11 +1401,11 @@ impl<S: Store> crate::database::DB<S> {
         for prefix in prefixes {
             let no_slash_prefix = prefix.trim_start_matches('/');
 
-            if path.starts_with(prefix.as_str()) {
-                return format!("/{}", &path[prefix.len()..]);
+            if let Some(rest) = path.strip_prefix(prefix.as_str()) {
+                return format!("/{}", rest);
             }
-            if path.starts_with(no_slash_prefix) {
-                return format!("/{}", &path[no_slash_prefix.len()..]);
+            if let Some(rest) = path.strip_prefix(no_slash_prefix) {
+                return format!("/{}", rest);
             }
             // Exact match without trailing slash (collection-level operations).
             // E.g., path="/Users" with prefix="/Users/" → "/"

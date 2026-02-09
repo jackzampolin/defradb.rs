@@ -332,17 +332,12 @@ pub unsafe extern "C" fn new_node_with_p2p(
                     &config,
                 )
                 .await;
-                eprintln!("[REPL-LOOP] result={:?}", &result);
                 match &result {
                     ReplicationResult::Merged {
                         cid,
                         doc_id,
                         collection_id,
                     } => {
-                        eprintln!(
-                            "[REPL-LOOP] Publishing merge_complete cid={} doc_id={} collection={}",
-                            cid, doc_id, collection_id
-                        );
                         let mc = events::MergeCompleteData {
                             doc_id: doc_id.clone(),
                             cid: *cid,
@@ -350,16 +345,11 @@ pub unsafe extern "C" fn new_node_with_p2p(
                             by_peer: coord_for_repl.local_peer_id().to_string(),
                         };
                         event_bus_for_repl.publish(events::Message::merge_complete(mc));
-                        eprintln!("[REPL-LOOP] merge_complete published for cid={}", cid);
 
                         // Publish SE artifact received event so the Go SE coordinator
                         // bridge picks it up. The Go test framework uses this to know
                         // when encrypted index data is available after replication.
                         if !doc_id.is_empty() {
-                            eprintln!(
-                                "[REPL-LOOP] Publishing se_artifact_received for doc_id={}",
-                                doc_id
-                            );
                             event_bus_for_repl.publish(events::Message::se_artifact_received(
                                 events::SEArtifactReceivedData {
                                     doc_id: doc_id.clone(),

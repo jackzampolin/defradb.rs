@@ -293,18 +293,17 @@ fn like_match(
     negate: bool,
     case_insensitive: bool,
 ) -> Result<bool> {
-    // Null fields never match (standard database behavior, matches Go DefraDB)
+    // Null and non-string values can't match a LIKE pattern.
+    // For _like: false (no match). For _nlike: true (doesn't match the pattern).
     if actual.is_null() {
         return Ok(negate);
     }
 
     let op_name = if case_insensitive { "_ilike" } else { "_like" };
 
-    // Non-string fields don't match _like (return false, not error)
-    // This matches Go DefraDB behavior for JSON fields with mixed types
     let actual_str = match actual.as_str() {
         Some(s) => s,
-        None => return Ok(negate), // Non-string doesn't match, so _like=false, _nlike=true
+        None => return Ok(negate),
     };
     let pattern_str = pattern.as_str().ok_or_else(|| {
         QueryError::invalid_filter(format!("{} requires string pattern", op_name))
@@ -335,7 +334,6 @@ fn like_match(
 pub fn like_pattern_match(text: &str, pattern: &str) -> bool {
     let text_bytes = text.as_bytes();
     let pattern_bytes = pattern.as_bytes();
-    let t_len = text_bytes.len();
     let p_len = pattern_bytes.len();
 
     // dp[j] = true means text[0..i] matches pattern[0..j]
@@ -351,7 +349,7 @@ pub fn like_pattern_match(text: &str, pattern: &str) -> bool {
         }
     }
 
-    for i in 0..t_len {
+    for &text_byte in text_bytes {
         let mut prev = dp[0];
         dp[0] = false;
         for j in 0..p_len {
@@ -359,7 +357,7 @@ pub fn like_pattern_match(text: &str, pattern: &str) -> bool {
             if pattern_bytes[j] == b'%' {
                 // '%' matches zero or more chars: either skip '%' (dp[j]) or extend match (dp[j+1])
                 dp[j + 1] = dp[j] || dp[j + 1];
-            } else if text_bytes[i] == pattern_bytes[j] {
+            } else if text_byte == pattern_bytes[j] {
                 dp[j + 1] = prev;
             } else {
                 dp[j + 1] = false;

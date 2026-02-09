@@ -102,34 +102,25 @@ impl Filter {
 
         // Also check inside _and and _or blocks
         for (key, value) in self.conditions() {
-            if let Some(op) = FilterOp::parse(key) {
-                match op {
-                    FilterOp::And | FilterOp::Or => {
-                        if let Some(arr) = value.as_array() {
-                            for item in arr {
-                                if let Some(obj) = item.as_object() {
-                                    if let Some(rel_value) = obj.get(relation_field) {
-                                        if let Some(rel_obj) = rel_value.as_object() {
-                                            let is_nested = rel_obj
-                                                .keys()
-                                                .any(|k| FilterOp::parse(k).is_none());
-                                            if is_nested {
-                                                let nested_conditions: HashMap<String, JsonValue> =
-                                                    rel_obj
-                                                        .iter()
-                                                        .map(|(k, v)| (k.clone(), v.clone()))
-                                                        .collect();
-                                                return Some(Filter::from_conditions(
-                                                    nested_conditions,
-                                                ));
-                                            }
-                                        }
+            if let Some(FilterOp::And | FilterOp::Or) = FilterOp::parse(key) {
+                if let Some(arr) = value.as_array() {
+                    for item in arr {
+                        if let Some(obj) = item.as_object() {
+                            if let Some(rel_value) = obj.get(relation_field) {
+                                if let Some(rel_obj) = rel_value.as_object() {
+                                    let is_nested =
+                                        rel_obj.keys().any(|k| FilterOp::parse(k).is_none());
+                                    if is_nested {
+                                        let nested_conditions: HashMap<String, JsonValue> = rel_obj
+                                            .iter()
+                                            .map(|(k, v)| (k.clone(), v.clone()))
+                                            .collect();
+                                        return Some(Filter::from_conditions(nested_conditions));
                                     }
                                 }
                             }
                         }
                     }
-                    _ => {}
                 }
             }
         }
@@ -157,7 +148,7 @@ impl Filter {
     /// - "author" is a relation (its value has non-operator keys)
     /// - "published" is a relation (its value has non-operator keys)
     /// - "rating" is a scalar (its value only has operator keys like "_eq")
-    /// So the path is ["author", "published"].
+    ///   So the path is ["author", "published"].
     fn collect_relation_paths(
         conditions: &HashMap<String, JsonValue>,
         current_path: &mut Vec<String>,
@@ -280,24 +271,17 @@ impl Filter {
 
         // Also check inside _and and _or blocks
         for (key, value) in conditions {
-            if let Some(op) = FilterOp::parse(key) {
-                match op {
-                    FilterOp::And | FilterOp::Or => {
-                        if let Some(arr) = value.as_array() {
-                            for item in arr {
-                                if let Some(obj) = item.as_object() {
-                                    let nested: HashMap<String, JsonValue> =
-                                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                    if let Some(filter) =
-                                        Self::extract_at_path_recursive(&nested, path)
-                                    {
-                                        return Some(filter);
-                                    }
-                                }
+            if let Some(FilterOp::And | FilterOp::Or) = FilterOp::parse(key) {
+                if let Some(arr) = value.as_array() {
+                    for item in arr {
+                        if let Some(obj) = item.as_object() {
+                            let nested: HashMap<String, JsonValue> =
+                                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            if let Some(filter) = Self::extract_at_path_recursive(&nested, path) {
+                                return Some(filter);
                             }
                         }
                     }
-                    _ => {}
                 }
             }
         }

@@ -914,7 +914,7 @@ impl Reader for RedbTxn {
 
         // Helper to check prefix
         let matches_prefix =
-            |key: &[u8]| -> bool { opts.prefix().map_or(true, |p| key.starts_with(p)) };
+            |key: &[u8]| -> bool { opts.prefix().is_none_or(|p| key.starts_with(p)) };
 
         // Extract snapshot items into Vec (already sorted by BTreeMap)
         let snapshot_items: Vec<(Vec<u8>, Vec<u8>)> = self

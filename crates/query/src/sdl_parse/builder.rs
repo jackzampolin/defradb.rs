@@ -54,7 +54,6 @@ impl<'a> SdlParser<'a> {
 
     /// Validate parsed types before building collections.
     /// Checks for NonNull fields, one-one relation primary constraints, and default value constraints.
-
     pub(super) fn build_collections(&self) -> Result<Vec<CollectionVersion>> {
         // Build collection names set for relation detection, including external types
         let mut type_names: std::collections::HashSet<_> = self.type_defs.keys().cloned().collect();
@@ -576,7 +575,7 @@ impl<'a> SdlParser<'a> {
                     };
                     // FK field has same is_primary status as relation object field
                     let mut id_field =
-                        FieldDescription::new(&id_field_id, &id_field_name.clone(), id_field_kind)
+                        FieldDescription::new(&id_field_id, &id_field_name, id_field_kind)
                             .with_crdt_type(id_field_crdt)
                             .with_relation_name(relation_name);
                     if is_primary {

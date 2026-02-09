@@ -271,7 +271,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         // Get the shared transaction from the fetcher
         let shared_txn = ctx.fetcher_shared_txn();
         let txn_guard = shared_txn.lock().await;
-        let txn = txn_guard.as_ref().ok_or_else(|| Error::TxnNotActive)?;
+        let txn = txn_guard.as_ref().ok_or(Error::TxnNotActive)?;
 
         // Call the database's transaction-aware set_migration
         self.db.set_migration_in_txn(txn, config).await

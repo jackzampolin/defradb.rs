@@ -33,7 +33,7 @@ pub enum ExplainType {
 
 impl ExplainType {
     /// Parse explain type from string.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "simple" => Some(Self::Simple),
             "execute" => Some(Self::Execute),
@@ -61,7 +61,7 @@ pub enum ParsedOperation {
     /// Subscription operations (single root field only per GraphQL spec)
     Subscription {
         /// The single select for the subscription.
-        select: Select,
+        select: Box<Select>,
     },
     /// Introspection query (__schema or __type)
     ///
@@ -86,12 +86,12 @@ fn parse_explain_directive(directives: &[Directive<'_, String>]) -> Result<Optio
                         Value::Enum(s) => s.as_str(),
                         Value::String(s) => s.as_str(),
                         _ => {
-                            return Err(QueryError::parse(format!(
-                                "Argument \"type\" has invalid value.\nExpected type \"ExplainType\"."
-                            )));
+                            return Err(QueryError::parse(
+                                "Argument \"type\" has invalid value.\nExpected type \"ExplainType\".",
+                            ));
                         }
                     };
-                    if let Some(explain_type) = ExplainType::from_str(type_str) {
+                    if let Some(explain_type) = ExplainType::parse_str(type_str) {
                         return Ok(Some(explain_type));
                     }
                     return Err(QueryError::parse(format!(
@@ -492,7 +492,7 @@ pub fn parse_request_with_variables(
     if has_subscription {
         // subscription_selects is guaranteed to have exactly one element due to earlier validation
         Ok(ParsedOperation::Subscription {
-            select: subscription_selects.into_iter().next().unwrap(),
+            select: Box::new(subscription_selects.into_iter().next().unwrap()),
         })
     } else if has_mutation {
         Ok(ParsedOperation::Mutation { mutations, explain })

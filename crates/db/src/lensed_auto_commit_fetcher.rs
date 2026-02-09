@@ -697,18 +697,33 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         let limit = params.limit;
         let offset = params.offset;
 
-        // Helper to collect entries with optional early termination
+        // Helper to collect entries with optional early termination and value filtering.
+        // Returns (doc_ids, total_iterated) where total_iterated counts ALL entries
+        // including those filtered out (for indexFetches metrics).
         async fn collect_with_limit<I: IndexIterator>(
             iter: &mut I,
             limit: Option<u64>,
             offset: u64,
-        ) -> Result<Vec<String>, query::error::QueryError> {
+            value_filter: Option<&query::planner::index_selection::ScanValueFilter>,
+        ) -> Result<(Vec<String>, u64), query::error::QueryError> {
             let mut entries = Vec::new();
             let mut skipped = 0u64;
+            let mut total_iterated = 0u64;
 
             while let Some(entry) = iter.next().await.map_err(|e| {
                 query::error::QueryError::execution(format!("index iteration error: {}", e))
             })? {
+                total_iterated += 1;
+
+                // Apply scan-level value filter (matches Go's indexLikeMatcher)
+                if let Some(filter) = value_filter {
+                    if let Some(first_value) = entry.values.first() {
+                        if !filter.matches_value(first_value) {
+                            continue;
+                        }
+                    }
+                }
+
                 // Skip offset entries
                 if skipped < offset {
                     skipped += 1;
@@ -725,16 +740,19 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
                 }
             }
 
-            Ok(entries)
+            Ok((entries, total_iterated))
         }
 
-        // Execute the appropriate scan based on scan type
-        let raw_doc_ids: Vec<String> = match &params.scan_type {
+        // Execute the appropriate scan based on scan type.
+        // Returns (doc_ids, raw_fetches) where raw_fetches counts ALL entries iterated
+        // including those filtered out by value_filter (for indexFetches metrics).
+        let vf = params.value_filter.as_ref();
+        let (raw_doc_ids, raw_fetches): (Vec<String>, u64) = match &params.scan_type {
             IndexScanType::ExactMatch { values } => {
                 let mut iter = index.get(&datastore, values).await.map_err(|e| {
                     query::error::QueryError::execution(format!("index error: {}", e))
                 })?;
-                collect_with_limit(&mut iter, limit, offset).await?
+                collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::InScan {
                 values,
@@ -764,7 +782,7 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
                         all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
                     } else if is_composite {
                         let mut iter = index
-                            .scan_prefix(&datastore, &[value.clone()], false)
+                            .scan_prefix(&datastore, std::slice::from_ref(value), false)
                             .await
                             .map_err(|e| {
                                 query::error::QueryError::execution(format!("index error: {}", e))
@@ -777,8 +795,10 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
                         })?;
                         all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
                     } else {
-                        let mut iter =
-                            index.get(&datastore, &[value.clone()]).await.map_err(|e| {
+                        let mut iter = index
+                            .get(&datastore, std::slice::from_ref(value))
+                            .await
+                            .map_err(|e| {
                                 query::error::QueryError::execution(format!("index error: {}", e))
                             })?;
                         let entries = iter.collect_all().await.map_err(|e| {
@@ -790,7 +810,8 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
                         all_doc_ids.extend(entries.into_iter().map(|e| e.doc_id));
                     }
                 }
-                all_doc_ids
+                let count = all_doc_ids.len() as u64;
+                (all_doc_ids, count)
             }
             IndexScanType::PrefixScan {
                 prefix_values,
@@ -802,7 +823,7 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
-                collect_with_limit(&mut iter, limit, offset).await?
+                collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::RangeScan {
                 prefix_values,
@@ -822,14 +843,11 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
                     .map_err(|e| {
                         query::error::QueryError::execution(format!("index error: {}", e))
                     })?;
-                collect_with_limit(&mut iter, limit, offset).await?
+                collect_with_limit(&mut iter, limit, offset, vf).await?
             }
         };
 
         let _ = txn.discard();
-
-        // Track raw fetch count before deduplication (for explain metrics)
-        let raw_fetches = raw_doc_ids.len() as u64;
 
         // Deduplicate doc_ids while preserving order.
         // Array indexes can return the same document multiple times (once per array element).

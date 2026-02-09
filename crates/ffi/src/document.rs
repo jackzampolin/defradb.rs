@@ -246,10 +246,10 @@ fn parse_go_duration(s: &str) -> Result<i64, String> {
         return Ok(0);
     }
 
-    let (negative, s) = if s.starts_with('-') {
-        (true, &s[1..])
-    } else if s.starts_with('+') {
-        (false, &s[1..])
+    let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = s.strip_prefix('+') {
+        (false, rest)
     } else {
         (false, s)
     };

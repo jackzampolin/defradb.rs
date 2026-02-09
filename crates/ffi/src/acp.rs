@@ -54,6 +54,10 @@ fn normalize_auth_error(err: String) -> String {
 /// ```
 ///
 /// This function is NAC-gated with the `NacStatus` permission.
+///
+/// # Safety
+///
+/// Caller must ensure all pointer arguments are valid, non-null, and point to valid C strings.
 #[no_mangle]
 pub unsafe extern "C" fn get_nac_status(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
     let rt = get_runtime!(FfiResult);
@@ -520,10 +524,7 @@ pub unsafe extern "C" fn add_dac_policy(
         None => return FfiResult::error("policy is null"),
     };
 
-    let identity_str = match c_str_to_string(_identity_did) {
-        Some(s) => s,
-        None => String::new(),
-    };
+    let identity_str = c_str_to_string(_identity_did).unwrap_or_default();
 
     if identity_str.is_empty() {
         return FfiResult::error("policy creator can not be empty");
@@ -1031,6 +1032,7 @@ pub extern "C" fn get_node_identity(node_ptr: usize) -> FfiResult {
 ///
 /// # Returns
 /// Success with empty JSON object, or error on failure.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn RegisterIdentity(
     did: *const c_char,
@@ -1109,12 +1111,12 @@ pub extern "C" fn create_identity() -> FfiResult {
         // Store identity in global store so block signing can look up the
         // private key from just a DID string during mutations.
         defra_core::signing::store_identity(
-            &did.to_string(),
+            did.as_ref(),
             defra_core::signing::SigningConfig {
                 key_type: "ed25519".to_string(),
                 private_key_bytes: identity.private_key_bytes().to_vec(),
                 public_key_bytes: identity.public_key_bytes().to_vec(),
-                public_key_hex: public_key_hex,
+                public_key_hex,
             },
         );
 

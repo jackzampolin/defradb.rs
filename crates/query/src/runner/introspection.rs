@@ -611,15 +611,33 @@ fn build_order_input_type(
         InputValue::new("_docID", TypeRef::named("Ordering")),
     ));
 
-    // Add order fields for each collection field
+    // Add order fields for each collection field.
+    // One-to-one relation fields reference the related collection's OrderArg type to allow
+    // nested ordering like `User(order: {device: {model: ASC}})`.
+    // One-to-many relations (arrays) are excluded — ordering by an array relation is ambiguous.
     for field in &collection.fields {
         if field.name == "_docID" {
             continue;
         }
-        fields.push((
-            field.name.clone(),
-            InputValue::new(&field.name, TypeRef::named("Ordering")),
-        ));
+        if field.kind.is_relation() && !field.kind.is_array() {
+            // One-to-one relation: reference the related collection's OrderArg type
+            if let Some(related_collection_id) = field.kind.relation_collection_id() {
+                if let Some(related_name) = _id_to_name.get(related_collection_id) {
+                    fields.push((
+                        field.name.clone(),
+                        InputValue::new(
+                            &field.name,
+                            TypeRef::named(format!("{}OrderArg", related_name)),
+                        ),
+                    ));
+                }
+            }
+        } else if !field.kind.is_relation() {
+            fields.push((
+                field.name.clone(),
+                InputValue::new(&field.name, TypeRef::named("Ordering")),
+            ));
+        }
     }
 
     // Sort alphabetically to match Go introspection output
@@ -636,13 +654,12 @@ fn build_order_input_type(
 /// Go includes system fields: _deleted, _docID, _group, _version
 fn build_field_enum(collection: &CollectionVersion) -> Enum {
     let type_name = format!("{}Field", collection.name);
-    let mut items: Vec<String> = Vec::new();
-
-    // System fields that Go always includes
-    items.push("_deleted".to_string());
-    items.push("_docID".to_string());
-    items.push("_group".to_string());
-    items.push("_version".to_string());
+    let mut items: Vec<String> = vec![
+        "_deleted".to_string(),
+        "_docID".to_string(),
+        "_group".to_string(),
+        "_version".to_string(),
+    ];
 
     // User-defined fields
     for field in &collection.fields {
@@ -1492,12 +1509,12 @@ fn build_numeric_fields_enum(collection: &CollectionVersion) -> Enum {
     let mut enum_type = Enum::new(&type_name);
 
     for field in &collection.fields {
-        let is_numeric = match &field.kind {
+        let is_numeric = matches!(
+            &field.kind,
             FieldKind::Scalar(ScalarKind::Int)
-            | FieldKind::Scalar(ScalarKind::Float32)
-            | FieldKind::Scalar(ScalarKind::Float64) => true,
-            _ => false,
-        };
+                | FieldKind::Scalar(ScalarKind::Float32)
+                | FieldKind::Scalar(ScalarKind::Float64)
+        );
         if is_numeric {
             enum_type = enum_type.item(EnumItem::new(&field.name));
         }

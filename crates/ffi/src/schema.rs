@@ -106,6 +106,10 @@ pub unsafe extern "C" fn add_schema(
 /// Get all collections from the database.
 ///
 /// Returns a JSON array of collection descriptions.
+///
+/// # Safety
+///
+/// Caller must ensure all pointer arguments are valid, non-null, and point to valid C strings.
 #[no_mangle]
 pub unsafe extern "C" fn get_collections(
     node_ptr: usize,

@@ -561,7 +561,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 if !relation_targets.is_empty() {
                     aggregates_info.push((
                         agg.output_name().to_string(),
-                        agg.aggregate_type.clone(),
+                        agg.aggregate_type,
                         relation_targets,
                     ));
                 }
@@ -920,13 +920,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 // `published { name }` but the aggregate filter needed `rating`, we need to remove
                 // `rating` from each item in `published` after aggregate computation.
                 for (relation_name, allowed_fields) in &selected_relation_fields {
-                    if let Some(relation_data) = obj.get_mut(relation_name) {
-                        if let JsonValue::Array(items) = relation_data {
-                            for item in items.iter_mut() {
-                                if let JsonValue::Object(item_obj) = item {
-                                    // Remove fields that weren't in the original selection
-                                    item_obj.retain(|k, _| allowed_fields.contains(k));
-                                }
+                    if let Some(JsonValue::Array(items)) = obj.get_mut(relation_name) {
+                        for item in items.iter_mut() {
+                            if let JsonValue::Object(item_obj) = item {
+                                // Remove fields that weren't in the original selection
+                                item_obj.retain(|k, _| allowed_fields.contains(k));
                             }
                         }
                     }
@@ -1184,20 +1182,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         for result in &mut results {
             if let JsonValue::Object(ref mut obj) = result {
                 for (field_name, limit, offset) in &relation_limits {
-                    if let Some(relation_data) = obj.get_mut(field_name) {
-                        if let JsonValue::Array(items) = relation_data {
-                            let offset = *offset as usize;
-                            let total = items.len();
-                            if offset >= total {
-                                *items = Vec::new();
+                    if let Some(JsonValue::Array(items)) = obj.get_mut(field_name) {
+                        let offset = *offset as usize;
+                        let total = items.len();
+                        if offset >= total {
+                            *items = Vec::new();
+                        } else {
+                            let remaining: Vec<JsonValue> = items.drain(offset..).collect();
+                            *items = if *limit > 0 {
+                                remaining.into_iter().take(*limit as usize).collect()
                             } else {
-                                let remaining: Vec<JsonValue> = items.drain(offset..).collect();
-                                *items = if *limit > 0 {
-                                    remaining.into_iter().take(*limit as usize).collect()
-                                } else {
-                                    remaining
-                                };
-                            }
+                                remaining
+                            };
                         }
                     }
                 }
@@ -1338,9 +1334,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         Ok(JsonValue::Array(results))
     }
 
-    /// Execute a CID-based time-travel query with optional _version support.
-
-    ///
     /// Top-level aggregates compute a single value over all documents in a collection.
     /// Unlike regular collection queries that return an array, top-level aggregates
     /// return a single value (the computed aggregate).

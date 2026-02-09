@@ -403,12 +403,18 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     /// Composite deltas contain links to the actual field LWW/Counter blocks.
     /// This method processes all linked blocks within a SINGLE transaction to ensure
     /// atomicity between CRDT field merges and document storage.
+    ///
+    /// When `from_collection` is true, this composite is being processed as part of
+    /// a collection-level sync (BranchableSync). The caller (`process_collection_delta`)
+    /// handles collection headstore updates, so we skip creating local collection blocks
+    /// to avoid race conditions with _commits queries.
     async fn process_composite_delta(
         &self,
         cid: &Cid,
         block: &Block,
         payload: &defra_core::block::CompositeDeltaPayload,
         metadata: &BlockMetadata<'_>,
+        from_collection: bool,
     ) -> std::result::Result<MergeOutcome, MergeError> {
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
 
@@ -468,6 +474,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         &head_block,
                         head_payload,
                         metadata,
+                        from_collection,
                     ))
                     .await;
                 }
@@ -483,6 +490,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let mut any_field_applied = false;
         let mut process_error: Option<MergeError> = None;
         let mut is_branchable = false;
+        // Collect field block heads for proper headstore merging during concurrent updates
+        let mut field_block_heads: HashMap<String, Vec<Cid>> = HashMap::new();
 
         // Process linked blocks within the transaction scope
         // Use a scoped block to ensure datastore is dropped before commit/discard
@@ -548,6 +557,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             break;
                         }
                     };
+
+                    // Collect field block heads for proper headstore merging.
+                    // During concurrent updates, we must only delete the heads that
+                    // this field block explicitly supersedes, not ALL heads for the field.
+                    if let Some(heads) = &linked_block.heads {
+                        field_block_heads.insert(link_name.clone(), heads.clone());
+                    }
 
                     // Decrypt linked block data if it has encryption
                     let effective_linked_delta = match &linked_block.delta {
@@ -667,10 +683,35 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     Some(collection) => {
                         is_branchable = collection.schema().is_branchable;
                         if is_delete {
-                            // Handle delete: write the deletion marker so queries
-                            // exclude this document (or show _deleted:true).
-                            // The delete composite has no field links, so field_values
-                            // is empty — but we still need to mark the doc as deleted.
+                            // Handle delete: remove index entries, then write deletion marker.
+                            // Must load the old document first so we know which index
+                            // entries to remove (Go's syncIndexedDoc does the same).
+                            if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
+                                if let Ok(Some(old_doc)) =
+                                    collection.get_with_datastore(&datastore, &doc_id).await
+                                {
+                                    let short_id = collection_short_id(collection.collection_id());
+                                    if let Ok(index_manager) =
+                                        IndexManager::from_collection(short_id, collection.schema())
+                                    {
+                                        if let Err(e) = index_manager
+                                            .on_document_delete(
+                                                &datastore,
+                                                &old_doc,
+                                                collection.schema(),
+                                            )
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                doc_id = %doc_id_str,
+                                                error = %e,
+                                                "Failed to delete indexes after merge"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
                             let deleted_key =
                                 build_deleted_key(collection.collection_id(), &doc_id_str);
                             if let Err(e) = datastore.set(&deleted_key, &[DELETED_MARKER]).await {
@@ -800,27 +841,32 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Write headstore entries so _version / _commits queries work on
         // the receiving node.  The headstore tracks the latest CID for each
         // field and for the composite ("C"), keyed by doc_id.
+        //
+        // IMPORTANT: Use proper head merging — only delete heads that this block
+        // explicitly supersedes (listed in block.heads / field block heads).
+        // This preserves concurrent branches during concurrent P2P updates.
         if process_error.is_none() {
             if let Ok(headstore) = txn.headstore() {
-                // Write composite head: /d/{doc_id}/C/{cid} → priority
-                let composite_head_key =
-                    storage::keys::headstore::HeadstoreDocKey::new(&doc_id_str, "C", *cid);
                 let priority_bytes = encode_priority_varint(payload.priority);
 
-                // Delete any existing composite head for this doc before
-                // writing the new one (replace, not accumulate).
-                let prefix =
-                    storage::keys::headstore::HeadstoreDocKey::field_prefix(&doc_id_str, "C");
-                if let Ok(mut iter) = headstore
-                    .iterator(datastore::IterOptions::new().with_prefix(prefix))
-                    .await
-                {
-                    while let Ok(Some(pair)) = iter.next().await {
-                        let _ = headstore.delete(&pair.key).await;
+                // Composite head: only delete heads listed in block.heads
+                if let Some(heads) = &block.heads {
+                    for parent_cid in heads {
+                        let parent_key = storage::keys::headstore::HeadstoreDocKey::new(
+                            &doc_id_str,
+                            "C",
+                            *parent_cid,
+                        );
+                        let _ = headstore
+                            .delete(
+                                &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&parent_key),
+                            )
+                            .await;
                     }
-                    let _ = iter.close().await;
                 }
-
+                // Add new composite head
+                let composite_head_key =
+                    storage::keys::headstore::HeadstoreDocKey::new(&doc_id_str, "C", *cid);
                 if let Err(e) = headstore
                     .set(
                         &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(
@@ -833,30 +879,30 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     tracing::warn!(error = %e, "Failed to write composite head to headstore");
                 }
 
-                // Write field heads for each linked block
+                // Field heads: only delete heads that each field block supersedes
                 if let Some(links) = &block.links {
                     for dag_link in links {
+                        // Delete only the parent field heads (from the field block's heads)
+                        if let Some(parent_cids) = field_block_heads.get(&dag_link.name) {
+                            for parent_cid in parent_cids {
+                                let parent_key = storage::keys::headstore::HeadstoreDocKey::new(
+                                    &doc_id_str,
+                                    &dag_link.name,
+                                    *parent_cid,
+                                );
+                                let _ = headstore
+                                    .delete(
+                                        &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&parent_key),
+                                    )
+                                    .await;
+                            }
+                        }
+                        // Add new field head
                         let field_head_key = storage::keys::headstore::HeadstoreDocKey::new(
                             &doc_id_str,
                             &dag_link.name,
                             dag_link.link,
                         );
-
-                        // Delete existing field head entries for this field
-                        let field_prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(
-                            &doc_id_str,
-                            &dag_link.name,
-                        );
-                        if let Ok(mut iter) = headstore
-                            .iterator(datastore::IterOptions::new().with_prefix(field_prefix))
-                            .await
-                        {
-                            while let Ok(Some(pair)) = iter.next().await {
-                                let _ = headstore.delete(&pair.key).await;
-                            }
-                            let _ = iter.close().await;
-                        }
-
                         if let Err(e) = headstore
                             .set(
                                 &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&field_head_key),
@@ -874,6 +920,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 }
             }
         }
+
+        // For branchable collections, the sender broadcasts the collection block
+        // separately (dual broadcast), so we don't create local collection blocks here.
+        // The sender's collection block arrives via handle_block → process_collection_delta
+        // which preserves the exact collection CID for cross-node consistency.
 
         // Handle transaction commit/discard based on result
         match process_error {
@@ -900,8 +951,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     bus.publish(Message::update(update));
 
                     // For branchable collections, emit a collection-level merge_complete
-                    // event so the test framework (and Go event system) can track
-                    // collection DAG heads separately from document DAG heads.
+                    // event. Uses composite CID to match the sender's Update event CID.
                     if is_branchable {
                         let by_peer = metadata.creator.unwrap_or("").to_string();
                         let mc = MergeCompleteData {
@@ -1356,6 +1406,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                 &linked_block,
                                 composite_payload,
                                 metadata,
+                                true, // from_collection: skip local collection block creation
                             )
                             .await
                         {
@@ -1401,26 +1452,31 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
-        // Update collection headstore: write the new collection head CID
-        // and delete any previous heads that this block supersedes.
+        // Update collection headstore using proper head merging.
+        // Only remove heads that this block explicitly supersedes (listed in block.heads),
+        // preserving concurrent branches for later merge via write_collection_block.
         let collection_id = metadata.collection_id.unwrap_or(&payload.schema_version_id);
         let short_id = collection_short_id(collection_id);
 
         let txn = self.db.new_txn(false).await?;
         if let Ok(headstore) = txn.headstore() {
-            // Delete existing collection heads
-            let prefix = storage::keys::headstore::HeadstoreColKey::collection_prefix(short_id);
-            if let Ok(mut iter) = headstore
-                .iterator(datastore::IterOptions::new().with_prefix(prefix))
-                .await
-            {
-                while let Ok(Some(pair)) = iter.next().await {
-                    let _ = headstore.delete(&pair.key).await;
+            // Remove only the heads that this block supersedes (its parents).
+            // This preserves concurrent branches in the headstore.
+            if let Some(heads) = &block.heads {
+                for parent_cid in heads {
+                    let parent_key =
+                        storage::keys::headstore::HeadstoreColKey::new(short_id, *parent_cid);
+                    let _ = headstore
+                        .delete(
+                            &<storage::keys::headstore::HeadstoreColKey as storage::corekv::Key>::bytes(
+                                &parent_key,
+                            ),
+                        )
+                        .await;
                 }
-                let _ = iter.close().await;
             }
 
-            // Write the new collection head
+            // Add the new collection head (idempotent if already exists)
             let col_key = storage::keys::headstore::HeadstoreColKey::new(short_id, *cid);
             let priority_bytes = encode_priority_varint(payload.priority);
             if let Err(e) = headstore
@@ -1797,7 +1853,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                 self.process_counter_delta(cid, payload, &metadata).await
             }
             CrdtDelta::Composite(payload) => {
-                self.process_composite_delta(cid, &block, payload, &metadata)
+                self.process_composite_delta(cid, &block, payload, &metadata, false)
                     .await
             }
             CrdtDelta::Collection(payload) => {

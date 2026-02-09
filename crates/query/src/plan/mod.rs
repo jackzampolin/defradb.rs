@@ -65,7 +65,7 @@ fn strip_docid_value(value: &serde_json::Value) -> serde_json::Value {
                     if let serde_json::Value::Array(arr) = val {
                         let filtered: Vec<serde_json::Value> = arr
                             .iter()
-                            .map(|item| strip_docid_value(item))
+                            .map(strip_docid_value)
                             .filter(|item| {
                                 !item.is_null()
                                     && !item.as_object().map(|o| o.is_empty()).unwrap_or(false)

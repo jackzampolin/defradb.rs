@@ -379,8 +379,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
     }
 
-    /// Execute a top-level aggregate query (e.g., `{ _avg(Users: {field: Age}) }`).
-
     /// Execute a _commits system collection query.
     ///
     /// This handles queries to the special _commits collection which fetches
