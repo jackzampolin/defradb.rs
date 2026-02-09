@@ -18,9 +18,9 @@ func TestIndexCreateDropParity(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	rustNode, goNode := startMirrorNodes(t, ctx)
-	rustClient := rustNode.Client()
-	goClient := goNode.Client()
+	rustNode, goNode, id := startMirrorNodes(t, ctx)
+	rustClient := rustNode.Client().WithIdentity(id)
+	goClient := goNode.Client().WithIdentity(id)
 
 	// Add Article schema
 	_, err := rustClient.AddSchema(ctx, framework.ArticleSchema)
@@ -98,9 +98,9 @@ func TestUniqueIndexParity(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	rustNode, goNode := startMirrorNodes(t, ctx)
-	rustClient := rustNode.Client()
-	goClient := goNode.Client()
+	rustNode, goNode, id := startMirrorNodes(t, ctx)
+	rustClient := rustNode.Client().WithIdentity(id)
+	goClient := goNode.Client().WithIdentity(id)
 
 	_, err := rustClient.AddSchema(ctx, framework.ArticleSchema)
 	require.NoError(t, err)

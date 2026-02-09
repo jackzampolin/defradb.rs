@@ -72,6 +72,7 @@ func mintJWT(priv ed25519.PrivateKey, pub ed25519.PublicKey, did, audience strin
 		"iss":      did,
 		"aud":      jwt.ClaimStrings{audience},
 		"iat":      now.Unix(),
+		"nbf":      now.Add(-1 * time.Minute).Unix(),
 		"exp":      now.Add(1 * time.Hour).Unix(),
 		"key_type": "ed25519",
 	}

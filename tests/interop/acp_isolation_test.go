@@ -14,8 +14,13 @@ import (
 
 // startMirrorNodes starts a Rust and Go node pair for mirror-mode testing.
 // Both nodes run independently (no P2P), with encryption enabled.
-func startMirrorNodes(t *testing.T, ctx context.Context) (rustNode, goNode *framework.Node) {
+// Returns nodes and a default identity that can be used for authenticated API calls.
+func startMirrorNodes(t *testing.T, ctx context.Context) (rustNode, goNode *framework.Node, defaultIdentity *framework.TestIdentity) {
 	t.Helper()
+
+	// Generate a default identity for node startup and API auth
+	defaultIdentity, err := framework.GenerateIdentity("test")
+	require.NoError(t, err, "failed to generate default identity")
 
 	rustPorts, err := framework.ReserveNodePorts()
 	require.NoError(t, err)
@@ -31,6 +36,7 @@ func startMirrorNodes(t *testing.T, ctx context.Context) (rustNode, goNode *fram
 		P2PPort:  rustPorts.P2PPort,
 		Store:    "memory",
 		NoP2P:    true,
+		Identity: defaultIdentity,
 	})
 
 	rustPorts.Release()
@@ -44,6 +50,7 @@ func startMirrorNodes(t *testing.T, ctx context.Context) (rustNode, goNode *fram
 		P2PPort:  goPorts.P2PPort,
 		Store:    "memory",
 		NoP2P:    true,
+		Identity: defaultIdentity,
 	})
 
 	goPorts.Release()
@@ -51,7 +58,7 @@ func startMirrorNodes(t *testing.T, ctx context.Context) (rustNode, goNode *fram
 	t.Cleanup(func() { goNode.Stop() })
 	dumpLogsOnFailure(t, "go-node", goNode)
 
-	return rustNode, goNode
+	return rustNode, goNode, defaultIdentity
 }
 
 // TestACPMultiUserIsolation tests that multiple users with ACP policies
@@ -70,7 +77,7 @@ func TestACPMultiUserIsolation(t *testing.T) {
 	carol, err := framework.GenerateIdentity("test")
 	require.NoError(t, err, "failed to generate Carol identity")
 
-	rustNode, goNode := startMirrorNodes(t, ctx)
+	rustNode, goNode, _ := startMirrorNodes(t, ctx)
 	rustClient := rustNode.Client()
 	goClient := goNode.Client()
 
@@ -216,7 +223,7 @@ func TestACPCrossUserWriteBlocked(t *testing.T) {
 	bob, err := framework.GenerateIdentity("test")
 	require.NoError(t, err)
 
-	rustNode, goNode := startMirrorNodes(t, ctx)
+	rustNode, goNode, _ := startMirrorNodes(t, ctx)
 
 	type nodeClients struct {
 		name   string
