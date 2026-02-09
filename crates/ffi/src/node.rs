@@ -28,13 +28,16 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
 
     let result = rt.block_on(async {
         // Create storage backend based on options
+        let db_path_opt: Option<String>;
         let store: Arc<FfiStore> = if options.in_memory == 0 && !options.db_path.is_null() {
             let path = unsafe { c_str_to_string(options.db_path) }
                 .ok_or_else(|| "db_path is not valid UTF-8".to_string())?;
             let redb = storage::RedbStore::open(&path)
                 .map_err(|e| format!("failed to open redb store at '{}': {}", path, e))?;
+            db_path_opt = Some(path);
             Arc::new(FfiStore::Redb(redb))
         } else {
+            db_path_opt = None;
             Arc::new(FfiStore::Memory(storage::MemoryStore::new()))
         };
 
@@ -142,15 +145,76 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
         let mutator: Arc<dyn query::DocMutator> =
             Arc::new(db::AutoCommitMutator::new(database.clone()));
 
-        // Create in-memory ACP store for document-level access control
-        let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
-        let document_acp: Arc<dyn acp::DocumentACP> =
-            Arc::new(acp::LocalDocumentACP::new(acp_store));
+        // Create document-level access control: SourceHub (on-chain) or Local (in-memory)
+        let (document_acp, sourcehub_acp): (
+            Arc<dyn acp::DocumentACP>,
+            Option<Arc<sourcehub::SourceHubDocumentACP>>,
+        ) = if !options.sourcehub_grpc_address.is_null() {
+            let grpc_addr = unsafe { c_str_to_string(options.sourcehub_grpc_address) }
+                .ok_or_else(|| "sourcehub_grpc_address is not valid UTF-8".to_string())?;
+            let comet_addr = unsafe { c_str_to_string(options.sourcehub_comet_rpc_address) }
+                .ok_or_else(|| "sourcehub_comet_rpc_address is not valid UTF-8".to_string())?;
+            let chain_id = unsafe { c_str_to_string(options.sourcehub_chain_id) }
+                .ok_or_else(|| "sourcehub_chain_id is not valid UTF-8".to_string())?;
+            let signer_key = if !options.sourcehub_signer_key.is_null()
+                && options.sourcehub_signer_key_len > 0
+            {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        options.sourcehub_signer_key,
+                        options.sourcehub_signer_key_len,
+                    )
+                }
+            } else {
+                return Err(
+                    "sourcehub_signer_key is required when SourceHub is configured".to_string(),
+                );
+            };
+            let sh_client = sourcehub::SourceHubClient::new(grpc_addr, comet_addr);
+            let sh_signer = sourcehub::TxSigner::from_secp256k1_bytes(signer_key, &chain_id)
+                .map_err(|e| format!("failed to create SourceHub signer: {}", e))?;
+            eprintln!(
+                "[SH-DEBUG] new_node: SourceHub ACP configured, validator={}",
+                sh_signer.address()
+            );
+            let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(sh_client, sh_signer));
+            (sh_acp.clone() as Arc<dyn acp::DocumentACP>, Some(sh_acp))
+        } else {
+            let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
+            (
+                Arc::new(acp::LocalDocumentACP::new(acp_store)) as Arc<dyn acp::DocumentACP>,
+                None,
+            )
+        };
 
         // Create NAC manager for node-level access control
-        let nac_store = Arc::new(acp::MemoryZanzibarStore::new());
-        let nac_config = db::NacConfig::new().with_dev_mode();
-        let nac_manager = Arc::new(db::NacManager::new(nac_store, nac_config));
+        // Use persistent store when file-based storage is configured
+        let nac_manager: Arc<dyn db::NacManagerApi> = if let Some(ref path) = db_path_opt {
+            // db_path is a file (e.g., /tmp/Test/rustffi), use parent dir for NAC store
+            let data_path = std::path::Path::new(path);
+            let parent = data_path
+                .parent()
+                .ok_or_else(|| "db_path has no parent directory".to_string())?;
+            let nac_path = parent.join("local_node_acp");
+            std::fs::create_dir_all(&nac_path)
+                .map_err(|e| format!("failed to create NAC data directory: {}", e))?;
+            let nac_db_path = nac_path.join("nac.db");
+            let nac_store = acp::PersistentZanzibarStore::open(&nac_db_path)
+                .map_err(|e| format!("failed to open persistent NAC store: {}", e))?;
+            let nac_config = db::NacConfig::new()
+                .with_dev_mode()
+                .with_data_path(nac_path.display().to_string());
+            let mgr = Arc::new(db::NacManager::new(Arc::new(nac_store), nac_config));
+            // Load existing NAC state from persistent store
+            mgr.initialize(None)
+                .await
+                .map_err(|e| format!("failed to initialize NAC from persistent store: {}", e))?;
+            mgr as Arc<dyn db::NacManagerApi>
+        } else {
+            let nac_store = Arc::new(acp::MemoryZanzibarStore::new());
+            let nac_config = db::NacConfig::new().with_dev_mode();
+            Arc::new(db::NacManager::new(nac_store, nac_config))
+        };
 
         // Encryption key for CRDT delta encryption (test key matching Go DefraDB)
         let encryption_key = b"examplekey1234567890examplekey12".to_vec();
@@ -183,6 +247,7 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
             policy_store,
             p2p: None,
             node_identity_did,
+            sourcehub_acp,
         };
 
         // Register and get handle

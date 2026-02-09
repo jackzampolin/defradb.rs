@@ -148,6 +148,11 @@ git worktree remove ../defradb.rs-foo          # Remove worktree
 3. `cargo fmt --all` applied
 4. If touching P2P/query/schema/CRDT: FFI tests pass
 
+## ACP / Searchable Encryption
+
+- When fixing ACP (Access Control Policy) filtering, always verify BOTH User queries AND Commits queries are filtered. These are two separate code paths that both require ACP checks.
+- After fixing any ACP-related code, run the full ACP test suite (all 36+ tests) not just the immediately failing one.
+
 ## Goal
 
 **New contributor feels ready to do productive work immediately.**

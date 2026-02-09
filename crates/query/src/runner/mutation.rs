@@ -159,15 +159,42 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .or(mutation.doc_ids.as_ref())
             .cloned();
 
-        // Check ACP permissions for UPDATE/DELETE operations
+        // Two-phase ACP permission check for UPDATE/DELETE operations.
+        //
+        // Phase 1: Check READ permission. If denied, the document is invisible to
+        // this identity — silently remove it from the target set (empty results, no error).
+        // Phase 2: Check UPDATE/DELETE permission. If denied but readable, the document
+        // is visible but unauthorized — return an error.
+        //
+        // This matches Go's behavior where GQL mutations on invisible documents return
+        // empty results, while mutations on visible-but-unauthorized documents return errors.
+        let mut acp_filtered_doc_ids: Option<Vec<String>> = None;
         if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
             match mutation.mutation_type {
                 MutationType::Update | MutationType::Upsert => {
-                    // For UPDATE, check updater permission on each target doc
                     if let Some(ref doc_ids) = doc_ids_for_check {
                         let identity_for_acp = Identity::from(caller_identity.as_ref());
+                        let mut visible_doc_ids = Vec::new();
                         for doc_id in doc_ids {
-                            let has_permission = acp
+                            // Phase 1: Check if the identity can read the document
+                            let can_read = acp
+                                .check_doc_access(
+                                    &identity_for_acp,
+                                    DocumentPermission::Read,
+                                    &policy.id,
+                                    &policy.resource_name,
+                                    doc_id,
+                                )
+                                .await
+                                .unwrap_or(false);
+
+                            if !can_read {
+                                // Document is invisible to this identity — skip silently
+                                continue;
+                            }
+
+                            // Phase 2: Check if the identity can update the document
+                            let can_update = acp
                                 .check_doc_access(
                                     &identity_for_acp,
                                     DocumentPermission::Update,
@@ -176,37 +203,42 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                     doc_id,
                                 )
                                 .await
-                                .map_err(|e| {
-                                    tracing::warn!(
-                                        doc_id = %doc_id,
-                                        identity = %identity_for_acp,
-                                        error = %e,
-                                        "ACP permission check failed during UPDATE - propagating error"
-                                    );
-                                    QueryError::acp_check_failed("update", doc_id, e)
-                                })?;
+                                .map_err(|e| QueryError::acp_check_failed("update", doc_id, e))?;
 
-                            if !has_permission {
+                            if !can_update {
                                 return Err(QueryError::document_not_found(
                                     "document not found or not authorized to access",
                                 ));
                             }
+                            visible_doc_ids.push(doc_id.clone());
                         }
-                    } else {
-                        // No doc_ids to check - this means the mutation has no targets
-                        // Log this as it may indicate a logic issue
-                        tracing::debug!(
-                            collection = %mutation.collection_name,
-                            "UPDATE mutation has no doc_ids for ACP permission check - no documents will be affected"
-                        );
+                        acp_filtered_doc_ids = Some(visible_doc_ids);
                     }
                 }
                 MutationType::Delete => {
-                    // For DELETE, check deleter permission on each target doc
                     if let Some(ref doc_ids) = doc_ids_for_check {
                         let identity_for_acp = Identity::from(caller_identity.as_ref());
+                        let mut visible_doc_ids = Vec::new();
                         for doc_id in doc_ids {
-                            let has_permission = acp
+                            // Phase 1: Check if the identity can read the document
+                            let can_read = acp
+                                .check_doc_access(
+                                    &identity_for_acp,
+                                    DocumentPermission::Read,
+                                    &policy.id,
+                                    &policy.resource_name,
+                                    doc_id,
+                                )
+                                .await
+                                .unwrap_or(false);
+
+                            if !can_read {
+                                // Document is invisible to this identity — skip silently
+                                continue;
+                            }
+
+                            // Phase 2: Check if the identity can delete the document
+                            let can_delete = acp
                                 .check_doc_access(
                                     &identity_for_acp,
                                     DocumentPermission::Delete,
@@ -215,28 +247,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                     doc_id,
                                 )
                                 .await
-                                .map_err(|e| {
-                                    tracing::warn!(
-                                        doc_id = %doc_id,
-                                        identity = %identity_for_acp,
-                                        error = %e,
-                                        "ACP permission check failed during DELETE - propagating error"
-                                    );
-                                    QueryError::acp_check_failed("delete", doc_id, e)
-                                })?;
+                                .map_err(|e| QueryError::acp_check_failed("delete", doc_id, e))?;
 
-                            if !has_permission {
+                            if !can_delete {
                                 return Err(QueryError::document_not_found(
                                     "document not found or not authorized to access",
                                 ));
                             }
+                            visible_doc_ids.push(doc_id.clone());
                         }
-                    } else {
-                        // No doc_ids to check - this means the mutation has no targets
-                        tracing::debug!(
-                            collection = %mutation.collection_name,
-                            "DELETE mutation has no doc_ids for ACP permission check - no documents will be affected"
-                        );
+                        acp_filtered_doc_ids = Some(visible_doc_ids);
                     }
                 }
                 MutationType::Create => {
@@ -281,8 +301,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         .with_request_time(request_time)
                         .with_input(input);
 
-                // Use resolved doc_ids (from filter) or original doc_ids
-                if let Some(ref doc_ids) = resolved_doc_ids {
+                // Use ACP-filtered doc_ids (invisible docs removed), or resolved/original
+                if let Some(ref doc_ids) = acp_filtered_doc_ids {
+                    node = node.with_doc_ids(doc_ids.clone());
+                } else if let Some(ref doc_ids) = resolved_doc_ids {
                     node = node.with_doc_ids(doc_ids.clone());
                 } else if let Some(ref doc_ids) = mutation.doc_ids {
                     node = node.with_doc_ids(doc_ids.clone());
@@ -301,8 +323,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let mut node =
                     DeleteNode::new(&mutation.collection_name, mutator, fetcher, mapping.clone());
 
-                // Use resolved doc_ids (from filter) or original doc_ids
-                if let Some(ref doc_ids) = resolved_doc_ids {
+                // Use ACP-filtered doc_ids (invisible docs removed), or resolved/original
+                if let Some(ref doc_ids) = acp_filtered_doc_ids {
+                    node = node.with_doc_ids(doc_ids.clone());
+                } else if let Some(ref doc_ids) = resolved_doc_ids {
                     node = node.with_doc_ids(doc_ids.clone());
                 } else if let Some(ref doc_ids) = mutation.doc_ids {
                     node = node.with_doc_ids(doc_ids.clone());
@@ -336,8 +360,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     node = node.with_update_input(update_input);
                 }
 
-                // Use resolved doc_ids (from filter) or original doc_ids
-                if let Some(ref doc_ids) = resolved_doc_ids {
+                // Use ACP-filtered doc_ids (invisible docs removed), or resolved/original
+                if let Some(ref doc_ids) = acp_filtered_doc_ids {
+                    node = node.with_doc_ids(doc_ids.clone());
+                } else if let Some(ref doc_ids) = resolved_doc_ids {
                     node = node.with_doc_ids(doc_ids.clone());
                 } else if let Some(ref doc_ids) = mutation.doc_ids {
                     node = node.with_doc_ids(doc_ids.clone());

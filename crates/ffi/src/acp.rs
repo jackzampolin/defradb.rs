@@ -556,20 +556,47 @@ pub unsafe extern "C" fn add_dac_policy(
         return FfiResult::error(e);
     }
 
-    // Step 5: Store with Go-compatible ID generation
-    let result = NODES
-        .get(node_ptr, |state| {
-            let policy_id = state.policy_store.add_policy(&policy_str, &parsed);
-            serde_json::json!({
-                "PolicyID": policy_id
-            })
-            .to_string()
-        })
-        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string());
+    // Step 5: Store policy - route through SourceHub when configured, else local
+    let sh_acp = match NODES.get(node_ptr, |state| state.sourcehub_acp.clone()) {
+        Some(opt) => opt,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
 
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
+    if let Some(sh_acp) = sh_acp {
+        // SourceHub mode: submit MsgCreatePolicy transaction
+        let result = rt.block_on(async {
+            let policy_id = sh_acp
+                .add_policy(&identity_str, &policy_str)
+                .await
+                .map_err(|e| format!("SourceHub create policy failed: {}", e))?;
+            Ok::<String, String>(policy_id)
+        });
+        match result {
+            Ok(policy_id) => {
+                // Cache policy locally so schema validation can find it
+                NODES.get(node_ptr, |state| {
+                    state.policy_store.store_policy(&policy_id, &policy_str);
+                });
+                FfiResult::success(serde_json::json!({ "PolicyID": policy_id }).to_string())
+            }
+            Err(e) => FfiResult::error(e),
+        }
+    } else {
+        // Local mode: Go-compatible ID generation
+        let result = NODES
+            .get(node_ptr, |state| {
+                let policy_id = state.policy_store.add_policy(&policy_str, &parsed);
+                serde_json::json!({
+                    "PolicyID": policy_id
+                })
+                .to_string()
+            })
+            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string());
+
+        match result {
+            Ok(json) => FfiResult::success(json),
+            Err(e) => FfiResult::error(e),
+        }
     }
 }
 
@@ -770,6 +797,7 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
             .add_actor_relationship(
                 &requestor,
                 &target,
+                &policy_id,
                 &resource_name,
                 &doc_id_str,
                 &relation_str,
@@ -931,6 +959,7 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
             .delete_actor_relationship(
                 &requestor,
                 &target,
+                &policy_id,
                 &resource_name,
                 &doc_id_str,
                 &relation_str,

@@ -61,6 +61,13 @@ impl PolicyStore {
         policy_id
     }
 
+    /// Store a policy with a known ID (used for SourceHub-created policies).
+    pub fn store_policy(&self, id: &str, policy: &str) {
+        self.policies
+            .write()
+            .insert(id.to_string(), policy.to_string());
+    }
+
     /// Get a policy by ID.
     pub fn get_policy(&self, id: &str) -> Option<String> {
         self.policies.read().get(id).cloned()
@@ -267,8 +274,8 @@ pub type FfiMergeHandler = db::DbMergeHandler<FfiStore, FfiBlockstore>;
 /// Type alias for node handles (opaque to FFI callers).
 pub type NodeHandle = usize;
 
-/// Type alias for the NAC manager used in FFI (in-memory).
-pub type FfiNacManager = db::NacManager<acp::MemoryZanzibarStore>;
+/// Type alias for the NAC manager used in FFI (dynamic dispatch over store backend).
+pub type FfiNacManager = dyn db::NacManagerApi;
 
 /// Type alias for subscription handles (opaque to FFI callers).
 pub type SubscriptionHandle = usize;
@@ -297,6 +304,9 @@ pub struct NodeState {
     /// Node identity DID (set when signing is enabled).
     /// Used as fallback identity for signing blocks when no explicit identity is provided.
     pub node_identity_did: Option<String>,
+    /// SourceHub ACP (optional - only set when using SourceHub for document ACP).
+    /// Used by add_dac_policy to route policy creation through SourceHub transactions.
+    pub sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
 }
 
 /// State held for each FFI subscription.
