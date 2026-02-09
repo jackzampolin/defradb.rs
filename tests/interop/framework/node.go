@@ -151,10 +151,9 @@ func (n *Node) startRust(ctx context.Context) error {
 		args = append(args, "--no-signing", "true")
 	}
 
-	// Add identity if configured
+	// Add identity if configured (key type auto-detected from length)
 	if n.Config.Identity != nil {
 		args = append(args, "--identity", n.Config.Identity.PrivateKeyHex)
-		args = append(args, "--identity-key-type", "ed25519")
 	}
 
 	return n.startBinary(ctx, binary, args)
@@ -205,10 +204,9 @@ func (n *Node) startGo(ctx context.Context) error {
 		args = append(args, "--no-signing")
 	}
 
-	// Add identity if configured
+	// Add identity if configured (Go also auto-detects key type)
 	if n.Config.Identity != nil {
 		args = append(args, "--identity", n.Config.Identity.PrivateKeyHex)
-		args = append(args, "--identity-key-type", "ed25519")
 	}
 
 	return n.startBinary(ctx, binary, args)

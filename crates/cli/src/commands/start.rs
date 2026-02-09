@@ -87,17 +87,11 @@ pub struct StartArgs {
 
     /// Hex formatted private key used to authenticate with ACP.
     ///
-    /// The key should be a 64-byte hex string (128 hex characters) for Ed25519,
-    /// or a 32-byte hex string (64 hex characters) for secp256k1.
-    ///
-    /// Example: defra start --identity 0x<hex-encoded-private-key>
+    /// The key type is auto-detected from the key length:
+    /// - 64 bytes (128 hex chars) → Ed25519
+    /// - 32 bytes (64 hex chars) → secp256k1
     #[arg(short = 'i', long)]
     pub identity: Option<String>,
-
-    /// Key type for the identity (ed25519 or secp256k1).
-    /// Only used if --identity is provided.
-    #[arg(long, default_value = "ed25519")]
-    pub identity_key_type: Option<String>,
 
     /// Retry intervals for the replicator (comma-separated seconds)
     #[arg(long, value_delimiter = ',')]
@@ -129,9 +123,9 @@ impl StartArgs {
     /// Parse the user identity from the --identity flag.
     ///
     /// The identity flag should contain a hex-encoded private key.
-    /// Supported formats:
-    /// - Ed25519: 64-byte key (128 hex chars) or 32-byte seed (64 hex chars)
-    /// - secp256k1: 32-byte key (64 hex chars)
+    /// Key type is auto-detected from byte length:
+    /// - 64 bytes → Ed25519
+    /// - 32 bytes → secp256k1
     fn parse_user_identity(&self) -> Result<Option<std::sync::Arc<identity::RawIdentity>>> {
         let hex_key = match &self.identity {
             Some(key) => key,
@@ -146,14 +140,17 @@ impl StartArgs {
             Error::InvalidIdentity(format!("invalid hex in --identity flag: {}", e))
         })?;
 
-        // Determine key type
-        let key_type_str = self.identity_key_type.as_deref().unwrap_or("ed25519");
-        let key_type: identity::IdentityKeyType = key_type_str.parse().map_err(|_| {
-            Error::InvalidIdentity(format!(
-                "invalid --identity-key-type '{}': expected 'ed25519' or 'secp256k1'",
-                key_type_str
-            ))
-        })?;
+        // Auto-detect key type from byte length
+        let key_type = match key_bytes.len() {
+            64 => identity::IdentityKeyType::Ed25519,
+            32 => identity::IdentityKeyType::Secp256k1,
+            n => {
+                return Err(Error::InvalidIdentity(format!(
+                    "invalid key length {} bytes: expected 64 (ed25519) or 32 (secp256k1)",
+                    n
+                )));
+            }
+        };
 
         // Create identity from bytes
         let raw_identity = identity::RawIdentity::from_identity_key_type(key_type, &key_bytes)?;
