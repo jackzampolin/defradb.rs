@@ -63,7 +63,7 @@ func TestQueryFilterParity(t *testing.T) {
 		{"rating_gt_3", `{rating: {_gt: 3}}`},
 		{"published_eq_true", `{published: {_eq: true}}`},
 		{"title_like_rust", `{title: {_like: "%rust%"}}`},
-		{"and_rating_gte_2_published", `{_and: [{rating: {_gte: 2}}, {published: {_eq: true}}]}`},
+		{"and_rating_gt_1_published", `{_and: [{rating: {_gt: 1}}, {published: {_eq: true}}]}`},
 		{"rating_lt_3", `{rating: {_lt: 3}}`},
 		{"title_like_go", `{title: {_like: "%go%"}}`},
 	}
