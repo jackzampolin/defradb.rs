@@ -41,6 +41,9 @@ sha2.workspace = true
 # Random number generation (for Counter CRDT nonces)
 rand = "0.8"
 
+# HTTP client (for embedding generation API calls)
+reqwest = { version = "0.12", features = ["json"] }
+
 # Encoding
 base64.workspace = true
 hex.workspace = true
