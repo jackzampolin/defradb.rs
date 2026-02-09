@@ -70,6 +70,34 @@ const GLOBAL_VALIDATORS: &[Validator] = &[
     validate_embedding_provider_and_model,
 ];
 
+/// Validates embedding definitions on newly created collections.
+///
+/// Only runs embedding-specific validators (type, fields, provider/model).
+/// Other global validators are not appropriate at create time.
+pub fn validate_new_collections(
+    new_collections: &[CollectionVersion],
+) -> Result<(), String> {
+    let new_state = DefinitionState::new(new_collections);
+    let old_state = DefinitionState::new(&[]);
+
+    let validators: &[Validator] = &[
+        validate_embedding_and_kind_compatible,
+        validate_embedding_fields_for_generation,
+        validate_embedding_provider_and_model,
+    ];
+
+    let mut errors = Vec::new();
+    for validator in validators {
+        errors.extend(validator(&new_state, &old_state));
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
+}
+
 /// Run all validators comparing old and new collection states.
 ///
 /// Returns Ok(()) if all validators pass, or an error with all validation
@@ -803,9 +831,6 @@ fn is_valid_embedding_kind(kind: &FieldKind) -> bool {
     matches!(
         kind,
         FieldKind::ScalarArray(schema::ScalarArrayKind::Float32Array)
-            | FieldKind::ScalarArray(schema::ScalarArrayKind::Float64Array)
-            | FieldKind::ScalarArray(schema::ScalarArrayKind::NillableFloat32Array)
-            | FieldKind::ScalarArray(schema::ScalarArrayKind::NillableFloat64Array)
     )
 }
 

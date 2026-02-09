@@ -839,7 +839,7 @@ impl<S: Store> crate::database::DB<S> {
 
             // Validate: can't remove a collection that has documents (only on active→inactive)
             if !new_schema.is_active && old_schema.is_active {
-                let has_data = self.collection_has_data(&collection_id).await?;
+                let has_data = self.collection_has_data(&old_schema).await?;
                 if has_data {
                     return Err(Error::InvalidPatch(
                         "cannot delete a collection that has documents, first delete the documents and then delete the version".to_string(),

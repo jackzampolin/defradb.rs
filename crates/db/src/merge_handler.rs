@@ -746,6 +746,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                         }
                                     };
 
+                                    // Set the schema version from the incoming block so the
+                                    // lensed fetcher can detect version mismatches and apply
+                                    // migrations at query time (matches Go's composite merge).
+                                    doc.set_schema_version_id(&payload.schema_version_id);
+
                                     // Overlay new/winning field values on top of existing fields
                                     for (field_name, value) in &field_values {
                                         doc.set(field_name, value.clone());

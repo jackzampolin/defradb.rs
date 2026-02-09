@@ -116,8 +116,7 @@ pub struct CollectionVersion {
     #[serde(
         rename = "VectorEmbeddings",
         default,
-        deserialize_with = "deserialize_null_as_empty_vec",
-        skip_serializing_if = "Vec::is_empty"
+        deserialize_with = "deserialize_null_as_empty_vec"
     )]
     pub vector_embeddings: Vec<VectorEmbeddingDescription>,
 

@@ -238,6 +238,9 @@ fn build_env(ctx: &WorktreeContext) -> HashMap<String, String> {
     // Enable Rust FFI client
     env.insert("DEFRA_CLIENT_RUST_FFI".to_string(), "true".to_string());
 
+    // Enable vector embedding tests
+    env.insert("DEFRA_VECTOR_EMBEDDING".to_string(), "true".to_string());
+
     env
 }
 
