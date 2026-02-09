@@ -12,7 +12,7 @@ use cid::Cid;
 use crate::error::{QueryError, Result};
 use schema::{
     CType, CollectionVersion, FieldDescription, FieldKind, IndexDescription,
-    IndexedFieldDescription,
+    IndexedFieldDescription, VectorEmbeddingDescription,
 };
 use std::collections::HashMap;
 
@@ -839,10 +839,25 @@ impl<'a> SdlParser<'a> {
             .map(|f| schema::EncryptedIndexDescription::new(&f.name))
             .collect();
 
+        // Build vector embeddings from @embedding directives
+        let vector_embeddings: Vec<VectorEmbeddingDescription> = type_def
+            .fields
+            .iter()
+            .filter_map(|f| {
+                f.directives.embedding.as_ref().map(|emb| {
+                    VectorEmbeddingDescription::new(&f.name, &emb.model, &emb.provider)
+                        .with_fields(emb.fields.clone())
+                        .with_url(&emb.url)
+                        .with_template(&emb.template)
+                })
+            })
+            .collect();
+
         let mut collection =
             CollectionVersion::new(&type_def.name, &version_id, &collection_id, fields);
         collection.indexes = indexes;
         collection.encrypted_indexes = encrypted_indexes;
+        collection.vector_embeddings = vector_embeddings;
         collection.is_materialized = type_def.directives.is_materialized;
         collection.is_branchable = type_def.directives.is_branchable;
         if let Some(ref policy_config) = type_def.directives.policy {
