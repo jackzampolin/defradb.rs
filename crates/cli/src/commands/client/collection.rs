@@ -173,7 +173,7 @@ impl CollectionArgs {
             CollectionCommand::List(args) => args.execute(ctx).await,
             CollectionCommand::Patch(args) => args.execute(ctx).await,
             CollectionCommand::SetActive(args) => args.execute(ctx).await,
-            CollectionCommand::Truncate(args) => args.execute(ctx).await,
+            CollectionCommand::Truncate(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::Update(args) => args.execute(ctx, self.name.as_deref()).await,
         }
     }
@@ -453,22 +453,45 @@ impl DocIdsArgs {
 }
 
 impl CollectionPatchArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let patch = get_data_from_args(&self.patch, &self.patch_file)?;
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.collection_patch(&patch).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }
 
 impl SetActiveArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client
+            .collection_set_active(self.version_id.as_deref())
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }
 
 impl TruncateArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext, name: Option<&str>) -> Result<()> {
+        let collection =
+            name.ok_or_else(|| Error::MissingInput("--name is required for truncate".to_string()))?;
+        validate_identifier(collection)?;
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        client.collection_truncate(collection).await?;
+        println!("Truncated collection {}", collection);
         Ok(())
     }
 }

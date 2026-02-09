@@ -83,6 +83,33 @@ pub async fn get_collection_doc_ids(
     }
 }
 
+/// Patch a collection schema.
+///
+/// PATCH /api/v0/collections
+pub async fn patch_collection() -> Result<Json<()>, HttpError> {
+    Err(HttpError::NotImplemented(
+        "collection patch is not yet implemented".into(),
+    ))
+}
+
+/// Set the active collection version.
+///
+/// POST /api/v0/collections/set-active
+pub async fn set_active() -> Result<Json<()>, HttpError> {
+    Err(HttpError::NotImplemented(
+        "collection set-active is not yet implemented".into(),
+    ))
+}
+
+/// Truncate all documents in a collection.
+///
+/// DELETE /api/v0/collections/{name}/truncate
+pub async fn truncate_collection() -> Result<Json<()>, HttpError> {
+    Err(HttpError::NotImplemented(
+        "collection truncate is not yet implemented".into(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

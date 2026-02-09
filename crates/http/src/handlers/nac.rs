@@ -255,3 +255,21 @@ pub async fn go_remove_relationship(
     // Go returns 200 OK with empty body on success
     Ok(axum::http::StatusCode::OK.into_response())
 }
+
+/// POST /api/v0/acp/node/disable
+///
+/// Temporarily disable NAC on this node.
+pub async fn disable() -> Result<Json<()>, HttpError> {
+    Err(HttpError::NotImplemented(
+        "NAC disable is not yet implemented".into(),
+    ))
+}
+
+/// POST /api/v0/acp/node/re-enable
+///
+/// Re-enable NAC on this node after it was disabled.
+pub async fn re_enable() -> Result<Json<()>, HttpError> {
+    Err(HttpError::NotImplemented(
+        "NAC re-enable is not yet implemented".into(),
+    ))
+}

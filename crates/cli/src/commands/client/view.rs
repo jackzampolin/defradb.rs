@@ -68,14 +68,17 @@ impl ViewArgs {
 
 impl ViewAddArgs {
     pub async fn execute(&self) -> Result<()> {
-        eprintln!("not yet implemented");
-        Ok(())
+        Err(crate::error::Error::Server(
+            "view add requires view management infrastructure (not yet implemented)".to_string(),
+        ))
     }
 }
 
 impl ViewRefreshArgs {
     pub async fn execute(&self) -> Result<()> {
-        eprintln!("not yet implemented");
-        Ok(())
+        Err(crate::error::Error::Server(
+            "view refresh requires view management infrastructure (not yet implemented)"
+                .to_string(),
+        ))
     }
 }

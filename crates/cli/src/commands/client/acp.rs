@@ -246,15 +246,59 @@ impl AcpDocumentRelationshipArgs {
 }
 
 impl AcpDocumentRelationshipAddArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let collection = self.collection.as_deref().ok_or_else(|| {
+            crate::error::Error::MissingInput("--collection is required".to_string())
+        })?;
+        let doc_id = self
+            .doc_id
+            .as_deref()
+            .ok_or_else(|| crate::error::Error::MissingInput("--docID is required".to_string()))?;
+        let relation = self.relation.as_deref().ok_or_else(|| {
+            crate::error::Error::MissingInput("--relation is required".to_string())
+        })?;
+        let actor = self
+            .actor
+            .as_deref()
+            .ok_or_else(|| crate::error::Error::MissingInput("--actor is required".to_string()))?;
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client
+            .acp_doc_relationship_add(collection, doc_id, relation, actor)
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }
 
 impl AcpDocumentRelationshipDeleteArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let collection = self.collection.as_deref().ok_or_else(|| {
+            crate::error::Error::MissingInput("--collection is required".to_string())
+        })?;
+        let doc_id = self
+            .doc_id
+            .as_deref()
+            .ok_or_else(|| crate::error::Error::MissingInput("--docID is required".to_string()))?;
+        let relation = self.relation.as_deref().ok_or_else(|| {
+            crate::error::Error::MissingInput("--relation is required".to_string())
+        })?;
+        let actor = self
+            .actor
+            .as_deref()
+            .ok_or_else(|| crate::error::Error::MissingInput("--actor is required".to_string()))?;
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client
+            .acp_doc_relationship_delete(collection, doc_id, relation, actor)
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }
@@ -332,15 +376,25 @@ impl AcpNodeStatusArgs {
 }
 
 impl AcpNodeDisableArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.nac_disable().await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }
 
 impl AcpNodeReEnableArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.nac_re_enable().await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }

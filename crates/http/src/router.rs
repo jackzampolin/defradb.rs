@@ -565,8 +565,11 @@ pub fn create_router_with_state(state: AppState) -> Router {
     // Collection routes (REST API)
     let collection_routes = Router::new()
         .route("/", get(handlers::list_collections))
+        .route("/", patch(handlers::patch_collection))
+        .route("/set-active", post(handlers::set_active))
         .route("/:name", get(handlers::get_collection_doc_ids))
         .route("/:name", post(handlers::create_document))
+        .route("/:name/truncate", delete(handlers::truncate_collection))
         .route("/:name/:docID", get(handlers::get_document))
         .route("/:name/:docID", patch(handlers::update_document))
         .route("/:name/:docID", delete(handlers::delete_document))
@@ -581,6 +584,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
     // P2P routes
     let p2p_routes = Router::new()
         .route("/info", get(handlers::p2p::get_info))
+        .route("/active-peers", get(handlers::p2p::active_peers)) // Go-compatible
         .route("/connect", post(handlers::p2p::connect)) // Go-compatible
         .route("/peers", get(handlers::p2p::list_peers))
         .route("/peers", post(handlers::p2p::connect_peer)) // Legacy
@@ -603,7 +607,15 @@ pub fn create_router_with_state(state: AppState) -> Router {
     let acp_routes = Router::new()
         .route("/policy", post(handlers::acp::add_policy))
         .route("/policy", get(handlers::acp::list_policies))
-        .route("/policy/:id", get(handlers::acp::get_policy));
+        .route("/policy/:id", get(handlers::acp::get_policy))
+        .route(
+            "/document/relationship",
+            post(handlers::acp::add_doc_relationship),
+        )
+        .route(
+            "/document/relationship",
+            delete(handlers::acp::remove_doc_relationship),
+        );
 
     // Index routes
     let index_routes = Router::new()
@@ -618,6 +630,8 @@ pub fn create_router_with_state(state: AppState) -> Router {
 
     // Lens migration routes
     let lens_routes = Router::new()
+        .route("/", post(handlers::lens::add_lens))
+        .route("/", get(handlers::lens::list_lenses))
         .route("/set", post(handlers::lens::set_migration))
         .route("/reload", post(handlers::lens::reload));
 
@@ -632,13 +646,17 @@ pub fn create_router_with_state(state: AppState) -> Router {
     //   GET /acp/node/status
     //   POST /acp/node/relationship
     //   DELETE /acp/node/relationship
+    //   POST /acp/node/disable
+    //   POST /acp/node/re-enable
     let acp_node_routes = Router::new()
         .route("/status", get(handlers::nac::get_status))
         .route("/relationship", post(handlers::nac::go_add_relationship))
         .route(
             "/relationship",
             delete(handlers::nac::go_remove_relationship),
-        );
+        )
+        .route("/disable", post(handlers::nac::disable))
+        .route("/re-enable", post(handlers::nac::re_enable));
 
     // API v0 routes
     let api_routes = Router::new()

@@ -45,7 +45,8 @@ impl BlockArgs {
 
 impl BlockVerifySignatureArgs {
     pub async fn execute(&self) -> Result<()> {
-        eprintln!("not yet implemented");
-        Ok(())
+        Err(crate::error::Error::Server(
+            "block verify-signature requires crypto verification infrastructure (not yet implemented)".to_string(),
+        ))
     }
 }

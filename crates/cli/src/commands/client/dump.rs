@@ -11,7 +11,8 @@ pub struct DumpArgs {}
 
 impl DumpArgs {
     pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
-        Ok(())
+        Err(crate::error::Error::Server(
+            "dump requires debug dump infrastructure (not yet implemented)".to_string(),
+        ))
     }
 }

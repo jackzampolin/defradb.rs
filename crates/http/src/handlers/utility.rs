@@ -6,7 +6,7 @@
 //!
 //! These endpoints match Go DefraDB's utility endpoints for compatibility.
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{extract::State, Json};
 use serde::Serialize;
 
 use crate::error::HttpError;
@@ -52,20 +52,12 @@ pub async fn get_node_identity(
 pub async fn purge(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-) -> Result<impl IntoResponse, HttpError> {
+) -> Result<Json<()>, HttpError> {
     require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
 
-    // Purge is not yet implemented in the query executor
-    // For now, return 501 Not Implemented
-    tracing::warn!("Purge endpoint called but not yet implemented");
-
-    Ok((
-        StatusCode::NOT_IMPLEMENTED,
-        Json(crate::error::ErrorResponse {
-            error: "purge operation is not yet implemented".to_string(),
-        }),
-    )
-        .into_response())
+    Err(HttpError::NotImplemented(
+        "purge operation is not yet implemented".to_string(),
+    ))
 }
 
 #[cfg(test)]

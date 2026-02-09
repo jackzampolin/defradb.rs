@@ -86,6 +86,24 @@ pub async fn reload(
     Ok(())
 }
 
+/// Add a lens migration.
+///
+/// POST /api/v0/lens
+pub async fn add_lens() -> Result<Json<()>, HttpError> {
+    Err(HttpError::NotImplemented(
+        "lens add is not yet implemented".into(),
+    ))
+}
+
+/// List lens migrations.
+///
+/// GET /api/v0/lens
+pub async fn list_lenses() -> Result<Json<()>, HttpError> {
+    Err(HttpError::NotImplemented(
+        "lens list is not yet implemented".into(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

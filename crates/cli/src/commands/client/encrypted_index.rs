@@ -67,21 +67,27 @@ impl EncryptedIndexArgs {
 
 impl EncryptedIndexCreateArgs {
     pub async fn execute(&self) -> Result<()> {
-        eprintln!("not yet implemented");
-        Ok(())
+        Err(crate::error::Error::Server(
+            "encrypted-index create requires searchable encryption support (not yet implemented)"
+                .to_string(),
+        ))
     }
 }
 
 impl EncryptedIndexDeleteArgs {
     pub async fn execute(&self) -> Result<()> {
-        eprintln!("not yet implemented");
-        Ok(())
+        Err(crate::error::Error::Server(
+            "encrypted-index delete requires searchable encryption support (not yet implemented)"
+                .to_string(),
+        ))
     }
 }
 
 impl EncryptedIndexListArgs {
     pub async fn execute(&self) -> Result<()> {
-        eprintln!("not yet implemented");
-        Ok(())
+        Err(crate::error::Error::Server(
+            "encrypted-index list requires searchable encryption support (not yet implemented)"
+                .to_string(),
+        ))
     }
 }

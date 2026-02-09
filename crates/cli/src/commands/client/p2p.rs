@@ -217,8 +217,13 @@ impl P2pArgs {
 }
 
 impl P2pActivePeersArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.p2p_active_peers().await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }
@@ -466,8 +471,9 @@ impl P2pCollectionSyncVersionsArgs {
 
 impl P2pCollectionSyncBranchableArgs {
     pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
-        Ok(())
+        Err(crate::error::Error::Server(
+            "p2p collection sync-branchable requires branchable sync protocol (not yet implemented)".to_string(),
+        ))
     }
 }
 

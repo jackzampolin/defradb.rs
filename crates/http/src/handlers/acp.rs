@@ -95,6 +95,24 @@ pub async fn get_policy(
     Ok(Json(policy))
 }
 
+/// Add a document ACP relationship.
+///
+/// POST /api/v0/acp/document/relationship
+pub async fn add_doc_relationship() -> Result<Json<()>, HttpError> {
+    Err(HttpError::NotImplemented(
+        "document ACP relationship add is not yet implemented".into(),
+    ))
+}
+
+/// Remove a document ACP relationship.
+///
+/// DELETE /api/v0/acp/document/relationship
+pub async fn remove_doc_relationship() -> Result<Json<()>, HttpError> {
+    Err(HttpError::NotImplemented(
+        "document ACP relationship delete is not yet implemented".into(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

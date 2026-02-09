@@ -81,15 +81,27 @@ impl LensArgs {
 }
 
 impl LensAddArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let config = get_data_from_args(&self.config, &self.file)?;
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.lens_add(&config).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }
 
 impl LensListArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.lens_list().await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }
