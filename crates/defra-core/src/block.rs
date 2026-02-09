@@ -234,6 +234,10 @@ pub enum CrdtDelta {
     #[serde(rename = "collection")]
     Collection(CollectionDeltaPayload),
 
+    /// Collection set delta (circular relation groups)
+    #[serde(rename = "collectionSet")]
+    CollectionSet(CollectionSetDeltaPayload),
+
     /// Field definition delta (schema versioning)
     #[serde(rename = "fieldDefinition")]
     FieldDefinition(FieldDefinitionDeltaPayload),
@@ -251,6 +255,7 @@ impl CrdtDelta {
             CrdtDelta::Counter(d) => d.priority,
             CrdtDelta::Composite(d) => d.priority,
             CrdtDelta::Collection(d) => d.priority,
+            CrdtDelta::CollectionSet(d) => d.priority,
             CrdtDelta::FieldDefinition(d) => d.priority,
             CrdtDelta::CollectionDefinition(d) => d.priority,
         }
@@ -263,6 +268,7 @@ impl CrdtDelta {
             CrdtDelta::Counter(d) => d.priority = priority,
             CrdtDelta::Composite(d) => d.priority = priority,
             CrdtDelta::Collection(d) => d.priority = priority,
+            CrdtDelta::CollectionSet(d) => d.priority = priority,
             CrdtDelta::FieldDefinition(d) => d.priority = priority,
             CrdtDelta::CollectionDefinition(d) => d.priority = priority,
         }
@@ -278,6 +284,7 @@ impl CrdtDelta {
             CrdtDelta::Counter(d) => Some(&d.doc_id),
             CrdtDelta::Composite(d) => Some(&d.doc_id),
             CrdtDelta::Collection(_) => None,
+            CrdtDelta::CollectionSet(_) => None,
             CrdtDelta::FieldDefinition(_) => None,
             CrdtDelta::CollectionDefinition(_) => None,
         }
@@ -293,6 +300,7 @@ impl CrdtDelta {
             CrdtDelta::Counter(d) => Some(&d.schema_version_id),
             CrdtDelta::Composite(d) => Some(&d.schema_version_id),
             CrdtDelta::Collection(d) => Some(&d.schema_version_id),
+            CrdtDelta::CollectionSet(_) => None,
             CrdtDelta::FieldDefinition(_) => None,
             CrdtDelta::CollectionDefinition(_) => None,
         }
@@ -302,7 +310,9 @@ impl CrdtDelta {
     pub fn is_definition(&self) -> bool {
         matches!(
             self,
-            CrdtDelta::FieldDefinition(_) | CrdtDelta::CollectionDefinition(_)
+            CrdtDelta::FieldDefinition(_)
+                | CrdtDelta::CollectionDefinition(_)
+                | CrdtDelta::CollectionSet(_)
         )
     }
 }
@@ -539,6 +549,21 @@ impl CollectionDefinitionDeltaPayload {
     pub fn with_query_transform(mut self, transform_cid: Cid) -> Self {
         self.query_transform = Some(transform_cid);
         self
+    }
+}
+
+/// Collection set delta payload for schema versioning.
+///
+/// Matches Go's `crdt.CollectionSetDelta` structure.
+/// Used to generate a CollectionSetID CID for circular relation groups.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CollectionSetDeltaPayload {
+    pub priority: u64,
+}
+
+impl CollectionSetDeltaPayload {
+    pub fn new(priority: u64) -> Self {
+        Self { priority }
     }
 }
 

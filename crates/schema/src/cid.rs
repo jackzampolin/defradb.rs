@@ -5,8 +5,8 @@
 
 use cid::Cid;
 use defra_core::{
-    Block, CollectionDefinitionDeltaPayload, CrdtDelta, DAGLink, FieldDefinitionDeltaPayload,
-    DAG_CBOR_CODEC, SHA2_256_CODE,
+    Block, CollectionDefinitionDeltaPayload, CollectionSetDeltaPayload, CrdtDelta, DAGLink,
+    FieldDefinitionDeltaPayload, DAG_CBOR_CODEC, SHA2_256_CODE,
 };
 use multihash::MultihashGeneric;
 use sha2::{Digest, Sha256};
@@ -205,6 +205,23 @@ pub fn generate_collection_block_full(
     );
     let (cid, bytes) = generate_block_cid_and_bytes(&block)?;
     Ok(BlockWithCid { cid, bytes })
+}
+
+/// Generates a CollectionSetID CID from the collection CIDs of a circular relation group.
+///
+/// Matches Go's `saveBlocks()` in `internal/db/collection_id.go`:
+/// - Creates a `CollectionSetDelta { priority: 1 }`
+/// - Links each collection CID as a DAGLink with empty name
+/// - Block::new() sorts links by CID string
+/// - DAG-CBOR encode → SHA2-256 → CIDv1
+pub fn generate_collection_set_cid(collection_cids: &[Cid]) -> crate::Result<Cid> {
+    let delta = CollectionSetDeltaPayload::new(1);
+    let links: Vec<DAGLink> = collection_cids
+        .iter()
+        .map(|cid| DAGLink::new("", *cid))
+        .collect();
+    let block = Block::new(CrdtDelta::CollectionSet(delta), vec![], links);
+    generate_block_cid(&block)
 }
 
 /// Convert a FieldDescription to a FieldDefinitionDeltaPayload with a specific priority

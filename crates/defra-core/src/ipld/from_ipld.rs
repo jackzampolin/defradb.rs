@@ -138,6 +138,23 @@ impl TryFrom<&Ipld> for CrdtDelta {
                 FieldDefinitionDeltaPayload::try_from(field_def)?,
             ));
         }
+        if let Some(col_set) = map.get("collectionSet") {
+            let inner = match col_set {
+                Ipld::Map(m) => m,
+                _ => {
+                    return Err(Error::IpldError(
+                        "Expected IPLD map for CollectionSetDelta".to_string(),
+                    ))
+                }
+            };
+            let priority = match inner.get("priority") {
+                Some(Ipld::Integer(n)) => *n as u64,
+                _ => 0,
+            };
+            return Ok(CrdtDelta::CollectionSet(
+                crate::CollectionSetDeltaPayload::new(priority),
+            ));
+        }
         if let Some(col_def) = map.get("collectionDefinition") {
             return Ok(CrdtDelta::CollectionDefinition(
                 CollectionDefinitionDeltaPayload::try_from(col_def)?,
