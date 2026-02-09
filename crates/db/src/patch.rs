@@ -7,8 +7,8 @@
 use crate::collection::Collection;
 use crate::error::{Error, Result};
 use crate::json_patch::{
-    extract_field_name_from_path, json_pointer_get, json_pointer_remove, json_pointer_set,
-    JsonPatchError,
+    extract_field_name_from_path, json_pointer_get, json_pointer_remove, json_pointer_replace,
+    json_pointer_set, JsonPatchError,
 };
 use schema::{CollectionSource, CollectionVersion};
 use storage::corekv::{Key, Store};
@@ -346,7 +346,13 @@ impl<S: Store> crate::database::DB<S> {
                             }
                         }
 
-                        if let Err(e) = json_pointer_set(&mut schema_json, path, value) {
+                        // RFC 6902: "add" inserts into arrays, "replace" replaces
+                        let result = if operation == Some("replace") {
+                            json_pointer_replace(&mut schema_json, path, value)
+                        } else {
+                            json_pointer_set(&mut schema_json, path, value)
+                        };
+                        if let Err(e) = result {
                             match &e {
                                 JsonPatchError::PathNotFound(_)
                                 | JsonPatchError::CannotNavigate(_) => {

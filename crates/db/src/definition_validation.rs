@@ -324,15 +324,15 @@ fn validate_field_not_mutated(
             }
         };
 
-        // Build old field map by name
-        let old_fields: HashMap<&str, &schema::FieldDescription> = old_col
-            .fields
-            .iter()
-            .map(|f| (f.name.as_str(), f))
-            .collect();
+        // Build old field map by FieldID (matching Go's approach)
+        let old_fields_by_id: HashMap<&str, &schema::FieldDescription> =
+            old_col.fields.iter().map(|f| (f.id.as_str(), f)).collect();
 
         for new_field in &new_col.fields {
-            if let Some(old_field) = old_fields.get(new_field.name.as_str()) {
+            if new_field.id.is_empty() {
+                continue;
+            }
+            if let Some(old_field) = old_fields_by_id.get(new_field.id.as_str()) {
                 if new_field != *old_field {
                     errs.push(format!(
                         "mutating an existing field is not supported. ProposedName: {}",
@@ -767,7 +767,6 @@ fn validate_embedding_provider_and_model(
         for embedding in &col.vector_embeddings {
             if embedding.provider.is_empty() {
                 errs.push("embedding Provider cannot be empty".to_string());
-                continue;
             }
 
             if !is_known_embedding_provider(&embedding.provider) {

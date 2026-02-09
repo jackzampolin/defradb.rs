@@ -26,6 +26,9 @@ pub type Result<T> = std::result::Result<T, JsonPatchError>;
 /// Navigates to the specified path and sets the value. Supports both object
 /// properties and array indices. Use "-" as an array index to append.
 ///
+/// When `insert` is true, array operations INSERT at the index (shifting elements right),
+/// matching RFC 6902 `add`/`copy`/`move` semantics. When false, replaces the element.
+///
 /// # Arguments
 /// * `json` - The JSON value to modify
 /// * `path` - JSON Pointer path (e.g., "/foo/bar/0")
@@ -34,6 +37,15 @@ pub type Result<T> = std::result::Result<T, JsonPatchError>;
 /// # Errors
 /// Returns an error if the path is invalid or cannot be navigated.
 pub fn json_pointer_set(json: &mut Value, path: &str, value: Value) -> Result<()> {
+    json_pointer_set_impl(json, path, value, true)
+}
+
+/// Like `json_pointer_set` but replaces array elements instead of inserting.
+pub fn json_pointer_replace(json: &mut Value, path: &str, value: Value) -> Result<()> {
+    json_pointer_set_impl(json, path, value, false)
+}
+
+fn json_pointer_set_impl(json: &mut Value, path: &str, value: Value, insert: bool) -> Result<()> {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if segments.is_empty() {
         return Err(JsonPatchError::InvalidPath("empty path".to_string()));
@@ -58,7 +70,11 @@ pub fn json_pointer_set(json: &mut Value, path: &str, value: Value) -> Result<()
                         })?;
                         if idx >= arr.len() {
                             arr.push(value);
+                        } else if insert {
+                            // RFC 6902 add/copy/move: INSERT at index, shifting right
+                            arr.insert(idx, value);
                         } else {
+                            // RFC 6902 replace: REPLACE at index
                             arr[idx] = value;
                         }
                     }
@@ -236,9 +252,16 @@ mod tests {
     }
 
     #[test]
-    fn test_json_pointer_set_array() {
+    fn test_json_pointer_set_array_insert() {
         let mut json = json!({"arr": [1, 2, 3]});
         json_pointer_set(&mut json, "/arr/1", json!(99)).unwrap();
+        assert_eq!(json, json!({"arr": [1, 99, 2, 3]}));
+    }
+
+    #[test]
+    fn test_json_pointer_replace_array() {
+        let mut json = json!({"arr": [1, 2, 3]});
+        json_pointer_replace(&mut json, "/arr/1", json!(99)).unwrap();
         assert_eq!(json, json!({"arr": [1, 99, 3]}));
     }
 
