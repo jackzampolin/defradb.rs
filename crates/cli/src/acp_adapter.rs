@@ -1,92 +1,75 @@
 //! Adapter to bridge ACP policy operations to HTTP's AcpOperations trait.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use std::sync::RwLock;
-
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 
+use acp::{Policy, StorePolicyOptions, ZanzibarStore};
 use defra_http::router::{AcpOperations, PolicyInfo};
 
-/// Adapter that implements AcpOperations with an in-memory policy store.
+/// Adapter that implements AcpOperations backed by a ZanzibarStore.
 pub struct AcpAdapter {
-    policies: RwLock<HashMap<String, PolicyInfo>>,
-}
-
-impl Default for AcpAdapter {
-    fn default() -> Self {
-        Self::new()
-    }
+    store: Arc<dyn ZanzibarStore>,
 }
 
 impl AcpAdapter {
-    pub fn new() -> Self {
-        Self {
-            policies: RwLock::new(HashMap::new()),
-        }
+    pub fn new(store: Arc<dyn ZanzibarStore>) -> Self {
+        Self { store }
     }
 
-    pub fn new_arc() -> Arc<dyn AcpOperations> {
-        Arc::new(Self::new())
+    pub fn new_arc(store: Arc<dyn ZanzibarStore>) -> Arc<dyn AcpOperations> {
+        Arc::new(Self::new(store))
     }
 }
 
-/// Generate a deterministic policy ID from the policy content.
-fn policy_id_from_content(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    let hash = hasher.finalize();
-    hex::encode(hash)
+/// Convert a Zanzibar Policy to an HTTP PolicyInfo.
+fn policy_to_info(policy: &Policy) -> PolicyInfo {
+    let resources = serde_json::to_value(&policy.resources).ok();
+    PolicyInfo {
+        id: policy.id.clone(),
+        name: Some(policy.name.clone()),
+        description: policy.attributes.get("description").cloned(),
+        resources,
+        actor: None,
+        creation_time: None,
+    }
 }
 
 #[async_trait]
 impl AcpOperations for AcpAdapter {
-    async fn add_policy(&self, policy: &str) -> Result<String, String> {
-        let policy_id = policy_id_from_content(policy);
+    async fn add_policy(&self, yaml: &str) -> Result<String, String> {
+        let policy = Policy::from_yaml(yaml).map_err(|e| format!("invalid policy: {}", e))?;
+        let policy_id = policy.id.clone();
 
-        // Parse YAML to extract metadata
-        let parsed: serde_yaml::Value =
-            serde_yaml::from_str(policy).map_err(|e| format!("invalid policy YAML: {}", e))?;
+        let options = StorePolicyOptions::new()
+            .with_validation()
+            .with_dpi_enforcement();
 
-        let name = parsed
-            .get("name")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        let description = parsed
-            .get("description")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        let resources = parsed
-            .get("resources")
-            .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null));
-
-        let info = PolicyInfo {
-            id: policy_id.clone(),
-            name,
-            description,
-            resources,
-            actor: None,
-            creation_time: None,
-        };
-
-        self.policies
-            .write()
-            .unwrap()
-            .insert(policy_id.clone(), info);
+        self.store
+            .store_policy_with_options(&policy, &options)
+            .await
+            .map_err(|e| format!("failed to store policy: {}", e))?;
 
         Ok(policy_id)
     }
 
     async fn list_policies(&self) -> Result<Vec<PolicyInfo>, String> {
-        let policies: Vec<PolicyInfo> = self.policies.read().unwrap().values().cloned().collect();
-        Ok(policies)
+        let policies = self
+            .store
+            .list_policies()
+            .await
+            .map_err(|e| format!("failed to list policies: {}", e))?;
+
+        Ok(policies.iter().map(policy_to_info).collect())
     }
 
     async fn get_policy(&self, id: &str) -> Result<Option<PolicyInfo>, String> {
-        Ok(self.policies.read().unwrap().get(id).cloned())
+        let policy = self
+            .store
+            .get_policy(id)
+            .await
+            .map_err(|e| format!("failed to get policy: {}", e))?;
+
+        Ok(policy.as_ref().map(policy_to_info))
     }
 }

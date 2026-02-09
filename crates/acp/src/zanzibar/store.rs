@@ -82,6 +82,9 @@ pub trait ZanzibarStore: MaybeSendSync {
     /// Get a policy by ID.
     async fn get_policy(&self, policy_id: &str) -> Result<Option<Policy>>;
 
+    /// List all stored policies.
+    async fn list_policies(&self) -> Result<Vec<Policy>>;
+
     /// Delete a policy.
     async fn delete_policy(&self, policy_id: &str) -> Result<bool>;
 
@@ -183,6 +186,10 @@ impl ZanzibarStore for MemoryZanzibarStore {
 
     async fn get_policy(&self, policy_id: &str) -> Result<Option<Policy>> {
         Ok(self.policies.read().get(policy_id).cloned())
+    }
+
+    async fn list_policies(&self) -> Result<Vec<Policy>> {
+        Ok(self.policies.read().values().cloned().collect())
     }
 
     async fn delete_policy(&self, policy_id: &str) -> Result<bool> {
@@ -425,6 +432,34 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             }
             None => Ok(None),
         }
+    }
+
+    async fn list_policies(&self) -> Result<Vec<Policy>> {
+        let txn = self
+            .store
+            .new_txn(true)
+            .await
+            .map_err(|e| Error::storage_txn("list_policies: create transaction", e))?;
+
+        let prefix = "/zanzibar/policy/";
+        let iter_opts = IterOptions::new().with_prefix(prefix.as_bytes().to_vec());
+
+        let mut iter = txn
+            .iterator(iter_opts)
+            .await
+            .map_err(|e| Error::storage_read("list_policies: create iterator", e))?;
+
+        let mut policies = Vec::new();
+        while let Some(kv) = iter
+            .next()
+            .await
+            .map_err(|e| Error::storage_read("list_policies: iterate", e))?
+        {
+            let policy: Policy = serde_json::from_slice(&kv.value)?;
+            policies.push(policy);
+        }
+
+        Ok(policies)
     }
 
     async fn delete_policy(&self, policy_id: &str) -> Result<bool> {

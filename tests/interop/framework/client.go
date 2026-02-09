@@ -679,7 +679,9 @@ func (c *Client) Purge(ctx context.Context) error {
 		return fmt.Errorf("purge returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return nil
+	// Go node restarts asynchronously after purge; wait for it to come back
+	time.Sleep(500 * time.Millisecond)
+	return WaitForReady(ctx, c, 30*time.Second)
 }
 
 // TruncateCollection truncates (removes all documents from) a collection.

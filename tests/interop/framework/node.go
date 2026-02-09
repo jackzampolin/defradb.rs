@@ -31,6 +31,7 @@ type NodeConfig struct {
 	NoSigning    bool
 	Identity     *TestIdentity // if set, pass --identity flag at startup
 	NoP2P        bool          // if set, disable P2P (no --p2paddr)
+	AcpType      string        // "local", "source-hub", or "" (default/none)
 }
 
 // multiWriter writes to both an io.Writer and a buffer for later retrieval.
@@ -207,6 +208,11 @@ func (n *Node) startGo(ctx context.Context) error {
 	// Add identity if configured (Go also auto-detects key type)
 	if n.Config.Identity != nil {
 		args = append(args, "--identity", n.Config.Identity.PrivateKeyHex)
+	}
+
+	// Enable ACP if configured (Go requires explicit --document-acp-type flag)
+	if n.Config.AcpType != "" {
+		args = append(args, "--document-acp-type", n.Config.AcpType)
 	}
 
 	return n.startBinary(ctx, binary, args)

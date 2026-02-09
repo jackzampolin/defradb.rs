@@ -26,9 +26,9 @@ serde_json.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
 sha2 = "0.10"
+serde_yaml = "0.9"
 
 [dev-dependencies]
 proptest.workspace = true
-serde_yaml = "0.9"
 tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

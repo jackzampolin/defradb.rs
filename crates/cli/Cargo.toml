@@ -63,9 +63,6 @@ getrandom = "0.2"
 # Hex encoding/decoding
 hex = "0.4"
 
-# Hashing (for content-addressable policy IDs)
-sha2 = { workspace = true }
-
 # IPLD (for Bitswap type parameters)
 libipld = { workspace = true }
 

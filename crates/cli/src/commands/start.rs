@@ -273,6 +273,8 @@ impl Node {
                 let store = Arc::new(storage::MemoryStore::new());
                 // Use in-memory ACP store for memory datastore
                 let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
+                let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
+                    Arc::new(acp::MemoryZanzibarStore::new());
                 info!("Using in-memory ACP store");
                 Self::init_store_and_server(
                     store,
@@ -280,6 +282,7 @@ impl Node {
                     peer_keypair,
                     user_identity.clone(),
                     acp_store,
+                    zanzibar_store,
                 )
                 .await?
             }
@@ -290,12 +293,15 @@ impl Node {
                 info!("Using unified ACP store (namespace isolated in main database)");
                 let acp_store: Arc<dyn acp::AcpStore> =
                     Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
+                let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
+                    Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
                 Self::init_store_and_server(
                     store,
                     &config,
                     peer_keypair,
                     user_identity.clone(),
                     acp_store,
+                    zanzibar_store,
                 )
                 .await?
             }
@@ -421,6 +427,7 @@ impl Node {
         peer_keypair: Option<p2p::Keypair>,
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
         acp_store: Arc<dyn acp::AcpStore>,
+        zanzibar_store: Arc<dyn acp::ZanzibarStore>,
     ) -> Result<(
         Option<p2p::P2PHostHandle>,
         Option<P2PTasks>,
@@ -731,7 +738,7 @@ impl Node {
             info!("NAC HTTP endpoints enabled");
 
             // Wire ACP policy operations to HTTP server
-            let acp_adapter = crate::acp_adapter::AcpAdapter::new_arc();
+            let acp_adapter = crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store);
             server = server.with_acp_arc(acp_adapter);
             info!("ACP policy HTTP endpoints enabled");
 

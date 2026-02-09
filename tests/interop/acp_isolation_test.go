@@ -73,6 +73,7 @@ func startMirrorNodes(t *testing.T, ctx context.Context) *mirrorNodes {
 		Store:    "memory",
 		NoP2P:    true,
 		Identity: defaultIdentity,
+		AcpType:  "local",
 	})
 
 	rustPorts.Release()
@@ -87,6 +88,7 @@ func startMirrorNodes(t *testing.T, ctx context.Context) *mirrorNodes {
 		Store:    "memory",
 		NoP2P:    true,
 		Identity: defaultIdentity,
+		AcpType:  "local",
 	})
 
 	goPorts.Release()
