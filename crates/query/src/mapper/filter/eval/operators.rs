@@ -293,18 +293,17 @@ fn like_match(
     negate: bool,
     case_insensitive: bool,
 ) -> Result<bool> {
-    // Null fields never match (standard database behavior, matches Go DefraDB)
+    // Null and non-string values can't match a LIKE pattern.
+    // For _like: false (no match). For _nlike: true (doesn't match the pattern).
     if actual.is_null() {
         return Ok(negate);
     }
 
     let op_name = if case_insensitive { "_ilike" } else { "_like" };
 
-    // Non-string fields don't match _like (return false, not error)
-    // This matches Go DefraDB behavior for JSON fields with mixed types
     let actual_str = match actual.as_str() {
         Some(s) => s,
-        None => return Ok(negate), // Non-string doesn't match, so _like=false, _nlike=true
+        None => return Ok(negate),
     };
     let pattern_str = pattern.as_str().ok_or_else(|| {
         QueryError::invalid_filter(format!("{} requires string pattern", op_name))

@@ -26,11 +26,11 @@ use crate::error::{Error, Result};
 use crate::message::PushLogBroadcast;
 use crate::sync::PeerStateTracker;
 
+use super::super::queue::ProcessQueue;
 use super::config::SyncConfig;
 use super::events::SyncEvent;
 use super::links::{find_all_missing_links, find_missing_links};
 use super::pending::PendingDag;
-use super::super::queue::ProcessQueue;
 
 /// Manager for P2P block synchronization.
 ///

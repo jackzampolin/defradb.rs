@@ -830,7 +830,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .map(|f| f.has_relation_filters())
             .unwrap_or(false);
 
-        let _order_has_relations = select
+        let order_has_relations = select
             .order_by
             .as_ref()
             .map(|o| o.has_relation_order())
@@ -845,6 +845,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             || has_relation_aggregates
             || has_nested
             || filter_has_relations
+            || order_has_relations
             || has_similarity
         {
             // Use Planner path for index-based queries, relation aggregates,
@@ -998,10 +999,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // Check if this object contains scanNode
             if let Some(scan_node) = obj.get_mut("scanNode") {
                 if let Some(scan_obj) = scan_node.as_object_mut() {
-                    scan_obj.insert(
-                        "iterations".to_string(),
-                        serde_json::json!(iterations),
-                    );
+                    scan_obj.insert("iterations".to_string(), serde_json::json!(iterations));
                     scan_obj.insert(
                         "docFetches".to_string(),
                         serde_json::json!(doc_fetches as u64),

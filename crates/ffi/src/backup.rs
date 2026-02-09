@@ -218,8 +218,7 @@ pub unsafe extern "C" fn basic_export(node_ptr: usize, config_json: *const c_cha
             name_cid_pairs.push((name.clone(), col.schema().collection_id.clone()));
         }
         name_cid_pairs.sort_by(|a, b| a.1.cmp(&b.1));
-        let collection_names: Vec<String> =
-            name_cid_pairs.into_iter().map(|(n, _)| n).collect();
+        let collection_names: Vec<String> = name_cid_pairs.into_iter().map(|(n, _)| n).collect();
 
         // Three-phase export:
         // Phase 1: Query all docs, compute initial _docIDNew (including FK fields)

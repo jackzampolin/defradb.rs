@@ -86,6 +86,15 @@ pub struct TypeJoinMany {
     /// Used to simulate Go's per-parent filteredFetcher behavior for explain metrics
     /// when a child limit is set.
     child_scan_order: Vec<(String, u64)>,
+    /// Optional separate child plan for indexed relation filter evaluation.
+    /// When present, this plan uses an index to find children matching the
+    /// relation filter. The main child_plan still provides ALL children for display.
+    /// This matches Go's inverted index join behavior.
+    filter_child_plan: Option<Box<dyn PlanNode>>,
+    /// Cache of children from filter_child_plan, indexed by FK value.
+    filter_child_cache: HashMap<String, Vec<Doc>>,
+    /// FK field index in the filter child plan's documents.
+    filter_child_fk_index: Option<usize>,
 }
 
 impl std::fmt::Debug for TypeJoinMany {
@@ -159,6 +168,9 @@ impl TypeJoinMany {
             total_fields_per_scan: 0,
             per_parent_child_scan: false,
             child_scan_order: Vec::new(),
+            filter_child_plan: None,
+            filter_child_cache: HashMap::new(),
+            filter_child_fk_index: None,
         })
     }
 
@@ -221,6 +233,22 @@ impl TypeJoinMany {
     /// per-parent limit applied during the scan.
     pub fn with_per_parent_child_scan(mut self) -> Self {
         self.per_parent_child_scan = true;
+        self
+    }
+
+    /// Set a separate filter child plan for indexed relation filter evaluation.
+    ///
+    /// When set, this plan uses an index to find children matching the relation
+    /// filter. The main child_plan still provides ALL children for display.
+    /// This avoids narrowing the display scan while still getting indexed filter evaluation.
+    pub fn with_filter_child_plan(mut self, plan: Box<dyn PlanNode>) -> Self {
+        // Determine the FK field index in the filter plan's mapping
+        let fk_name = schema::CollectionVersion::relation_id_field_name(
+            self.child_side.relation_field().name.as_str(),
+        );
+        let fk_idx = plan.document_map().first_index_of_name(&fk_name);
+        self.filter_child_fk_index = fk_idx;
+        self.filter_child_plan = Some(plan);
         self
     }
 
@@ -537,13 +565,28 @@ impl TypeJoinMany {
     /// Returns false if:
     /// - There are no child documents (empty relation can't pass any filter)
     /// - No child document passes the filter conditions
-    fn check_relation_filter(&self, children: &[Doc], rel_filter: &RelationFilter) -> Result<bool> {
+    fn check_relation_filter(
+        &self,
+        children: &[Doc],
+        rel_filter: &RelationFilter,
+        use_filter_mapping: bool,
+    ) -> Result<bool> {
         if children.is_empty() {
             return Ok(false);
         }
 
+        // Use filter_child_plan's mapping when evaluating filter_child_cache children,
+        // otherwise use child_plan's mapping.
+        let child_mapping = if use_filter_mapping {
+            self.filter_child_plan
+                .as_ref()
+                .map(|p| p.document_map())
+                .unwrap_or(self.child_plan.document_map())
+        } else {
+            self.child_plan.document_map()
+        };
+
         // Check if any child passes the filter
-        let child_mapping = self.child_plan.document_map();
         for child in children {
             if rel_filter
                 .conditions
@@ -624,21 +667,32 @@ impl TypeJoinMany {
             self.go_child_metrics.field_fetches += child_info.fields_fetched;
             self.go_child_metrics.index_fetches += child_info.indexes_fetched;
 
-            // If limit was reached early, add the partial index fetches
-            // (Go stops scanning when limit reached, so indexFetches = entries scanned)
+            // If limit was reached early, override index fetches with actual entries scanned.
+            // Go stops scanning when limit reached, counting ALL index entries examined
+            // (including those filtered out by residual filters like _like).
+            // child_info.docs_fetched counts entries iterated in IndexScanNode.next(),
+            // including those skipped by the residual filter, which matches Go's behavior.
             if limit_reached {
-                // Override: Go counts only the entries actually scanned, not all
-                // The child plan may have fetched all from index, but Go would have stopped.
-                // We approximate with matching_count since Go scans until limit matches.
                 self.go_child_metrics.index_fetches -= child_info.indexes_fetched;
-                self.go_child_metrics.index_fetches += total_scanned;
+                self.go_child_metrics.index_fetches += child_info.docs_fetched;
             }
 
             self.child_plan.close().await?;
 
             // Apply relation filter if present
             if let Some(ref rel_filter) = self.relation_filter {
-                if !self.check_relation_filter(&all_children, rel_filter)? {
+                // Use filter_child_cache (from indexed filter plan) when available,
+                // otherwise use per-parent scanned children.
+                let use_filter = self.filter_child_plan.is_some();
+                let filter_children = if use_filter {
+                    self.filter_child_cache
+                        .get(&parent_doc_id)
+                        .map(|docs| docs.iter().map(|d| d.deep_clone()).collect())
+                        .unwrap_or_default()
+                } else {
+                    all_children.clone()
+                };
+                if !self.check_relation_filter(&filter_children, rel_filter, use_filter)? {
                     continue;
                 }
             }
@@ -705,6 +759,29 @@ impl PlanNode for TypeJoinMany {
         self.total_children_in_cache = 0;
         self.total_fields_per_scan = 0;
         self.child_scan_order.clear();
+        self.filter_child_cache.clear();
+
+        // Build filter child cache if present (indexed relation filter evaluation)
+        let filter_index_fetches = if let Some(ref mut filter_plan) = self.filter_child_plan {
+            filter_plan.init().await?;
+            filter_plan.start().await?;
+            while filter_plan.next().await? {
+                let doc = filter_plan.value();
+                if let Some(fk_idx) = self.filter_child_fk_index {
+                    if let Some(fk) = doc.get(fk_idx).and_then(|v| v.as_str()) {
+                        self.filter_child_cache
+                            .entry(fk.to_string())
+                            .or_default()
+                            .push(doc.deep_clone());
+                    }
+                }
+            }
+            let fetches = filter_plan.exec_info().indexes_fetched;
+            filter_plan.close().await?;
+            Some(fetches)
+        } else {
+            None
+        };
 
         if self.per_parent_child_scan {
             // Per-parent mode: don't cache, we'll re-scan per parent in next()
@@ -715,6 +792,12 @@ impl PlanNode for TypeJoinMany {
             // Then init parent plan
             self.parent_plan.init().await?;
         }
+
+        // Add filter child plan's index_fetches to the display child's
+        if let Some(fetches) = filter_index_fetches {
+            self.go_child_metrics.index_fetches += fetches;
+        }
+
         self.initialized = true;
         Ok(())
     }
@@ -768,8 +851,18 @@ impl PlanNode for TypeJoinMany {
 
             // Apply relation filter if present (check against ALL children, not just limited)
             if let Some(ref rel_filter) = self.relation_filter {
-                let all_children = self.get_all_children(&parent_doc_id);
-                if !self.check_relation_filter(&all_children, rel_filter)? {
+                // Use filter_child_cache (from indexed filter plan) when available,
+                // otherwise fall back to child_cache (display plan).
+                let use_filter = self.filter_child_plan.is_some();
+                let filter_children = if use_filter {
+                    self.filter_child_cache
+                        .get(&parent_doc_id)
+                        .map(|docs| docs.iter().map(|d| d.deep_clone()).collect())
+                        .unwrap_or_default()
+                } else {
+                    self.get_all_children(&parent_doc_id)
+                };
+                if !self.check_relation_filter(&filter_children, rel_filter, use_filter)? {
                     // No children pass the filter - skip this parent
                     continue;
                 }
@@ -845,6 +938,8 @@ impl PlanNode for TypeJoinMany {
         // child_plan was already closed in build_child_cache()
         self.child_cache.clear();
         self.child_scan_order.clear();
+        self.filter_child_cache.clear();
+        // filter_child_plan was already closed in init()
         self.initialized = false;
         Ok(())
     }

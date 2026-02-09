@@ -5,4 +5,4 @@
 
 mod operators;
 
-pub use operators::{eval_op, values_equal};
+pub use operators::{eval_op, like_pattern_match, values_equal};

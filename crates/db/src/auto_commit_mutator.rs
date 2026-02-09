@@ -472,7 +472,8 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                 let fields_modified = doc.values().len();
                 match commit_result {
                     Some((cid, block, col_data)) => {
-                        let mut result = UpdateResult::with_commit(doc, fields_modified, cid, block);
+                        let mut result =
+                            UpdateResult::with_commit(doc, fields_modified, cid, block);
                         if let Some((col_cid, col_bytes)) = col_data {
                             result.broadcast_cid = Some(col_cid);
                             result.broadcast_block = Some(col_bytes);
