@@ -381,14 +381,11 @@ impl<S: Store> P2PHost<S> {
             } => {
                 info!("Connected to peer: {}", peer_id);
                 // For dialer: store the address we dialed (which is the peer's listen addr).
-                // For listener: store send_back_addr temporarily; identify will update it.
-                let remote_addr = match &endpoint {
-                    libp2p::core::ConnectedPoint::Dialer { address, .. } => address.clone(),
-                    libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } => {
-                        send_back_addr.clone()
-                    }
-                };
-                self.peer_addrs.insert(peer_id, remote_addr);
+                // For listener: do NOT store send_back_addr (it has an ephemeral port).
+                // The identify protocol will provide the correct listen address shortly.
+                if let libp2p::core::ConnectedPoint::Dialer { address, .. } = &endpoint {
+                    self.peer_addrs.insert(peer_id, address.clone());
+                }
 
                 if self
                     .event_tx
@@ -421,9 +418,17 @@ impl<S: Store> P2PHost<S> {
 
             SwarmEvent::Behaviour(DefraEvent::Mdns(mdns::Event::Discovered(peers))) => {
                 for (peer_id, addr) in peers {
-                    debug!("mDNS discovered peer: {} at {}", peer_id, addr);
-                    debug!(peer_id = %peer_id, address = %addr, "Adding external address from mDNS discovery");
-                    self.swarm.add_external_address(addr);
+                    debug!(peer_id = %peer_id, address = %addr, "mDNS discovered peer, dialing");
+                    // Dial discovered peers (matches Go's mDNS HandlePeerFound behavior).
+                    // Skip if already connected — dial returns AlreadyDialing or similar.
+                    if !self.swarm.is_connected(&peer_id) {
+                        let dial_opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
+                            .addresses(vec![addr])
+                            .build();
+                        if let Err(e) = self.swarm.dial(dial_opts) {
+                            debug!(peer_id = %peer_id, error = %e, "mDNS dial failed (may already be connecting)");
+                        }
+                    }
                     if self
                         .event_tx
                         .send(HostEvent::PeerDiscovered(peer_id))

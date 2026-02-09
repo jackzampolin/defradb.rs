@@ -299,8 +299,41 @@ impl<S: Store> P2PHost<S> {
             } => {
                 let handler = self.two_stream_handler.clone();
                 self.spawned_tasks.spawn(async move {
-                    let mut h = handler.lock().await;
-                    let result = h.send_request(peer_id, request).await;
+                    // Phase 1: Send the request (needs handler lock for stream control).
+                    let (message_id, rx) = {
+                        let mut h = handler.lock().await;
+                        match h.start_request(peer_id, request).await {
+                            Ok(pair) => pair,
+                            Err(e) => {
+                                if response.send(Err(e)).is_err() {
+                                    debug!(peer_id = %peer_id, "SendTwoStreamRequest command response dropped - caller cancelled");
+                                }
+                                return;
+                            }
+                        }
+                    }; // Handler lock released here — response handler can now route replies.
+
+                    // Phase 2: Wait for response WITHOUT holding the handler lock.
+                    let result = match tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        rx,
+                    )
+                    .await
+                    {
+                        Ok(Ok(reply)) => Ok(reply),
+                        Ok(Err(_)) => {
+                            handler.lock().await.cleanup_pending(&message_id);
+                            Err(crate::error::Error::Transport(
+                                "response channel closed".into(),
+                            ))
+                        }
+                        Err(_) => {
+                            handler.lock().await.cleanup_pending(&message_id);
+                            Err(crate::error::Error::Transport(
+                                "timeout waiting for response".into(),
+                            ))
+                        }
+                    };
                     if response.send(result).is_err() {
                         debug!(peer_id = %peer_id, "SendTwoStreamRequest command response dropped - caller cancelled");
                     }
