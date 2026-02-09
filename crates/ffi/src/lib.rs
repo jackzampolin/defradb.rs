@@ -104,7 +104,7 @@ pub use p2p::{
     p2p_sync_branchable_collection, p2p_sync_documents,
 };
 pub use query::exec_request;
-pub use schema::{add_schema, get_collections};
+pub use schema::{add_schema, get_collections, get_collections_in_txn};
 pub use subscription::{
     close_graphql_subscription, close_subscription, create_merge_complete_subscription,
     create_subscription, poll_graphql_subscription, poll_subscription,
