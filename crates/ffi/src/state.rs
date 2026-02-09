@@ -145,7 +145,7 @@ pub struct P2PState {
     /// Documents subscribed for P2P replication (by doc ID).
     pub documents: RwLock<HashSet<String>>,
     /// Known peer addresses: peer_id_string -> full multiaddr with /p2p/ component.
-    /// Populated when peers connect via p2p_connect or p2p_set_replicator.
+    /// Populated when peers connect via p2p_connect or p2p_create_replicator.
     pub peer_addresses: RwLock<HashMap<String, String>>,
     /// Abort handle for the host event loop task.
     pub host_event_handle: Option<tokio::task::AbortHandle>,

@@ -547,7 +547,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
 ///
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
-pub extern "C" fn p2p_peer_info(node_ptr: usize) -> FfiResult {
+pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, _identity_did: *const c_char) -> FfiResult {
     let rt = get_runtime!(FfiResult);
 
     let result = NODES
@@ -759,7 +759,7 @@ pub unsafe extern "C" fn p2p_connect(
 ///
 /// All string pointers must be valid null-terminated UTF-8 strings.
 #[no_mangle]
-pub unsafe extern "C" fn p2p_set_replicator(
+pub unsafe extern "C" fn p2p_create_replicator(
     node_ptr: usize,
     identity_did: *const c_char,
     peer_addr: *const c_char,
@@ -1148,7 +1148,7 @@ pub unsafe extern "C" fn p2p_delete_replicator(
 ///
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
-pub unsafe extern "C" fn p2p_get_all_replicators(
+pub unsafe extern "C" fn p2p_list_replicators(
     node_ptr: usize,
     identity_did: *const c_char,
 ) -> FfiResult {
@@ -1220,7 +1220,7 @@ pub unsafe extern "C" fn p2p_get_all_replicators(
 ///
 /// `collections_json` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn p2p_add_collections(
+pub unsafe extern "C" fn p2p_create_collections(
     node_ptr: usize,
     identity_did: *const c_char,
     collections_json: *const c_char,
@@ -1297,7 +1297,7 @@ pub unsafe extern "C" fn p2p_add_collections(
 ///
 /// `collections_json` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn p2p_remove_collections(
+pub unsafe extern "C" fn p2p_delete_collections(
     node_ptr: usize,
     identity_did: *const c_char,
     collections_json: *const c_char,
@@ -1370,7 +1370,7 @@ pub unsafe extern "C" fn p2p_remove_collections(
 ///
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
-pub unsafe extern "C" fn p2p_get_all_collections(
+pub unsafe extern "C" fn p2p_list_collections(
     node_ptr: usize,
     identity_did: *const c_char,
 ) -> FfiResult {
@@ -1416,7 +1416,7 @@ pub unsafe extern "C" fn p2p_get_all_collections(
 ///
 /// `doc_ids_json` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn p2p_add_documents(
+pub unsafe extern "C" fn p2p_create_documents(
     node_ptr: usize,
     identity_did: *const c_char,
     doc_ids_json: *const c_char,
@@ -1489,7 +1489,7 @@ pub unsafe extern "C" fn p2p_add_documents(
 ///
 /// `doc_ids_json` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn p2p_remove_documents(
+pub unsafe extern "C" fn p2p_delete_documents(
     node_ptr: usize,
     identity_did: *const c_char,
     doc_ids_json: *const c_char,
@@ -1559,7 +1559,7 @@ pub unsafe extern "C" fn p2p_remove_documents(
 ///
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
-pub unsafe extern "C" fn p2p_get_all_documents(
+pub unsafe extern "C" fn p2p_list_documents(
     node_ptr: usize,
     identity_did: *const c_char,
 ) -> FfiResult {

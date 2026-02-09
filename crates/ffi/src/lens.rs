@@ -143,7 +143,8 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
 ///
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
-pub extern "C" fn lens_list(node_ptr: usize) -> FfiResult {
+pub unsafe extern "C" fn lens_list(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
+    let _ = identity_did;
     let rt = get_runtime!(FfiResult);
 
     // Validate node handle before entering async block
@@ -215,7 +216,7 @@ mod tests {
         assert_eq!(result.status, 0);
         let node = result.node_ptr;
 
-        let result = lens_list(node);
+        let result = unsafe { lens_list(node, std::ptr::null()) };
         assert_eq!(result.status, 0);
         assert!(!result.value.is_null());
 
@@ -231,7 +232,7 @@ mod tests {
     fn test_lens_list_invalid_node() {
         assert!(crate::runtime::init_runtime());
 
-        let result = lens_list(0);
+        let result = unsafe { lens_list(0, std::ptr::null()) };
         assert_eq!(result.status, 1);
         assert!(!result.error.is_null());
         unsafe { crate::types::defra_free_string(result.error) };
