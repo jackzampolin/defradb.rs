@@ -224,8 +224,19 @@ impl P2pActivePeersArgs {
 }
 
 impl P2pConnectArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        if self.addresses.is_empty() {
+            return Err(crate::error::Error::MissingInput(
+                "at least one address is required".to_string(),
+            ));
+        }
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        client.p2p_connect(&self.addresses).await?;
+        println!("Connected to peer(s)");
         Ok(())
     }
 }
@@ -255,29 +266,57 @@ impl P2pDocumentArgs {
 }
 
 impl P2pDocumentAddArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let doc_ids: Vec<String> = self.doc_id.iter().cloned().collect();
+        let schema_ids: Vec<String> = self.schema_id.iter().cloned().collect();
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        client.p2p_document_add(&doc_ids, &schema_ids).await?;
+        println!("Added document(s) to P2P sync");
         Ok(())
     }
 }
 
 impl P2pDocumentRemoveArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let doc_ids: Vec<String> = self.doc_id.iter().cloned().collect();
+        let schema_ids: Vec<String> = self.schema_id.iter().cloned().collect();
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        client.p2p_document_remove(&doc_ids, &schema_ids).await?;
+        println!("Removed document(s) from P2P sync");
         Ok(())
     }
 }
 
 impl P2pDocumentGetAllArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.p2p_document_list().await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }
 
 impl P2pDocumentSyncArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        client
+            .p2p_document_sync(self.doc_id.as_deref(), self.schema_id.as_deref())
+            .await?;
+        println!("Document sync initiated");
         Ok(())
     }
 }
@@ -414,8 +453,13 @@ impl P2pCollectionRemoveArgs {
 }
 
 impl P2pCollectionSyncVersionsArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        client.p2p_collection_sync().await?;
+        println!("Collection sync initiated");
         Ok(())
     }
 }

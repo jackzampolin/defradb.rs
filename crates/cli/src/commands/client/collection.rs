@@ -168,7 +168,7 @@ impl CollectionArgs {
             CollectionCommand::Create(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::Delete(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::Describe(args) => args.execute(ctx, self.name.as_deref()).await,
-            CollectionCommand::DocIds(args) => args.execute(ctx).await,
+            CollectionCommand::DocIds(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::Get(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::List(args) => args.execute(ctx).await,
             CollectionCommand::Patch(args) => args.execute(ctx).await,
@@ -391,22 +391,63 @@ impl DocumentGetArgs {
 }
 
 impl DocumentUpdateArgs {
-    pub async fn execute(&self, _ctx: &ClientContext, _name: Option<&str>) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext, name: Option<&str>) -> Result<()> {
+        let collection =
+            name.ok_or_else(|| Error::MissingInput("--name is required for update".to_string()))?;
+        validate_identifier(collection)?;
+
+        if let Some(ref doc_id) = self.doc_id {
+            let updater = self.updater.as_deref().ok_or_else(|| {
+                Error::MissingInput("--updater is required for update".to_string())
+            })?;
+
+            let client = HttpClient::new(&ctx.url)?
+                .with_auth_token(ctx.auth_token.clone())
+                .with_verbose(ctx.verbose);
+
+            let result = client
+                .collection_update_doc(collection, doc_id, updater)
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            eprintln!("filter-based update not yet supported");
+        }
         Ok(())
     }
 }
 
 impl DocumentDeleteArgs {
-    pub async fn execute(&self, _ctx: &ClientContext, _name: Option<&str>) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext, name: Option<&str>) -> Result<()> {
+        let collection =
+            name.ok_or_else(|| Error::MissingInput("--name is required for delete".to_string()))?;
+        validate_identifier(collection)?;
+
+        if let Some(ref doc_id) = self.doc_id {
+            let client = HttpClient::new(&ctx.url)?
+                .with_auth_token(ctx.auth_token.clone())
+                .with_verbose(ctx.verbose);
+
+            client.collection_delete_doc(collection, doc_id).await?;
+            println!("Deleted document {}", doc_id);
+        } else {
+            eprintln!("filter-based delete not yet supported");
+        }
         Ok(())
     }
 }
 
 impl DocIdsArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext, name: Option<&str>) -> Result<()> {
+        let collection =
+            name.ok_or_else(|| Error::MissingInput("--name is required for doc-ids".to_string()))?;
+        validate_identifier(collection)?;
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.collection_doc_ids(collection).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }

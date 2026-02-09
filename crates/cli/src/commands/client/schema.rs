@@ -51,8 +51,35 @@ impl SchemaArgs {
 }
 
 impl SchemaAddArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let mut sdl_parts = Vec::new();
+
+        if let Some(ref schema) = self.schema {
+            sdl_parts.push(schema.clone());
+        }
+
+        for path in &self.file {
+            let content =
+                std::fs::read_to_string(path).map_err(|e| crate::error::Error::ReadFile {
+                    path: path.clone(),
+                    source: e,
+                })?;
+            sdl_parts.push(content);
+        }
+
+        if sdl_parts.is_empty() {
+            return Err(crate::error::Error::MissingInput(
+                "either SCHEMA argument or --file must be provided".to_string(),
+            ));
+        }
+
+        let sdl = sdl_parts.join("\n");
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.schema_add(&sdl).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }

@@ -2,6 +2,7 @@
 
 use clap::Args;
 
+use super::http_client::HttpClient;
 use super::ClientContext;
 use crate::error::Result;
 
@@ -14,8 +15,19 @@ pub struct PurgeArgs {
 }
 
 impl PurgeArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        if !self.force {
+            return Err(crate::error::Error::MissingInput(
+                "--force is required to purge".to_string(),
+            ));
+        }
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        client.purge().await?;
+        println!("Database purged successfully");
         Ok(())
     }
 }

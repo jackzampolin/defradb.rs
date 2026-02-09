@@ -280,22 +280,53 @@ impl AcpNodeRelationshipArgs {
 }
 
 impl AcpNodeRelationshipAddArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let relation = self.relation.as_deref().ok_or_else(|| {
+            crate::error::Error::MissingInput("--relation is required".to_string())
+        })?;
+        let actor = self
+            .actor
+            .as_deref()
+            .ok_or_else(|| crate::error::Error::MissingInput("--actor is required".to_string()))?;
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.nac_add_relationship(relation, actor).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }
 
 impl AcpNodeRelationshipDeleteArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let relation = self.relation.as_deref().ok_or_else(|| {
+            crate::error::Error::MissingInput("--relation is required".to_string())
+        })?;
+        let actor = self
+            .actor
+            .as_deref()
+            .ok_or_else(|| crate::error::Error::MissingInput("--actor is required".to_string()))?;
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.nac_remove_relationship(relation, actor).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }
 
 impl AcpNodeStatusArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        eprintln!("not yet implemented");
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.nac_status().await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }
