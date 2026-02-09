@@ -55,4 +55,18 @@ impl<S: Store + 'static> CollectionManagementOperations for CollectionManagement
             .await
             .map_err(|e| format!("{}", e))
     }
+
+    async fn purge(&self) -> Result<(), String> {
+        let collections = self
+            .database
+            .list_collections()
+            .map_err(|e| format!("{}", e))?;
+        for name in &collections {
+            self.database
+                .truncate_collection(name)
+                .await
+                .map_err(|e| format!("{}", e))?;
+        }
+        Ok(())
+    }
 }

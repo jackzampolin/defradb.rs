@@ -7,6 +7,7 @@ pub mod cli;
 pub mod collection_mgmt_adapter;
 pub mod commands;
 pub mod config;
+pub mod doc_acp_adapter;
 pub mod error;
 pub mod lens_adapter;
 pub mod logging;

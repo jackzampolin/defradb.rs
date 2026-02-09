@@ -15,8 +15,8 @@ use query::rest::RestOperations;
 
 use crate::error::Result;
 use crate::router::{
-    create_router_with_state, AppStateBuilder, CollectionManagementOperations, LensOperations,
-    NodeAcpOperations, P2POperations, SchemaOperations,
+    create_router_with_state, AppStateBuilder, CollectionManagementOperations,
+    DocumentAcpOperations, LensOperations, NodeAcpOperations, P2POperations, SchemaOperations,
 };
 
 /// Server configuration options.
@@ -48,6 +48,7 @@ pub struct Server {
     lens: Option<Arc<dyn LensOperations>>,
     nac: Option<Arc<dyn NodeAcpOperations>>,
     collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
+    doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
 }
 
@@ -63,6 +64,7 @@ impl Server {
             lens: None,
             nac: None,
             collection_mgmt: None,
+            doc_acp: None,
             event_bus: None,
         }
     }
@@ -78,6 +80,7 @@ impl Server {
             lens: None,
             nac: None,
             collection_mgmt: None,
+            doc_acp: None,
             event_bus: None,
         }
     }
@@ -93,6 +96,7 @@ impl Server {
             lens: None,
             nac: None,
             collection_mgmt: None,
+            doc_acp: None,
             event_bus: None,
         }
     }
@@ -108,6 +112,7 @@ impl Server {
             lens: None,
             nac: None,
             collection_mgmt: None,
+            doc_acp: None,
             event_bus: None,
         }
     }
@@ -187,6 +192,12 @@ impl Server {
         self
     }
 
+    /// Set document ACP operations from an Arc.
+    pub fn with_doc_acp_arc(mut self, doc_acp: Arc<dyn DocumentAcpOperations>) -> Self {
+        self.doc_acp = Some(doc_acp);
+        self
+    }
+
     /// Set collection management operations from an Arc.
     pub fn with_collection_mgmt_arc(
         mut self,
@@ -236,6 +247,9 @@ impl Server {
         }
         if let Some(ref collection_mgmt) = self.collection_mgmt {
             builder = builder.with_collection_mgmt(Arc::clone(collection_mgmt));
+        }
+        if let Some(ref doc_acp) = self.doc_acp {
+            builder = builder.with_doc_acp(Arc::clone(doc_acp));
         }
         if let Some(ref event_bus) = self.event_bus {
             builder = builder.with_event_bus(Arc::clone(event_bus));

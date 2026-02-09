@@ -55,9 +55,13 @@ pub async fn purge(
 ) -> Result<Json<()>, HttpError> {
     require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
 
-    Err(HttpError::NotImplemented(
-        "purge operation is not yet implemented".to_string(),
-    ))
+    state
+        .require_collection_mgmt()?
+        .purge()
+        .await
+        .map_err(HttpError::Internal)?;
+
+    Ok(Json(()))
 }
 
 #[cfg(test)]

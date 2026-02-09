@@ -535,8 +535,9 @@ impl RestOperations for FailingMockRestOperations {
 // ============================================================================
 
 use crate::router::{
-    AcpOperations, BackupOperations, ImportResult, IndexFieldInfo, IndexInfo, IndexOperations,
-    P2POperations, P2pDocumentInfo, P2pDocumentRequest, PolicyInfo, ReplicatorInfo,
+    AcpOperations, BackupOperations, CollectionManagementOperations, DocumentAcpOperations,
+    ImportResult, IndexFieldInfo, IndexInfo, IndexOperations, LensOperations, P2POperations,
+    P2pDocumentInfo, P2pDocumentRequest, PolicyInfo, ReplicatorInfo,
 };
 
 /// Mock P2P operations for testing P2P handlers.
@@ -1450,5 +1451,114 @@ impl NodeAcpOperations for FailingMockNodeAcpOperations {
 
     async fn re_enable(&self, _requestor: &Did) -> std::result::Result<(), String> {
         Err(self.error.clone())
+    }
+}
+
+// ============================================================================
+// Mock Lens Operations
+// ============================================================================
+
+/// Mock lens operations for testing lens handlers.
+#[derive(Debug, Clone, Default)]
+pub struct MockLensOperations;
+
+impl MockLensOperations {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl LensOperations for MockLensOperations {
+    async fn set_migration(&self, _config: &str) -> std::result::Result<String, String> {
+        Ok("mock-transform-001".to_string())
+    }
+
+    async fn reload(&self) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
+    async fn add(&self, _config: &str) -> std::result::Result<String, String> {
+        Ok("mock-transform-002".to_string())
+    }
+
+    async fn list(&self) -> std::result::Result<serde_json::Value, String> {
+        Ok(json!({}))
+    }
+}
+
+// ============================================================================
+// Mock Collection Management Operations
+// ============================================================================
+
+/// Mock collection management operations for testing.
+#[derive(Debug, Clone, Default)]
+pub struct MockCollectionManagementOperations;
+
+impl MockCollectionManagementOperations {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl CollectionManagementOperations for MockCollectionManagementOperations {
+    async fn patch_collection(
+        &self,
+        collection_name: &str,
+        _patch: &str,
+    ) -> std::result::Result<serde_json::Value, String> {
+        Ok(json!({"name": collection_name, "version": "v2"}))
+    }
+
+    async fn set_active_version(&self, _version_id: &str) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
+    async fn truncate_collection(&self, _name: &str) -> std::result::Result<(), String> {
+        Ok(())
+    }
+
+    async fn purge(&self) -> std::result::Result<(), String> {
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Mock Document ACP Operations
+// ============================================================================
+
+/// Mock document ACP operations for testing document relationship handlers.
+#[derive(Debug, Clone, Default)]
+pub struct MockDocumentAcpOperations;
+
+impl MockDocumentAcpOperations {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl DocumentAcpOperations for MockDocumentAcpOperations {
+    async fn add_doc_relationship(
+        &self,
+        _requestor: &Did,
+        _target_actor: &str,
+        _collection: &str,
+        _doc_id: &str,
+        _relation: &str,
+    ) -> std::result::Result<bool, String> {
+        Ok(true)
+    }
+
+    async fn delete_doc_relationship(
+        &self,
+        _requestor: &Did,
+        _target_actor: &str,
+        _collection: &str,
+        _doc_id: &str,
+        _relation: &str,
+    ) -> std::result::Result<bool, String> {
+        Ok(true)
     }
 }

@@ -656,6 +656,7 @@ impl Node {
             );
 
             // Create LocalDocumentACP with the provided store
+            let acp_store_for_http = acp_store.clone();
             let document_acp: Arc<dyn acp::DocumentACP> =
                 Arc::new(acp::LocalDocumentACP::new(acp_store));
             info!("Document ACP configured");
@@ -731,6 +732,14 @@ impl Node {
             let nac_adapter = crate::nac_adapter::NacAdapter::new_arc(nac_manager);
             server = server.with_nac_arc(nac_adapter);
             info!("NAC HTTP endpoints enabled");
+
+            // Wire document ACP operations to HTTP server
+            let doc_acp_adapter = crate::doc_acp_adapter::DocumentAcpAdapter::new_arc(
+                database.clone(),
+                Arc::new(acp::LocalDocumentACP::new(acp_store_for_http)),
+            );
+            server = server.with_doc_acp_arc(doc_acp_adapter);
+            info!("Document ACP HTTP endpoints enabled");
 
             // Wire collection management operations to HTTP server
             let collection_mgmt_adapter =
