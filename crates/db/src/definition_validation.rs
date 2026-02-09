@@ -324,15 +324,15 @@ fn validate_field_not_mutated(
             }
         };
 
-        // Build old field map by name
-        let old_fields: HashMap<&str, &schema::FieldDescription> = old_col
-            .fields
-            .iter()
-            .map(|f| (f.name.as_str(), f))
-            .collect();
+        // Build old field map by FieldID (matching Go's approach)
+        let old_fields_by_id: HashMap<&str, &schema::FieldDescription> =
+            old_col.fields.iter().map(|f| (f.id.as_str(), f)).collect();
 
         for new_field in &new_col.fields {
-            if let Some(old_field) = old_fields.get(new_field.name.as_str()) {
+            if new_field.id.is_empty() {
+                continue;
+            }
+            if let Some(old_field) = old_fields_by_id.get(new_field.id.as_str()) {
                 if new_field != *old_field {
                     errs.push(format!(
                         "mutating an existing field is not supported. ProposedName: {}",
@@ -457,14 +457,18 @@ fn validate_sources_not_redefined(
     errs
 }
 
-/// Matches Go's validateSourceBelongsToHost.
+/// Matches Go's validateCollectionSourceFromSameCollection.
 /// The PreviousVersion source must point to a version belonging to the same root collection.
+/// Skips collections with empty names (orphan placeholders), matching Go's behavior.
 fn validate_source_belongs_to_host(
     new_state: &DefinitionState,
     _old_state: &DefinitionState,
 ) -> Vec<String> {
     let mut errs = Vec::new();
     for col in &new_state.collections {
+        if col.name.is_empty() {
+            continue;
+        }
         if let Some(ref prev) = col.previous_version {
             if !prev.source_collection_id.is_empty() {
                 // Look up the source version to check its collection_id
@@ -763,7 +767,6 @@ fn validate_embedding_provider_and_model(
         for embedding in &col.vector_embeddings {
             if embedding.provider.is_empty() {
                 errs.push("embedding Provider cannot be empty".to_string());
-                continue;
             }
 
             if !is_known_embedding_provider(&embedding.provider) {

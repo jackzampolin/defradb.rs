@@ -1871,6 +1871,10 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                 self.process_collection_definition_delta(cid, &block, payload, &metadata)
                     .await
             }
+            CrdtDelta::CollectionSet(_) => {
+                tracing::debug!(cid = %cid, "CollectionSet delta - skipping");
+                Ok(MergeOutcome::skipped("collection set delta"))
+            }
         }
     }
 }

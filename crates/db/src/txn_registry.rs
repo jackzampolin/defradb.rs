@@ -276,6 +276,45 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         // Call the database's transaction-aware set_migration
         self.db.set_migration_in_txn(txn, config).await
     }
+
+    /// Get all collection versions visible within a transaction.
+    ///
+    /// This reads from the transaction's systemstore, which includes both
+    /// committed data and any uncommitted writes made within this transaction
+    /// (e.g., placeholders from `set_migration_in_txn`).
+    pub async fn get_collections_in_txn(
+        &self,
+        txn_id: &str,
+    ) -> Result<Vec<schema::CollectionVersion>> {
+        let ctx = self
+            .get_ctx(txn_id)?
+            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+
+        let shared_txn = ctx.fetcher_shared_txn();
+        let txn_guard = shared_txn.lock().await;
+        let txn = txn_guard.as_ref().ok_or(Error::TxnNotActive)?;
+
+        let systemstore = txn.systemstore()?;
+        let prefix = storage::keys::systemstore::CollectionKey::collection_prefix();
+        let opts = storage::corekv::IterOptions::new().with_prefix(prefix);
+        let mut iter = systemstore.iterator(opts).await.map_err(Error::Storage)?;
+
+        let mut versions = Vec::new();
+        while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+            match serde_json::from_slice::<schema::CollectionVersion>(&pair.value) {
+                Ok(col) => versions.push(col),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to deserialize collection version during txn scan"
+                    );
+                }
+            }
+        }
+        iter.close().await.map_err(Error::Storage)?;
+
+        Ok(versions)
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

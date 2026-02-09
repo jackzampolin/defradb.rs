@@ -525,6 +525,7 @@ impl<S: Store> CommitsFetcher<S> {
             CrdtDelta::Counter(d) => Some(d.field_name.clone()),
             CrdtDelta::Composite(_) => Some("_C".to_string()), // Composite field marker
             CrdtDelta::Collection(_) => None,                  // Collection commits have no field
+            CrdtDelta::CollectionSet(_) => None,
             CrdtDelta::FieldDefinition(_) => None,
             CrdtDelta::CollectionDefinition(_) => None,
         }
@@ -613,6 +614,7 @@ impl<S: Store> CommitsFetcher<S> {
             }
             CrdtDelta::Composite(_) => None, // Composite has no data
             CrdtDelta::Collection(_) => None,
+            CrdtDelta::CollectionSet(_) => None,
             CrdtDelta::FieldDefinition(_) => None,
             CrdtDelta::CollectionDefinition(_) => None,
         }
@@ -625,6 +627,7 @@ impl<S: Store> CommitsFetcher<S> {
             CrdtDelta::Counter(d) => Some(d.schema_version_id.clone()),
             CrdtDelta::Composite(d) => Some(d.schema_version_id.clone()),
             CrdtDelta::Collection(d) => Some(d.schema_version_id.clone()),
+            CrdtDelta::CollectionSet(_) => None,
             CrdtDelta::FieldDefinition(_) => None,
             CrdtDelta::CollectionDefinition(_) => None,
         }

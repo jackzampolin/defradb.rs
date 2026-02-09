@@ -410,9 +410,9 @@ impl<S: Store> DB<S> {
 
     /// Rebuild secondary indexes for a collection after a migration is registered.
     ///
-    /// If the destination version is the currently active version and the collection
-    /// has indexes, this fetches all documents (applying lens migration), drops
-    /// existing index entries, and rebuilds them with migrated values.
+    /// Checks if the destination version is in the active version's history chain
+    /// (not just an exact match). This handles cases where migrations are registered
+    /// for ancestor versions that affect the active version's data.
     #[instrument(skip(self), fields(collection = %collection_name, dest_version = %dest_version_id))]
     pub(crate) async fn maybe_reindex_after_migration(
         &self,
@@ -426,27 +426,90 @@ impl<S: Store> DB<S> {
             }
         };
 
-        // Only reindex if destination is the current active version
-        if collection.version_id() != dest_version_id {
+        if collection.get_indexes().is_empty() {
             return Ok(());
         }
 
-        // Only reindex if the collection has indexes
+        // Check if dest_version_id is in the active version's history chain
+        let collection_id = collection.collection_id().to_string();
+        let target_version_id = collection.version_id().to_string();
+
+        let read_txn = self.new_txn(true).await?;
+        let systemstore = read_txn.systemstore()?;
+        let versions = get_collections_by_collection_id(&systemstore, &collection_id).await?;
+        let _ = read_txn.discard();
+
+        let history = crate::lens_utils::build_collection_history(&versions, &target_version_id);
+        let in_history = history
+            .as_ref()
+            .is_some_and(|h| h.contains_key(dest_version_id));
+
+        if !in_history {
+            return Ok(());
+        }
+
+        self.reindex_collection_with_migrations(collection_name)
+            .await
+    }
+
+    /// Reindex a collection after the active version changes (e.g., via patch).
+    ///
+    /// If the new active version's history contains any migrations, rebuild
+    /// all secondary indexes with lens-migrated document values.
+    pub(crate) async fn maybe_reindex_on_version_switch(
+        &self,
+        collection_name: &str,
+    ) -> Result<()> {
+        let collection = match self.get_collection(collection_name)? {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
         if collection.get_indexes().is_empty() {
             return Ok(());
         }
 
         let collection_id = collection.collection_id().to_string();
         let target_version_id = collection.version_id().to_string();
-        let short_id = collection_short_id(&collection_id);
 
-        // Load all versions of this collection to build migration history
         let read_txn = self.new_txn(true).await?;
         let systemstore = read_txn.systemstore()?;
         let versions = get_collections_by_collection_id(&systemstore, &collection_id).await?;
         let _ = read_txn.discard();
 
-        // Build targeted migration history
+        let history = crate::lens_utils::build_collection_history(&versions, &target_version_id);
+        let has_migrations = history
+            .as_ref()
+            .is_some_and(|h| h.values().any(|link| link.transform.is_some()));
+
+        if !has_migrations {
+            return Ok(());
+        }
+
+        self.reindex_collection_with_migrations(collection_name)
+            .await
+    }
+
+    /// Rebuild secondary indexes for a collection using lens-migrated documents.
+    ///
+    /// Fetches all documents, applies lens migration to any that need it,
+    /// drops existing index entries, and rebuilds them with migrated values.
+    pub async fn reindex_collection_with_migrations(&self, collection_name: &str) -> Result<()> {
+        let collection = match self.get_collection(collection_name)? {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let collection_id = collection.collection_id().to_string();
+        let target_version_id = collection.version_id().to_string();
+        let short_id = collection_short_id(&collection_id);
+
+        // Load all versions and build migration history
+        let read_txn = self.new_txn(true).await?;
+        let systemstore = read_txn.systemstore()?;
+        let versions = get_collections_by_collection_id(&systemstore, &collection_id).await?;
+        let _ = read_txn.discard();
+
         let history = {
             let mut full_history: HashMap<String, CollectionHistoryLink> = HashMap::new();
             for version in &versions {
@@ -531,7 +594,6 @@ impl<S: Store> DB<S> {
                             }
                             for (field_name, value) in migrated_lens_doc {
                                 if field_name != DOC_ID_FIELD {
-                                    // Convert JSON value to native type based on schema field kind
                                     let native_value = json_to_native_value(
                                         &value,
                                         &field_name,

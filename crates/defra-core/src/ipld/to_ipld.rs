@@ -85,6 +85,14 @@ impl TryFrom<&CrdtDelta> for Ipld {
             CrdtDelta::Collection(payload) => {
                 map.insert("collection".to_string(), Ipld::from(payload));
             }
+            CrdtDelta::CollectionSet(payload) => {
+                let mut inner = BTreeMap::new();
+                inner.insert(
+                    "priority".to_string(),
+                    Ipld::Integer(payload.priority as i128),
+                );
+                map.insert("collectionSet".to_string(), Ipld::Map(inner));
+            }
             CrdtDelta::FieldDefinition(payload) => {
                 map.insert("fieldDefinition".to_string(), Ipld::from(payload));
             }

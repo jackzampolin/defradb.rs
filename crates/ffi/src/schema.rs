@@ -139,7 +139,53 @@ pub unsafe extern "C" fn get_collections(
         let json = serde_json::to_string(&collections)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        eprintln!("[GET-COLLECTIONS] JSON output: {}", json);
+        Ok::<String, String>(json)
+    });
+
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
+    }
+}
+
+/// Get all collection versions visible within a specific transaction.
+///
+/// This reads from the transaction's systemstore, which includes uncommitted
+/// writes (e.g., placeholders from set_migration_in_txn).
+///
+/// # Safety
+///
+/// Caller must ensure all pointer arguments are valid, non-null, and point to valid C strings.
+#[no_mangle]
+pub unsafe extern "C" fn get_collections_in_txn(
+    node_ptr: usize,
+    txn_id: *const c_char,
+    identity_did: *const c_char,
+) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionGet) {
+        return e;
+    }
+
+    let txn_str = match c_str_to_string(txn_id) {
+        Some(s) => s,
+        None => return FfiResult::error("txn_id is null"),
+    };
+
+    let registry = match NODES.get(node_ptr, |state| state.txn_registry.clone()) {
+        Some(r) => r,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
+
+    let result = rt.block_on(async {
+        let collections = registry
+            .get_collections_in_txn(&txn_str)
+            .await
+            .map_err(|e| format!("failed to get collections in txn: {}", e))?;
+
+        let json = serde_json::to_string(&collections)
+            .map_err(|e| format!("failed to serialize result: {}", e))?;
 
         Ok::<String, String>(json)
     });

@@ -190,23 +190,60 @@ impl<S: Store> crate::database::DB<S> {
         CollectionVersion::finalize_relations_hashmap(&mut schemas, String::new, || 0)?;
 
         // Update cache
-        let mut cache = self.collections.write().map_err(|e| {
-            tracing::error!(error = ?e, "Collection cache lock poisoned during load");
-            Error::LockPoisoned("collection cache lock poisoned during load".into())
-        })?;
+        {
+            let mut cache = self.collections.write().map_err(|e| {
+                tracing::error!(error = ?e, "Collection cache lock poisoned during load");
+                Error::LockPoisoned("collection cache lock poisoned during load".into())
+            })?;
 
-        for (name, schema) in schemas {
-            tracing::trace!(
-                collection_name = %name,
-                version_id = %schema.version_id,
-                collection_id = %schema.collection_id,
-                field_count = schema.fields.len(),
-                "Loaded collection"
-            );
-            cache.insert(name, Collection::new(schema));
+            for (name, schema) in schemas {
+                tracing::trace!(
+                    collection_name = %name,
+                    version_id = %schema.version_id,
+                    collection_id = %schema.collection_id,
+                    field_count = schema.fields.len(),
+                    "Loaded collection"
+                );
+                cache.insert(name, Collection::new(schema));
+            }
+
+            tracing::info!(collection_count = cache.len(), "Loaded collections");
         }
 
-        tracing::info!(collection_count = cache.len(), "Loaded collections");
+        // Reconstruct schema_heads from loaded collections.
+        // For each collection, count all versions in its version chain to determine height,
+        // then set the active version's CID as the head.
+        {
+            let all_versions = self.get_all_collection_versions().await?;
+            // Group versions by collection_id
+            let mut versions_by_collection: std::collections::HashMap<
+                &str,
+                Vec<&CollectionVersion>,
+            > = std::collections::HashMap::new();
+            for v in &all_versions {
+                versions_by_collection
+                    .entry(v.collection_id.as_str())
+                    .or_default()
+                    .push(v);
+            }
+
+            let mut heads_map = self.schema_heads.write().map_err(|e| {
+                tracing::error!(error = ?e, "schema_heads lock poisoned during load");
+                Error::LockPoisoned("schema_heads lock poisoned during load".into())
+            })?;
+
+            for versions in versions_by_collection.values() {
+                // Total versions = height of the latest version
+                let height = versions.len() as u64;
+                // Find the active version to use as head
+                if let Some(active) = versions.iter().find(|v| v.is_active) {
+                    if let Ok(cid) = cid::Cid::try_from(active.version_id.as_str()) {
+                        heads_map.insert(active.name.clone(), (vec![cid], height));
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -428,6 +465,13 @@ impl<S: Store> crate::database::DB<S> {
             .set(&version_index_key.bytes(), b"1")
             .await
             .map_err(Error::Storage)?;
+
+        // Update schema_heads: new collection starts at height=1
+        if let Ok(cid) = cid::Cid::try_from(version_id.as_str()) {
+            if let Ok(mut heads) = self.schema_heads.write() {
+                heads.insert(name.clone(), (vec![cid], 1));
+            }
+        }
 
         // Add to transaction's cache
         txn.cache_collection(Collection::new(schema.clone()));
@@ -944,22 +988,28 @@ impl<S: Store> crate::database::DB<S> {
 
         txn.commit().await?;
 
-        // Update the process-wide cache
-        let mut cache = self.collections.write().map_err(|e| {
-            tracing::error!(
-                error = ?e,
-                version_id = %version_id,
-                "Collection cache lock poisoned during set_active_collection_version"
-            );
-            Error::CacheUpdateFailedAfterCommit(name.clone())
-        })?;
-        cache.insert(name.clone(), Collection::new(target_schema));
+        // Update the process-wide cache (scoped to drop lock before reindex)
+        {
+            let mut cache = self.collections.write().map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    version_id = %version_id,
+                    "Collection cache lock poisoned during set_active_collection_version"
+                );
+                Error::CacheUpdateFailedAfterCommit(name.clone())
+            })?;
+            cache.insert(name.clone(), Collection::new(target_schema));
+        }
 
         tracing::info!(
             collection_name = %name,
             version_id = %version_id,
             "Set active collection version"
         );
+
+        // After switching the active version, rebuild indexes with migrated values
+        // if the new version's history chain contains any migrations.
+        self.reindex_collection_with_migrations(&name).await?;
 
         Ok(())
     }
@@ -986,7 +1036,7 @@ impl<S: Store> crate::database::DB<S> {
     }
 
     /// Get a collection by version ID, searching both cache and KV store.
-    pub(crate) async fn get_collection_by_version_id_full(
+    pub async fn get_collection_by_version_id_full(
         &self,
         version_id: &str,
     ) -> Result<Option<Collection>> {
@@ -1033,6 +1083,209 @@ impl<S: Store> crate::database::DB<S> {
 
         let _ = txn.discard();
         Ok(versions)
+    }
+
+    /// Delete a specific collection version by version_id.
+    ///
+    /// This performs true deletion (not deactivation): removes the version from
+    /// the KV store, version index, name pointer (if active), blockstore blocks,
+    /// and in-memory cache.
+    ///
+    /// # Validation
+    ///
+    /// - The version must exist
+    /// - No non-deleted child versions may reference this as PreviousVersion
+    ///   (unless those children are also in `also_deleting` batch)
+    /// - The collection must have no documents
+    pub async fn delete_collection_version(
+        &self,
+        version_id: &str,
+        also_deleting: &[String],
+    ) -> Result<()> {
+        // Load the version from KV store
+        let txn = self.new_txn(true).await?;
+        let target_schema = {
+            let systemstore = txn.systemstore()?;
+            let collection_key = CollectionKey::new(version_id);
+            let target_bytes = systemstore
+                .get(&collection_key.bytes())
+                .await
+                .map_err(Error::Storage)?
+                .ok_or(Error::CollectionVersionNotFound(version_id.to_string()))?;
+            serde_json::from_slice::<CollectionVersion>(&target_bytes).map_err(|e| {
+                Error::Serialization(format!(
+                    "failed to deserialize version '{}': {}",
+                    version_id, e
+                ))
+            })?
+        };
+        let _ = txn.discard();
+
+        let collection_id = target_schema.collection_id.clone();
+        let name = target_schema.name.clone();
+
+        // Validate: no child versions reference this (excluding batch siblings)
+        let all_versions = self.get_all_collection_versions().await?;
+        for other in &all_versions {
+            if let Some(ref prev) = other.previous_version {
+                if prev.source_collection_id == version_id
+                    && !also_deleting.contains(&other.version_id)
+                {
+                    return Err(Error::InvalidPatch(
+                        "cannot delete a version that is used by a newer version, first delete the new version".to_string(),
+                    ));
+                }
+            }
+        }
+
+        // Validate: no documents exist
+        if target_schema.is_active {
+            let has_data = self.collection_has_data(&collection_id).await?;
+            if has_data {
+                return Err(Error::InvalidPatch(
+                    "cannot delete a collection that has documents, first delete the documents and then delete the version".to_string(),
+                ));
+            }
+        }
+
+        // Perform the actual deletion
+        let txn = self.new_txn(false).await?;
+        {
+            let systemstore = txn.systemstore()?;
+
+            // 1. Delete /collection/id/{version_id}
+            let collection_key = CollectionKey::new(version_id);
+            systemstore
+                .delete(&collection_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+
+            // 2. Delete /collection/version/{collection_id}/{version_id}
+            let version_index_key = CollectionVersionKey::new(&collection_id, version_id);
+            systemstore
+                .delete(&version_index_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+
+            // 3. If version was active, delete /collection/name/{name}
+            if target_schema.is_active {
+                let name_key = CollectionNameKey::new(&name);
+                systemstore
+                    .delete(&name_key.bytes())
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+        }
+
+        // 4. Delete IPLD blocks from blockstore (collection CID + field CIDs)
+        {
+            let blockstore = txn.blockstore()?;
+            // Delete the version CID block itself
+            if let Ok(cid) = cid::Cid::try_from(version_id) {
+                let _ = blockstore.delete(&cid.to_bytes()).await;
+            }
+            // Delete field CID blocks
+            for field in &target_schema.fields {
+                if !field.id.is_empty() {
+                    if let Ok(cid) = cid::Cid::try_from(field.id.as_str()) {
+                        let _ = blockstore.delete(&cid.to_bytes()).await;
+                    }
+                }
+            }
+        }
+
+        txn.commit().await?;
+
+        // 5. Remove from in-memory cache if active
+        if target_schema.is_active {
+            if let Ok(mut cache) = self.collections.write() {
+                cache.remove(&name);
+            }
+        }
+
+        tracing::info!(
+            version_id = %version_id,
+            collection_name = %name,
+            "Deleted collection version"
+        );
+
+        Ok(())
+    }
+
+    /// Delete multiple collection versions in a single batch.
+    ///
+    /// Versions are sorted topologically (children before parents based on
+    /// PreviousVersion) and deleted in that order. When checking for child
+    /// references, other versions in the batch are excluded from validation.
+    pub async fn delete_collection_versions_batch(&self, version_ids: Vec<String>) -> Result<()> {
+        if version_ids.is_empty() {
+            return Ok(());
+        }
+
+        // Sort topologically: children before parents
+        // A child has a PreviousVersion pointing to a parent in the batch
+        let all_versions = self.get_all_collection_versions().await?;
+        let version_map: std::collections::HashMap<&str, &CollectionVersion> = all_versions
+            .iter()
+            .map(|v| (v.version_id.as_str(), v))
+            .collect();
+
+        let mut sorted = Vec::with_capacity(version_ids.len());
+        let mut remaining: std::collections::HashSet<String> =
+            version_ids.iter().cloned().collect();
+
+        // Simple topological sort: repeatedly find versions whose children
+        // (within the batch) have already been added to sorted
+        let max_iterations = version_ids.len() * version_ids.len();
+        let mut iterations = 0;
+        while !remaining.is_empty() {
+            iterations += 1;
+            if iterations > max_iterations {
+                // Break cycles by just adding remaining in any order
+                for id in &remaining {
+                    sorted.push(id.clone());
+                }
+                break;
+            }
+
+            let mut added_any = false;
+            let remaining_snapshot: Vec<String> = remaining.iter().cloned().collect();
+            for id in &remaining_snapshot {
+                // Check if any remaining version has this as its parent
+                let has_remaining_child = remaining.iter().any(|other_id| {
+                    if other_id == id {
+                        return false;
+                    }
+                    version_map
+                        .get(other_id.as_str())
+                        .and_then(|v| v.previous_version.as_ref())
+                        .map(|prev| prev.source_collection_id == *id)
+                        .unwrap_or(false)
+                });
+
+                if !has_remaining_child {
+                    sorted.push(id.clone());
+                    remaining.remove(id);
+                    added_any = true;
+                }
+            }
+
+            if !added_any {
+                // All remaining have circular deps, add them all
+                for id in &remaining {
+                    sorted.push(id.clone());
+                }
+                break;
+            }
+        }
+
+        // Delete each version in topological order
+        for version_id in &sorted {
+            self.delete_collection_version(version_id, &version_ids)
+                .await?;
+        }
+
+        Ok(())
     }
 
     /// Check if a collection has any documents in the datastore.

@@ -59,13 +59,42 @@ impl<'a> SdlParser<'a> {
         let mut type_names: std::collections::HashSet<_> = self.type_defs.keys().cloned().collect();
         type_names.extend(self.known_external_types.iter().cloned());
 
+        // Pre-validate all field types to accumulate multiple errors (Go compatibility).
+        // Go collects ALL "no type found" errors before returning, rather than stopping at first.
+        let scalar_types: std::collections::HashSet<&str> = [
+            "String", "Int", "Float", "Float64", "Float32", "Boolean", "ID", "DateTime", "JSON",
+            "Blob", "Self",
+        ]
+        .into_iter()
+        .collect();
+        let mut field_type_errors = Vec::new();
+        for type_def in self.type_defs.values() {
+            for field in &type_def.fields {
+                let base = &field.field_type.base_type;
+                if !scalar_types.contains(base.as_str())
+                    && !type_names.contains(base)
+                    && base != &type_def.name
+                {
+                    field_type_errors.push(format!(
+                        "no type found for given name. Field: {}, Kind: {}",
+                        field.name, base
+                    ));
+                }
+            }
+        }
+        if !field_type_errors.is_empty() {
+            field_type_errors.sort();
+            return Err(QueryError::parse(field_type_errors.join("\n")));
+        }
+
         // Collect @primary directive information for determining actual primaryness
         let primary_directives = self.collect_primary_directives(&type_names);
 
         // Detect circular relation sets - types that form TRUE cycles
         // A cycle only occurs if BOTH sides of a mutual reference are PRIMARY
         // (i.e., neither has @primary making the other secondary)
-        let collection_set = self.detect_collection_set(&type_names, &primary_directives);
+        let (collection_set, collection_set_groups) =
+            self.detect_collection_set(&type_names, &primary_directives);
 
         // Process types in alphabetical order (Go behavior)
         let mut sorted_type_names: Vec<_> = self.type_defs.keys().cloned().collect();
@@ -115,8 +144,18 @@ impl<'a> SdlParser<'a> {
 
                 let is_field_primary = has_primary || !counterpart_has_primary;
                 if is_field_primary {
-                    // This field is PRIMARY, so this type's CID depends on target's CID
-                    deps.insert(target.clone());
+                    // If both types are in the same collection set, they use SelfRef
+                    // (relative_id) instead of Relation (CID), so no CID dependency.
+                    let same_set = match (
+                        collection_set.get(type_name.as_str()),
+                        collection_set.get(target.as_str()),
+                    ) {
+                        (Some(&(_, g1)), Some(&(_, g2))) => g1 == g2,
+                        _ => false,
+                    };
+                    if !same_set {
+                        deps.insert(target.clone());
+                    }
                 }
             }
 
@@ -207,6 +246,34 @@ impl<'a> SdlParser<'a> {
                 headstore.insert(type_name.clone(), (cid, height));
             }
         }
+        // Compute CollectionSetIDs for multi-type circular groups
+        let mut collection_set_map: HashMap<String, schema::CollectionSetDescription> =
+            HashMap::new();
+        for group in &collection_set_groups {
+            if group.len() < 2 {
+                continue;
+            }
+            let collection_cids: Vec<Cid> = group
+                .iter()
+                .filter_map(|name| all_collection_ids.get(name))
+                .filter_map(|id| id.parse::<Cid>().ok())
+                .collect();
+            if collection_cids.len() != group.len() {
+                continue;
+            }
+            if let Ok(set_cid) = schema::generate_collection_set_cid(&collection_cids) {
+                let set_id = set_cid.to_string();
+                for name in group {
+                    if let Some(&(relative_id, _)) = collection_set.get(name) {
+                        collection_set_map.insert(
+                            name.clone(),
+                            schema::CollectionSetDescription::new(&set_id, relative_id),
+                        );
+                    }
+                }
+            }
+        }
+
         // Pass 2: Rebuild all collections with ALL CollectionIDs known
         // This ensures all relation fields have proper CollectionKind (not NamedKind)
         // for query resolution, even for secondary fields pointing to later types.
@@ -237,6 +304,11 @@ impl<'a> SdlParser<'a> {
                 collection.version_id = pass1_id.clone();
             }
 
+            // Assign CollectionSetDescription for multi-type circular groups
+            if let Some(set_desc) = collection_set_map.get(type_name) {
+                collection.collection_set = Some(set_desc.clone());
+            }
+
             // Interface types are embedded-only (not root-queryable)
             if type_def.is_interface {
                 collection.is_embedded_only = true;
@@ -258,11 +330,15 @@ impl<'a> SdlParser<'a> {
     ///
     /// IMPORTANT: Only types that are ACTUALLY part of a cycle are included.
     /// Different cycle groups (e.g., Employee self-ref) are treated as separate collection sets.
+    #[allow(clippy::type_complexity)]
     pub(super) fn detect_collection_set(
         &self,
         type_names: &std::collections::HashSet<String>,
         primary_directives: &std::collections::HashMap<(String, String), bool>,
-    ) -> std::collections::HashMap<String, i32> {
+    ) -> (
+        std::collections::HashMap<String, (i32, usize)>,
+        Vec<Vec<String>>,
+    ) {
         // Helper to check if a relation field from source->target is actually primary
         // (will be included in CID calculation)
         let is_field_primary = |source: &str, target: &str, is_array: bool| -> bool {
@@ -317,109 +393,36 @@ impl<'a> SdlParser<'a> {
             references.insert(type_name.clone(), refs);
         }
 
-        // Build bidirectional cycle edges: only keep edges that form cycles
-        // A->B is a cycle edge if A->B and B->A (mutual reference) or A->A (self-ref)
-        // where BOTH sides are PRIMARY
-        let mut cycle_edges: std::collections::HashMap<String, std::collections::HashSet<String>> =
-            std::collections::HashMap::new();
+        // Find strongly connected components (SCCs) using Tarjan's algorithm.
+        // An SCC is a maximal set where every node can reach every other node via
+        // directed primary edges. This correctly detects cycles like A→B→C→D→A even
+        // when not all edges are bidirectional.
+        let components = find_sccs(&references);
 
-        for (type_a, refs_a) in &references {
-            let mut edges = std::collections::HashSet::new();
-
-            // Self-reference (single-object only - already filtered above)
-            if refs_a.contains(type_a) {
-                edges.insert(type_a.clone());
-            }
-
-            // Mutual references where BOTH directions are primary
-            for type_b in refs_a {
-                if type_a != type_b {
-                    if let Some(refs_b) = references.get(type_b) {
-                        // Both A->B and B->A are in PRIMARY references
-                        if refs_b.contains(type_a) {
-                            edges.insert(type_b.clone());
-                        }
-                    }
-                }
-            }
-
-            if !edges.is_empty() {
-                cycle_edges.insert(type_a.clone(), edges);
-            }
+        if components.is_empty() {
+            return (std::collections::HashMap::new(), Vec::new());
         }
 
-        if cycle_edges.is_empty() {
-            return std::collections::HashMap::new();
-        }
-
-        // Find connected components of cycle graph using union-find style approach
-        let mut component: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-
-        fn find_root(
-            node: &str,
-            component: &mut std::collections::HashMap<String, String>,
-        ) -> String {
-            if let Some(parent) = component.get(node).cloned() {
-                if parent != node {
-                    let root = find_root(&parent, component);
-                    component.insert(node.to_string(), root.clone());
-                    return root;
-                }
-            }
-            node.to_string()
-        }
-
-        fn union(a: &str, b: &str, component: &mut std::collections::HashMap<String, String>) {
-            let root_a = find_root(a, component);
-            let root_b = find_root(b, component);
-            if root_a != root_b {
-                // Use lexicographically smaller as root for determinism
-                if root_a < root_b {
-                    component.insert(root_b, root_a);
-                } else {
-                    component.insert(root_a, root_b);
-                }
-            }
-        }
-
-        // Initialize each node as its own component
-        for type_name in cycle_edges.keys() {
-            component.insert(type_name.clone(), type_name.clone());
-        }
-
-        // Union nodes that are connected via cycle edges
-        for (type_a, edges) in &cycle_edges {
-            for type_b in edges {
-                union(type_a, type_b, &mut component);
-            }
-        }
-
-        // Group types by their component root
-        let mut components: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        for type_name in cycle_edges.keys() {
-            let root = find_root(type_name, &mut component);
-            components.entry(root).or_default().push(type_name.clone());
-        }
-
-        // Build result: each type gets index within its component
-        let mut result = std::collections::HashMap::new();
-        for (_root, mut members) in components {
+        // Build result: each type gets (relative_id, group_index)
+        let mut relative_ids = std::collections::HashMap::new();
+        let mut groups = Vec::new();
+        for mut members in components {
             members.sort(); // Sort alphabetically within component
-            for (idx, name) in members.into_iter().enumerate() {
-                result.insert(name, idx as i32);
+            let group_idx = groups.len();
+            for (idx, name) in members.iter().enumerate() {
+                relative_ids.insert(name.clone(), (idx as i32, group_idx));
             }
+            groups.push(members);
         }
 
-        result
+        (relative_ids, groups)
     }
 
     pub(super) fn build_collection(
         &self,
         type_def: &ParsedTypeDef,
         type_names: &std::collections::HashSet<String>,
-        collection_set: &std::collections::HashMap<String, i32>,
+        collection_set: &std::collections::HashMap<String, (i32, usize)>,
         known_collection_ids: &std::collections::HashMap<String, String>,
         primary_directives: &std::collections::HashMap<(String, String), bool>,
         headstore: &HashMap<String, (Cid, u64)>,
@@ -428,7 +431,7 @@ impl<'a> SdlParser<'a> {
         let mut fields = Vec::new();
         let mut indexes = Vec::new();
         let mut existing_index_names: Vec<String> = Vec::new();
-        let mut field_id_counter = 1u32;
+        let mut index_id_counter = 0u32;
 
         // Track one-to-one FK fields that may need auto-created unique indexes.
         // We defer auto-index creation until after type-level indexes are processed
@@ -443,7 +446,6 @@ impl<'a> SdlParser<'a> {
             FieldDescription::new(&doc_id_field_id, "_docID", doc_id_kind)
                 .with_crdt_type(CType::None),
         );
-        field_id_counter += 1;
 
         // Process user-defined fields
         for parsed_field in &type_def.fields {
@@ -620,7 +622,6 @@ impl<'a> SdlParser<'a> {
                         }
                     }
                     fields.push(id_field);
-                    field_id_counter += 1;
                 }
             }
 
@@ -695,16 +696,16 @@ impl<'a> SdlParser<'a> {
                 });
                 existing_index_names.push(idx_name.clone());
 
+                index_id_counter += 1;
                 indexes.push(IndexDescription {
                     name: idx_name,
-                    id: field_id_counter,
+                    id: index_id_counter,
                     fields: index_fields,
                     unique: idx_config.unique,
                 });
             }
 
             fields.push(field);
-            field_id_counter += 1;
         }
 
         // Handle type-level @index directives (composite indexes)
@@ -744,9 +745,10 @@ impl<'a> SdlParser<'a> {
                 })
                 .collect();
 
+            index_id_counter += 1;
             indexes.push(IndexDescription {
                 name: idx_name,
-                id: field_id_counter,
+                id: index_id_counter,
                 fields: indexed_fields,
                 unique: composite_idx.unique,
             });
@@ -756,6 +758,8 @@ impl<'a> SdlParser<'a> {
         // We deferred this until after type-level indexes so we can check coverage.
         // Go's behavior: if user defines ANY index with FK field as first field (unique or not),
         // that determines uniqueness - auto-index isn't created.
+        // Sort alphabetically to match Go's deterministic index ID assignment.
+        one_to_one_fk_fields.sort();
         for fk_field_name in &one_to_one_fk_fields {
             // Check if any existing index has this FK field as its first field
             let has_covering_index = indexes.iter().any(|idx| {
@@ -791,16 +795,16 @@ impl<'a> SdlParser<'a> {
             let idx_name =
                 generate_index_name(&type_def.name, fk_field_name, &existing_index_names);
             existing_index_names.push(idx_name.clone());
+            index_id_counter += 1;
             indexes.push(IndexDescription {
                 name: idx_name,
-                id: field_id_counter,
+                id: index_id_counter,
                 fields: vec![IndexedFieldDescription {
                     name: fk_field_name.clone(),
                     descending: false,
                 }],
                 unique: true,
             });
-            field_id_counter += 1;
         }
 
         // INTEROP CRITICAL: Sort fields alphabetically after _docID (like Go does).
@@ -857,7 +861,7 @@ impl<'a> SdlParser<'a> {
         field_name: &str,
         type_names: &std::collections::HashSet<String>,
         current_type: &str,
-        collection_set: &std::collections::HashMap<String, i32>,
+        collection_set: &std::collections::HashMap<String, (i32, usize)>,
         known_collection_ids: &std::collections::HashMap<String, String>,
     ) -> Result<FieldKind> {
         let base = &parsed_type.base_type;
@@ -888,13 +892,17 @@ impl<'a> SdlParser<'a> {
         // Check if it references another type in the schema
         if type_names.contains(base) {
             // This is a relation to another type
-            // If the target type is in the collection set (circular relations),
-            // use SelfRef with the target's relative index
-            if let Some(&target_idx) = collection_set.get(base) {
-                return Ok(FieldKind::self_ref(
-                    target_idx.to_string(),
-                    parsed_type.is_list,
-                ));
+            // If both the current type and target type are in the SAME collection set
+            // (circular relations), use SelfRef with the target's relative index
+            if let (Some(&(target_idx, target_group)), Some(&(_, current_group))) =
+                (collection_set.get(base), collection_set.get(current_type))
+            {
+                if target_group == current_group {
+                    return Ok(FieldKind::self_ref(
+                        target_idx.to_string(),
+                        parsed_type.is_list,
+                    ));
+                }
             }
 
             // If target type was already processed (alphabetically earlier),
@@ -916,4 +924,95 @@ impl<'a> SdlParser<'a> {
             field_name, base
         )))
     }
+}
+
+/// Find strongly connected components in a directed graph using Tarjan's algorithm.
+/// Returns only SCCs that represent actual cycles (2+ members, or self-referencing singletons).
+fn find_sccs(
+    graph: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) -> Vec<Vec<String>> {
+    struct TarjanState<'a> {
+        graph: &'a std::collections::HashMap<String, std::collections::HashSet<String>>,
+        type_list: Vec<String>,
+        idx_map: std::collections::HashMap<String, usize>,
+        index_counter: usize,
+        stack: Vec<usize>,
+        on_stack: Vec<bool>,
+        indices: Vec<usize>,
+        lowlinks: Vec<usize>,
+        sccs: Vec<Vec<String>>,
+    }
+
+    impl TarjanState<'_> {
+        fn visit(&mut self, v: usize) {
+            self.indices[v] = self.index_counter;
+            self.lowlinks[v] = self.index_counter;
+            self.index_counter += 1;
+            self.stack.push(v);
+            self.on_stack[v] = true;
+
+            if let Some(refs) = self.graph.get(&self.type_list[v]) {
+                for target in refs {
+                    if let Some(&w) = self.idx_map.get(target) {
+                        if self.indices[w] == usize::MAX {
+                            self.visit(w);
+                            self.lowlinks[v] = self.lowlinks[v].min(self.lowlinks[w]);
+                        } else if self.on_stack[w] {
+                            self.lowlinks[v] = self.lowlinks[v].min(self.indices[w]);
+                        }
+                    }
+                }
+            }
+
+            if self.lowlinks[v] == self.indices[v] {
+                let mut scc = Vec::new();
+                loop {
+                    let w = self.stack.pop().unwrap();
+                    self.on_stack[w] = false;
+                    scc.push(self.type_list[w].clone());
+                    if w == v {
+                        break;
+                    }
+                }
+                if scc.len() > 1 {
+                    self.sccs.push(scc);
+                } else if scc.len() == 1 {
+                    if let Some(refs) = self.graph.get(&scc[0]) {
+                        if refs.contains(&scc[0]) {
+                            self.sccs.push(scc);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut type_list: Vec<String> = graph.keys().cloned().collect();
+    type_list.sort();
+    let n = type_list.len();
+    let idx_map: std::collections::HashMap<String, usize> = type_list
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.clone(), i))
+        .collect();
+
+    let mut state = TarjanState {
+        graph,
+        type_list,
+        idx_map,
+        index_counter: 0,
+        stack: Vec::new(),
+        on_stack: vec![false; n],
+        indices: vec![usize::MAX; n],
+        lowlinks: vec![0; n],
+        sccs: Vec::new(),
+    };
+
+    for i in 0..n {
+        if state.indices[i] == usize::MAX {
+            state.visit(i);
+        }
+    }
+
+    state.sccs
 }

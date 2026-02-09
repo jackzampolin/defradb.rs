@@ -549,7 +549,8 @@ pub unsafe extern "C" fn get_collection_by_version_id(
 
     let result = rt.block_on(async {
         let collection = database
-            .get_collection_by_version_id(&version_str)
+            .get_collection_by_version_id_full(&version_str)
+            .await
             .map_err(|e| format!("failed to get collection: {}", e))?;
 
         let json = match collection {
@@ -961,6 +962,65 @@ pub unsafe extern "C" fn set_migration_in_txn(
     match result {
         Ok(transform_id) => FfiResult::success(&transform_id),
         Err(e) => FfiResult::error(&e),
+    }
+}
+
+/// Delete multiple collection versions by their version IDs.
+///
+/// Takes a JSON array of version ID strings. Versions are deleted in
+/// topological order (children before parents).
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `version_ids_json` - JSON array of version ID strings
+///
+/// # Returns
+///
+/// - Status 0: Success (value is "{}")
+/// - Status 1: Error (error field contains message)
+///
+/// # Safety
+///
+/// `version_ids_json` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn delete_collection_versions(
+    node_ptr: usize,
+    identity_did: *const c_char,
+    version_ids_json: *const c_char,
+) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
+    {
+        return e;
+    }
+
+    let ids_str = match c_str_to_string(version_ids_json) {
+        Some(s) => s,
+        None => return FfiResult::error("version_ids_json is null"),
+    };
+
+    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+        Some(db) => db,
+        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+    };
+
+    let result = rt.block_on(async {
+        let version_ids: Vec<String> = serde_json::from_str(&ids_str)
+            .map_err(|e| format!("failed to parse version IDs JSON: {}", e))?;
+
+        database
+            .delete_collection_versions_batch(version_ids)
+            .await
+            .map_err(|e| format!("failed to delete collection versions: {}", e))?;
+
+        Ok::<String, String>("{}".to_string())
+    });
+
+    match result {
+        Ok(json) => FfiResult::success(json),
+        Err(e) => FfiResult::error(e),
     }
 }
 

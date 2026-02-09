@@ -16,10 +16,19 @@ pub fn build_introspection_schema(
     collections: &[CollectionVersion],
 ) -> std::result::Result<Schema, SchemaError> {
     // Build a mapping from collection ID to collection name for relation resolution
-    let id_to_name: HashMap<String, String> = collections
+    let mut id_to_name: HashMap<String, String> = collections
         .iter()
         .map(|c| (c.collection_id.clone(), c.name.clone()))
         .collect();
+
+    // Add relative_id → name entries for collections in collection sets.
+    // This allows SelfRef fields (which use relative_id as their identifier)
+    // to resolve to the correct collection name during introspection.
+    for c in collections {
+        if let Some(ref set) = c.collection_set {
+            id_to_name.insert(set.relative_id.to_string(), c.name.clone());
+        }
+    }
 
     // Start with basic scalar types
     // Register Mutation root when collections exist so MutationInputArg types are reachable
@@ -185,6 +194,16 @@ pub fn build_introspection_schema(
             FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
         }));
     }
+
+    // Add a hidden field referencing ExplainType so it appears in introspection.
+    // async-graphql only includes registered types that are reachable from the type graph.
+    // ExplainType is used as a directive argument in Go but we need it in __schema.types.
+    query_type = query_type.field(
+        Field::new("_explainType", TypeRef::named("ExplainType"), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+        })
+        .argument(InputValue::new("type", TypeRef::named("ExplainType"))),
+    );
 
     schema_builder = schema_builder.register(query_type);
 

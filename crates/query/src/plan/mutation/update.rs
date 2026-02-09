@@ -364,25 +364,27 @@ impl PlanNode for UpdateNode {
 
             // Update each document
             for doc_id_str in doc_ids_to_update {
-                let doc_id = match DocID::from_string(&doc_id_str) {
-                    Ok(id) => id,
-                    Err(_) => {
-                        // Invalid DocID format - treat as not found (Go compatibility)
-                        tracing::warn!(
-                            collection = %self.collection_name,
-                            doc_id = %doc_id_str,
-                            "Invalid DocID format - skipping"
-                        );
-                        self.not_found_ids.push(doc_id_str.clone());
-                        continue;
-                    }
-                };
+                if DocID::from_string(&doc_id_str).is_err() {
+                    // Invalid DocID format - treat as not found (Go compatibility)
+                    tracing::warn!(
+                        collection = %self.collection_name,
+                        doc_id = %doc_id_str,
+                        "Invalid DocID format - skipping"
+                    );
+                    self.not_found_ids.push(doc_id_str.clone());
+                    continue;
+                }
 
-                // Fetch document for update
-                let doc_opt = self
-                    .mutator
-                    .get_for_update(&self.collection_name, &doc_id)
+                // Fetch document through the lensed fetcher so lens migrations
+                // are applied before the update. This matches Go's behavior where
+                // the lensedFetcher migrates documents on read, ensuring migrated
+                // field values (e.g., SetDefault) are present before the update
+                // patch is applied and the result is returned.
+                let fetch_result = self
+                    .fetcher
+                    .get_by_ids(&self.collection_name, std::slice::from_ref(&doc_id_str))
                     .await?;
+                let doc_opt = fetch_result.into_docs().into_iter().next();
 
                 if let Some(mut doc) = doc_opt {
                     // Apply update input with schema-aware coercion and request time
