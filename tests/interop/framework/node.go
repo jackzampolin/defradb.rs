@@ -29,6 +29,8 @@ type NodeConfig struct {
 	Store        string // "memory", "redb" (rust only), "badger"
 	NoEncryption bool
 	NoSigning    bool
+	Identity     *TestIdentity // if set, pass --identity flag at startup
+	NoP2P        bool          // if set, disable P2P (no --p2paddr)
 }
 
 // multiWriter writes to both an io.Writer and a buffer for later retrieval.
@@ -96,13 +98,15 @@ func (n *Node) Start(ctx context.Context) error {
 		return fmt.Errorf("node failed to become ready: %w", err)
 	}
 
-	// Fetch peer ID
-	info, err := client.P2PInfo(ctx)
-	if err != nil {
-		n.Stop()
-		return fmt.Errorf("failed to get peer info: %w", err)
+	// Fetch peer ID (skip when P2P is disabled)
+	if !n.Config.NoP2P {
+		info, err := client.P2PInfo(ctx)
+		if err != nil {
+			n.Stop()
+			return fmt.Errorf("failed to get peer info: %w", err)
+		}
+		n.peerID = info.ID
 	}
-	n.peerID = info.ID
 
 	return nil
 }
@@ -121,9 +125,15 @@ func (n *Node) startRust(ctx context.Context) error {
 	args := []string{
 		"start",
 		"--url", fmt.Sprintf("127.0.0.1:%d", n.Config.HTTPPort),
-		"--p2paddr", fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", n.Config.P2PPort),
 		"--rootdir", n.tempDir,
 		"--no-keyring", "true",
+	}
+
+	// Add P2P address unless disabled
+	if !n.Config.NoP2P {
+		args = append(args, "--p2paddr", fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", n.Config.P2PPort))
+	} else {
+		args = append(args, "--no-p2p", "true")
 	}
 
 	// Add store type
@@ -139,6 +149,12 @@ func (n *Node) startRust(ctx context.Context) error {
 	}
 	if n.Config.NoSigning {
 		args = append(args, "--no-signing", "true")
+	}
+
+	// Add identity if configured
+	if n.Config.Identity != nil {
+		args = append(args, "--identity", n.Config.Identity.PrivateKeyHex)
+		args = append(args, "--identity-key-type", "ed25519")
 	}
 
 	return n.startBinary(ctx, binary, args)
@@ -158,10 +174,16 @@ func (n *Node) startGo(ctx context.Context) error {
 	args := []string{
 		"start",
 		"--url", fmt.Sprintf("127.0.0.1:%d", n.Config.HTTPPort),
-		"--p2paddr", fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", n.Config.P2PPort),
 		"--rootdir", n.tempDir,
 		"--no-keyring",
 		"--development",
+	}
+
+	// Add P2P address unless disabled
+	if !n.Config.NoP2P {
+		args = append(args, "--p2paddr", fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", n.Config.P2PPort))
+	} else {
+		args = append(args, "--no-p2p")
 	}
 
 	// Add store type (Go supports: memory, badger)
@@ -181,6 +203,12 @@ func (n *Node) startGo(ctx context.Context) error {
 	}
 	if n.Config.NoSigning {
 		args = append(args, "--no-signing")
+	}
+
+	// Add identity if configured
+	if n.Config.Identity != nil {
+		args = append(args, "--identity", n.Config.Identity.PrivateKeyHex)
+		args = append(args, "--identity-key-type", "ed25519")
 	}
 
 	return n.startBinary(ctx, binary, args)

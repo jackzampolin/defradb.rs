@@ -18,6 +18,7 @@ import (
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
+	authHeader string // optional Authorization header
 }
 
 // NewClient creates a new Client for the given base URL.
@@ -25,6 +26,22 @@ func NewClient(baseURL string) *Client {
 	return &Client{
 		httpClient: &http.Client{},
 		baseURL:    baseURL,
+	}
+}
+
+// WithIdentity returns a new Client that sends the identity's auth header with every request.
+func (c *Client) WithIdentity(id *TestIdentity) *Client {
+	return &Client{
+		httpClient: c.httpClient,
+		baseURL:    c.baseURL,
+		authHeader: id.AuthHeader(),
+	}
+}
+
+// setAuth sets the Authorization header on a request if configured.
+func (c *Client) setAuth(req *http.Request) {
+	if c.authHeader != "" {
+		req.Header.Set("Authorization", c.authHeader)
 	}
 }
 
@@ -79,6 +96,7 @@ func (c *Client) HealthCheck(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create health check request: %w", err)
 	}
+	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -101,6 +119,7 @@ func (c *Client) P2PInfo(ctx context.Context) (*P2PInfoResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create p2p info request: %w", err)
 	}
+	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -150,6 +169,7 @@ func (c *Client) ConnectPeer(ctx context.Context, multiaddr string) error {
 		return fmt.Errorf("failed to create connect peer request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -175,6 +195,7 @@ func (c *Client) ListPeers(ctx context.Context) ([]PeerInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create list peers request: %w", err)
 	}
+	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -213,6 +234,7 @@ func (c *Client) GraphQL(ctx context.Context, query string, vars map[string]any)
 		return nil, fmt.Errorf("failed to create graphql request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -252,6 +274,7 @@ func (c *Client) SetReplicator(ctx context.Context, addresses []string, collecti
 		return fmt.Errorf("failed to create set replicator request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -279,6 +302,7 @@ func (c *Client) AddP2PCollections(ctx context.Context, collectionIDs []string) 
 		return fmt.Errorf("failed to create add p2p collections request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -318,6 +342,7 @@ func (c *Client) SyncDocuments(ctx context.Context, collectionName string, docID
 		return fmt.Errorf("failed to create sync documents request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -348,6 +373,7 @@ func (c *Client) AddSchema(ctx context.Context, sdl string) ([]AddSchemaResponse
 		return nil, fmt.Errorf("failed to create add schema request: %w", err)
 	}
 	req.Header.Set("Content-Type", "text/plain")
+	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -366,6 +392,317 @@ func (c *Client) AddSchema(ctx context.Context, sdl string) ([]AddSchemaResponse
 	}
 
 	return schemas, nil
+}
+
+// PolicyInfo represents a policy returned from the API.
+type PolicyInfo struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// AddPolicy adds an ACP policy to the node.
+// POST /api/v0/acp/policy with text/plain body.
+func (c *Client) AddPolicy(ctx context.Context, policyYAML string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v0/acp/policy", strings.NewReader(policyYAML))
+	if err != nil {
+		return "", fmt.Errorf("failed to create add policy request: %w", err)
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("add policy request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("add policy returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		PolicyID string `json:"PolicyID"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode add policy response: %w", err)
+	}
+
+	return result.PolicyID, nil
+}
+
+// ListPolicies lists all ACP policies.
+func (c *Client) ListPolicies(ctx context.Context) ([]PolicyInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v0/acp/policy", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create list policies request: %w", err)
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list policies request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list policies returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var policies []PolicyInfo
+	if err := json.NewDecoder(resp.Body).Decode(&policies); err != nil {
+		return nil, fmt.Errorf("failed to decode list policies response: %w", err)
+	}
+
+	return policies, nil
+}
+
+// DocRelationshipRequest represents a request to add/delete a document relationship.
+type DocRelationshipRequest struct {
+	Collection string `json:"collection"`
+	DocID      string `json:"docID"`
+	Relation   string `json:"relation"`
+	Actor      string `json:"actor"`
+}
+
+// AddDocRelationship adds a relationship to a document (e.g., granting a user read access).
+func (c *Client) AddDocRelationship(ctx context.Context, collection, docID, relation, actor string) (bool, error) {
+	reqBody := DocRelationshipRequest{
+		Collection: collection,
+		DocID:      docID,
+		Relation:   relation,
+		Actor:      actor,
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return false, fmt.Errorf("failed to marshal doc relationship request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v0/acp/document/relationship", bytes.NewReader(body))
+	if err != nil {
+		return false, fmt.Errorf("failed to create add doc relationship request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("add doc relationship request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return false, fmt.Errorf("add doc relationship returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		ExistedAlready bool `json:"ExistedAlready"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, fmt.Errorf("failed to decode add doc relationship response: %w", err)
+	}
+
+	return !result.ExistedAlready, nil
+}
+
+// DeleteDocRelationship removes a relationship from a document.
+func (c *Client) DeleteDocRelationship(ctx context.Context, collection, docID, relation, actor string) (bool, error) {
+	reqBody := DocRelationshipRequest{
+		Collection: collection,
+		DocID:      docID,
+		Relation:   relation,
+		Actor:      actor,
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return false, fmt.Errorf("failed to marshal doc relationship request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/api/v0/acp/document/relationship", bytes.NewReader(body))
+	if err != nil {
+		return false, fmt.Errorf("failed to create delete doc relationship request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("delete doc relationship request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return false, fmt.Errorf("delete doc relationship returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		RecordFound bool `json:"RecordFound"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, fmt.Errorf("failed to decode delete doc relationship response: %w", err)
+	}
+
+	return result.RecordFound, nil
+}
+
+// IndexField specifies a field and direction for an index.
+type IndexField struct {
+	Name      string `json:"Name"`
+	Direction string `json:"Direction,omitempty"` // "ASC" or "DESC"
+}
+
+// CreateIndexRequest represents a request to create an index.
+type CreateIndexRequest struct {
+	Name   string       `json:"Name,omitempty"`
+	Fields []IndexField `json:"Fields"`
+	Unique bool         `json:"Unique,omitempty"`
+}
+
+// IndexInfo represents index information returned from the API.
+type IndexInfo struct {
+	Name   string       `json:"Name"`
+	ID     int          `json:"ID"`
+	Fields []IndexField `json:"Fields"`
+	Unique bool         `json:"Unique"`
+}
+
+// CreateIndex creates an index on a collection.
+func (c *Client) CreateIndex(ctx context.Context, collection string, fields []string, name string, unique bool) error {
+	indexFields := make([]IndexField, len(fields))
+	for i, f := range fields {
+		indexFields[i] = IndexField{Name: f, Direction: "ASC"}
+	}
+
+	reqBody := CreateIndexRequest{
+		Name:   name,
+		Fields: indexFields,
+		Unique: unique,
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal create index request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v0/collections/%s/indexes", c.baseURL, collection)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create index request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("create index request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("create index returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+// ListIndexes lists all indexes on a collection.
+func (c *Client) ListIndexes(ctx context.Context, collection string) ([]IndexInfo, error) {
+	url := fmt.Sprintf("%s/api/v0/collections/%s/indexes", c.baseURL, collection)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create list indexes request: %w", err)
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list indexes request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list indexes returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var indexes []IndexInfo
+	if err := json.NewDecoder(resp.Body).Decode(&indexes); err != nil {
+		return nil, fmt.Errorf("failed to decode list indexes response: %w", err)
+	}
+
+	return indexes, nil
+}
+
+// DropIndex drops an index from a collection.
+func (c *Client) DropIndex(ctx context.Context, collection, indexName string) error {
+	url := fmt.Sprintf("%s/api/v0/collections/%s/indexes/%s", c.baseURL, collection, indexName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create drop index request: %w", err)
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("drop index request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("drop index returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+// Purge purges all data from the database.
+func (c *Client) Purge(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v0/purge", nil)
+	if err != nil {
+		return fmt.Errorf("failed to create purge request: %w", err)
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("purge request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("purge returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+// TruncateCollection truncates (removes all documents from) a collection.
+func (c *Client) TruncateCollection(ctx context.Context, name string) error {
+	url := fmt.Sprintf("%s/api/v0/collections/%s/truncate", c.baseURL, name)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create truncate request: %w", err)
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("truncate request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("truncate returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
 }
 
 // SubscriptionMessage represents a graphql-ws protocol message.
