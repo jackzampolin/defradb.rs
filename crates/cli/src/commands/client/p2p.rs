@@ -16,19 +16,73 @@ pub struct P2pArgs {
 /// P2P subcommands
 #[derive(Subcommand, Debug)]
 pub enum P2pCommand {
+    /// Show active peers
+    ActivePeers(P2pActivePeersArgs),
+    /// Manage P2P collections
+    Collection(P2pCollectionArgs),
+    /// Connect to a peer
+    Connect(P2pConnectArgs),
+    /// Manage document P2P sync
+    Document(P2pDocumentArgs),
     /// Show P2P node information
     Info(P2pInfoArgs),
     /// Manage peer connections
     Peers(P2pPeersArgs),
     /// Manage replicators
     Replicator(P2pReplicatorArgs),
-    /// Manage P2P collections
-    Collection(P2pCollectionArgs),
+}
+
+/// Arguments for p2p active-peers command
+#[derive(Args, Debug)]
+pub struct P2pActivePeersArgs {}
+
+/// Arguments for p2p connect command
+#[derive(Args, Debug)]
+pub struct P2pConnectArgs {
+    /// Peer addresses to connect to
+    #[arg(value_name = "ADDRESS")]
+    pub addresses: Vec<String>,
 }
 
 /// Arguments for p2p info command
 #[derive(Args, Debug)]
 pub struct P2pInfoArgs {}
+
+/// P2P document management subcommands
+#[derive(Args, Debug)]
+pub struct P2pDocumentArgs {
+    #[command(subcommand)]
+    pub command: P2pDocumentCommand,
+}
+
+/// P2P document subcommands
+#[derive(Subcommand, Debug)]
+pub enum P2pDocumentCommand {
+    /// Add a document to P2P sync
+    Add(P2pDocumentAddArgs),
+    /// Remove a document from P2P sync
+    Remove(P2pDocumentRemoveArgs),
+    /// Get all P2P synced documents
+    GetAll(P2pDocumentGetAllArgs),
+    /// Sync a document
+    Sync(P2pDocumentSyncArgs),
+}
+
+/// Arguments for p2p document add command
+#[derive(Args, Debug)]
+pub struct P2pDocumentAddArgs {}
+
+/// Arguments for p2p document remove command
+#[derive(Args, Debug)]
+pub struct P2pDocumentRemoveArgs {}
+
+/// Arguments for p2p document get-all command
+#[derive(Args, Debug)]
+pub struct P2pDocumentGetAllArgs {}
+
+/// Arguments for p2p document sync command
+#[derive(Args, Debug)]
+pub struct P2pDocumentSyncArgs {}
 
 /// Peer management subcommands
 #[derive(Args, Debug)]
@@ -120,6 +174,10 @@ pub enum P2pCollectionCommand {
     Add(P2pCollectionAddArgs),
     /// Remove a collection from P2P sync
     Remove(P2pCollectionRemoveArgs),
+    /// Sync collection versions
+    SyncVersions(P2pCollectionSyncVersionsArgs),
+    /// Sync branchable collection
+    SyncBranchable(P2pCollectionSyncBranchableArgs),
 }
 
 /// Arguments for collection list command
@@ -142,15 +200,40 @@ pub struct P2pCollectionRemoveArgs {
     pub collection: Vec<String>,
 }
 
+/// Arguments for collection sync-versions command
+#[derive(Args, Debug)]
+pub struct P2pCollectionSyncVersionsArgs {}
+
+/// Arguments for collection sync-branchable command
+#[derive(Args, Debug)]
+pub struct P2pCollectionSyncBranchableArgs {}
+
 impl P2pArgs {
     /// Execute the p2p command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
+            P2pCommand::ActivePeers(args) => args.execute(ctx).await,
+            P2pCommand::Collection(args) => args.execute(ctx).await,
+            P2pCommand::Connect(args) => args.execute(ctx).await,
+            P2pCommand::Document(args) => args.execute(ctx).await,
             P2pCommand::Info(args) => args.execute(ctx).await,
             P2pCommand::Peers(args) => args.execute(ctx).await,
             P2pCommand::Replicator(args) => args.execute(ctx).await,
-            P2pCommand::Collection(args) => args.execute(ctx).await,
         }
+    }
+}
+
+impl P2pActivePeersArgs {
+    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+        eprintln!("not yet implemented");
+        Ok(())
+    }
+}
+
+impl P2pConnectArgs {
+    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+        eprintln!("not yet implemented");
+        Ok(())
     }
 }
 
@@ -163,6 +246,45 @@ impl P2pInfoArgs {
 
         let info = client.p2p_info().await?;
         println!("{}", serde_json::to_string_pretty(&info)?);
+        Ok(())
+    }
+}
+
+impl P2pDocumentArgs {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        match &self.command {
+            P2pDocumentCommand::Add(args) => args.execute(ctx).await,
+            P2pDocumentCommand::Remove(args) => args.execute(ctx).await,
+            P2pDocumentCommand::GetAll(args) => args.execute(ctx).await,
+            P2pDocumentCommand::Sync(args) => args.execute(ctx).await,
+        }
+    }
+}
+
+impl P2pDocumentAddArgs {
+    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+        eprintln!("not yet implemented");
+        Ok(())
+    }
+}
+
+impl P2pDocumentRemoveArgs {
+    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+        eprintln!("not yet implemented");
+        Ok(())
+    }
+}
+
+impl P2pDocumentGetAllArgs {
+    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+        eprintln!("not yet implemented");
+        Ok(())
+    }
+}
+
+impl P2pDocumentSyncArgs {
+    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+        eprintln!("not yet implemented");
         Ok(())
     }
 }
@@ -278,6 +400,8 @@ impl P2pCollectionArgs {
             P2pCollectionCommand::List(args) => args.execute(ctx).await,
             P2pCollectionCommand::Add(args) => args.execute(ctx).await,
             P2pCollectionCommand::Remove(args) => args.execute(ctx).await,
+            P2pCollectionCommand::SyncVersions(args) => args.execute(ctx).await,
+            P2pCollectionCommand::SyncBranchable(args) => args.execute(ctx).await,
         }
     }
 }
@@ -328,6 +452,20 @@ impl P2pCollectionRemoveArgs {
             "Removed collections from P2P: {}",
             self.collection.join(", ")
         );
+        Ok(())
+    }
+}
+
+impl P2pCollectionSyncVersionsArgs {
+    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+        eprintln!("not yet implemented");
+        Ok(())
+    }
+}
+
+impl P2pCollectionSyncBranchableArgs {
+    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+        eprintln!("not yet implemented");
         Ok(())
     }
 }

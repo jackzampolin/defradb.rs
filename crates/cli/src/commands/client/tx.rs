@@ -16,17 +16,17 @@ pub struct TxArgs {
 /// Transaction subcommands
 #[derive(Subcommand, Debug)]
 pub enum TxCommand {
-    /// Begin a new transaction
-    Begin(TxBeginArgs),
+    /// Create a new transaction
+    Create(TxCreateArgs),
     /// Commit a transaction
     Commit(TxCommitArgs),
     /// Discard (rollback) a transaction
     Discard(TxDiscardArgs),
 }
 
-/// Arguments for tx begin command
+/// Arguments for tx create command
 #[derive(Args, Debug)]
-pub struct TxBeginArgs {
+pub struct TxCreateArgs {
     /// Create a read-only transaction
     #[arg(long)]
     pub readonly: bool,
@@ -52,15 +52,15 @@ impl TxArgs {
     /// Execute the transaction command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            TxCommand::Begin(args) => args.execute(ctx).await,
+            TxCommand::Create(args) => args.execute(ctx).await,
             TxCommand::Commit(args) => args.execute(ctx).await,
             TxCommand::Discard(args) => args.execute(ctx).await,
         }
     }
 }
 
-impl TxBeginArgs {
-    /// Execute the tx begin command
+impl TxCreateArgs {
+    /// Execute the tx create command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
@@ -100,8 +100,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tx_begin_args_default() {
-        let args = TxBeginArgs { readonly: false };
+    fn test_tx_create_args_default() {
+        let args = TxCreateArgs { readonly: false };
         assert!(!args.readonly);
     }
 

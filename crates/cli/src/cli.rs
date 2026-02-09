@@ -2,7 +2,9 @@
 
 use clap::{Parser, Subcommand};
 
-use crate::commands::{ClientArgs, KeyringArgs, StartArgs, VersionArgs};
+use crate::commands::{
+    ClientArgs, IdentityArgs, KeyringArgs, SdlArgs, ServerDumpArgs, StartArgs, VersionArgs,
+};
 use crate::config::Config;
 use crate::error::Result;
 
@@ -104,6 +106,15 @@ pub enum Command {
 
     /// Interact with a DefraDB node
     Client(ClientArgs),
+
+    /// Manage identities
+    Identity(IdentityArgs),
+
+    /// Manage SDL (Schema Definition Language)
+    Sdl(SdlArgs),
+
+    /// Dump server-side data
+    ServerDump(ServerDumpArgs),
 }
 
 impl Cli {
@@ -114,6 +125,9 @@ impl Cli {
             Command::Version(args) => args.execute(),
             Command::Keyring(args) => args.execute(config),
             Command::Client(args) => args.execute(config, self.url).await,
+            Command::Identity(args) => args.execute(),
+            Command::Sdl(args) => args.execute(),
+            Command::ServerDump(args) => args.execute(),
         }
     }
 }

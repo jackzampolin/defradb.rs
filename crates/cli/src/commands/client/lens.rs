@@ -18,18 +18,28 @@ pub struct LensArgs {
 /// Lens subcommands
 #[derive(Subcommand, Debug)]
 pub enum LensCommand {
-    /// Set a migration between schema versions
-    Set(LensSetArgs),
+    /// Add a lens migration
+    Add(LensAddArgs),
+    /// List lens migrations
+    List(LensListArgs),
     /// Reload all lens modules
     Reload(LensReloadArgs),
+    /// Set a migration between schema versions
+    Set(LensSetArgs),
 }
+
+/// Arguments for lens add command
+#[derive(Args, Debug)]
+pub struct LensAddArgs {}
+
+/// Arguments for lens list command
+#[derive(Args, Debug)]
+pub struct LensListArgs {}
 
 /// Arguments for lens set command
 #[derive(Args, Debug)]
 pub struct LensSetArgs {
     /// The lens configuration (JSON format)
-    ///
-    /// Example: '{"SourceSchemaVersionID": "...", "DestinationSchemaVersionID": "...", "Lens": {"Path": "/path/to/transform.wasm"}}'
     #[arg(value_name = "CONFIG")]
     pub config: Option<String>,
 
@@ -46,9 +56,25 @@ impl LensArgs {
     /// Execute the lens command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            LensCommand::Set(args) => args.execute(ctx).await,
+            LensCommand::Add(args) => args.execute(ctx).await,
+            LensCommand::List(args) => args.execute(ctx).await,
             LensCommand::Reload(args) => args.execute(ctx).await,
+            LensCommand::Set(args) => args.execute(ctx).await,
         }
+    }
+}
+
+impl LensAddArgs {
+    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+        eprintln!("not yet implemented");
+        Ok(())
+    }
+}
+
+impl LensListArgs {
+    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+        eprintln!("not yet implemented");
+        Ok(())
     }
 }
 

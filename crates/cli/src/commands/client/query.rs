@@ -21,7 +21,7 @@ pub struct QueryArgs {
     pub file: Option<PathBuf>,
 
     /// Variables to pass to the query (JSON format)
-    #[arg(long, short = 'v')]
+    #[arg(long)]
     pub variables: Option<String>,
 
     /// Transaction ID to execute the query within

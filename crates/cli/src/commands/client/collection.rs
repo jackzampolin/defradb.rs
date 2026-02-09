@@ -1,15 +1,33 @@
 //! Collection command implementation
 
+use std::path::PathBuf;
+
 use clap::{Args, Subcommand};
 use serde_json::Value as JsonValue;
 
 use super::http_client::HttpClient;
-use super::{validate_identifier, ClientContext};
+use super::{escape_graphql_string, get_data_from_args, validate_identifier, ClientContext};
 use crate::error::{Error, Result};
 
-/// Interact with collections
+/// Interact with collections and documents
 #[derive(Args, Debug)]
 pub struct CollectionArgs {
+    /// Collection name
+    #[arg(long, global = true)]
+    pub name: Option<String>,
+
+    /// Collection ID
+    #[arg(long, global = true)]
+    pub collection_id: Option<String>,
+
+    /// Schema version ID
+    #[arg(long, global = true)]
+    pub version_id: Option<String>,
+
+    /// Get inactive collections
+    #[arg(long, global = true)]
+    pub get_inactive: bool,
+
     #[command(subcommand)]
     pub command: CollectionCommand,
 }
@@ -17,10 +35,26 @@ pub struct CollectionArgs {
 /// Collection subcommands
 #[derive(Subcommand, Debug)]
 pub enum CollectionCommand {
-    /// List all collections
-    List(CollectionListArgs),
+    /// Create a new document
+    Create(DocumentCreateArgs),
+    /// Delete a document
+    Delete(DocumentDeleteArgs),
     /// Describe a collection's schema
     Describe(CollectionDescribeArgs),
+    /// Get document IDs
+    DocIds(DocIdsArgs),
+    /// Get a document by ID
+    Get(DocumentGetArgs),
+    /// List all collections
+    List(CollectionListArgs),
+    /// Patch a collection schema
+    Patch(CollectionPatchArgs),
+    /// Set a collection as active
+    SetActive(SetActiveArgs),
+    /// Truncate a collection
+    Truncate(TruncateArgs),
+    /// Update a document
+    Update(DocumentUpdateArgs),
 }
 
 /// Arguments for collection list command
@@ -29,18 +63,94 @@ pub struct CollectionListArgs {}
 
 /// Arguments for collection describe command
 #[derive(Args, Debug)]
-pub struct CollectionDescribeArgs {
-    /// The collection name
-    #[arg(value_name = "NAME")]
-    pub name: String,
+pub struct CollectionDescribeArgs {}
+
+/// Arguments for document create command
+#[derive(Args, Debug)]
+pub struct DocumentCreateArgs {
+    /// The document data (JSON)
+    #[arg(value_name = "DATA")]
+    pub data: Option<String>,
+
+    /// Path to a file containing the document data
+    #[arg(long, short = 'f', conflicts_with = "data")]
+    pub file: Option<PathBuf>,
 }
+
+/// Arguments for document get command
+#[derive(Args, Debug)]
+pub struct DocumentGetArgs {
+    /// The document ID
+    #[arg(value_name = "DOC_ID")]
+    pub doc_id: String,
+
+    /// Output in JSON format with consistent structure for programmatic use
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for document update command
+#[derive(Args, Debug)]
+pub struct DocumentUpdateArgs {
+    /// The document ID
+    #[arg(value_name = "DOC_ID")]
+    pub doc_id: String,
+
+    /// The update data (JSON)
+    #[arg(value_name = "DATA")]
+    pub data: Option<String>,
+
+    /// Path to a file containing the update data
+    #[arg(long, short = 'f', conflicts_with = "data")]
+    pub file: Option<PathBuf>,
+}
+
+/// Arguments for document delete command
+#[derive(Args, Debug)]
+pub struct DocumentDeleteArgs {
+    /// The document ID
+    #[arg(value_name = "DOC_ID")]
+    pub doc_id: String,
+}
+
+/// Arguments for doc-ids command
+#[derive(Args, Debug)]
+pub struct DocIdsArgs {}
+
+/// Arguments for collection patch command
+#[derive(Args, Debug)]
+pub struct CollectionPatchArgs {
+    /// The patch data (JSON)
+    #[arg(value_name = "PATCH")]
+    pub patch: Option<String>,
+
+    /// Path to a file containing the patch data
+    #[arg(long, short = 'f', conflicts_with = "patch")]
+    pub file: Option<PathBuf>,
+}
+
+/// Arguments for set-active command
+#[derive(Args, Debug)]
+pub struct SetActiveArgs {}
+
+/// Arguments for truncate command
+#[derive(Args, Debug)]
+pub struct TruncateArgs {}
 
 impl CollectionArgs {
     /// Execute the collection command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
+            CollectionCommand::Create(args) => args.execute(ctx, self.name.as_deref()).await,
+            CollectionCommand::Delete(args) => args.execute(ctx, self.name.as_deref()).await,
+            CollectionCommand::Describe(args) => args.execute(ctx, self.name.as_deref()).await,
+            CollectionCommand::DocIds(args) => args.execute(ctx).await,
+            CollectionCommand::Get(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::List(args) => args.execute(ctx).await,
-            CollectionCommand::Describe(args) => args.execute(ctx).await,
+            CollectionCommand::Patch(args) => args.execute(ctx).await,
+            CollectionCommand::SetActive(args) => args.execute(ctx).await,
+            CollectionCommand::Truncate(args) => args.execute(ctx).await,
+            CollectionCommand::Update(args) => args.execute(ctx, self.name.as_deref()).await,
         }
     }
 }
@@ -59,15 +169,11 @@ const INTROSPECTION_QUERY: &str = r#"
 "#;
 
 /// Check if a field name is a built-in GraphQL or DefraDB field.
-///
-/// Uses pattern matching to be resilient to new built-in types.
 fn is_builtin_field(name: &str) -> bool {
-    // GraphQL introspection fields
     if name.starts_with("__") {
         return true;
     }
 
-    // DefraDB commit-related fields (case-insensitive suffix matching)
     let lower = name.to_lowercase();
     if lower == "commits" || lower.ends_with("commits") {
         return true;
@@ -101,8 +207,10 @@ impl CollectionListArgs {
 
 impl CollectionDescribeArgs {
     /// Execute the collection describe command
-    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
-        validate_identifier(&self.name)?;
+    pub async fn execute(&self, ctx: &ClientContext, name: Option<&str>) -> Result<()> {
+        let collection_name =
+            name.ok_or_else(|| Error::MissingInput("--name is required for describe".to_string()))?;
+        validate_identifier(collection_name)?;
 
         let query = format!(
             r#"
@@ -123,7 +231,7 @@ impl CollectionDescribeArgs {
   }}
 }}
 "#,
-            name = self.name
+            name = collection_name
         );
 
         let client = HttpClient::new(&ctx.url)?
@@ -141,15 +249,265 @@ impl CollectionDescribeArgs {
 
         let type_info = data
             .get("__type")
-            .ok_or_else(|| Error::CollectionNotFound(self.name.clone()))?;
+            .ok_or_else(|| Error::CollectionNotFound(collection_name.to_string()))?;
 
         if type_info.is_null() {
-            return Err(Error::CollectionNotFound(self.name.clone()));
+            return Err(Error::CollectionNotFound(collection_name.to_string()));
         }
 
         let output = serde_json::to_string_pretty(type_info)?;
         println!("{output}");
 
+        Ok(())
+    }
+}
+
+impl DocumentCreateArgs {
+    /// Execute the document create command
+    pub async fn execute(&self, ctx: &ClientContext, name: Option<&str>) -> Result<()> {
+        let collection =
+            name.ok_or_else(|| Error::MissingInput("--name is required for create".to_string()))?;
+        validate_identifier(collection)?;
+
+        let data = get_data_from_args(&self.data, &self.file)?;
+        let parsed: JsonValue = serde_json::from_str(&data)?;
+
+        let input_str = serde_json::to_string(&parsed)?;
+        let query = format!(
+            r#"mutation {{ create_{collection}(input: {input}) {{ _docID }} }}"#,
+            collection = collection,
+            input = input_str
+        );
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+        let response = client.graphql(&query, None, ctx.tx_id.clone()).await?;
+
+        if response.has_errors() {
+            return Err(Error::Server(response.error_message()));
+        }
+
+        let data = response
+            .data
+            .ok_or_else(|| Error::Server("Server returned success but with no data".to_string()))?;
+
+        let key = format!("create_{}", collection);
+        let result = data.get(&key).ok_or_else(|| {
+            Error::Server(format!(
+                "Server response missing expected key '{}'. Response: {}",
+                key,
+                serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+            ))
+        })?;
+        let output = serde_json::to_string_pretty(result)?;
+        println!("{output}");
+
+        Ok(())
+    }
+}
+
+impl DocumentGetArgs {
+    /// Execute the document get command.
+    pub async fn execute(&self, ctx: &ClientContext, name: Option<&str>) -> Result<()> {
+        let collection =
+            name.ok_or_else(|| Error::MissingInput("--name is required for get".to_string()))?;
+        validate_identifier(collection)?;
+
+        let fields = get_collection_fields(ctx, collection).await?;
+        let field_selection = fields.join(" ");
+        let escaped_doc_id = escape_graphql_string(&self.doc_id);
+
+        let query = format!(
+            r#"{{ {collection}(filter: {{_docID: {{_eq: "{doc_id}"}}}}) {{ {fields} }} }}"#,
+            collection = collection,
+            doc_id = escaped_doc_id,
+            fields = field_selection
+        );
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+        let response = client.graphql(&query, None, ctx.tx_id.clone()).await?;
+
+        if response.has_errors() {
+            if self.json {
+                let output = serde_json::json!({
+                    "success": false,
+                    "error": response.error_message()
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+            return Err(Error::Server(response.error_message()));
+        }
+
+        let data = response
+            .data
+            .ok_or_else(|| Error::Server("Server returned no data".to_string()))?;
+
+        let results = data.get(collection).ok_or_else(|| {
+            Error::Server(format!(
+                "Server response missing collection key '{}'",
+                collection
+            ))
+        })?;
+
+        let arr = results.as_array().ok_or_else(|| {
+            Error::Server(format!(
+                "Expected array for collection '{}', got: {}",
+                collection, results
+            ))
+        })?;
+
+        if arr.is_empty() {
+            if self.json {
+                let output = serde_json::json!({
+                    "success": true,
+                    "data": null
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                println!("Document not found");
+            }
+        } else if arr.len() == 1 {
+            if self.json {
+                let output = serde_json::json!({
+                    "success": true,
+                    "data": arr[0]
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                let output = serde_json::to_string_pretty(&arr[0])?;
+                println!("{output}");
+            }
+        } else if self.json {
+            let output = serde_json::json!({
+                "success": true,
+                "data": results
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            let output = serde_json::to_string_pretty(results)?;
+            println!("{output}");
+        }
+
+        Ok(())
+    }
+}
+
+impl DocumentUpdateArgs {
+    /// Execute the document update command
+    pub async fn execute(&self, ctx: &ClientContext, name: Option<&str>) -> Result<()> {
+        let collection =
+            name.ok_or_else(|| Error::MissingInput("--name is required for update".to_string()))?;
+        validate_identifier(collection)?;
+
+        let data = get_data_from_args(&self.data, &self.file)?;
+        let parsed: JsonValue = serde_json::from_str(&data)?;
+
+        let input_str = serde_json::to_string(&parsed)?;
+        let escaped_doc_id = escape_graphql_string(&self.doc_id);
+        let query = format!(
+            r#"mutation {{ update_{collection}(docIDs: ["{doc_id}"], input: {input}) {{ _docID }} }}"#,
+            collection = collection,
+            doc_id = escaped_doc_id,
+            input = input_str
+        );
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+        let response = client.graphql(&query, None, ctx.tx_id.clone()).await?;
+
+        if response.has_errors() {
+            return Err(Error::Server(response.error_message()));
+        }
+
+        let data = response
+            .data
+            .ok_or_else(|| Error::Server("Server returned success but with no data".to_string()))?;
+
+        let key = format!("update_{}", collection);
+        let result = data.get(&key).ok_or_else(|| {
+            Error::Server(format!(
+                "Server response missing expected key '{}'. Response: {}",
+                key,
+                serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+            ))
+        })?;
+        let output = serde_json::to_string_pretty(result)?;
+        println!("{output}");
+
+        Ok(())
+    }
+}
+
+impl DocumentDeleteArgs {
+    /// Execute the document delete command
+    pub async fn execute(&self, ctx: &ClientContext, name: Option<&str>) -> Result<()> {
+        let collection =
+            name.ok_or_else(|| Error::MissingInput("--name is required for delete".to_string()))?;
+        validate_identifier(collection)?;
+
+        let escaped_doc_id = escape_graphql_string(&self.doc_id);
+        let query = format!(
+            r#"mutation {{ delete_{collection}(docIDs: ["{doc_id}"]) {{ _docID }} }}"#,
+            collection = collection,
+            doc_id = escaped_doc_id
+        );
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+        let response = client.graphql(&query, None, ctx.tx_id.clone()).await?;
+
+        if response.has_errors() {
+            return Err(Error::Server(response.error_message()));
+        }
+
+        let data = response
+            .data
+            .ok_or_else(|| Error::Server("Server returned success but with no data".to_string()))?;
+
+        let key = format!("delete_{}", collection);
+        let result = data.get(&key).ok_or_else(|| {
+            Error::Server(format!(
+                "Server response missing expected key '{}'. Response: {}",
+                key,
+                serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
+            ))
+        })?;
+        let output = serde_json::to_string_pretty(result)?;
+        println!("{output}");
+
+        Ok(())
+    }
+}
+
+impl DocIdsArgs {
+    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+        eprintln!("not yet implemented");
+        Ok(())
+    }
+}
+
+impl CollectionPatchArgs {
+    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+        eprintln!("not yet implemented");
+        Ok(())
+    }
+}
+
+impl SetActiveArgs {
+    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+        eprintln!("not yet implemented");
+        Ok(())
+    }
+}
+
+impl TruncateArgs {
+    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+        eprintln!("not yet implemented");
         Ok(())
     }
 }
@@ -176,6 +534,89 @@ fn extract_collections(data: &Option<JsonValue>) -> Result<Vec<String>> {
 
     collections.sort();
     Ok(collections)
+}
+
+/// Get the field names for a collection (excluding relations for simplicity)
+async fn get_collection_fields(ctx: &ClientContext, collection: &str) -> Result<Vec<String>> {
+    let query = format!(
+        r#"
+{{
+  __type(name: "{collection}") {{
+    fields {{
+      name
+      type {{
+        kind
+        ofType {{
+          kind
+        }}
+      }}
+    }}
+  }}
+}}
+"#
+    );
+
+    let client = HttpClient::new(&ctx.url)?
+        .with_auth_token(ctx.auth_token.clone())
+        .with_verbose(ctx.verbose);
+    let response = client.graphql(&query, None, ctx.tx_id.clone()).await?;
+
+    if response.has_errors() {
+        return Err(Error::Server(response.error_message()));
+    }
+
+    let data = response
+        .data
+        .ok_or_else(|| Error::CollectionNotFound(collection.to_string()))?;
+
+    let type_info = data
+        .get("__type")
+        .ok_or_else(|| Error::CollectionNotFound(collection.to_string()))?;
+
+    if type_info.is_null() {
+        return Err(Error::CollectionNotFound(collection.to_string()));
+    }
+
+    let fields = type_info
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .ok_or_else(|| Error::CollectionNotFound(collection.to_string()))?;
+
+    let scalar_fields: Vec<String> = fields
+        .iter()
+        .filter_map(|f| {
+            let name = f.get("name")?.as_str()?;
+            let type_info = f.get("type")?;
+            let kind = type_info.get("kind").and_then(|k| k.as_str())?;
+
+            if kind == "SCALAR" {
+                return Some(name.to_string());
+            }
+
+            if kind == "NON_NULL" {
+                if let Some(of_type) = type_info.get("ofType") {
+                    if let Some(inner_kind) = of_type.get("kind").and_then(|k| k.as_str()) {
+                        if inner_kind == "SCALAR" {
+                            return Some(name.to_string());
+                        }
+                    }
+                }
+            }
+
+            None
+        })
+        .collect();
+
+    if scalar_fields.is_empty() {
+        eprintln!(
+            "Warning: No queryable scalar fields found for collection '{}'. Only _docID will be returned.",
+            collection
+        );
+        eprintln!("Use 'defra client query' for full control over field selection.");
+        Ok(vec!["_docID".to_string()])
+    } else {
+        Ok(scalar_fields)
+    }
 }
 
 #[cfg(test)]
