@@ -1112,12 +1112,31 @@ impl<S: Store> crate::database::DB<S> {
                 .await
                 .map_err(Error::Storage)?
                 .ok_or(Error::CollectionVersionNotFound(version_id.to_string()))?;
-            serde_json::from_slice::<CollectionVersion>(&target_bytes).map_err(|e| {
-                Error::Serialization(format!(
-                    "failed to deserialize version '{}': {}",
-                    version_id, e
-                ))
-            })?
+            let mut schema =
+                serde_json::from_slice::<CollectionVersion>(&target_bytes).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to deserialize version '{}': {}",
+                        version_id, e
+                    ))
+                })?;
+
+            // Populate root_id from store (skipped during deserialization)
+            if schema.root_id == 0 {
+                let short_id_key = CollectionID::new(&schema.collection_id);
+                if let Some(short_id_bytes) = systemstore
+                    .get(&short_id_key.bytes())
+                    .await
+                    .map_err(Error::Storage)?
+                {
+                    if let Ok(short_id_str) = String::from_utf8(short_id_bytes.to_vec()) {
+                        if let Ok(short_id) = short_id_str.parse::<u32>() {
+                            schema.root_id = short_id;
+                        }
+                    }
+                }
+            }
+
+            schema
         };
         let _ = txn.discard();
 
@@ -1140,7 +1159,7 @@ impl<S: Store> crate::database::DB<S> {
 
         // Validate: no documents exist
         if target_schema.is_active {
-            let has_data = self.collection_has_data(&collection_id).await?;
+            let has_data = self.collection_has_data(&target_schema).await?;
             if has_data {
                 return Err(Error::InvalidPatch(
                     "cannot delete a collection that has documents, first delete the documents and then delete the version".to_string(),
@@ -1289,12 +1308,29 @@ impl<S: Store> crate::database::DB<S> {
     }
 
     /// Check if a collection has any documents in the datastore.
-    pub(crate) async fn collection_has_data(&self, collection_id: &str) -> Result<bool> {
+    pub(crate) async fn collection_has_data(
+        &self,
+        version: &schema::CollectionVersion,
+    ) -> Result<bool> {
+        if !version.is_materialized {
+            return Ok(false);
+        }
+
         let txn = self.new_txn(true).await?;
         let has_data = {
             let datastore = txn.datastore()?;
-            let doc_prefix = format!("/d/{}/", collection_id);
-            let opts = IterOptions::new().with_prefix(doc_prefix.as_bytes().to_vec());
+
+            let prefix = if version.query.is_some() {
+                // View: check view cache prefix using short ID
+                storage::keys::datastore::ViewCacheKey::collection_prefix(version.root_id)
+            } else {
+                // Regular collection: check document prefix
+                format!("/d/{}/", version.collection_id)
+                    .as_bytes()
+                    .to_vec()
+            };
+
+            let opts = IterOptions::new().with_prefix(prefix);
             let mut iter = datastore.iterator(opts).await.map_err(Error::Storage)?;
             let has_any = iter.next().await.map_err(Error::Storage)?.is_some();
             iter.close().await.map_err(Error::Storage)?;
