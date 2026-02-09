@@ -23,6 +23,28 @@ func (id *TestIdentity) AuthHeader() string {
 	return "Bearer " + id.Token
 }
 
+// ForAudience returns a copy of this identity with a JWT minted for the given audience.
+// Use this when different nodes have different listen addresses.
+func (id *TestIdentity) ForAudience(audience string) (*TestIdentity, error) {
+	privBytes, err := hex.DecodeString(id.PrivateKeyHex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode private key hex: %w", err)
+	}
+	priv := ed25519.PrivateKey(privBytes)
+	pub := priv.Public().(ed25519.PublicKey)
+
+	token, err := mintJWT(priv, pub, id.DID, audience)
+	if err != nil {
+		return nil, fmt.Errorf("failed to mint JWT for audience %s: %w", audience, err)
+	}
+
+	return &TestIdentity{
+		PrivateKeyHex: id.PrivateKeyHex,
+		DID:           id.DID,
+		Token:         token,
+	}, nil
+}
+
 // GenerateIdentity creates a new ed25519 identity with a JWT token.
 // The audience parameter is used as the JWT "aud" claim (typically the node URL).
 func GenerateIdentity(audience string) (*TestIdentity, error) {

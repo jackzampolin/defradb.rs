@@ -12,14 +12,50 @@ import (
 	"github.com/sourcenetwork/defradb.rs-interop/tests/interop/framework"
 )
 
+// mirrorNodes holds the nodes and identity helpers returned by startMirrorNodes.
+type mirrorNodes struct {
+	Rust     *framework.Node
+	Go       *framework.Node
+	Identity *framework.TestIdentity // base identity (key material, no audience-specific token)
+}
+
+// RustClient returns an authenticated client for the Rust node.
+func (m *mirrorNodes) RustClient(t *testing.T) *framework.Client {
+	t.Helper()
+	id, err := m.Identity.ForAudience(fmt.Sprintf("127.0.0.1:%d", m.Rust.Config.HTTPPort))
+	require.NoError(t, err, "failed to create Rust identity")
+	return m.Rust.Client().WithIdentity(id)
+}
+
+// GoClient returns an authenticated client for the Go node.
+func (m *mirrorNodes) GoClient(t *testing.T) *framework.Client {
+	t.Helper()
+	id, err := m.Identity.ForAudience(fmt.Sprintf("127.0.0.1:%d", m.Go.Config.HTTPPort))
+	require.NoError(t, err, "failed to create Go identity")
+	return m.Go.Client().WithIdentity(id)
+}
+
+// ClientForIdentity returns authenticated clients for both nodes using the given identity.
+func (m *mirrorNodes) ClientForIdentity(t *testing.T, id *framework.TestIdentity) (rustClient, goClient *framework.Client) {
+	t.Helper()
+	return m.NodeClient(t, m.Rust, id), m.NodeClient(t, m.Go, id)
+}
+
+// NodeClient returns an authenticated client for a specific node using the given identity.
+func (m *mirrorNodes) NodeClient(t *testing.T, node *framework.Node, id *framework.TestIdentity) *framework.Client {
+	t.Helper()
+	audienceID, err := id.ForAudience(fmt.Sprintf("127.0.0.1:%d", node.Config.HTTPPort))
+	require.NoError(t, err, "failed to create identity for node")
+	return node.Client().WithIdentity(audienceID)
+}
+
 // startMirrorNodes starts a Rust and Go node pair for mirror-mode testing.
 // Both nodes run independently (no P2P), with encryption enabled.
-// Returns nodes and a default identity that can be used for authenticated API calls.
-func startMirrorNodes(t *testing.T, ctx context.Context) (rustNode, goNode *framework.Node, defaultIdentity *framework.TestIdentity) {
+func startMirrorNodes(t *testing.T, ctx context.Context) *mirrorNodes {
 	t.Helper()
 
 	// Generate a default identity for node startup and API auth
-	defaultIdentity, err := framework.GenerateIdentity("test")
+	defaultIdentity, err := framework.GenerateIdentity("defradb")
 	require.NoError(t, err, "failed to generate default identity")
 
 	rustPorts, err := framework.ReserveNodePorts()
@@ -30,7 +66,7 @@ func startMirrorNodes(t *testing.T, ctx context.Context) (rustNode, goNode *fram
 	require.NoError(t, err)
 	defer goPorts.Release()
 
-	rustNode = framework.NewNode(framework.NodeConfig{
+	rustNode := framework.NewNode(framework.NodeConfig{
 		Type:     framework.NodeTypeRust,
 		HTTPPort: rustPorts.HTTPPort,
 		P2PPort:  rustPorts.P2PPort,
@@ -44,7 +80,7 @@ func startMirrorNodes(t *testing.T, ctx context.Context) (rustNode, goNode *fram
 	t.Cleanup(func() { rustNode.Stop() })
 	dumpLogsOnFailure(t, "rust-node", rustNode)
 
-	goNode = framework.NewNode(framework.NodeConfig{
+	goNode := framework.NewNode(framework.NodeConfig{
 		Type:     framework.NodeTypeGo,
 		HTTPPort: goPorts.HTTPPort,
 		P2PPort:  goPorts.P2PPort,
@@ -58,7 +94,11 @@ func startMirrorNodes(t *testing.T, ctx context.Context) (rustNode, goNode *fram
 	t.Cleanup(func() { goNode.Stop() })
 	dumpLogsOnFailure(t, "go-node", goNode)
 
-	return rustNode, goNode, defaultIdentity
+	return &mirrorNodes{
+		Rust:     rustNode,
+		Go:       goNode,
+		Identity: defaultIdentity,
+	}
 }
 
 // TestACPMultiUserIsolation tests that multiple users with ACP policies
@@ -77,34 +117,35 @@ func TestACPMultiUserIsolation(t *testing.T) {
 	carol, err := framework.GenerateIdentity("test")
 	require.NoError(t, err, "failed to generate Carol identity")
 
-	rustNode, goNode, _ := startMirrorNodes(t, ctx)
-	rustClient := rustNode.Client()
-	goClient := goNode.Client()
+	m := startMirrorNodes(t, ctx)
 
-	type nodeClients struct {
-		name   string
-		client *framework.Client
+	type nodeInfo struct {
+		name string
+		node *framework.Node
 	}
 
-	nodes := []nodeClients{
-		{"Rust", rustClient},
-		{"Go", goClient},
+	nodes := []nodeInfo{
+		{"Rust", m.Rust},
+		{"Go", m.Go},
 	}
 
 	// Track policy IDs and doc IDs per node
 	type nodeState struct {
-		policyID     string
-		aliceDocIDs  []string
-		bobDocIDs    []string
-		carolDocIDs  []string
+		policyID    string
+		aliceDocIDs []string
+		bobDocIDs   []string
+		carolDocIDs []string
 	}
 	states := make([]nodeState, len(nodes))
 
 	for i, n := range nodes {
 		t.Logf("Setting up %s node...", n.name)
 
+		aliceClient := m.NodeClient(t, n.node, alice)
+		bobClient := m.NodeClient(t, n.node, bob)
+		carolClient := m.NodeClient(t, n.node, carol)
+
 		// Alice adds ACP policy
-		aliceClient := n.client.WithIdentity(alice)
 		policyID, err := aliceClient.AddPolicy(ctx, framework.UserACPPolicy)
 		require.NoError(t, err, "%s: failed to add ACP policy", n.name)
 		t.Logf("%s: Policy ID = %s", n.name, policyID)
@@ -127,7 +168,6 @@ func TestACPMultiUserIsolation(t *testing.T) {
 		}
 
 		// Bob creates 5 documents
-		bobClient := n.client.WithIdentity(bob)
 		for j := 0; j < 5; j++ {
 			resp, err := bobClient.GraphQL(ctx, framework.CreateUserQuery(fmt.Sprintf("Bob-%d", j), 20+j), nil)
 			require.NoError(t, err, "%s: Bob failed to create doc %d", n.name, j)
@@ -137,7 +177,6 @@ func TestACPMultiUserIsolation(t *testing.T) {
 		}
 
 		// Carol creates 5 documents
-		carolClient := n.client.WithIdentity(carol)
 		for j := 0; j < 5; j++ {
 			resp, err := carolClient.GraphQL(ctx, framework.CreateUserQuery(fmt.Sprintf("Carol-%d", j), 40+j), nil)
 			require.NoError(t, err, "%s: Carol failed to create doc %d", n.name, j)
@@ -149,9 +188,9 @@ func TestACPMultiUserIsolation(t *testing.T) {
 
 	// Verify isolation: each user sees only their own docs
 	for i, n := range nodes {
-		aliceClient := n.client.WithIdentity(alice)
-		bobClient := n.client.WithIdentity(bob)
-		carolClient := n.client.WithIdentity(carol)
+		aliceClient := m.NodeClient(t, n.node, alice)
+		bobClient := m.NodeClient(t, n.node, bob)
+		carolClient := m.NodeClient(t, n.node, carol)
 
 		aliceResp, err := aliceClient.GraphQL(ctx, framework.QueryUsersQuery(), nil)
 		require.NoError(t, err, "%s: Alice query failed", n.name)
@@ -203,9 +242,10 @@ func TestACPMultiUserIsolation(t *testing.T) {
 
 	// Compare Rust vs Go responses for each user
 	for _, id := range []*framework.TestIdentity{alice, bob, carol} {
-		rustResp, err := rustClient.WithIdentity(id).GraphQL(ctx, framework.QueryUsersQuery(), nil)
+		rustClient, goClient := m.ClientForIdentity(t, id)
+		rustResp, err := rustClient.GraphQL(ctx, framework.QueryUsersQuery(), nil)
 		require.NoError(t, err)
-		goResp, err := goClient.WithIdentity(id).GraphQL(ctx, framework.QueryUsersQuery(), nil)
+		goResp, err := goClient.GraphQL(ctx, framework.QueryUsersQuery(), nil)
 		require.NoError(t, err)
 		framework.CompareGraphQLResponses(t, rustResp, goResp, fmt.Sprintf("user %s query parity", id.DID[:20]))
 	}
@@ -223,17 +263,17 @@ func TestACPCrossUserWriteBlocked(t *testing.T) {
 	bob, err := framework.GenerateIdentity("test")
 	require.NoError(t, err)
 
-	rustNode, goNode, _ := startMirrorNodes(t, ctx)
+	m := startMirrorNodes(t, ctx)
 
-	type nodeClients struct {
-		name   string
-		client *framework.Client
+	type nodeInfo struct {
+		name string
+		node *framework.Node
 	}
 
-	for _, n := range []nodeClients{{"Rust", rustNode.Client()}, {"Go", goNode.Client()}} {
+	for _, n := range []nodeInfo{{"Rust", m.Rust}, {"Go", m.Go}} {
 		t.Run(n.name, func(t *testing.T) {
-			aliceClient := n.client.WithIdentity(alice)
-			bobClient := n.client.WithIdentity(bob)
+			aliceClient := m.NodeClient(t, n.node, alice)
+			bobClient := m.NodeClient(t, n.node, bob)
 
 			// Alice creates collection with ACP
 			policyID, err := aliceClient.AddPolicy(ctx, framework.UserACPPolicy)

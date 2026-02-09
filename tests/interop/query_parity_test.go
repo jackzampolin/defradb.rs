@@ -43,9 +43,9 @@ func TestQueryFilterParity(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	rustNode, goNode, id := startMirrorNodes(t, ctx)
-	rustClient := rustNode.Client().WithIdentity(id)
-	goClient := goNode.Client().WithIdentity(id)
+	m := startMirrorNodes(t, ctx)
+	rustClient := m.RustClient(t)
+	goClient := m.GoClient(t)
 
 	// Add Article schema to both
 	_, err := rustClient.AddSchema(ctx, framework.ArticleSchema)
@@ -92,9 +92,9 @@ func TestQueryOrderParity(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	rustNode, goNode, id := startMirrorNodes(t, ctx)
-	rustClient := rustNode.Client().WithIdentity(id)
-	goClient := goNode.Client().WithIdentity(id)
+	m := startMirrorNodes(t, ctx)
+	rustClient := m.RustClient(t)
+	goClient := m.GoClient(t)
 
 	_, err := rustClient.AddSchema(ctx, framework.ArticleSchema)
 	require.NoError(t, err)
@@ -140,9 +140,9 @@ func TestQueryLimitOffsetParity(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	rustNode, goNode, id := startMirrorNodes(t, ctx)
-	rustClient := rustNode.Client().WithIdentity(id)
-	goClient := goNode.Client().WithIdentity(id)
+	m := startMirrorNodes(t, ctx)
+	rustClient := m.RustClient(t)
+	goClient := m.GoClient(t)
 
 	_, err := rustClient.AddSchema(ctx, framework.ArticleSchema)
 	require.NoError(t, err)
@@ -185,9 +185,9 @@ func TestQueryAggregateParity(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	rustNode, goNode, id := startMirrorNodes(t, ctx)
-	rustClient := rustNode.Client().WithIdentity(id)
-	goClient := goNode.Client().WithIdentity(id)
+	m := startMirrorNodes(t, ctx)
+	rustClient := m.RustClient(t)
+	goClient := m.GoClient(t)
 
 	_, err := rustClient.AddSchema(ctx, framework.ArticleSchema)
 	require.NoError(t, err)
