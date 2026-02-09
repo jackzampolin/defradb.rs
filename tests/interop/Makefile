@@ -1,4 +1,4 @@
-.PHONY: build-rust build-go build-all test test-cross ffi-build ffi-test clean
+.PHONY: build-rust build-go build-all test test-cross test-mirror test-acp test-queries test-indexes test-bulk ffi-build ffi-test clean
 
 # Paths
 DEFRA_GO_PATH ?= ../../../defradb
@@ -26,6 +26,30 @@ test: build-all
 # Run cross-implementation P2P tests only
 test-cross: build-all
 	go test -v -timeout 5m -run TestCross ./...
+
+# =============================================================================
+# Mirror Tests (independent Rust/Go nodes, HTTP API comparison)
+# =============================================================================
+
+# Run all mirror-mode tests
+test-mirror: build-all
+	go test -v -timeout 10m -run "TestACP|TestQuery|TestIndex|TestBulk" ./...
+
+# Run ACP isolation tests
+test-acp: build-all
+	go test -v -timeout 5m -run "TestACP" ./...
+
+# Run query parity tests
+test-queries: build-all
+	go test -v -timeout 5m -run "TestQuery" ./...
+
+# Run index tests
+test-indexes: build-all
+	go test -v -timeout 5m -run "TestIndex" ./...
+
+# Run bulk data tests
+test-bulk: build-all
+	go test -v -timeout 10m -run "TestBulk" ./...
 
 # =============================================================================
 # FFI Tests (run Go integration tests against Rust via FFI)

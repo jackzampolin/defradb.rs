@@ -1325,9 +1325,7 @@ impl<S: Store> crate::database::DB<S> {
                 storage::keys::datastore::ViewCacheKey::collection_prefix(version.root_id)
             } else {
                 // Regular collection: check document prefix
-                format!("/d/{}/", version.collection_id)
-                    .as_bytes()
-                    .to_vec()
+                format!("/d/{}/", version.collection_id).as_bytes().to_vec()
             };
 
             let opts = IterOptions::new().with_prefix(prefix);

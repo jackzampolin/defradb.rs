@@ -6,7 +6,7 @@ use clap::{Args, Subcommand};
 
 use super::http_client::HttpClient;
 use super::{get_data_from_args, ClientContext};
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// Interact with Access Control Policies
 #[derive(Args, Debug)]
@@ -18,17 +18,45 @@ pub struct AcpArgs {
 /// ACP subcommands
 #[derive(Subcommand, Debug)]
 pub enum AcpCommand {
-    /// Add a new ACP policy
-    Add(AcpAddArgs),
-    /// List all ACP policies
-    List(AcpListArgs),
-    /// Show details of a specific policy
-    Describe(AcpDescribeArgs),
+    /// Manage document-level ACP
+    Document(AcpDocumentArgs),
+    /// Manage node-level ACP
+    Node(AcpNodeArgs),
 }
 
-/// Arguments for acp add command
+/// ACP document subcommands
 #[derive(Args, Debug)]
-pub struct AcpAddArgs {
+pub struct AcpDocumentArgs {
+    #[command(subcommand)]
+    pub command: AcpDocumentCommand,
+}
+
+/// ACP document subcommands
+#[derive(Subcommand, Debug)]
+pub enum AcpDocumentCommand {
+    /// Manage ACP policies
+    Policy(AcpPolicyArgs),
+    /// Manage ACP relationships
+    Relationship(AcpDocumentRelationshipArgs),
+}
+
+/// ACP policy subcommands
+#[derive(Args, Debug)]
+pub struct AcpPolicyArgs {
+    #[command(subcommand)]
+    pub command: AcpPolicyCommand,
+}
+
+/// ACP policy subcommands
+#[derive(Subcommand, Debug)]
+pub enum AcpPolicyCommand {
+    /// Add a new ACP policy
+    Add(AcpPolicyAddArgs),
+}
+
+/// Arguments for acp policy add command
+#[derive(Args, Debug)]
+pub struct AcpPolicyAddArgs {
     /// The policy definition (YAML or JSON format)
     #[arg(value_name = "POLICY")]
     pub policy: Option<String>,
@@ -38,31 +66,163 @@ pub struct AcpAddArgs {
     pub file: Option<PathBuf>,
 }
 
-/// Arguments for acp list command
+/// ACP document relationship subcommands
 #[derive(Args, Debug)]
-pub struct AcpListArgs {}
-
-/// Arguments for acp describe command
-#[derive(Args, Debug)]
-pub struct AcpDescribeArgs {
-    /// The policy ID
-    #[arg(value_name = "ID")]
-    pub id: String,
+pub struct AcpDocumentRelationshipArgs {
+    #[command(subcommand)]
+    pub command: AcpDocumentRelationshipCommand,
 }
+
+/// ACP document relationship subcommands
+#[derive(Subcommand, Debug)]
+pub enum AcpDocumentRelationshipCommand {
+    /// Add a document ACP relationship
+    Add(AcpDocumentRelationshipAddArgs),
+    /// Delete a document ACP relationship
+    Delete(AcpDocumentRelationshipDeleteArgs),
+}
+
+/// Arguments for acp document relationship add command
+#[derive(Args, Debug)]
+pub struct AcpDocumentRelationshipAddArgs {
+    /// Collection name
+    #[arg(long, short = 'c')]
+    pub collection: Option<String>,
+
+    /// Document ID
+    #[arg(long = "docID")]
+    pub doc_id: Option<String>,
+
+    /// Relation name
+    #[arg(long, short = 'r')]
+    pub relation: Option<String>,
+
+    /// Actor (target identity)
+    #[arg(long, short = 'a')]
+    pub actor: Option<String>,
+}
+
+/// Arguments for acp document relationship delete command
+#[derive(Args, Debug)]
+pub struct AcpDocumentRelationshipDeleteArgs {
+    /// Collection name
+    #[arg(long, short = 'c')]
+    pub collection: Option<String>,
+
+    /// Document ID
+    #[arg(long = "docID")]
+    pub doc_id: Option<String>,
+
+    /// Relation name
+    #[arg(long, short = 'r')]
+    pub relation: Option<String>,
+
+    /// Actor (target identity)
+    #[arg(long, short = 'a')]
+    pub actor: Option<String>,
+}
+
+/// ACP node subcommands
+#[derive(Args, Debug)]
+pub struct AcpNodeArgs {
+    #[command(subcommand)]
+    pub command: AcpNodeCommand,
+}
+
+/// ACP node subcommands
+#[derive(Subcommand, Debug)]
+pub enum AcpNodeCommand {
+    /// Manage node ACP relationships
+    Relationship(AcpNodeRelationshipArgs),
+    /// Show ACP status
+    Status(AcpNodeStatusArgs),
+    /// Disable node ACP
+    Disable(AcpNodeDisableArgs),
+    /// Re-enable node ACP
+    ReEnable(AcpNodeReEnableArgs),
+}
+
+/// ACP node relationship subcommands
+#[derive(Args, Debug)]
+pub struct AcpNodeRelationshipArgs {
+    #[command(subcommand)]
+    pub command: AcpNodeRelationshipCommand,
+}
+
+/// ACP node relationship subcommands
+#[derive(Subcommand, Debug)]
+pub enum AcpNodeRelationshipCommand {
+    /// Add a node ACP relationship
+    Add(AcpNodeRelationshipAddArgs),
+    /// Delete a node ACP relationship
+    Delete(AcpNodeRelationshipDeleteArgs),
+}
+
+/// Arguments for acp node relationship add command
+#[derive(Args, Debug)]
+pub struct AcpNodeRelationshipAddArgs {
+    /// Relation name
+    #[arg(long, short = 'r')]
+    pub relation: Option<String>,
+
+    /// Actor (target identity)
+    #[arg(long, short = 'a')]
+    pub actor: Option<String>,
+}
+
+/// Arguments for acp node relationship delete command
+#[derive(Args, Debug)]
+pub struct AcpNodeRelationshipDeleteArgs {
+    /// Relation name
+    #[arg(long, short = 'r')]
+    pub relation: Option<String>,
+
+    /// Actor (target identity)
+    #[arg(long, short = 'a')]
+    pub actor: Option<String>,
+}
+
+/// Arguments for acp node status command
+#[derive(Args, Debug)]
+pub struct AcpNodeStatusArgs {}
+
+/// Arguments for acp node disable command
+#[derive(Args, Debug)]
+pub struct AcpNodeDisableArgs {}
+
+/// Arguments for acp node re-enable command
+#[derive(Args, Debug)]
+pub struct AcpNodeReEnableArgs {}
 
 impl AcpArgs {
     /// Execute the ACP command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            AcpCommand::Add(args) => args.execute(ctx).await,
-            AcpCommand::List(args) => args.execute(ctx).await,
-            AcpCommand::Describe(args) => args.execute(ctx).await,
+            AcpCommand::Document(args) => args.execute(ctx).await,
+            AcpCommand::Node(args) => args.execute(ctx).await,
         }
     }
 }
 
-impl AcpAddArgs {
-    /// Execute the acp add command
+impl AcpDocumentArgs {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        match &self.command {
+            AcpDocumentCommand::Policy(args) => args.execute(ctx).await,
+            AcpDocumentCommand::Relationship(args) => args.execute(ctx).await,
+        }
+    }
+}
+
+impl AcpPolicyArgs {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        match &self.command {
+            AcpPolicyCommand::Add(args) => args.execute(ctx).await,
+        }
+    }
+}
+
+impl AcpPolicyAddArgs {
+    /// Execute the acp policy add command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         let policy = get_data_from_args(&self.policy, &self.file)?;
 
@@ -76,35 +236,165 @@ impl AcpAddArgs {
     }
 }
 
-impl AcpListArgs {
-    /// Execute the acp list command
+impl AcpDocumentRelationshipArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        match &self.command {
+            AcpDocumentRelationshipCommand::Add(args) => args.execute(ctx).await,
+            AcpDocumentRelationshipCommand::Delete(args) => args.execute(ctx).await,
+        }
+    }
+}
+
+impl AcpDocumentRelationshipAddArgs {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let collection = self.collection.as_deref().ok_or_else(|| {
+            crate::error::Error::MissingInput("--collection is required".to_string())
+        })?;
+        let doc_id = self
+            .doc_id
+            .as_deref()
+            .ok_or_else(|| crate::error::Error::MissingInput("--docID is required".to_string()))?;
+        let relation = self.relation.as_deref().ok_or_else(|| {
+            crate::error::Error::MissingInput("--relation is required".to_string())
+        })?;
+        let actor = self
+            .actor
+            .as_deref()
+            .ok_or_else(|| crate::error::Error::MissingInput("--actor is required".to_string()))?;
+
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        let policies = client.acp_list_policies().await?;
-        println!("{}", serde_json::to_string_pretty(&policies)?);
+        let result = client
+            .acp_doc_relationship_add(collection, doc_id, relation, actor)
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }
 
-impl AcpDescribeArgs {
-    /// Execute the acp describe command
+impl AcpDocumentRelationshipDeleteArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
-        // Validate policy ID is not empty
-        if self.id.trim().is_empty() {
-            return Err(Error::InvalidIdentifier(
-                "policy ID cannot be empty".to_string(),
-            ));
-        }
+        let collection = self.collection.as_deref().ok_or_else(|| {
+            crate::error::Error::MissingInput("--collection is required".to_string())
+        })?;
+        let doc_id = self
+            .doc_id
+            .as_deref()
+            .ok_or_else(|| crate::error::Error::MissingInput("--docID is required".to_string()))?;
+        let relation = self.relation.as_deref().ok_or_else(|| {
+            crate::error::Error::MissingInput("--relation is required".to_string())
+        })?;
+        let actor = self
+            .actor
+            .as_deref()
+            .ok_or_else(|| crate::error::Error::MissingInput("--actor is required".to_string()))?;
 
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        let policy = client.acp_get_policy(&self.id).await?;
-        println!("{}", serde_json::to_string_pretty(&policy)?);
+        let result = client
+            .acp_doc_relationship_delete(collection, doc_id, relation, actor)
+            .await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        Ok(())
+    }
+}
+
+impl AcpNodeArgs {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        match &self.command {
+            AcpNodeCommand::Relationship(args) => args.execute(ctx).await,
+            AcpNodeCommand::Status(args) => args.execute(ctx).await,
+            AcpNodeCommand::Disable(args) => args.execute(ctx).await,
+            AcpNodeCommand::ReEnable(args) => args.execute(ctx).await,
+        }
+    }
+}
+
+impl AcpNodeRelationshipArgs {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        match &self.command {
+            AcpNodeRelationshipCommand::Add(args) => args.execute(ctx).await,
+            AcpNodeRelationshipCommand::Delete(args) => args.execute(ctx).await,
+        }
+    }
+}
+
+impl AcpNodeRelationshipAddArgs {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let relation = self.relation.as_deref().ok_or_else(|| {
+            crate::error::Error::MissingInput("--relation is required".to_string())
+        })?;
+        let actor = self
+            .actor
+            .as_deref()
+            .ok_or_else(|| crate::error::Error::MissingInput("--actor is required".to_string()))?;
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.nac_add_relationship(relation, actor).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        Ok(())
+    }
+}
+
+impl AcpNodeRelationshipDeleteArgs {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let relation = self.relation.as_deref().ok_or_else(|| {
+            crate::error::Error::MissingInput("--relation is required".to_string())
+        })?;
+        let actor = self
+            .actor
+            .as_deref()
+            .ok_or_else(|| crate::error::Error::MissingInput("--actor is required".to_string()))?;
+
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.nac_remove_relationship(relation, actor).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        Ok(())
+    }
+}
+
+impl AcpNodeStatusArgs {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.nac_status().await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        Ok(())
+    }
+}
+
+impl AcpNodeDisableArgs {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.nac_disable().await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        Ok(())
+    }
+}
+
+impl AcpNodeReEnableArgs {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.nac_re_enable().await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }
@@ -114,8 +404,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_acp_add_args_with_data() {
-        let args = AcpAddArgs {
+    fn test_acp_policy_add_args_with_data() {
+        let args = AcpPolicyAddArgs {
             policy: Some("test policy".to_string()),
             file: None,
         };
@@ -124,20 +414,12 @@ mod tests {
     }
 
     #[test]
-    fn test_acp_add_args_with_file() {
-        let args = AcpAddArgs {
+    fn test_acp_policy_add_args_with_file() {
+        let args = AcpPolicyAddArgs {
             policy: None,
             file: Some(PathBuf::from("policy.yaml")),
         };
         assert!(args.policy.is_none());
         assert!(args.file.is_some());
-    }
-
-    #[test]
-    fn test_acp_describe_args() {
-        let args = AcpDescribeArgs {
-            id: "policy123".to_string(),
-        };
-        assert_eq!(args.id, "policy123");
     }
 }

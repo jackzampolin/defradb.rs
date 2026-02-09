@@ -87,17 +87,11 @@ pub struct StartArgs {
 
     /// Hex formatted private key used to authenticate with ACP.
     ///
-    /// The key should be a 64-byte hex string (128 hex characters) for Ed25519,
-    /// or a 32-byte hex string (64 hex characters) for secp256k1.
-    ///
-    /// Example: defra start --identity 0x<hex-encoded-private-key>
+    /// The key type is auto-detected from the key length:
+    /// - 64 bytes (128 hex chars) → Ed25519
+    /// - 32 bytes (64 hex chars) → secp256k1
     #[arg(short = 'i', long)]
     pub identity: Option<String>,
-
-    /// Key type for the identity (ed25519 or secp256k1).
-    /// Only used if --identity is provided.
-    #[arg(long, default_value = "ed25519")]
-    pub identity_key_type: Option<String>,
 
     /// Retry intervals for the replicator (comma-separated seconds)
     #[arg(long, value_delimiter = ',')]
@@ -129,9 +123,9 @@ impl StartArgs {
     /// Parse the user identity from the --identity flag.
     ///
     /// The identity flag should contain a hex-encoded private key.
-    /// Supported formats:
-    /// - Ed25519: 64-byte key (128 hex chars) or 32-byte seed (64 hex chars)
-    /// - secp256k1: 32-byte key (64 hex chars)
+    /// Key type is auto-detected from byte length:
+    /// - 64 bytes → Ed25519
+    /// - 32 bytes → secp256k1
     fn parse_user_identity(&self) -> Result<Option<std::sync::Arc<identity::RawIdentity>>> {
         let hex_key = match &self.identity {
             Some(key) => key,
@@ -146,14 +140,17 @@ impl StartArgs {
             Error::InvalidIdentity(format!("invalid hex in --identity flag: {}", e))
         })?;
 
-        // Determine key type
-        let key_type_str = self.identity_key_type.as_deref().unwrap_or("ed25519");
-        let key_type: identity::IdentityKeyType = key_type_str.parse().map_err(|_| {
-            Error::InvalidIdentity(format!(
-                "invalid --identity-key-type '{}': expected 'ed25519' or 'secp256k1'",
-                key_type_str
-            ))
-        })?;
+        // Auto-detect key type from byte length
+        let key_type = match key_bytes.len() {
+            64 => identity::IdentityKeyType::Ed25519,
+            32 => identity::IdentityKeyType::Secp256k1,
+            n => {
+                return Err(Error::InvalidIdentity(format!(
+                    "invalid key length {} bytes: expected 64 (ed25519) or 32 (secp256k1)",
+                    n
+                )));
+            }
+        };
 
         // Create identity from bytes
         let raw_identity = identity::RawIdentity::from_identity_key_type(key_type, &key_bytes)?;
@@ -276,6 +273,8 @@ impl Node {
                 let store = Arc::new(storage::MemoryStore::new());
                 // Use in-memory ACP store for memory datastore
                 let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
+                let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
+                    Arc::new(acp::MemoryZanzibarStore::new());
                 info!("Using in-memory ACP store");
                 Self::init_store_and_server(
                     store,
@@ -283,6 +282,7 @@ impl Node {
                     peer_keypair,
                     user_identity.clone(),
                     acp_store,
+                    zanzibar_store,
                 )
                 .await?
             }
@@ -293,12 +293,15 @@ impl Node {
                 info!("Using unified ACP store (namespace isolated in main database)");
                 let acp_store: Arc<dyn acp::AcpStore> =
                     Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
+                let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
+                    Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
                 Self::init_store_and_server(
                     store,
                     &config,
                     peer_keypair,
                     user_identity.clone(),
                     acp_store,
+                    zanzibar_store,
                 )
                 .await?
             }
@@ -424,6 +427,7 @@ impl Node {
         peer_keypair: Option<p2p::Keypair>,
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
         acp_store: Arc<dyn acp::AcpStore>,
+        zanzibar_store: Arc<dyn acp::ZanzibarStore>,
     ) -> Result<(
         Option<p2p::P2PHostHandle>,
         Option<P2PTasks>,
@@ -656,6 +660,7 @@ impl Node {
             );
 
             // Create LocalDocumentACP with the provided store
+            let acp_store_for_http = acp_store.clone();
             let document_acp: Arc<dyn acp::DocumentACP> =
                 Arc::new(acp::LocalDocumentACP::new(acp_store));
             info!("Document ACP configured");
@@ -723,6 +728,40 @@ impl Node {
                     warn!("Failed to create lens adapter: {}", e);
                 }
             }
+
+            // Wire NAC (Node Access Control) to HTTP server
+            let nac_config = db::NacConfig::new();
+            let nac_manager: std::sync::Arc<dyn db::NacManagerApi> =
+                std::sync::Arc::new(db::create_memory_nac_manager(nac_config));
+            let nac_adapter = crate::nac_adapter::NacAdapter::new_arc(nac_manager);
+            server = server.with_nac_arc(nac_adapter);
+            info!("NAC HTTP endpoints enabled");
+
+            // Wire ACP policy operations to HTTP server
+            let acp_adapter = crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store);
+            server = server.with_acp_arc(acp_adapter);
+            info!("ACP policy HTTP endpoints enabled");
+
+            // Wire document ACP operations to HTTP server
+            let doc_acp_adapter = crate::doc_acp_adapter::DocumentAcpAdapter::new_arc(
+                database.clone(),
+                Arc::new(acp::LocalDocumentACP::new(acp_store_for_http)),
+            );
+            server = server.with_doc_acp_arc(doc_acp_adapter);
+            info!("Document ACP HTTP endpoints enabled");
+
+            // Wire collection management operations to HTTP server
+            let collection_mgmt_adapter =
+                crate::collection_mgmt_adapter::CollectionManagementAdapter::new_arc(
+                    database.clone(),
+                );
+            server = server.with_collection_mgmt_arc(collection_mgmt_adapter);
+            info!("Collection management HTTP endpoints enabled");
+
+            // Wire index operations to HTTP server
+            let index_adapter = crate::index_adapter::IndexAdapter::new_arc(database.clone());
+            server = server.with_index_arc(index_adapter);
+            info!("Index HTTP endpoints enabled");
 
             // Wire event bus to HTTP server for GraphQL subscriptions
             server = server.with_event_bus_arc(event_bus);

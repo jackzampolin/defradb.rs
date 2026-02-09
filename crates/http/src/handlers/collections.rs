@@ -83,6 +83,107 @@ pub async fn get_collection_doc_ids(
     }
 }
 
+/// Request body for patching a collection schema.
+#[derive(Debug, serde::Deserialize)]
+pub struct PatchCollectionRequest {
+    /// Collection name (or version ID) to patch.
+    #[serde(rename = "Name", alias = "name")]
+    pub name: String,
+    /// JSON Patch (RFC 6902) as a JSON string or array.
+    #[serde(rename = "Patch", alias = "patch")]
+    pub patch: serde_json::Value,
+}
+
+/// Request body for setting the active collection version.
+#[derive(Debug, serde::Deserialize)]
+pub struct SetActiveRequest {
+    /// The version ID to activate.
+    #[serde(rename = "VersionID", alias = "version_id")]
+    pub version_id: String,
+}
+
+/// Patch a collection schema.
+///
+/// PATCH /api/v0/collections
+///
+/// Applies a JSON Patch (RFC 6902) to a collection schema, creating a
+/// new schema version.
+///
+/// Requires `CollectionUpdate` permission when NAC is enabled.
+pub async fn patch_collection(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Json(body): Json<PatchCollectionRequest>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
+
+    let collection_mgmt = state.require_collection_mgmt()?;
+
+    let patch_str = if body.patch.is_string() {
+        body.patch.as_str().unwrap().to_string()
+    } else {
+        serde_json::to_string(&body.patch)
+            .map_err(|e| HttpError::BadRequest(format!("invalid patch: {}", e)))?
+    };
+
+    let result = collection_mgmt
+        .patch_collection(&body.name, &patch_str)
+        .await
+        .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(result))
+}
+
+/// Set the active collection version.
+///
+/// POST /api/v0/collections/set-active
+///
+/// Activates the specified version and deactivates other versions
+/// of the same collection.
+///
+/// Requires `CollectionUpdate` permission when NAC is enabled.
+pub async fn set_active(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Json(body): Json<SetActiveRequest>,
+) -> Result<Json<()>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
+
+    let collection_mgmt = state.require_collection_mgmt()?;
+
+    collection_mgmt
+        .set_active_version(&body.version_id)
+        .await
+        .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(()))
+}
+
+/// Truncate all documents in a collection.
+///
+/// DELETE /api/v0/collections/{name}/truncate
+///
+/// Deletes all documents, heads, blocks, and index entries while
+/// preserving the collection schema.
+///
+/// Requires `DocumentDelete` permission when NAC is enabled.
+pub async fn truncate_collection(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Path(name): Path<String>,
+) -> Result<Json<()>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionTruncate).await?;
+
+    let collection_mgmt = state.require_collection_mgmt()?;
+
+    collection_mgmt
+        .truncate_collection(&name)
+        .await
+        .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

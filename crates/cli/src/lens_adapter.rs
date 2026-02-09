@@ -56,6 +56,30 @@ impl LensOperations for LensAdapter {
         // When persistence is implemented, this will reload from disk.
         Ok(())
     }
+
+    async fn add(&self, config: &str) -> Result<String, String> {
+        let lens_config: LensConfig = serde_json::from_str(config)
+            .map_err(|e| format!("failed to parse lens config: {}", e))?;
+
+        let transform_id = self
+            .store
+            .add(lens_config)
+            .await
+            .map_err(|e| format!("failed to add lens: {}", e))?;
+
+        Ok(transform_id.to_string())
+    }
+
+    async fn list(&self) -> Result<serde_json::Value, String> {
+        let modules = self
+            .store
+            .list()
+            .await
+            .map_err(|e| format!("failed to list lenses: {}", e))?;
+
+        serde_json::to_value(&modules)
+            .map_err(|e| format!("failed to serialize lens modules: {}", e))
+    }
 }
 
 #[cfg(test)]
@@ -80,8 +104,7 @@ mod tests {
         }"#;
         let result = adapter.set_migration(config).await;
         assert!(result.is_err());
-        // Should fail because no path or module bytes provided
-        assert!(result.unwrap_err().contains("failed to set migration"));
+        assert!(result.unwrap_err().contains("failed to parse lens config"));
     }
 
     #[tokio::test]

@@ -20,8 +20,12 @@ pub struct QueryArgs {
     #[arg(long, short = 'f', conflicts_with = "query")]
     pub file: Option<PathBuf>,
 
+    /// Name of the operation to execute in the query
+    #[arg(long, short = 'o')]
+    pub operation: Option<String>,
+
     /// Variables to pass to the query (JSON format)
-    #[arg(long, short = 'v')]
+    #[arg(long)]
     pub variables: Option<String>,
 
     /// Transaction ID to execute the query within
@@ -93,6 +97,7 @@ mod tests {
         let args = QueryArgs {
             query: Some("{ Users { name } }".to_string()),
             file: None,
+            operation: None,
             variables: None,
             txn_id: None,
         };
@@ -104,6 +109,7 @@ mod tests {
         let args = QueryArgs {
             query: Some("{ Users { name } }".to_string()),
             file: None,
+            operation: None,
             variables: Some(r#"{"limit": 10}"#.to_string()),
             txn_id: None,
         };
@@ -116,6 +122,7 @@ mod tests {
         let args = QueryArgs {
             query: None,
             file: None,
+            operation: None,
             variables: None,
             txn_id: None,
         };

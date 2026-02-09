@@ -15,7 +15,9 @@ use query::rest::RestOperations;
 
 use crate::error::Result;
 use crate::router::{
-    create_router_with_state, AppStateBuilder, LensOperations, P2POperations, SchemaOperations,
+    create_router_with_state, AcpOperations, AppStateBuilder, CollectionManagementOperations,
+    DocumentAcpOperations, IndexOperations, LensOperations, NodeAcpOperations, P2POperations,
+    SchemaOperations,
 };
 
 /// Server configuration options.
@@ -43,8 +45,13 @@ pub struct Server {
     executor: Arc<dyn QueryExecutor>,
     rest: Option<Arc<dyn RestOperations>>,
     p2p: Option<Arc<dyn P2POperations>>,
+    acp: Option<Arc<dyn AcpOperations>>,
+    index: Option<Arc<dyn IndexOperations>>,
     schema: Option<Arc<dyn SchemaOperations>>,
     lens: Option<Arc<dyn LensOperations>>,
+    nac: Option<Arc<dyn NodeAcpOperations>>,
+    collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
+    doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
 }
 
@@ -56,8 +63,13 @@ impl Server {
             executor: Arc::new(executor),
             rest: None,
             p2p: None,
+            acp: None,
+            index: None,
             schema: None,
             lens: None,
+            nac: None,
+            collection_mgmt: None,
+            doc_acp: None,
             event_bus: None,
         }
     }
@@ -69,8 +81,13 @@ impl Server {
             executor: Arc::new(executor),
             rest: None,
             p2p: None,
+            acp: None,
+            index: None,
             schema: None,
             lens: None,
+            nac: None,
+            collection_mgmt: None,
+            doc_acp: None,
             event_bus: None,
         }
     }
@@ -82,8 +99,13 @@ impl Server {
             executor,
             rest: None,
             p2p: None,
+            acp: None,
+            index: None,
             schema: None,
             lens: None,
+            nac: None,
+            collection_mgmt: None,
+            doc_acp: None,
             event_bus: None,
         }
     }
@@ -95,8 +117,13 @@ impl Server {
             executor,
             rest: None,
             p2p: None,
+            acp: None,
+            index: None,
             schema: None,
             lens: None,
+            nac: None,
+            collection_mgmt: None,
+            doc_acp: None,
             event_bus: None,
         }
     }
@@ -139,6 +166,18 @@ impl Server {
         self
     }
 
+    /// Set ACP operations from an Arc.
+    pub fn with_acp_arc(mut self, acp: Arc<dyn AcpOperations>) -> Self {
+        self.acp = Some(acp);
+        self
+    }
+
+    /// Set index operations from an Arc.
+    pub fn with_index_arc(mut self, index: Arc<dyn IndexOperations>) -> Self {
+        self.index = Some(index);
+        self
+    }
+
     /// Set schema operations for schema management endpoints.
     ///
     /// When schema operations are configured, the server enables:
@@ -167,6 +206,27 @@ impl Server {
     /// Set lens operations from an Arc.
     pub fn with_lens_arc(mut self, lens: Arc<dyn LensOperations>) -> Self {
         self.lens = Some(lens);
+        self
+    }
+
+    /// Set NAC (Node Access Control) operations from an Arc.
+    pub fn with_nac_arc(mut self, nac: Arc<dyn NodeAcpOperations>) -> Self {
+        self.nac = Some(nac);
+        self
+    }
+
+    /// Set document ACP operations from an Arc.
+    pub fn with_doc_acp_arc(mut self, doc_acp: Arc<dyn DocumentAcpOperations>) -> Self {
+        self.doc_acp = Some(doc_acp);
+        self
+    }
+
+    /// Set collection management operations from an Arc.
+    pub fn with_collection_mgmt_arc(
+        mut self,
+        collection_mgmt: Arc<dyn CollectionManagementOperations>,
+    ) -> Self {
+        self.collection_mgmt = Some(collection_mgmt);
         self
     }
 
@@ -199,11 +259,26 @@ impl Server {
         if let Some(ref p2p) = self.p2p {
             builder = builder.with_p2p(Arc::clone(p2p));
         }
+        if let Some(ref acp) = self.acp {
+            builder = builder.with_acp(Arc::clone(acp));
+        }
+        if let Some(ref index) = self.index {
+            builder = builder.with_index(Arc::clone(index));
+        }
         if let Some(ref schema) = self.schema {
             builder = builder.with_schema(Arc::clone(schema));
         }
         if let Some(ref lens) = self.lens {
             builder = builder.with_lens(Arc::clone(lens));
+        }
+        if let Some(ref nac) = self.nac {
+            builder = builder.with_nac(Arc::clone(nac));
+        }
+        if let Some(ref collection_mgmt) = self.collection_mgmt {
+            builder = builder.with_collection_mgmt(Arc::clone(collection_mgmt));
+        }
+        if let Some(ref doc_acp) = self.doc_acp {
+            builder = builder.with_doc_acp(Arc::clone(doc_acp));
         }
         if let Some(ref event_bus) = self.event_bus {
             builder = builder.with_event_bus(Arc::clone(event_bus));

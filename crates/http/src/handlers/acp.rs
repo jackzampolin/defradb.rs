@@ -14,7 +14,7 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
@@ -93,6 +93,94 @@ pub async fn get_policy(
         .ok_or_else(|| HttpError::NotFound(format!("Policy '{}' not found", id)))?;
 
     Ok(Json(policy))
+}
+
+/// Request body for document ACP relationship operations (Go-compatible).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DocRelationshipRequest {
+    #[serde(alias = "collection")]
+    pub collection: String,
+    #[serde(alias = "docID")]
+    pub doc_id: String,
+    #[serde(alias = "relation")]
+    pub relation: String,
+    #[serde(alias = "actor")]
+    pub target_actor: String,
+}
+
+/// Response for document ACP relationship operations (Go-compatible).
+#[derive(Debug, Clone, Serialize)]
+pub struct DocRelationshipResponse {
+    #[serde(rename = "ExistedAlready")]
+    pub existed_already: bool,
+}
+
+/// Add a document ACP relationship.
+///
+/// POST /api/v0/acp/document/relationship
+///
+/// Requires `DacRelationAdd` permission when NAC is enabled.
+pub async fn add_doc_relationship(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Json(body): Json<DocRelationshipRequest>,
+) -> Result<Json<DocRelationshipResponse>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DacRelationAdd).await?;
+
+    let requestor = identity
+        .did()
+        .ok_or_else(|| HttpError::BadRequest("identity required for document ACP".into()))?;
+
+    let doc_acp = state.require_doc_acp()?;
+
+    let is_new = doc_acp
+        .add_doc_relationship(
+            requestor,
+            &body.target_actor,
+            &body.collection,
+            &body.doc_id,
+            &body.relation,
+        )
+        .await
+        .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(DocRelationshipResponse {
+        existed_already: !is_new,
+    }))
+}
+
+/// Remove a document ACP relationship.
+///
+/// DELETE /api/v0/acp/document/relationship
+///
+/// Requires `DacRelationDelete` permission when NAC is enabled.
+pub async fn remove_doc_relationship(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Json(body): Json<DocRelationshipRequest>,
+) -> Result<Json<DocRelationshipResponse>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DacRelationDelete).await?;
+
+    let requestor = identity
+        .did()
+        .ok_or_else(|| HttpError::BadRequest("identity required for document ACP".into()))?;
+
+    let doc_acp = state.require_doc_acp()?;
+
+    let was_removed = doc_acp
+        .delete_doc_relationship(
+            requestor,
+            &body.target_actor,
+            &body.collection,
+            &body.doc_id,
+            &body.relation,
+        )
+        .await
+        .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(DocRelationshipResponse {
+        existed_already: !was_removed,
+    }))
 }
 
 #[cfg(test)]

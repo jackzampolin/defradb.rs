@@ -16,6 +16,7 @@ use crate::permission::DocumentPermission;
 /// - Registration: Documents are registered with an owner when created with identity
 /// - Access checks: Verify if an identity has permission to perform an operation
 /// - Relationship management: Add/remove actor relationships for sharing
+#[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait DocumentACP: MaybeSendSync {

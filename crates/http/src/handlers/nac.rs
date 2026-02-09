@@ -255,3 +255,49 @@ pub async fn go_remove_relationship(
     // Go returns 200 OK with empty body on success
     Ok(axum::http::StatusCode::OK.into_response())
 }
+
+/// POST /api/v0/acp/node/disable
+///
+/// Temporarily disable NAC on this node.
+/// The requestor must be an admin.
+pub async fn disable(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<()>, HttpError> {
+    let nac = state.require_nac()?;
+
+    let requestor = identity
+        .did()
+        .cloned()
+        .ok_or_else(|| HttpError::Forbidden("authentication required to disable NAC".into()))?;
+
+    nac.disable(&requestor).await.map_err(|e| {
+        tracing::warn!(error = %e, "NAC disable operation failed");
+        HttpError::Forbidden(e)
+    })?;
+
+    Ok(Json(()))
+}
+
+/// POST /api/v0/acp/node/re-enable
+///
+/// Re-enable NAC on this node after it was disabled.
+/// The requestor must be an admin.
+pub async fn re_enable(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<()>, HttpError> {
+    let nac = state.require_nac()?;
+
+    let requestor = identity
+        .did()
+        .cloned()
+        .ok_or_else(|| HttpError::Forbidden("authentication required to re-enable NAC".into()))?;
+
+    nac.re_enable(&requestor).await.map_err(|e| {
+        tracing::warn!(error = %e, "NAC re-enable operation failed");
+        HttpError::Forbidden(e)
+    })?;
+
+    Ok(Json(()))
+}

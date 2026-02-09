@@ -2,16 +2,21 @@
 
 mod acp;
 mod backup;
+mod block;
 mod collection;
-mod document;
+mod dump;
+mod encrypted_index;
 pub mod http_client;
 mod index;
 mod lens;
+mod node_identity;
 mod p2p;
+mod purge;
 mod query;
 mod schema;
 mod tx;
 mod validation;
+mod view;
 
 use std::path::PathBuf;
 
@@ -19,14 +24,19 @@ use clap::{Args, Subcommand};
 
 pub use acp::AcpArgs;
 pub use backup::BackupArgs;
+pub use block::BlockArgs;
 pub use collection::CollectionArgs;
-pub use document::DocumentArgs;
+pub use dump::DumpArgs;
+pub use encrypted_index::EncryptedIndexArgs;
 pub use index::IndexArgs;
 pub use lens::LensArgs;
+pub use node_identity::NodeIdentityArgs;
 pub use p2p::P2pArgs;
+pub use purge::PurgeArgs;
 pub use query::QueryArgs;
 pub use schema::SchemaArgs;
 pub use tx::TxArgs;
+pub use view::ViewArgs;
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -90,22 +100,32 @@ pub enum ClientCommand {
     Acp(AcpArgs),
     /// Manage database backups
     Backup(BackupArgs),
-    /// Interact with collections
+    /// Interact with blocks
+    Block(BlockArgs),
+    /// Interact with collections and documents
     Collection(CollectionArgs),
-    /// Interact with documents
-    Document(DocumentArgs),
+    /// Dump the database contents
+    Dump(DumpArgs),
+    /// Manage encrypted indexes
+    EncryptedIndex(EncryptedIndexArgs),
     /// Manage database indexes
     Index(IndexArgs),
     /// Manage lens schema migrations
     Lens(LensArgs),
+    /// Get the node's identity
+    NodeIdentity(NodeIdentityArgs),
     /// Manage P2P network
     P2p(P2pArgs),
+    /// Purge all database data
+    Purge(PurgeArgs),
     /// Execute a GraphQL query
     Query(QueryArgs),
     /// Interact with schema
     Schema(SchemaArgs),
     /// Manage transactions
     Tx(TxArgs),
+    /// Manage views
+    View(ViewArgs),
 }
 
 impl ClientArgs {
@@ -130,14 +150,19 @@ impl ClientArgs {
         match &self.command {
             ClientCommand::Acp(args) => args.execute(&ctx).await,
             ClientCommand::Backup(args) => args.execute(&ctx).await,
+            ClientCommand::Block(args) => args.execute(&ctx).await,
             ClientCommand::Collection(args) => args.execute(&ctx).await,
-            ClientCommand::Document(args) => args.execute(&ctx).await,
+            ClientCommand::Dump(args) => args.execute(&ctx).await,
+            ClientCommand::EncryptedIndex(args) => args.execute(&ctx).await,
             ClientCommand::Index(args) => args.execute(&ctx).await,
             ClientCommand::Lens(args) => args.execute(&ctx).await,
+            ClientCommand::NodeIdentity(args) => args.execute(&ctx).await,
             ClientCommand::P2p(args) => args.execute(&ctx).await,
+            ClientCommand::Purge(args) => args.execute(&ctx).await,
             ClientCommand::Query(args) => args.execute(&ctx).await,
             ClientCommand::Schema(args) => args.execute(&ctx).await,
             ClientCommand::Tx(args) => args.execute(&ctx).await,
+            ClientCommand::View(args) => args.execute(&ctx).await,
         }
     }
 }

@@ -16,20 +16,24 @@ pub struct TxArgs {
 /// Transaction subcommands
 #[derive(Subcommand, Debug)]
 pub enum TxCommand {
-    /// Begin a new transaction
-    Begin(TxBeginArgs),
+    /// Create a new transaction
+    Create(TxCreateArgs),
     /// Commit a transaction
     Commit(TxCommitArgs),
     /// Discard (rollback) a transaction
     Discard(TxDiscardArgs),
 }
 
-/// Arguments for tx begin command
+/// Arguments for tx create command
 #[derive(Args, Debug)]
-pub struct TxBeginArgs {
+pub struct TxCreateArgs {
     /// Create a read-only transaction
+    #[arg(long = "read-only")]
+    pub read_only: bool,
+
+    /// Create a concurrent transaction
     #[arg(long)]
-    pub readonly: bool,
+    pub concurrent: bool,
 }
 
 /// Arguments for tx commit command
@@ -52,20 +56,20 @@ impl TxArgs {
     /// Execute the transaction command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            TxCommand::Begin(args) => args.execute(ctx).await,
+            TxCommand::Create(args) => args.execute(ctx).await,
             TxCommand::Commit(args) => args.execute(ctx).await,
             TxCommand::Discard(args) => args.execute(ctx).await,
         }
     }
 }
 
-impl TxBeginArgs {
-    /// Execute the tx begin command
+impl TxCreateArgs {
+    /// Execute the tx create command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
-        let response = client.tx_begin(self.readonly).await?;
+        let response = client.tx_begin(self.read_only).await?;
         println!("{}", response.txn_id);
         Ok(())
     }
@@ -100,9 +104,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tx_begin_args_default() {
-        let args = TxBeginArgs { readonly: false };
-        assert!(!args.readonly);
+    fn test_tx_create_args_default() {
+        let args = TxCreateArgs {
+            read_only: false,
+            concurrent: false,
+        };
+        assert!(!args.read_only);
+        assert!(!args.concurrent);
     }
 
     #[test]

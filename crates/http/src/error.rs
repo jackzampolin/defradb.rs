@@ -35,6 +35,9 @@ pub enum HttpError {
     #[error("internal error: {0}")]
     Internal(String),
 
+    #[error("not implemented: {0}")]
+    NotImplemented(String),
+
     #[error("query execution failed: {0}")]
     QueryExecution(String),
 }
@@ -54,6 +57,7 @@ impl IntoResponse for HttpError {
             HttpError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             HttpError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
             HttpError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+            HttpError::NotImplemented(msg) => (StatusCode::NOT_IMPLEMENTED, msg.clone()),
             HttpError::QueryExecution(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
         };
 

@@ -126,6 +126,26 @@ pub async fn list_peers(
     Ok(Json(peer_infos))
 }
 
+/// List active peers (Go-compatible).
+///
+/// GET /api/v0/p2p/active-peers
+///
+/// Returns array of connected peer IDs as strings.
+///
+/// Requires `P2pPeerConnect` permission when NAC is enabled.
+pub async fn active_peers(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<Vec<String>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pPeerConnect).await?;
+
+    let p2p = state.require_p2p()?;
+
+    let peers = p2p.connected_peers().await.map_err(HttpError::Internal)?;
+
+    Ok(Json(peers))
+}
+
 /// Connect to a peer (legacy format).
 ///
 /// POST /api/v0/p2p/peers

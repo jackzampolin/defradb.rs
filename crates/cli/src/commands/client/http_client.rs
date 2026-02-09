@@ -204,7 +204,24 @@ impl HttpClient {
                         req
                     }
                 }
-                "DELETE" => self.add_auth_header(self.client.delete(url)),
+                "PATCH" => {
+                    let req = self.add_auth_header(self.client.patch(url));
+                    if let Some(b) = body {
+                        req.header("Content-Type", "application/json")
+                            .body(b.to_string())
+                    } else {
+                        req
+                    }
+                }
+                "DELETE" => {
+                    let req = self.add_auth_header(self.client.delete(url));
+                    if let Some(b) = body {
+                        req.header("Content-Type", "application/json")
+                            .body(b.to_string())
+                    } else {
+                        req
+                    }
+                }
                 _ => {
                     return Err(Error::Server(format!(
                         "Unsupported HTTP method: {}",
@@ -340,6 +357,27 @@ impl HttpClient {
             txn_id: txn_id.to_string(),
         };
         self.post_json(&url, &request).await
+    }
+
+    /// Helper for POST requests with plain text body
+    async fn post_text(&self, url: &str, text: &str) -> Result<Response> {
+        let request = self
+            .add_auth_header(self.client.post(url))
+            .header("Content-Type", "text/plain")
+            .body(text.to_string());
+
+        if self.verbose {
+            eprintln!(">>> POST {}", url);
+            eprintln!(">>> Body: {}", text);
+        }
+
+        let response = request.send().await.map_err(Error::HttpRequest)?;
+
+        if self.verbose {
+            eprintln!("<<< HTTP {}", response.status());
+        }
+
+        Ok(response)
     }
 
     /// Helper for POST requests with JSON body
@@ -850,4 +888,440 @@ pub struct LensSetMigrationResponse {
     /// The transform ID assigned to this migration
     #[serde(rename = "transformId", alias = "TransformID", alias = "transform_id")]
     pub transform_id: String,
+}
+
+/// NAC relationship request
+#[derive(Debug, Serialize)]
+pub struct NacRelationshipRequest {
+    pub relation: String,
+    pub actor: String,
+}
+
+/// P2P connect request
+#[derive(Debug, Serialize)]
+pub struct P2pConnectRequest {
+    pub addresses: Vec<String>,
+}
+
+/// P2P document request
+#[derive(Debug, Serialize)]
+pub struct P2pDocumentRequest {
+    #[serde(rename = "docIDs", skip_serializing_if = "Vec::is_empty")]
+    pub doc_ids: Vec<String>,
+    #[serde(rename = "schemaIDs", skip_serializing_if = "Vec::is_empty")]
+    pub schema_ids: Vec<String>,
+}
+
+/// P2P document sync request
+#[derive(Debug, Serialize)]
+pub struct P2pDocumentSyncRequest {
+    #[serde(rename = "docID", skip_serializing_if = "Option::is_none")]
+    pub doc_id: Option<String>,
+    #[serde(rename = "schemaID", skip_serializing_if = "Option::is_none")]
+    pub schema_id: Option<String>,
+}
+
+impl HttpClient {
+    /// Add a schema definition (SDL text)
+    pub async fn schema_add(&self, sdl: &str) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/schema", self.base_url);
+        let response = self.post_text(&url, sdl).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Get document IDs from a collection
+    pub async fn collection_doc_ids(&self, name: &str) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/collections/{}", self.base_url, encode(name));
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Update a document by ID
+    pub async fn collection_update_doc(
+        &self,
+        name: &str,
+        doc_id: &str,
+        patch: &str,
+    ) -> Result<JsonValue> {
+        let url = format!(
+            "{}/api/v0/collections/{}/{}",
+            self.base_url,
+            encode(name),
+            encode(doc_id)
+        );
+        let response = self.send_with_retry("PATCH", &url, Some(patch)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Delete a document by ID
+    pub async fn collection_delete_doc(&self, name: &str, doc_id: &str) -> Result<()> {
+        let url = format!(
+            "{}/api/v0/collections/{}/{}",
+            self.base_url,
+            encode(name),
+            encode(doc_id)
+        );
+        let response = self.send_with_retry("DELETE", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    /// Get active peers
+    pub async fn p2p_active_peers(&self) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/p2p/active-peers", self.base_url);
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Connect to peer addresses
+    pub async fn p2p_connect(&self, addresses: &[String]) -> Result<()> {
+        let url = format!("{}/api/v0/p2p/connect", self.base_url);
+        let request = P2pConnectRequest {
+            addresses: addresses.to_vec(),
+        };
+        let body = serde_json::to_string(&request)?;
+        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    /// Add documents to P2P sync
+    pub async fn p2p_document_add(&self, doc_ids: &[String], schema_ids: &[String]) -> Result<()> {
+        let url = format!("{}/api/v0/p2p/documents", self.base_url);
+        let request = P2pDocumentRequest {
+            doc_ids: doc_ids.to_vec(),
+            schema_ids: schema_ids.to_vec(),
+        };
+        let body = serde_json::to_string(&request)?;
+        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    /// Remove documents from P2P sync
+    pub async fn p2p_document_remove(
+        &self,
+        doc_ids: &[String],
+        schema_ids: &[String],
+    ) -> Result<()> {
+        let url = format!("{}/api/v0/p2p/documents", self.base_url);
+        let request = P2pDocumentRequest {
+            doc_ids: doc_ids.to_vec(),
+            schema_ids: schema_ids.to_vec(),
+        };
+        let body = serde_json::to_string(&request)?;
+        let response = self.send_with_retry("DELETE", &url, Some(&body)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    /// List P2P synced documents
+    pub async fn p2p_document_list(&self) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/p2p/documents", self.base_url);
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Sync a P2P document
+    pub async fn p2p_document_sync(
+        &self,
+        doc_id: Option<&str>,
+        schema_id: Option<&str>,
+    ) -> Result<()> {
+        let url = format!("{}/api/v0/p2p/documents/sync", self.base_url);
+        let request = P2pDocumentSyncRequest {
+            doc_id: doc_id.map(|s| s.to_string()),
+            schema_id: schema_id.map(|s| s.to_string()),
+        };
+        let body = serde_json::to_string(&request)?;
+        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    /// Sync P2P collection versions
+    pub async fn p2p_collection_sync(&self) -> Result<()> {
+        let url = format!("{}/api/v0/p2p/collections/sync", self.base_url);
+        let response = self.send_with_retry("POST", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    /// Add a NAC relationship
+    pub async fn nac_add_relationship(&self, relation: &str, actor: &str) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/acp/node/relationship", self.base_url);
+        let request = NacRelationshipRequest {
+            relation: relation.to_string(),
+            actor: actor.to_string(),
+        };
+        let body = serde_json::to_string(&request)?;
+        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Remove a NAC relationship
+    pub async fn nac_remove_relationship(&self, relation: &str, actor: &str) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/acp/node/relationship", self.base_url);
+        let request = NacRelationshipRequest {
+            relation: relation.to_string(),
+            actor: actor.to_string(),
+        };
+        let body = serde_json::to_string(&request)?;
+        let response = self.send_with_retry("DELETE", &url, Some(&body)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Get NAC status
+    pub async fn nac_status(&self) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/acp/node/status", self.base_url);
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Get node identity
+    pub async fn node_identity(&self) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/node/identity", self.base_url);
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Purge all database data
+    pub async fn purge(&self) -> Result<()> {
+        let url = format!("{}/api/v0/purge", self.base_url);
+        let response = self.send_with_retry("POST", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    /// Patch a collection schema
+    pub async fn collection_patch(&self, patch: &str) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/collections", self.base_url);
+        let response = self.send_with_retry("PATCH", &url, Some(patch)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Set the active collection version
+    pub async fn collection_set_active(&self, version_id: Option<&str>) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/collections/set-active", self.base_url);
+        let body = serde_json::json!({ "versionID": version_id });
+        let body_str = serde_json::to_string(&body)?;
+        let response = self.send_with_retry("POST", &url, Some(&body_str)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Truncate all documents in a collection
+    pub async fn collection_truncate(&self, name: &str) -> Result<()> {
+        let url = format!(
+            "{}/api/v0/collections/{}/truncate",
+            self.base_url,
+            encode(name)
+        );
+        let response = self.send_with_retry("DELETE", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        Ok(())
+    }
+
+    /// Add a document ACP relationship
+    pub async fn acp_doc_relationship_add(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        relation: &str,
+        actor: &str,
+    ) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/acp/document/relationship", self.base_url);
+        let body = serde_json::json!({
+            "collection": collection,
+            "docID": doc_id,
+            "relation": relation,
+            "actor": actor,
+        });
+        let body_str = serde_json::to_string(&body)?;
+        let response = self.send_with_retry("POST", &url, Some(&body_str)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Remove a document ACP relationship
+    pub async fn acp_doc_relationship_delete(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        relation: &str,
+        actor: &str,
+    ) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/acp/document/relationship", self.base_url);
+        let body = serde_json::json!({
+            "collection": collection,
+            "docID": doc_id,
+            "relation": relation,
+            "actor": actor,
+        });
+        let body_str = serde_json::to_string(&body)?;
+        let response = self
+            .send_with_retry("DELETE", &url, Some(&body_str))
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Disable node ACP
+    pub async fn nac_disable(&self) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/acp/node/disable", self.base_url);
+        let response = self.send_with_retry("POST", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Re-enable node ACP
+    pub async fn nac_re_enable(&self) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/acp/node/re-enable", self.base_url);
+        let response = self.send_with_retry("POST", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// Add a lens migration
+    pub async fn lens_add(&self, config: &str) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/lens", self.base_url);
+        let response = self.send_with_retry("POST", &url, Some(config)).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
+
+    /// List lens migrations
+    pub async fn lens_list(&self) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/lens", self.base_url);
+        let response = self.send_with_retry("GET", &url, None).await?;
+
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+
+        let result: JsonValue = response.json().await?;
+        Ok(result)
+    }
 }

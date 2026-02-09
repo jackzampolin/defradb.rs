@@ -22,7 +22,6 @@ fn default_start_args() -> StartArgs {
         default_key_type: None,
         no_searchable_encryption: None,
         identity: None,
-        identity_key_type: None,
         replicator_retry_intervals: None,
     }
 }
@@ -92,7 +91,6 @@ fn test_apply_to_config_all_flags() {
         default_key_type: Some("ed25519".to_string()),
         no_searchable_encryption: Some(true),
         identity: None, // identity is handled in Node::new, not apply_to_config
-        identity_key_type: None,
         replicator_retry_intervals: Some(vec![10, 20, 30]),
     };
 

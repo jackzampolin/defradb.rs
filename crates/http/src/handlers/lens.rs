@@ -86,6 +86,51 @@ pub async fn reload(
     Ok(())
 }
 
+/// Add a lens migration.
+///
+/// POST /api/v0/lens
+///
+/// Accepts lens configuration in JSON format in the request body.
+///
+/// Requires `CollectionPatch` permission when NAC is enabled.
+pub async fn add_lens(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    body: String,
+) -> Result<Json<SetMigrationResponse>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
+
+    let lens = state.require_lens()?;
+
+    if body.trim().is_empty() {
+        return Err(HttpError::BadRequest(
+            "lens configuration cannot be empty".into(),
+        ));
+    }
+
+    let transform_id = lens.add(&body).await.map_err(HttpError::BadRequest)?;
+
+    Ok(Json(SetMigrationResponse { transform_id }))
+}
+
+/// List lens migrations.
+///
+/// GET /api/v0/lens
+///
+/// Requires `CollectionGet` permission when NAC is enabled.
+pub async fn list_lenses(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionGet).await?;
+
+    let lens = state.require_lens()?;
+
+    let modules = lens.list().await.map_err(HttpError::Internal)?;
+
+    Ok(Json(modules))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

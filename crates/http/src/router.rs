@@ -249,6 +249,16 @@ pub trait NodeAcpOperations: Send + Sync {
         requestor: &identity::Did,
         target: &identity::Did,
     ) -> Result<bool, String>;
+
+    /// Temporarily disable NAC on this node.
+    ///
+    /// The requestor must be an admin.
+    async fn disable(&self, requestor: &identity::Did) -> Result<(), String>;
+
+    /// Re-enable NAC after it was temporarily disabled.
+    ///
+    /// The requestor must be an admin (uses persisted check).
+    async fn re_enable(&self, requestor: &identity::Did) -> Result<(), String>;
 }
 
 /// NAC status information for HTTP responses.
@@ -273,6 +283,35 @@ pub trait SchemaOperations: Send + Sync {
     async fn add_schema(&self, sdl: &str) -> Result<Vec<schema::CollectionVersion>, String>;
 }
 
+/// Trait for collection management operations beyond basic CRUD.
+///
+/// Provides schema patching, version activation, and truncation operations
+/// that operate at the collection level rather than the document level.
+#[async_trait::async_trait]
+pub trait CollectionManagementOperations: Send + Sync {
+    /// Apply a JSON Patch (RFC 6902) to a collection schema.
+    ///
+    /// Creates a new schema version with the patched fields.
+    /// The `patch` should be a JSON array of patch operations.
+    async fn patch_collection(
+        &self,
+        collection_name: &str,
+        patch: &str,
+    ) -> Result<serde_json::Value, String>;
+
+    /// Set the active collection version.
+    ///
+    /// Activates the specified version and deactivates other versions
+    /// of the same collection.
+    async fn set_active_version(&self, version_id: &str) -> Result<(), String>;
+
+    /// Truncate a collection, deleting all documents while preserving the schema.
+    async fn truncate_collection(&self, name: &str) -> Result<(), String>;
+
+    /// Purge all data from all collections.
+    async fn purge(&self) -> Result<(), String>;
+}
+
 /// Trait for lens migration operations.
 ///
 /// Enables setting up migrations between schema versions using WASM transforms.
@@ -290,6 +329,54 @@ pub trait LensOperations: Send + Sync {
 
     /// Reload all lens modules from disk.
     async fn reload(&self) -> Result<(), String>;
+
+    /// Add a lens configuration directly.
+    ///
+    /// The config should be a JSON string containing the full lens configuration.
+    /// Returns the transform ID assigned to this lens.
+    async fn add(&self, config: &str) -> Result<String, String>;
+
+    /// List all registered lens modules.
+    ///
+    /// Returns a JSON value representing all registered transforms.
+    async fn list(&self) -> Result<serde_json::Value, String>;
+}
+
+/// Trait for document-level ACP operations.
+///
+/// Manages per-document access control relationships (e.g., granting a user
+/// read or write access to a specific document).
+#[async_trait::async_trait]
+pub trait DocumentAcpOperations: Send + Sync {
+    /// Add an actor relationship to a document.
+    ///
+    /// Grants the `target_actor` the specified `relation` on the document
+    /// identified by `collection` and `doc_id`.
+    ///
+    /// Returns `true` if a new relationship was created, `false` if it already existed.
+    async fn add_doc_relationship(
+        &self,
+        requestor: &identity::Did,
+        target_actor: &str,
+        collection: &str,
+        doc_id: &str,
+        relation: &str,
+    ) -> Result<bool, String>;
+
+    /// Delete an actor relationship from a document.
+    ///
+    /// Revokes the `target_actor`'s `relation` on the document
+    /// identified by `collection` and `doc_id`.
+    ///
+    /// Returns `true` if the relationship was removed, `false` if it didn't exist.
+    async fn delete_doc_relationship(
+        &self,
+        requestor: &identity::Did,
+        target_actor: &str,
+        collection: &str,
+        doc_id: &str,
+        relation: &str,
+    ) -> Result<bool, String>;
 }
 
 /// Trait for backup operations.
@@ -332,6 +419,8 @@ pub struct AppState {
     pub schema: Option<Arc<dyn SchemaOperations>>,
     pub lens: Option<Arc<dyn LensOperations>>,
     pub nac: Option<Arc<dyn NodeAcpOperations>>,
+    pub collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
+    pub doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
     pub event_bus: Option<Arc<dyn events::Bus>>,
 }
 
@@ -353,6 +442,17 @@ impl std::fmt::Debug for AppState {
             )
             .field("lens", &self.lens.as_ref().map(|_| "<LensOperations>"))
             .field("nac", &self.nac.as_ref().map(|_| "<NodeAcpOperations>"))
+            .field(
+                "collection_mgmt",
+                &self
+                    .collection_mgmt
+                    .as_ref()
+                    .map(|_| "<CollectionManagementOperations>"),
+            )
+            .field(
+                "doc_acp",
+                &self.doc_acp.as_ref().map(|_| "<DocumentAcpOperations>"),
+            )
             .field("event_bus", &self.event_bus.as_ref().map(|_| "<EventBus>"))
             .finish()
     }
@@ -413,6 +513,28 @@ impl AppState {
         })
     }
 
+    /// Get collection management operations or return ServiceUnavailable error.
+    pub fn require_collection_mgmt(
+        &self,
+    ) -> Result<&Arc<dyn CollectionManagementOperations>, crate::error::HttpError> {
+        self.collection_mgmt.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable(
+                "Collection management operations are not enabled.".into(),
+            )
+        })
+    }
+
+    /// Get document ACP operations or return ServiceUnavailable error.
+    pub fn require_doc_acp(
+        &self,
+    ) -> Result<&Arc<dyn DocumentAcpOperations>, crate::error::HttpError> {
+        self.doc_acp.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable(
+                "Document ACP operations are not enabled. Start the server with ACP enabled to use this feature.".into(),
+            )
+        })
+    }
+
     /// Get NAC operations or return ServiceUnavailable error.
     pub fn require_nac(&self) -> Result<&Arc<dyn NodeAcpOperations>, crate::error::HttpError> {
         self.nac.as_ref().ok_or_else(|| {
@@ -434,6 +556,8 @@ pub struct AppStateBuilder {
     schema: Option<Arc<dyn SchemaOperations>>,
     lens: Option<Arc<dyn LensOperations>>,
     nac: Option<Arc<dyn NodeAcpOperations>>,
+    collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
+    doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
 }
 
@@ -450,6 +574,8 @@ impl AppStateBuilder {
             schema: None,
             lens: None,
             nac: None,
+            collection_mgmt: None,
+            doc_acp: None,
             event_bus: None,
         }
     }
@@ -502,6 +628,21 @@ impl AppStateBuilder {
         self
     }
 
+    /// Set collection management operations.
+    pub fn with_collection_mgmt(
+        mut self,
+        collection_mgmt: Arc<dyn CollectionManagementOperations>,
+    ) -> Self {
+        self.collection_mgmt = Some(collection_mgmt);
+        self
+    }
+
+    /// Set document ACP operations.
+    pub fn with_doc_acp(mut self, doc_acp: Arc<dyn DocumentAcpOperations>) -> Self {
+        self.doc_acp = Some(doc_acp);
+        self
+    }
+
     /// Set event bus for subscriptions.
     pub fn with_event_bus(mut self, bus: Arc<dyn events::Bus>) -> Self {
         self.event_bus = Some(bus);
@@ -520,6 +661,8 @@ impl AppStateBuilder {
             schema: self.schema,
             lens: self.lens,
             nac: self.nac,
+            collection_mgmt: self.collection_mgmt,
+            doc_acp: self.doc_acp,
             event_bus: self.event_bus,
         }
     }
@@ -565,8 +708,11 @@ pub fn create_router_with_state(state: AppState) -> Router {
     // Collection routes (REST API)
     let collection_routes = Router::new()
         .route("/", get(handlers::list_collections))
+        .route("/", patch(handlers::patch_collection))
+        .route("/set-active", post(handlers::set_active))
         .route("/:name", get(handlers::get_collection_doc_ids))
         .route("/:name", post(handlers::create_document))
+        .route("/:name/truncate", delete(handlers::truncate_collection))
         .route("/:name/:docID", get(handlers::get_document))
         .route("/:name/:docID", patch(handlers::update_document))
         .route("/:name/:docID", delete(handlers::delete_document))
@@ -581,6 +727,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
     // P2P routes
     let p2p_routes = Router::new()
         .route("/info", get(handlers::p2p::get_info))
+        .route("/active-peers", get(handlers::p2p::active_peers)) // Go-compatible
         .route("/connect", post(handlers::p2p::connect)) // Go-compatible
         .route("/peers", get(handlers::p2p::list_peers))
         .route("/peers", post(handlers::p2p::connect_peer)) // Legacy
@@ -603,7 +750,15 @@ pub fn create_router_with_state(state: AppState) -> Router {
     let acp_routes = Router::new()
         .route("/policy", post(handlers::acp::add_policy))
         .route("/policy", get(handlers::acp::list_policies))
-        .route("/policy/:id", get(handlers::acp::get_policy));
+        .route("/policy/:id", get(handlers::acp::get_policy))
+        .route(
+            "/document/relationship",
+            post(handlers::acp::add_doc_relationship),
+        )
+        .route(
+            "/document/relationship",
+            delete(handlers::acp::remove_doc_relationship),
+        );
 
     // Index routes
     let index_routes = Router::new()
@@ -618,6 +773,8 @@ pub fn create_router_with_state(state: AppState) -> Router {
 
     // Lens migration routes
     let lens_routes = Router::new()
+        .route("/", post(handlers::lens::add_lens))
+        .route("/", get(handlers::lens::list_lenses))
         .route("/set", post(handlers::lens::set_migration))
         .route("/reload", post(handlers::lens::reload));
 
@@ -632,13 +789,17 @@ pub fn create_router_with_state(state: AppState) -> Router {
     //   GET /acp/node/status
     //   POST /acp/node/relationship
     //   DELETE /acp/node/relationship
+    //   POST /acp/node/disable
+    //   POST /acp/node/re-enable
     let acp_node_routes = Router::new()
         .route("/status", get(handlers::nac::get_status))
         .route("/relationship", post(handlers::nac::go_add_relationship))
         .route(
             "/relationship",
             delete(handlers::nac::go_remove_relationship),
-        );
+        )
+        .route("/disable", post(handlers::nac::disable))
+        .route("/re-enable", post(handlers::nac::re_enable));
 
     // API v0 routes
     let api_routes = Router::new()
