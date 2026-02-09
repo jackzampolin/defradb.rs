@@ -576,9 +576,7 @@ pub unsafe extern "C" fn add_dac_policy(
                 NODES.get(node_ptr, |state| {
                     state.policy_store.store_policy(&policy_id, &policy_str);
                 });
-                FfiResult::success(
-                    serde_json::json!({ "PolicyID": policy_id }).to_string(),
-                )
+                FfiResult::success(serde_json::json!({ "PolicyID": policy_id }).to_string())
             }
             Err(e) => FfiResult::error(e),
         }

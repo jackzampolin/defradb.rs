@@ -37,8 +37,10 @@ pub struct P2PHost<S: Store> {
     pub(super) keypair: Keypair,
     pub(super) command_rx: mpsc::Receiver<HostCommand>,
     pub(super) event_tx: mpsc::Sender<HostEvent>,
-    pub(super) pending_requests:
-        HashMap<request_response::OutboundRequestId, tokio::sync::oneshot::Sender<Result<PushLogReply>>>,
+    pub(super) pending_requests: HashMap<
+        request_response::OutboundRequestId,
+        tokio::sync::oneshot::Sender<Result<PushLogReply>>,
+    >,
     /// Replicator registry for access control
     pub(super) replicators: Arc<ReplicatorRegistry>,
     /// Two-stream handler for Go compatibility

@@ -580,7 +580,15 @@ async fn test_non_owner_cannot_delete_relationship() {
 
     // Attacker (non-owner) tries to delete reader relationship
     let result = acp
-        .delete_actor_relationship(&attacker, &reader, "", "users", "doc1", READER_RELATION, &[])
+        .delete_actor_relationship(
+            &attacker,
+            &reader,
+            "",
+            "users",
+            "doc1",
+            READER_RELATION,
+            &[],
+        )
         .await;
     assert!(
         matches!(result, Err(Error::NotOwner { .. })),

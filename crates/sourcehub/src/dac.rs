@@ -43,10 +43,7 @@ impl SourceHubDocumentACP {
     /// creates a JWT with `authorized_account` set to the validator address.
     fn create_bearer_token(&self, did: &str) -> std::result::Result<String, acp::Error> {
         let signing_config = defra_core::signing::get_identity(did).ok_or_else(|| {
-            acp::Error::PermissionDenied(format!(
-                "no signing config found for DID: {}",
-                did
-            ))
+            acp::Error::PermissionDenied(format!("no signing config found for DID: {}", did))
         })?;
 
         let key_type: crypto::KeyType = match signing_config.key_type.as_str() {
@@ -60,11 +57,11 @@ impl SourceHubDocumentACP {
             }
         };
 
-        let raw_identity = identity::RawIdentity::from_bytes(
-            key_type,
-            &signing_config.private_key_bytes,
-        )
-        .map_err(|e| acp::Error::PermissionDenied(format!("failed to create identity: {}", e)))?;
+        let raw_identity =
+            identity::RawIdentity::from_bytes(key_type, &signing_config.private_key_bytes)
+                .map_err(|e| {
+                    acp::Error::PermissionDenied(format!("failed to create identity: {}", e))
+                })?;
 
         let token_bytes = identity::new_token(
             &raw_identity,

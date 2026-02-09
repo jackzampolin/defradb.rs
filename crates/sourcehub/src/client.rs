@@ -119,22 +119,21 @@ impl SourceHubClient {
             let log = body["result"]["response"]["log"]
                 .as_str()
                 .unwrap_or("unknown");
-            eprintln!("[SH-DEBUG] verify_access ABCI error: code={} log={}", abci_code, log);
+            eprintln!(
+                "[SH-DEBUG] verify_access ABCI error: code={} log={}",
+                abci_code, log
+            );
             return Ok(false);
         }
 
         // Decode base64-encoded protobuf response
-        let result_b64 = body["result"]["response"]["value"]
-            .as_str()
-            .unwrap_or("");
+        let result_b64 = body["result"]["response"]["value"].as_str().unwrap_or("");
         if result_b64.is_empty() {
             return Ok(false);
         }
-        let result_bytes = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            result_b64,
-        )
-        .map_err(|e| ClientError::QueryFailed(format!("base64 decode: {}", e)))?;
+        let result_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, result_b64)
+                .map_err(|e| ClientError::QueryFailed(format!("base64 decode: {}", e)))?;
 
         // QueryVerifyAccessRequestResponse: field 1 (bool) valid
         // Protobuf: tag 0x08 (field 1, varint), value 0x01 (true)
@@ -147,10 +146,7 @@ impl SourceHubClient {
     }
 
     /// Query account number and sequence for transaction signing.
-    pub async fn query_account(
-        &self,
-        address: &str,
-    ) -> Result<(u64, u64), ClientError> {
+    pub async fn query_account(&self, address: &str) -> Result<(u64, u64), ClientError> {
         let url = format!(
             "{}/cosmos/auth/v1beta1/accounts/{}",
             self.rest_base_url(),
@@ -180,10 +176,7 @@ impl SourceHubClient {
     /// Broadcast a signed transaction via CometBFT JSON-RPC.
     /// Returns the tx hash on success.
     pub async fn broadcast_tx_sync(&self, tx_bytes: &[u8]) -> Result<String, ClientError> {
-        let tx_b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            tx_bytes,
-        );
+        let tx_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, tx_bytes);
         let url = self.comet_rpc_base_url();
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -202,15 +195,10 @@ impl SourceHubClient {
         let result: serde_json::Value = resp.json().await?;
         let code = result["result"]["code"].as_u64().unwrap_or(1);
         if code != 0 {
-            let log = result["result"]["log"]
-                .as_str()
-                .unwrap_or("unknown error");
+            let log = result["result"]["log"].as_str().unwrap_or("unknown error");
             return Err(ClientError::TxFailed(format!("code={}: {}", code, log)));
         }
-        let hash = result["result"]["hash"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let hash = result["result"]["hash"].as_str().unwrap_or("").to_string();
         Ok(hash)
     }
 
@@ -231,8 +219,7 @@ impl SourceHubClient {
             let resp = self.http.get(&url).send().await;
             if let Ok(r) = resp {
                 if r.status().is_success() {
-                    let body: serde_json::Value =
-                        r.json().await.unwrap_or(serde_json::Value::Null);
+                    let body: serde_json::Value = r.json().await.unwrap_or(serde_json::Value::Null);
                     let code = body["result"]["tx_result"]["code"].as_u64();
                     if let Some(0) = code {
                         return Ok(body);

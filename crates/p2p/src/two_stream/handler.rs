@@ -170,7 +170,9 @@ impl TwoStreamHandler {
                 return Ok(Some(TwoStreamEvent::BranchableSyncReply { peer_id, reply }));
             }
             Ok(_) => {
-                tracing::trace!("BranchableSyncReply parsed but collection_id empty, trying other types");
+                tracing::trace!(
+                    "BranchableSyncReply parsed but collection_id empty, trying other types"
+                );
             }
             Err(_) => {
                 // Not a BranchableSyncReply, will try other types

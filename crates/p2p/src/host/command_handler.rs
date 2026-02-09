@@ -372,8 +372,7 @@ impl<S: Store> P2PHost<S> {
 
             HostCommand::PeerAddresses { response } => {
                 // Build full multiaddrs for connected peers (matches Go's ActivePeers).
-                let connected: HashSet<PeerId> =
-                    self.swarm.connected_peers().cloned().collect();
+                let connected: HashSet<PeerId> = self.swarm.connected_peers().cloned().collect();
                 let addrs: Vec<String> = connected
                     .iter()
                     .filter_map(|pid| {
@@ -399,10 +398,8 @@ impl<S: Store> P2PHost<S> {
         response: tokio::sync::oneshot::Sender<Result<QueryId>>,
     ) {
         // Generate a query ID for tracking
-        static QUERY_COUNTER: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(0);
-        let query_id =
-            QueryId(QUERY_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        static QUERY_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let query_id = QueryId(QUERY_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
 
         info!(
             cid = %cid,

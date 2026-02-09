@@ -133,9 +133,9 @@ pub use versioned_fetcher::VersionedFetcher;
 pub use view_ops::RefreshViewsOptions;
 
 // NAC exports
-pub use nac::{create_memory_nac_manager, NacConfig, NacInfo, NacManager, NacManagerApi};
 #[cfg(not(target_arch = "wasm32"))]
 pub use nac::create_persistent_nac_manager;
+pub use nac::{create_memory_nac_manager, NacConfig, NacInfo, NacManager, NacManagerApi};
 
 // SE (Searchable Encryption) exports
 pub use se::{

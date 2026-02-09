@@ -431,33 +431,52 @@ pub unsafe extern "C" fn new_node_with_p2p(
 
         // Create mutator with P2P broadcast support
         // BroadcastMutator handles push_to_replicators + GossipSub broadcast with retry
-        let mutator: Arc<dyn query::DocMutator> =
-            Arc::new(db::BroadcastMutator::new(database.clone(), coordinator.clone()));
+        let mutator: Arc<dyn query::DocMutator> = Arc::new(db::BroadcastMutator::new(
+            database.clone(),
+            coordinator.clone(),
+        ));
 
         // Create document-level access control: SourceHub (on-chain) or Local (in-memory)
-        let (document_acp, sourcehub_acp): (Arc<dyn acp::DocumentACP>, Option<Arc<sourcehub::SourceHubDocumentACP>>) =
-            if !options.sourcehub_grpc_address.is_null() {
-                let grpc_addr = unsafe { c_str_to_string(options.sourcehub_grpc_address) }
-                    .ok_or_else(|| "sourcehub_grpc_address is not valid UTF-8".to_string())?;
-                let comet_addr = unsafe { c_str_to_string(options.sourcehub_comet_rpc_address) }
-                    .ok_or_else(|| "sourcehub_comet_rpc_address is not valid UTF-8".to_string())?;
-                let chain_id = unsafe { c_str_to_string(options.sourcehub_chain_id) }
-                    .ok_or_else(|| "sourcehub_chain_id is not valid UTF-8".to_string())?;
-                let signer_key = if !options.sourcehub_signer_key.is_null() && options.sourcehub_signer_key_len > 0 {
-                    unsafe { std::slice::from_raw_parts(options.sourcehub_signer_key, options.sourcehub_signer_key_len) }
-                } else {
-                    return Err("sourcehub_signer_key is required when SourceHub is configured".to_string());
-                };
-                let sh_client = sourcehub::SourceHubClient::new(grpc_addr, comet_addr);
-                let sh_signer = sourcehub::TxSigner::from_secp256k1_bytes(signer_key, &chain_id)
-                    .map_err(|e| format!("failed to create SourceHub signer: {}", e))?;
-                eprintln!("[SH-DEBUG] new_node_with_p2p: SourceHub ACP configured, validator={}", sh_signer.address());
-                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(sh_client, sh_signer));
-                (sh_acp.clone() as Arc<dyn acp::DocumentACP>, Some(sh_acp))
+        let (document_acp, sourcehub_acp): (
+            Arc<dyn acp::DocumentACP>,
+            Option<Arc<sourcehub::SourceHubDocumentACP>>,
+        ) = if !options.sourcehub_grpc_address.is_null() {
+            let grpc_addr = unsafe { c_str_to_string(options.sourcehub_grpc_address) }
+                .ok_or_else(|| "sourcehub_grpc_address is not valid UTF-8".to_string())?;
+            let comet_addr = unsafe { c_str_to_string(options.sourcehub_comet_rpc_address) }
+                .ok_or_else(|| "sourcehub_comet_rpc_address is not valid UTF-8".to_string())?;
+            let chain_id = unsafe { c_str_to_string(options.sourcehub_chain_id) }
+                .ok_or_else(|| "sourcehub_chain_id is not valid UTF-8".to_string())?;
+            let signer_key = if !options.sourcehub_signer_key.is_null()
+                && options.sourcehub_signer_key_len > 0
+            {
+                unsafe {
+                    std::slice::from_raw_parts(
+                        options.sourcehub_signer_key,
+                        options.sourcehub_signer_key_len,
+                    )
+                }
             } else {
-                let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
-                (Arc::new(acp::LocalDocumentACP::new(acp_store)) as Arc<dyn acp::DocumentACP>, None)
+                return Err(
+                    "sourcehub_signer_key is required when SourceHub is configured".to_string(),
+                );
             };
+            let sh_client = sourcehub::SourceHubClient::new(grpc_addr, comet_addr);
+            let sh_signer = sourcehub::TxSigner::from_secp256k1_bytes(signer_key, &chain_id)
+                .map_err(|e| format!("failed to create SourceHub signer: {}", e))?;
+            eprintln!(
+                "[SH-DEBUG] new_node_with_p2p: SourceHub ACP configured, validator={}",
+                sh_signer.address()
+            );
+            let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(sh_client, sh_signer));
+            (sh_acp.clone() as Arc<dyn acp::DocumentACP>, Some(sh_acp))
+        } else {
+            let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
+            (
+                Arc::new(acp::LocalDocumentACP::new(acp_store)) as Arc<dyn acp::DocumentACP>,
+                None,
+            )
+        };
 
         // Create NAC manager - use persistent store when file-based storage is configured
         let nac_manager: Arc<dyn db::NacManagerApi> = if let Some(ref path) = db_path_opt {

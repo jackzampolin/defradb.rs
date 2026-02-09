@@ -141,9 +141,7 @@ async fn main() {
             all,
         } => commands::logs::execute(&package, test.as_deref(), failed, all).await,
 
-        Commands::Packages { package } => {
-            commands::packages::execute(package.as_deref()).await
-        }
+        Commands::Packages { package } => commands::packages::execute(package.as_deref()).await,
 
         Commands::Worktree { command } => match command {
             WorktreeCommands::List => commands::worktree::list().await,

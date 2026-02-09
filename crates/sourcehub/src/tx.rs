@@ -17,10 +17,7 @@ pub struct TxSigner {
 
 impl TxSigner {
     /// Create a signer from raw secp256k1 private key bytes.
-    pub fn from_secp256k1_bytes(
-        key_bytes: &[u8],
-        chain_id: &str,
-    ) -> Result<Self, TxSignerError> {
+    pub fn from_secp256k1_bytes(key_bytes: &[u8], chain_id: &str) -> Result<Self, TxSignerError> {
         let signing_key = SigningKey::from_slice(key_bytes)
             .map_err(|e| TxSignerError::Key(format!("invalid secp256k1 key: {}", e)))?;
 
@@ -92,12 +89,7 @@ impl TxSigner {
         policy_id: &str,
         cmd_json: serde_json::Value,
     ) -> Result<serde_json::Value, TxSignerError> {
-        let msg = build_msg_bearer_policy_cmd(
-            &self.address(),
-            bearer_token,
-            policy_id,
-            cmd_json,
-        );
+        let msg = build_msg_bearer_policy_cmd(&self.address(), bearer_token, policy_id, cmd_json);
         let tx_hash = self.sign_and_broadcast(client, vec![msg]).await?;
         let tx_result = client
             .await_tx(&tx_hash, 30_000)
@@ -149,19 +141,11 @@ impl TxSigner {
             400_000u64,
         );
 
-        let auth_info = SignerInfo::single_direct(
-            Some(self.signing_key.public_key()),
-            sequence,
-        )
-        .auth_info(fee);
+        let auth_info =
+            SignerInfo::single_direct(Some(self.signing_key.public_key()), sequence).auth_info(fee);
 
-        let sign_doc = SignDoc::new(
-            &body,
-            &auth_info,
-            &self.chain_id,
-            account_number,
-        )
-        .map_err(|e| TxSignerError::Sign(format!("SignDoc creation: {}", e)))?;
+        let sign_doc = SignDoc::new(&body, &auth_info, &self.chain_id, account_number)
+            .map_err(|e| TxSignerError::Sign(format!("SignDoc creation: {}", e)))?;
 
         let tx_raw = sign_doc
             .sign(&self.signing_key)
@@ -350,11 +334,8 @@ fn encode_varint_field(buf: &mut Vec<u8>, field_num: u32, value: u64) {
 /// Extract policy ID from tx_result.data (protobuf TxMsgData).
 fn extract_policy_id_from_tx_data(tx_result: &serde_json::Value) -> Option<String> {
     let data_b64 = tx_result["result"]["tx_result"]["data"].as_str()?;
-    let data_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        data_b64,
-    )
-    .ok()?;
+    let data_bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64).ok()?;
 
     // TxMsgData field 2 (msg_responses) → Any → MsgCreatePolicyResponse
     let msg_responses = decode_field_bytes(&data_bytes, 2)?;
@@ -370,9 +351,7 @@ fn extract_policy_id_from_events(tx_result: &serde_json::Value) -> Option<String
     let events = tx_result["result"]["tx_result"]["events"].as_array()?;
     for event in events {
         let event_type = event["type"].as_str().unwrap_or("");
-        if !event_type.contains("EventPolicyCreated")
-            && !event_type.contains("PolicyCreated")
-        {
+        if !event_type.contains("EventPolicyCreated") && !event_type.contains("PolicyCreated") {
             continue;
         }
         let attrs = event["attributes"].as_array()?;
@@ -390,10 +369,7 @@ fn extract_policy_id_from_events(tx_result: &serde_json::Value) -> Option<String
 /// Decode an event attribute value (handles both plain and base64-encoded).
 fn decode_event_attr(attr: &serde_json::Value, field: &str) -> Option<String> {
     let raw = attr[field].as_str()?;
-    if let Ok(bytes) = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        raw,
-    ) {
+    if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, raw) {
         if let Ok(s) = String::from_utf8(bytes) {
             return Some(s);
         }
@@ -472,11 +448,8 @@ struct PolicyCmdResult {
 ///     DeleteRelationshipResult (field 2) → record_found (field 1, bool)
 fn extract_policy_cmd_result(tx_result: &serde_json::Value) -> Option<PolicyCmdResult> {
     let data_b64 = tx_result["result"]["tx_result"]["data"].as_str()?;
-    let data_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        data_b64,
-    )
-    .ok()?;
+    let data_bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64).ok()?;
 
     // TxMsgData field 2 (msg_responses) → Any
     let msg_response = decode_field_bytes(&data_bytes, 2)?;

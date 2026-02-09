@@ -162,7 +162,8 @@ impl ReplicationLoop {
         loop {
             match events.try_recv() {
                 Ok(event) => {
-                    let result = process_event(&coordinator, event, handler.as_ref(), &config).await;
+                    let result =
+                        process_event(&coordinator, event, handler.as_ref(), &config).await;
                     results.push(result);
                 }
                 Err(mpsc::error::TryRecvError::Empty) => break,
