@@ -28,8 +28,8 @@ pub struct SdlGenerateArgs {
     pub files: Vec<PathBuf>,
 
     /// Output file path
-    #[arg(long, short = 'o')]
-    pub output: Option<PathBuf>,
+    #[arg(long, short = 'o', default_value = "schema.gen.graphql")]
+    pub output: PathBuf,
 
     /// Overwrite existing output file
     #[arg(long, short = 'y')]

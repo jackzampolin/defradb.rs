@@ -84,11 +84,43 @@ pub enum AcpDocumentRelationshipCommand {
 
 /// Arguments for acp document relationship add command
 #[derive(Args, Debug)]
-pub struct AcpDocumentRelationshipAddArgs {}
+pub struct AcpDocumentRelationshipAddArgs {
+    /// Collection name
+    #[arg(long, short = 'c')]
+    pub collection: Option<String>,
+
+    /// Document ID
+    #[arg(long = "docID")]
+    pub doc_id: Option<String>,
+
+    /// Relation name
+    #[arg(long, short = 'r')]
+    pub relation: Option<String>,
+
+    /// Actor (target identity)
+    #[arg(long, short = 'a')]
+    pub actor: Option<String>,
+}
 
 /// Arguments for acp document relationship delete command
 #[derive(Args, Debug)]
-pub struct AcpDocumentRelationshipDeleteArgs {}
+pub struct AcpDocumentRelationshipDeleteArgs {
+    /// Collection name
+    #[arg(long, short = 'c')]
+    pub collection: Option<String>,
+
+    /// Document ID
+    #[arg(long = "docID")]
+    pub doc_id: Option<String>,
+
+    /// Relation name
+    #[arg(long, short = 'r')]
+    pub relation: Option<String>,
+
+    /// Actor (target identity)
+    #[arg(long, short = 'a')]
+    pub actor: Option<String>,
+}
 
 /// ACP node subcommands
 #[derive(Args, Debug)]
@@ -128,11 +160,27 @@ pub enum AcpNodeRelationshipCommand {
 
 /// Arguments for acp node relationship add command
 #[derive(Args, Debug)]
-pub struct AcpNodeRelationshipAddArgs {}
+pub struct AcpNodeRelationshipAddArgs {
+    /// Relation name
+    #[arg(long, short = 'r')]
+    pub relation: Option<String>,
+
+    /// Actor (target identity)
+    #[arg(long, short = 'a')]
+    pub actor: Option<String>,
+}
 
 /// Arguments for acp node relationship delete command
 #[derive(Args, Debug)]
-pub struct AcpNodeRelationshipDeleteArgs {}
+pub struct AcpNodeRelationshipDeleteArgs {
+    /// Relation name
+    #[arg(long, short = 'r')]
+    pub relation: Option<String>,
+
+    /// Actor (target identity)
+    #[arg(long, short = 'a')]
+    pub actor: Option<String>,
+}
 
 /// Arguments for acp node status command
 #[derive(Args, Debug)]

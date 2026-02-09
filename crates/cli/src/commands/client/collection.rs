@@ -69,12 +69,20 @@ pub struct CollectionDescribeArgs {}
 #[derive(Args, Debug)]
 pub struct DocumentCreateArgs {
     /// The document data (JSON)
-    #[arg(value_name = "DATA")]
-    pub data: Option<String>,
+    #[arg(value_name = "DOCUMENT")]
+    pub document: Option<String>,
 
-    /// Path to a file containing the document data
-    #[arg(long, short = 'f', conflicts_with = "data")]
+    /// File containing document(s)
+    #[arg(long, short = 'f')]
     pub file: Option<PathBuf>,
+
+    /// Flag to enable encryption of the document
+    #[arg(long, short = 'e')]
+    pub encrypt: bool,
+
+    /// Comma-separated list of fields to encrypt
+    #[arg(long, value_delimiter = ',')]
+    pub encrypt_fields: Vec<String>,
 }
 
 /// Arguments for document get command
@@ -84,33 +92,37 @@ pub struct DocumentGetArgs {
     #[arg(value_name = "DOC_ID")]
     pub doc_id: String,
 
-    /// Output in JSON format with consistent structure for programmatic use
+    /// Show deleted documents
     #[arg(long)]
-    pub json: bool,
+    pub show_deleted: bool,
 }
 
 /// Arguments for document update command
 #[derive(Args, Debug)]
 pub struct DocumentUpdateArgs {
-    /// The document ID
-    #[arg(value_name = "DOC_ID")]
-    pub doc_id: String,
+    /// Document ID
+    #[arg(long = "docID")]
+    pub doc_id: Option<String>,
 
-    /// The update data (JSON)
-    #[arg(value_name = "DATA")]
-    pub data: Option<String>,
+    /// Document filter
+    #[arg(long)]
+    pub filter: Option<String>,
 
-    /// Path to a file containing the update data
-    #[arg(long, short = 'f', conflicts_with = "data")]
-    pub file: Option<PathBuf>,
+    /// Document updater
+    #[arg(long)]
+    pub updater: Option<String>,
 }
 
 /// Arguments for document delete command
 #[derive(Args, Debug)]
 pub struct DocumentDeleteArgs {
-    /// The document ID
-    #[arg(value_name = "DOC_ID")]
-    pub doc_id: String,
+    /// Document ID
+    #[arg(long = "docID")]
+    pub doc_id: Option<String>,
+
+    /// Document filter
+    #[arg(long)]
+    pub filter: Option<String>,
 }
 
 /// Arguments for doc-ids command
@@ -124,14 +136,26 @@ pub struct CollectionPatchArgs {
     #[arg(value_name = "PATCH")]
     pub patch: Option<String>,
 
-    /// Path to a file containing the patch data
-    #[arg(long, short = 'f', conflicts_with = "patch")]
-    pub file: Option<PathBuf>,
+    /// The migration configuration
+    #[arg(value_name = "MIGRATION")]
+    pub migration: Option<String>,
+
+    /// File to load a patch from
+    #[arg(long, short = 'p')]
+    pub patch_file: Option<PathBuf>,
+
+    /// File to load a lens config from
+    #[arg(long, short = 't')]
+    pub lens_file: Option<PathBuf>,
 }
 
 /// Arguments for set-active command
 #[derive(Args, Debug)]
-pub struct SetActiveArgs {}
+pub struct SetActiveArgs {
+    /// Collection version ID to set as active
+    #[arg(value_name = "VERSION_ID")]
+    pub version_id: Option<String>,
+}
 
 /// Arguments for truncate command
 #[derive(Args, Debug)]
@@ -269,7 +293,7 @@ impl DocumentCreateArgs {
             name.ok_or_else(|| Error::MissingInput("--name is required for create".to_string()))?;
         validate_identifier(collection)?;
 
-        let data = get_data_from_args(&self.data, &self.file)?;
+        let data = get_data_from_args(&self.document, &self.file)?;
         let parsed: JsonValue = serde_json::from_str(&data)?;
 
         let input_str = serde_json::to_string(&parsed)?;
@@ -331,13 +355,6 @@ impl DocumentGetArgs {
         let response = client.graphql(&query, None, ctx.tx_id.clone()).await?;
 
         if response.has_errors() {
-            if self.json {
-                let output = serde_json::json!({
-                    "success": false,
-                    "error": response.error_message()
-                });
-                println!("{}", serde_json::to_string_pretty(&output)?);
-            }
             return Err(Error::Server(response.error_message()));
         }
 
@@ -360,32 +377,10 @@ impl DocumentGetArgs {
         })?;
 
         if arr.is_empty() {
-            if self.json {
-                let output = serde_json::json!({
-                    "success": true,
-                    "data": null
-                });
-                println!("{}", serde_json::to_string_pretty(&output)?);
-            } else {
-                println!("Document not found");
-            }
+            println!("Document not found");
         } else if arr.len() == 1 {
-            if self.json {
-                let output = serde_json::json!({
-                    "success": true,
-                    "data": arr[0]
-                });
-                println!("{}", serde_json::to_string_pretty(&output)?);
-            } else {
-                let output = serde_json::to_string_pretty(&arr[0])?;
-                println!("{output}");
-            }
-        } else if self.json {
-            let output = serde_json::json!({
-                "success": true,
-                "data": results
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            let output = serde_json::to_string_pretty(&arr[0])?;
+            println!("{output}");
         } else {
             let output = serde_json::to_string_pretty(results)?;
             println!("{output}");
@@ -396,90 +391,15 @@ impl DocumentGetArgs {
 }
 
 impl DocumentUpdateArgs {
-    /// Execute the document update command
-    pub async fn execute(&self, ctx: &ClientContext, name: Option<&str>) -> Result<()> {
-        let collection =
-            name.ok_or_else(|| Error::MissingInput("--name is required for update".to_string()))?;
-        validate_identifier(collection)?;
-
-        let data = get_data_from_args(&self.data, &self.file)?;
-        let parsed: JsonValue = serde_json::from_str(&data)?;
-
-        let input_str = serde_json::to_string(&parsed)?;
-        let escaped_doc_id = escape_graphql_string(&self.doc_id);
-        let query = format!(
-            r#"mutation {{ update_{collection}(docIDs: ["{doc_id}"], input: {input}) {{ _docID }} }}"#,
-            collection = collection,
-            doc_id = escaped_doc_id,
-            input = input_str
-        );
-
-        let client = HttpClient::new(&ctx.url)?
-            .with_auth_token(ctx.auth_token.clone())
-            .with_verbose(ctx.verbose);
-        let response = client.graphql(&query, None, ctx.tx_id.clone()).await?;
-
-        if response.has_errors() {
-            return Err(Error::Server(response.error_message()));
-        }
-
-        let data = response
-            .data
-            .ok_or_else(|| Error::Server("Server returned success but with no data".to_string()))?;
-
-        let key = format!("update_{}", collection);
-        let result = data.get(&key).ok_or_else(|| {
-            Error::Server(format!(
-                "Server response missing expected key '{}'. Response: {}",
-                key,
-                serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
-            ))
-        })?;
-        let output = serde_json::to_string_pretty(result)?;
-        println!("{output}");
-
+    pub async fn execute(&self, _ctx: &ClientContext, _name: Option<&str>) -> Result<()> {
+        eprintln!("not yet implemented");
         Ok(())
     }
 }
 
 impl DocumentDeleteArgs {
-    /// Execute the document delete command
-    pub async fn execute(&self, ctx: &ClientContext, name: Option<&str>) -> Result<()> {
-        let collection =
-            name.ok_or_else(|| Error::MissingInput("--name is required for delete".to_string()))?;
-        validate_identifier(collection)?;
-
-        let escaped_doc_id = escape_graphql_string(&self.doc_id);
-        let query = format!(
-            r#"mutation {{ delete_{collection}(docIDs: ["{doc_id}"]) {{ _docID }} }}"#,
-            collection = collection,
-            doc_id = escaped_doc_id
-        );
-
-        let client = HttpClient::new(&ctx.url)?
-            .with_auth_token(ctx.auth_token.clone())
-            .with_verbose(ctx.verbose);
-        let response = client.graphql(&query, None, ctx.tx_id.clone()).await?;
-
-        if response.has_errors() {
-            return Err(Error::Server(response.error_message()));
-        }
-
-        let data = response
-            .data
-            .ok_or_else(|| Error::Server("Server returned success but with no data".to_string()))?;
-
-        let key = format!("delete_{}", collection);
-        let result = data.get(&key).ok_or_else(|| {
-            Error::Server(format!(
-                "Server response missing expected key '{}'. Response: {}",
-                key,
-                serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string())
-            ))
-        })?;
-        let output = serde_json::to_string_pretty(result)?;
-        println!("{output}");
-
+    pub async fn execute(&self, _ctx: &ClientContext, _name: Option<&str>) -> Result<()> {
+        eprintln!("not yet implemented");
         Ok(())
     }
 }

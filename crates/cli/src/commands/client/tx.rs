@@ -28,8 +28,12 @@ pub enum TxCommand {
 #[derive(Args, Debug)]
 pub struct TxCreateArgs {
     /// Create a read-only transaction
+    #[arg(long = "read-only")]
+    pub read_only: bool,
+
+    /// Create a concurrent transaction
     #[arg(long)]
-    pub readonly: bool,
+    pub concurrent: bool,
 }
 
 /// Arguments for tx commit command
@@ -65,7 +69,7 @@ impl TxCreateArgs {
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
-        let response = client.tx_begin(self.readonly).await?;
+        let response = client.tx_begin(self.read_only).await?;
         println!("{}", response.txn_id);
         Ok(())
     }
@@ -101,8 +105,12 @@ mod tests {
 
     #[test]
     fn test_tx_create_args_default() {
-        let args = TxCreateArgs { readonly: false };
-        assert!(!args.readonly);
+        let args = TxCreateArgs {
+            read_only: false,
+            concurrent: false,
+        };
+        assert!(!args.read_only);
+        assert!(!args.concurrent);
     }
 
     #[test]

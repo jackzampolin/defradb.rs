@@ -8,8 +8,8 @@ use crate::error::Result;
 /// Purge all database data
 #[derive(Args, Debug)]
 pub struct PurgeArgs {
-    /// Force purge without confirmation
-    #[arg(long, short = 'f')]
+    /// Force purge without confirmation (required)
+    #[arg(long, short = 'f', required = true)]
     pub force: bool,
 }
 

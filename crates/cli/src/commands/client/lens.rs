@@ -30,7 +30,15 @@ pub enum LensCommand {
 
 /// Arguments for lens add command
 #[derive(Args, Debug)]
-pub struct LensAddArgs {}
+pub struct LensAddArgs {
+    /// The lens configuration (JSON format)
+    #[arg(value_name = "CONFIG")]
+    pub config: Option<String>,
+
+    /// Read lens configuration from file
+    #[arg(long, short = 'f', value_name = "FILE")]
+    pub file: Option<PathBuf>,
+}
 
 /// Arguments for lens list command
 #[derive(Args, Debug)]
@@ -39,6 +47,14 @@ pub struct LensListArgs {}
 /// Arguments for lens set command
 #[derive(Args, Debug)]
 pub struct LensSetArgs {
+    /// Source schema version ID
+    #[arg(value_name = "SRC")]
+    pub src: Option<String>,
+
+    /// Destination schema version ID
+    #[arg(value_name = "DST")]
+    pub dst: Option<String>,
+
     /// The lens configuration (JSON format)
     #[arg(value_name = "CONFIG")]
     pub config: Option<String>,
@@ -111,22 +127,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_lens_set_args_with_config() {
+    fn test_lens_set_args_with_positional() {
         let args = LensSetArgs {
-            config: Some(r#"{"SourceSchemaVersionID": "v1"}"#.to_string()),
+            src: Some("v1".to_string()),
+            dst: Some("v2".to_string()),
+            config: Some(r#"{"Lenses": []}"#.to_string()),
             file: None,
         };
+        assert!(args.src.is_some());
+        assert!(args.dst.is_some());
         assert!(args.config.is_some());
-        assert!(args.file.is_none());
     }
 
     #[test]
     fn test_lens_set_args_with_file() {
         let args = LensSetArgs {
+            src: None,
+            dst: None,
             config: None,
             file: Some(PathBuf::from("migration.json")),
         };
-        assert!(args.config.is_none());
         assert!(args.file.is_some());
+    }
+
+    #[test]
+    fn test_lens_add_args_with_config() {
+        let args = LensAddArgs {
+            config: Some(r#"{"module": "test"}"#.to_string()),
+            file: None,
+        };
+        assert!(args.config.is_some());
     }
 }

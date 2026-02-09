@@ -25,15 +25,35 @@ pub enum EncryptedIndexCommand {
 
 /// Arguments for encrypted-index create command
 #[derive(Args, Debug)]
-pub struct EncryptedIndexCreateArgs {}
+pub struct EncryptedIndexCreateArgs {
+    /// Collection name
+    #[arg(long, short = 'c')]
+    pub collection: Option<String>,
+
+    /// Fields to index (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub fields: Vec<String>,
+}
 
 /// Arguments for encrypted-index delete command
 #[derive(Args, Debug)]
-pub struct EncryptedIndexDeleteArgs {}
+pub struct EncryptedIndexDeleteArgs {
+    /// Collection name
+    #[arg(long, short = 'c')]
+    pub collection: Option<String>,
+
+    /// Index name
+    #[arg(long)]
+    pub name: Option<String>,
+}
 
 /// Arguments for encrypted-index list command
 #[derive(Args, Debug)]
-pub struct EncryptedIndexListArgs {}
+pub struct EncryptedIndexListArgs {
+    /// Collection name
+    #[arg(long, short = 'c')]
+    pub collection: Option<String>,
+}
 
 impl EncryptedIndexArgs {
     pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
