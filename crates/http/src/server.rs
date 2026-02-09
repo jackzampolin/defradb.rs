@@ -15,7 +15,8 @@ use query::rest::RestOperations;
 
 use crate::error::Result;
 use crate::router::{
-    create_router_with_state, AppStateBuilder, LensOperations, P2POperations, SchemaOperations,
+    create_router_with_state, AppStateBuilder, CollectionManagementOperations, LensOperations,
+    NodeAcpOperations, P2POperations, SchemaOperations,
 };
 
 /// Server configuration options.
@@ -45,6 +46,8 @@ pub struct Server {
     p2p: Option<Arc<dyn P2POperations>>,
     schema: Option<Arc<dyn SchemaOperations>>,
     lens: Option<Arc<dyn LensOperations>>,
+    nac: Option<Arc<dyn NodeAcpOperations>>,
+    collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
 }
 
@@ -58,6 +61,8 @@ impl Server {
             p2p: None,
             schema: None,
             lens: None,
+            nac: None,
+            collection_mgmt: None,
             event_bus: None,
         }
     }
@@ -71,6 +76,8 @@ impl Server {
             p2p: None,
             schema: None,
             lens: None,
+            nac: None,
+            collection_mgmt: None,
             event_bus: None,
         }
     }
@@ -84,6 +91,8 @@ impl Server {
             p2p: None,
             schema: None,
             lens: None,
+            nac: None,
+            collection_mgmt: None,
             event_bus: None,
         }
     }
@@ -97,6 +106,8 @@ impl Server {
             p2p: None,
             schema: None,
             lens: None,
+            nac: None,
+            collection_mgmt: None,
             event_bus: None,
         }
     }
@@ -170,6 +181,21 @@ impl Server {
         self
     }
 
+    /// Set NAC (Node Access Control) operations from an Arc.
+    pub fn with_nac_arc(mut self, nac: Arc<dyn NodeAcpOperations>) -> Self {
+        self.nac = Some(nac);
+        self
+    }
+
+    /// Set collection management operations from an Arc.
+    pub fn with_collection_mgmt_arc(
+        mut self,
+        collection_mgmt: Arc<dyn CollectionManagementOperations>,
+    ) -> Self {
+        self.collection_mgmt = Some(collection_mgmt);
+        self
+    }
+
     /// Set event bus for GraphQL subscriptions.
     ///
     /// When an event bus is configured, the server enables WebSocket
@@ -204,6 +230,12 @@ impl Server {
         }
         if let Some(ref lens) = self.lens {
             builder = builder.with_lens(Arc::clone(lens));
+        }
+        if let Some(ref nac) = self.nac {
+            builder = builder.with_nac(Arc::clone(nac));
+        }
+        if let Some(ref collection_mgmt) = self.collection_mgmt {
+            builder = builder.with_collection_mgmt(Arc::clone(collection_mgmt));
         }
         if let Some(ref event_bus) = self.event_bus {
             builder = builder.with_event_bus(Arc::clone(event_bus));

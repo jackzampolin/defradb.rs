@@ -249,6 +249,16 @@ pub trait NodeAcpOperations: Send + Sync {
         requestor: &identity::Did,
         target: &identity::Did,
     ) -> Result<bool, String>;
+
+    /// Temporarily disable NAC on this node.
+    ///
+    /// The requestor must be an admin.
+    async fn disable(&self, requestor: &identity::Did) -> Result<(), String>;
+
+    /// Re-enable NAC after it was temporarily disabled.
+    ///
+    /// The requestor must be an admin (uses persisted check).
+    async fn re_enable(&self, requestor: &identity::Did) -> Result<(), String>;
 }
 
 /// NAC status information for HTTP responses.
@@ -271,6 +281,32 @@ pub trait SchemaOperations: Send + Sync {
     /// Parses the SDL and creates collections for each type defined.
     /// Returns the created collection versions.
     async fn add_schema(&self, sdl: &str) -> Result<Vec<schema::CollectionVersion>, String>;
+}
+
+/// Trait for collection management operations beyond basic CRUD.
+///
+/// Provides schema patching, version activation, and truncation operations
+/// that operate at the collection level rather than the document level.
+#[async_trait::async_trait]
+pub trait CollectionManagementOperations: Send + Sync {
+    /// Apply a JSON Patch (RFC 6902) to a collection schema.
+    ///
+    /// Creates a new schema version with the patched fields.
+    /// The `patch` should be a JSON array of patch operations.
+    async fn patch_collection(
+        &self,
+        collection_name: &str,
+        patch: &str,
+    ) -> Result<serde_json::Value, String>;
+
+    /// Set the active collection version.
+    ///
+    /// Activates the specified version and deactivates other versions
+    /// of the same collection.
+    async fn set_active_version(&self, version_id: &str) -> Result<(), String>;
+
+    /// Truncate a collection, deleting all documents while preserving the schema.
+    async fn truncate_collection(&self, name: &str) -> Result<(), String>;
 }
 
 /// Trait for lens migration operations.
@@ -332,6 +368,7 @@ pub struct AppState {
     pub schema: Option<Arc<dyn SchemaOperations>>,
     pub lens: Option<Arc<dyn LensOperations>>,
     pub nac: Option<Arc<dyn NodeAcpOperations>>,
+    pub collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
     pub event_bus: Option<Arc<dyn events::Bus>>,
 }
 
@@ -353,6 +390,13 @@ impl std::fmt::Debug for AppState {
             )
             .field("lens", &self.lens.as_ref().map(|_| "<LensOperations>"))
             .field("nac", &self.nac.as_ref().map(|_| "<NodeAcpOperations>"))
+            .field(
+                "collection_mgmt",
+                &self
+                    .collection_mgmt
+                    .as_ref()
+                    .map(|_| "<CollectionManagementOperations>"),
+            )
             .field("event_bus", &self.event_bus.as_ref().map(|_| "<EventBus>"))
             .finish()
     }
@@ -413,6 +457,17 @@ impl AppState {
         })
     }
 
+    /// Get collection management operations or return ServiceUnavailable error.
+    pub fn require_collection_mgmt(
+        &self,
+    ) -> Result<&Arc<dyn CollectionManagementOperations>, crate::error::HttpError> {
+        self.collection_mgmt.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable(
+                "Collection management operations are not enabled.".into(),
+            )
+        })
+    }
+
     /// Get NAC operations or return ServiceUnavailable error.
     pub fn require_nac(&self) -> Result<&Arc<dyn NodeAcpOperations>, crate::error::HttpError> {
         self.nac.as_ref().ok_or_else(|| {
@@ -434,6 +489,7 @@ pub struct AppStateBuilder {
     schema: Option<Arc<dyn SchemaOperations>>,
     lens: Option<Arc<dyn LensOperations>>,
     nac: Option<Arc<dyn NodeAcpOperations>>,
+    collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
 }
 
@@ -450,6 +506,7 @@ impl AppStateBuilder {
             schema: None,
             lens: None,
             nac: None,
+            collection_mgmt: None,
             event_bus: None,
         }
     }
@@ -502,6 +559,15 @@ impl AppStateBuilder {
         self
     }
 
+    /// Set collection management operations.
+    pub fn with_collection_mgmt(
+        mut self,
+        collection_mgmt: Arc<dyn CollectionManagementOperations>,
+    ) -> Self {
+        self.collection_mgmt = Some(collection_mgmt);
+        self
+    }
+
     /// Set event bus for subscriptions.
     pub fn with_event_bus(mut self, bus: Arc<dyn events::Bus>) -> Self {
         self.event_bus = Some(bus);
@@ -520,6 +586,7 @@ impl AppStateBuilder {
             schema: self.schema,
             lens: self.lens,
             nac: self.nac,
+            collection_mgmt: self.collection_mgmt,
             event_bus: self.event_bus,
         }
     }

@@ -1374,6 +1374,18 @@ impl NodeAcpOperations for MockNodeAcpOperations {
         admins.retain(|a| a != target);
         Ok(admins.len() < initial_len)
     }
+
+    async fn disable(&self, _requestor: &Did) -> std::result::Result<(), String> {
+        let mut status = self.status.write().unwrap();
+        *status = NacStatus::DisabledTemporarily;
+        Ok(())
+    }
+
+    async fn re_enable(&self, _requestor: &Did) -> std::result::Result<(), String> {
+        let mut status = self.status.write().unwrap();
+        *status = NacStatus::Enabled;
+        Ok(())
+    }
 }
 
 /// Mock NAC operations that always fails with a configurable error.
@@ -1429,6 +1441,14 @@ impl NodeAcpOperations for FailingMockNodeAcpOperations {
         _requestor: &Did,
         _target: &Did,
     ) -> std::result::Result<bool, String> {
+        Err(self.error.clone())
+    }
+
+    async fn disable(&self, _requestor: &Did) -> std::result::Result<(), String> {
+        Err(self.error.clone())
+    }
+
+    async fn re_enable(&self, _requestor: &Did) -> std::result::Result<(), String> {
         Err(self.error.clone())
     }
 }

@@ -724,6 +724,22 @@ impl Node {
                 }
             }
 
+            // Wire NAC (Node Access Control) to HTTP server
+            let nac_config = db::NacConfig::new();
+            let nac_manager: std::sync::Arc<dyn db::NacManagerApi> =
+                std::sync::Arc::new(db::create_memory_nac_manager(nac_config));
+            let nac_adapter = crate::nac_adapter::NacAdapter::new_arc(nac_manager);
+            server = server.with_nac_arc(nac_adapter);
+            info!("NAC HTTP endpoints enabled");
+
+            // Wire collection management operations to HTTP server
+            let collection_mgmt_adapter =
+                crate::collection_mgmt_adapter::CollectionManagementAdapter::new_arc(
+                    database.clone(),
+                );
+            server = server.with_collection_mgmt_arc(collection_mgmt_adapter);
+            info!("Collection management HTTP endpoints enabled");
+
             // Wire event bus to HTTP server for GraphQL subscriptions
             server = server.with_event_bus_arc(event_bus);
             info!("Subscription event bus enabled");
