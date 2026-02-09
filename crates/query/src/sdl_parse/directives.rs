@@ -104,6 +104,16 @@ pub fn default_type_error(
     ))
 }
 
+/// Parsed embedding configuration from @embedding directive
+#[derive(Debug, Clone)]
+pub struct EmbeddingConfig {
+    pub provider: String,
+    pub model: String,
+    pub url: String,
+    pub fields: Vec<String>,
+    pub template: String,
+}
+
 /// Parsed directive information from a field
 #[derive(Debug, Default, Clone)]
 pub struct ParsedDirectives {
@@ -123,6 +133,8 @@ pub struct ParsedDirectives {
     pub size_constraint: Option<usize>,
     /// Whether this field has an encrypted index for searchable encryption
     pub encrypted_index: bool,
+    /// Embedding configuration from @embedding directive
+    pub embedding: Option<EmbeddingConfig>,
 }
 
 /// Index configuration from @index directive

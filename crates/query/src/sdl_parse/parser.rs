@@ -276,7 +276,7 @@ pub fn parse_sdl_with_known_types(
 /// - Unknown directives (forward compatibility - ignored but noted)
 /// - Unknown arguments on known directives (possible typos)
 /// - Invalid argument types (e.g., string where bool expected - default used)
-/// - Unimplemented directives (@embedding, @encryptedIndex, field @policy)
+/// - Unimplemented directives (@encryptedIndex, field @policy)
 ///
 /// This is the recommended entry point for production use.
 pub fn parse_sdl_with_warnings(sdl: &str) -> Result<ParseOutput> {

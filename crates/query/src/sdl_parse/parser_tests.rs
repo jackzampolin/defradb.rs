@@ -1241,29 +1241,25 @@ fn test_policy_directive_unknown_argument_emits_warning() {
 }
 
 #[test]
-fn test_embedding_directive_emits_unimplemented_warning() {
+fn test_embedding_directive_parses_config() {
     let sdl = r#"
         type Document {
-            content: String @embedding(provider: "openai", model: "ada")
+            content: String
+            content_v: [Float32!] @embedding(provider: "openai", model: "ada", url: "http://localhost:8080", fields: ["content"])
         }
     "#;
 
     let output = parse_sdl_with_warnings(sdl).unwrap();
     assert_eq!(output.collections.len(), 1);
-    // @embedding is recognized but not implemented, should emit UnimplementedDirective
-    assert_eq!(output.warnings.len(), 1);
-    match &output.warnings[0] {
-        ParseWarning::UnimplementedDirective {
-            directive_name,
-            type_name,
-            field_name,
-        } => {
-            assert_eq!(directive_name, "embedding");
-            assert_eq!(type_name, "Document");
-            assert_eq!(field_name.as_deref(), Some("content"));
-        }
-        other => panic!("expected UnimplementedDirective, got {:?}", other),
-    }
+    assert_eq!(output.warnings.len(), 0);
+
+    let col = &output.collections[0];
+    assert_eq!(col.vector_embeddings.len(), 1);
+    assert_eq!(col.vector_embeddings[0].field_name, "content_v");
+    assert_eq!(col.vector_embeddings[0].provider, "openai");
+    assert_eq!(col.vector_embeddings[0].model, "ada");
+    assert_eq!(col.vector_embeddings[0].url, "http://localhost:8080");
+    assert_eq!(col.vector_embeddings[0].fields, vec!["content"]);
 }
 
 #[test]
@@ -1276,17 +1272,10 @@ fn test_embedding_directive_unknown_argument_emits_warning() {
 
     let output = parse_sdl_with_warnings(sdl).unwrap();
     assert_eq!(output.collections.len(), 1);
-    // Should have both UnknownDirectiveArgument and UnimplementedDirective
-    assert_eq!(output.warnings.len(), 2);
+    // Should have UnknownDirectiveArgument warning only
+    assert_eq!(output.warnings.len(), 1);
 
-    // Find the UnknownDirectiveArgument warning
-    let unknown_arg = output
-        .warnings
-        .iter()
-        .find(|w| matches!(w, ParseWarning::UnknownDirectiveArgument { .. }))
-        .expect("should have UnknownDirectiveArgument warning");
-
-    match unknown_arg {
+    match &output.warnings[0] {
         ParseWarning::UnknownDirectiveArgument {
             directive_name,
             argument_name,
@@ -1295,7 +1284,7 @@ fn test_embedding_directive_unknown_argument_emits_warning() {
             assert_eq!(directive_name, "embedding");
             assert_eq!(argument_name, "unknownArg");
         }
-        _ => unreachable!(),
+        other => panic!("expected UnknownDirectiveArgument, got {:?}", other),
     }
 }
 

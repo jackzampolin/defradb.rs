@@ -79,7 +79,22 @@ impl<'a> SdlParser<'a> {
                     // Searchable encryption index
                     result.encrypted_index = true;
                 }
-                "embedding" | "policy" => {
+                "embedding" => {
+                    let provider = get_directive_string(directive, "provider").unwrap_or_default();
+                    let model = get_directive_string(directive, "model").unwrap_or_default();
+                    let url = get_directive_string(directive, "url").unwrap_or_default();
+                    let fields = get_directive_string_list(directive, "fields");
+                    let template = get_directive_string(directive, "template").unwrap_or_default();
+
+                    result.embedding = Some(super::directives::EmbeddingConfig {
+                        provider,
+                        model,
+                        url,
+                        fields,
+                        template,
+                    });
+                }
+                "policy" => {
                     // Known but not yet implemented - emit warning so users know
                     self.warnings.push(ParseWarning::UnimplementedDirective {
                         directive_name: directive.name.clone(),
