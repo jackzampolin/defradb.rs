@@ -729,13 +729,17 @@ impl Node {
                 }
             }
 
-            // Wire NAC (Node Access Control) to HTTP server
-            let nac_config = db::NacConfig::new();
-            let nac_manager: std::sync::Arc<dyn db::NacManagerApi> =
-                std::sync::Arc::new(db::create_memory_nac_manager(nac_config));
-            let nac_adapter = crate::nac_adapter::NacAdapter::new_arc(nac_manager);
-            server = server.with_nac_arc(nac_adapter);
-            info!("NAC HTTP endpoints enabled");
+            // Wire NAC (Node Access Control) to HTTP server only when enabled
+            if config.acp.node_enable {
+                let nac_config = db::NacConfig::new().with_enabled();
+                let nac_manager: std::sync::Arc<dyn db::NacManagerApi> =
+                    std::sync::Arc::new(db::create_memory_nac_manager(nac_config));
+                let nac_adapter = crate::nac_adapter::NacAdapter::new_arc(nac_manager);
+                server = server.with_nac_arc(nac_adapter);
+                info!("NAC HTTP endpoints enabled");
+            } else {
+                info!("NAC disabled (use --acp-node-enable to enable)");
+            }
 
             // Wire ACP policy operations to HTTP server
             let acp_adapter = crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store);
