@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::config::{Config, DatastoreType};
+use crate::config::{AcpDocumentType, Config, DatastoreType};
 use crate::error::{Error, Result};
 use identity::Identity;
 
@@ -741,18 +741,24 @@ impl Node {
                 info!("NAC disabled (use --acp-node-enable to enable)");
             }
 
-            // Wire ACP policy operations to HTTP server
-            let acp_adapter = crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store);
-            server = server.with_acp_arc(acp_adapter);
-            info!("ACP policy HTTP endpoints enabled");
+            // Wire ACP adapters only when document ACP is enabled
+            if config.acp.document_type != AcpDocumentType::None {
+                let acp_adapter = crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store);
+                server = server.with_acp_arc(acp_adapter);
+                info!(
+                    "ACP policy HTTP endpoints enabled (type: {})",
+                    config.acp.document_type
+                );
 
-            // Wire document ACP operations to HTTP server
-            let doc_acp_adapter = crate::doc_acp_adapter::DocumentAcpAdapter::new_arc(
-                database.clone(),
-                Arc::new(acp::LocalDocumentACP::new(acp_store_for_http)),
-            );
-            server = server.with_doc_acp_arc(doc_acp_adapter);
-            info!("Document ACP HTTP endpoints enabled");
+                let doc_acp_adapter = crate::doc_acp_adapter::DocumentAcpAdapter::new_arc(
+                    database.clone(),
+                    Arc::new(acp::LocalDocumentACP::new(acp_store_for_http)),
+                );
+                server = server.with_doc_acp_arc(doc_acp_adapter);
+                info!("Document ACP HTTP endpoints enabled");
+            } else {
+                info!("Document ACP disabled (use --document-acp-type to enable)");
+            }
 
             // Wire collection management operations to HTTP server
             let collection_mgmt_adapter =
@@ -833,6 +839,14 @@ impl Node {
         if !config.net.peers.is_empty() {
             info!("Bootstrap peers configured: {:?}", config.net.peers);
             info!("Note: Direct peer connection requires peer ID; mDNS will discover local peers");
+        }
+
+        // Warn about unsupported P2P config flags
+        if !config.net.pubsub_enabled {
+            warn!("net.pubsub_enabled=false is not yet supported; GossipSub remains active");
+        }
+        if config.net.relay_enabled {
+            warn!("net.relay_enabled=true is not yet supported; relay is not available");
         }
 
         // Get and display peer ID
