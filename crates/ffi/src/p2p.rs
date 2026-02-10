@@ -670,18 +670,28 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
             };
 
             rt.block_on(async {
+                let local_pid = p2p
+                    .handle
+                    .local_peer_id()
+                    .await
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|_| "unknown".to_string());
                 // Get connected peers from the host first (authoritative list).
                 let connected = p2p
                     .handle
                     .connected_peers()
                     .await
                     .map_err(|e| format!("failed to get connected peers: {}", e))?;
+                eprintln!(
+                    "[FFI-ACTIVE-PEERS] node={} node_ptr={} connected={}",
+                    &local_pid[local_pid.len().saturating_sub(8)..],
+                    node_ptr,
+                    connected.len()
+                );
 
-                // Wait for identify protocol to resolve addresses for all connected
-                // peers. Incoming connections initially have no address in peer_addrs
-                // (we skip storing the ephemeral send_back_addr). The identify protocol
-                // updates peer_addrs with the correct listen address, typically within
-                // a few milliseconds on localhost.
+                // Wait for all connected peers to have resolved addresses.
+                // With TCP port reuse + biased select, addresses are typically
+                // available immediately, but we retry for robustness.
                 let mut host_addrs = Vec::new();
                 let mut covered: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
@@ -720,6 +730,16 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
                             all_addrs.push(ffi_addr.to_string());
                         }
                     }
+                }
+
+                eprintln!(
+                    "[FFI-ACTIVE-PEERS] connected={} host_addrs={} all_addrs={}",
+                    connected.len(),
+                    covered.len(),
+                    all_addrs.len()
+                );
+                for a in &all_addrs {
+                    eprintln!("[FFI-ACTIVE-PEERS]   addr={}", a);
                 }
 
                 serde_json::to_string(&all_addrs)

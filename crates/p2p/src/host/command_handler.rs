@@ -421,6 +421,15 @@ impl<S: Store> P2PHost<S> {
             HostCommand::PeerAddresses { response } => {
                 // Build full multiaddrs for connected peers (matches Go's ActivePeers).
                 let connected: HashSet<PeerId> = self.swarm.connected_peers().cloned().collect();
+                eprintln!(
+                    "[PEER-ADDRS] connected_peers={} peer_addrs={}",
+                    connected.len(),
+                    self.peer_addrs.len()
+                );
+                for pid in &connected {
+                    let has_addr = self.peer_addrs.contains_key(pid);
+                    eprintln!("[PEER-ADDRS]   peer={} has_addr={}", pid, has_addr);
+                }
                 let addrs: Vec<String> = connected
                     .iter()
                     .filter_map(|pid| {
