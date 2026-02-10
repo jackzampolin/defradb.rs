@@ -256,10 +256,12 @@ fn generate_auth_token_from_keyring(config: &Config, name: &str, audience: &str)
     let key_type = match key_bytes.len() {
         32 => KeyType::Secp256k1,
         64 => KeyType::Ed25519,
-        len => return Err(Error::InvalidIdentity(format!(
+        len => {
+            return Err(Error::InvalidIdentity(format!(
             "key '{}' has invalid length: {} bytes (expected 32 for secp256k1 or 64 for ed25519)",
             name, len
-        ))),
+        )))
+        }
     };
 
     let identity = RawIdentity::from_bytes(key_type, &key_bytes)
