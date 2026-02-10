@@ -307,6 +307,9 @@ pub struct NodeState {
     /// SourceHub ACP (optional - only set when using SourceHub for document ACP).
     /// Used by add_dac_policy to route policy creation through SourceHub transactions.
     pub sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
+    /// Searchable encryption key (32-byte AES-256 key).
+    /// Set via `set_se_encryption_key` FFI when SE is enabled in test config.
+    pub se_encryption_key: Option<Vec<u8>>,
 }
 
 /// State held for each FFI subscription.
@@ -370,6 +373,17 @@ impl NodeRegistry {
     {
         let nodes = self.nodes.read();
         nodes.get(&handle).map(f)
+    }
+
+    /// Get a mutable reference to a node state.
+    ///
+    /// Returns None if the handle is invalid.
+    pub fn get_mut<F, R>(&self, handle: NodeHandle, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut NodeState) -> R,
+    {
+        let mut nodes = self.nodes.write();
+        nodes.get_mut(&handle).map(f)
     }
 
     /// Remove and return a node state.
@@ -568,6 +582,13 @@ impl NodesAccess {
         F: FnOnce(&NodeState) -> R,
     {
         nodes().get(handle, f)
+    }
+
+    pub fn get_mut<F, R>(&self, handle: NodeHandle, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut NodeState) -> R,
+    {
+        nodes().get_mut(handle, f)
     }
 
     pub fn remove(&self, handle: NodeHandle) -> Option<NodeState> {

@@ -248,6 +248,7 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
             p2p: None,
             node_identity_did,
             sourcehub_acp,
+            se_encryption_key: None,
         };
 
         // Register and get handle

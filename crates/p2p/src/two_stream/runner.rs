@@ -22,6 +22,10 @@ pub struct TwoStreamRunner {
     request_streams: stream::IncomingStreams,
     /// Incoming response streams.
     response_streams: stream::IncomingStreams,
+    /// Incoming SE request streams.
+    se_request_streams: stream::IncomingStreams,
+    /// Incoming SE response streams.
+    se_response_streams: stream::IncomingStreams,
     /// Channel to send events.
     event_tx: mpsc::Sender<TwoStreamEvent>,
 }
@@ -32,12 +36,16 @@ impl TwoStreamRunner {
         handler: Arc<tokio::sync::Mutex<TwoStreamHandler>>,
         request_streams: stream::IncomingStreams,
         response_streams: stream::IncomingStreams,
+        se_request_streams: stream::IncomingStreams,
+        se_response_streams: stream::IncomingStreams,
         event_tx: mpsc::Sender<TwoStreamEvent>,
     ) -> Self {
         Self {
             handler,
             request_streams,
             response_streams,
+            se_request_streams,
+            se_response_streams,
             event_tx,
         }
     }
@@ -120,6 +128,38 @@ impl TwoStreamRunner {
                                 );
                             }
                         }
+                    });
+                }
+                // Handle incoming SE request streams (Rust receiving SE artifacts - log for now)
+                Some((peer_id, mut stream)) = self.se_request_streams.next() => {
+                    tokio::spawn(async move {
+                        use futures::AsyncReadExt;
+                        let mut buf = Vec::new();
+                        if let Err(e) = stream.read_to_end(&mut buf).await {
+                            tracing::warn!(peer_id = %peer_id, error = %e, "Failed to read SE request stream");
+                            return;
+                        }
+                        tracing::info!(
+                            peer_id = %peer_id,
+                            buf_len = buf.len(),
+                            "Received SE request stream (Rust as receiver not yet implemented)"
+                        );
+                    });
+                }
+                // Handle incoming SE response streams (replies to our SE pushes)
+                Some((peer_id, mut stream)) = self.se_response_streams.next() => {
+                    tokio::spawn(async move {
+                        use futures::AsyncReadExt;
+                        let mut buf = Vec::new();
+                        if let Err(e) = stream.read_to_end(&mut buf).await {
+                            tracing::warn!(peer_id = %peer_id, error = %e, "Failed to read SE response stream");
+                            return;
+                        }
+                        tracing::debug!(
+                            peer_id = %peer_id,
+                            buf_len = buf.len(),
+                            "Received SE response (acknowledgement)"
+                        );
                     });
                 }
                 else => {

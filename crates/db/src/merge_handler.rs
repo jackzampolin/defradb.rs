@@ -29,6 +29,48 @@ use crate::database::DB;
 use crate::error::Error;
 use crate::index_manager::IndexManager;
 
+/// Check whether the merge handler should skip decryption for an encrypted block.
+///
+/// Returns `true` if the block is encrypted AND the collection has an ACP policy
+/// AND the document is NOT registered in the local ACP.
+///
+/// Go stores encryption keys in a separate Encstore that is only populated via KMS
+/// (Key Management Service). Without KMS authorization, the keys never reach the
+/// remote node's Encstore, so Go's merge handler cannot decrypt and sets canRead=false.
+///
+/// Rust doesn't have KMS — encryption blocks are in the main blockstore and synced
+/// via Bitswap. This helper replicates Go's behavior: if we don't have local ACP
+/// registration for the document, we treat it as if we don't have the key.
+async fn should_skip_encrypted_merge(
+    document_acp: Option<&Arc<dyn acp::DocumentACP>>,
+    collection: Option<&CollectionVersion>,
+    doc_id: &str,
+) -> bool {
+    let acp = match document_acp {
+        Some(a) => a,
+        None => return false,
+    };
+    let col = match collection {
+        Some(c) => c,
+        None => return false,
+    };
+    let policy = match &col.policy {
+        Some(p) => p,
+        None => return false,
+    };
+
+    // If the document IS registered in our local ACP, we created it (or have explicit access).
+    // Allow decryption.
+    match acp
+        .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
+        .await
+    {
+        Ok(true) => false, // Registered → allow decryption
+        Ok(false) => true, // Not registered → skip (replicated doc, no local access)
+        Err(_) => true,    // Error checking → fail-closed, skip
+    }
+}
+
 /// Marker byte indicating a document is deleted (matches Go's DeletedObjectMarker).
 const DELETED_MARKER: u8 = 0x01;
 
@@ -109,6 +151,10 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     db: Arc<DB<S>>,
     /// Reference to the blockstore for loading linked blocks.
     blockstore: Arc<B>,
+    /// Optional DocumentACP for checking access on encrypted+ACP-protected documents.
+    /// Uses OnceLock so it can be set after construction (p2p.rs creates the merge
+    /// handler before document_acp is available).
+    document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
     /// Tracks composite CIDs that have already been merged, preventing
     /// duplicate processing from concurrent dual-broadcast paths (doc topic
     /// + collection topic). Matches Go's `loadComposites` dedup guard.
@@ -121,8 +167,20 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         Self {
             db,
             blockstore,
+            document_acp: std::sync::OnceLock::new(),
             merged_composites: std::sync::Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Set the DocumentACP for access control checks during merge (builder pattern).
+    pub fn with_document_acp(self, acp: Arc<dyn acp::DocumentACP>) -> Self {
+        let _ = self.document_acp.set(acp);
+        self
+    }
+
+    /// Set the DocumentACP after construction (when merge handler is already in Arc).
+    pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
+        let _ = self.document_acp.set(acp);
     }
 
     /// Get reference to blockstore.
@@ -512,6 +570,36 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Create a SINGLE transaction for all field merges AND document storage
         let txn = self.db.new_txn(false).await?;
 
+        // Pre-lookup the collection for ACP checks on encrypted blocks.
+        // Go uses a separate Encstore + KMS for encryption key distribution;
+        // without KMS authorization the remote node never gets the key, so
+        // Go's merge handler sets canRead=false and skips the field merge.
+        // We replicate that by checking local ACP registration.
+        let collection_for_acp = self
+            .db
+            .find_collection_by_id(&payload.schema_version_id)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                metadata
+                    .collection_id
+                    .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
+            });
+
+        let skip_encrypted = should_skip_encrypted_merge(
+            self.document_acp.get(),
+            collection_for_acp.as_ref().map(|c| c.schema()),
+            &doc_id_str,
+        )
+        .await;
+
+        if skip_encrypted {
+            tracing::info!(
+                doc_id = %doc_id_str,
+                "Skipping encrypted field merges: doc not registered in local ACP"
+            );
+        }
+
         // Collect winning field values for document reconstruction
         // These are the values that WON conflict resolution, not just the incoming values
         let mut field_values: HashMap<String, NormalValue> = HashMap::new();
@@ -591,6 +679,18 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     // this field block explicitly supersedes, not ALL heads for the field.
                     if let Some(heads) = &linked_block.heads {
                         field_block_heads.insert(link_name.clone(), heads.clone());
+                    }
+
+                    // Skip encrypted field merge if ACP denies access (Go compat:
+                    // Go's merge handler sets canRead=false when encryption key is
+                    // unavailable via KMS for ACP-protected collections).
+                    if skip_encrypted && linked_block.encryption.is_some() {
+                        tracing::debug!(
+                            link_cid = %link_cid,
+                            link_name = %link_name,
+                            "Skipping encrypted linked block (no local ACP registration)"
+                        );
+                        continue;
                     }
 
                     // Decrypt linked block data if it has encryption
@@ -878,7 +978,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // IMPORTANT: Use proper head merging — only delete heads that this block
         // explicitly supersedes (listed in block.heads / field block heads).
         // This preserves concurrent branches during concurrent P2P updates.
-        if process_error.is_none() {
+        if process_error.is_none() && !skip_encrypted {
             if let Ok(headstore) = txn.headstore() {
                 let priority_bytes = encode_priority_varint(payload.priority);
 

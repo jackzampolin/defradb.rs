@@ -48,6 +48,7 @@ mod policy_yaml;
 pub mod query;
 pub mod runtime;
 pub mod schema;
+pub mod se_key;
 pub mod state;
 pub mod subscription;
 pub mod txn;
@@ -105,6 +106,7 @@ pub use p2p::{
 };
 pub use query::exec_request;
 pub use schema::{add_schema, get_collections, get_collections_in_txn};
+pub use se_key::set_se_encryption_key;
 pub use subscription::{
     close_graphql_subscription, close_subscription, create_merge_complete_subscription,
     create_subscription, poll_graphql_subscription, poll_subscription,

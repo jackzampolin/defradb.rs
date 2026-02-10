@@ -185,6 +185,12 @@ impl<S: Store> P2PHost<S> {
         let response_streams = control
             .accept(TwoStreamHandler::response_protocol())
             .map_err(|_| Error::Behaviour("Failed to register response protocol".into()))?;
+        let se_request_streams = control
+            .accept(TwoStreamHandler::se_request_protocol())
+            .map_err(|_| Error::Behaviour("Failed to register SE request protocol".into()))?;
+        let se_response_streams = control
+            .accept(TwoStreamHandler::se_response_protocol())
+            .map_err(|_| Error::Behaviour("Failed to register SE response protocol".into()))?;
 
         let two_stream_handler = Arc::new(tokio::sync::Mutex::new(TwoStreamHandler::new(control)));
         let (two_stream_event_tx, two_stream_event_rx) = mpsc::channel(256);
@@ -194,6 +200,8 @@ impl<S: Store> P2PHost<S> {
             Arc::clone(&two_stream_handler),
             request_streams,
             response_streams,
+            se_request_streams,
+            se_response_streams,
             two_stream_event_tx,
         );
         tokio::spawn(runner.run());

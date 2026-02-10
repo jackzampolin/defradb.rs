@@ -28,6 +28,7 @@ use p2p::sync::{
 use p2p::topics::DefraTopic;
 use p2p::P2PHost;
 use storage::corekv::IterOptions;
+use storage::Store as _;
 
 /// Parsed multiaddr containing peer ID and transport address.
 struct ParsedMultiaddr {
@@ -224,10 +225,61 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
         let bitswap_store = BitswapStoreAdapter::new(blockstore.clone());
 
-        // Create P2P host
-        let (host, handle, event_rx, _replicator_registry) = P2PHost::new(bitswap_store.clone())
-            .await
-            .map_err(|e| format!("failed to create P2P host: {}", e))?;
+        // Try to load persisted P2P keypair from the store.
+        // Key uses systemstore prefix 's' + '/p2p/host_key'.
+        const P2P_HOST_KEY: &[u8] = b"s/p2p/host_key";
+
+        let stored_keypair = {
+            let txn = store
+                .new_txn(true)
+                .await
+                .map_err(|e| format!("failed to create txn for P2P key load: {}", e))?;
+            match txn.get(P2P_HOST_KEY).await {
+                Ok(Some(bytes)) => {
+                    match libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {
+                        Ok(kp) => Some(kp),
+                        Err(e) => {
+                            eprintln!(
+                                "[P2P] Warning: failed to decode stored keypair: {}, generating new one",
+                                e
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            }
+        };
+
+        let (host, handle, event_rx, _replicator_registry) =
+            if let Some(kp) = stored_keypair {
+                P2PHost::with_keypair(kp, bitswap_store.clone())
+                    .await
+                    .map_err(|e| format!("failed to create P2P host with stored keypair: {}", e))?
+            } else {
+                let result = P2PHost::new(bitswap_store.clone())
+                    .await
+                    .map_err(|e| format!("failed to create P2P host: {}", e))?;
+
+                // Persist the newly generated keypair
+                let key_bytes = result
+                    .1
+                    .keypair()
+                    .to_protobuf_encoding()
+                    .map_err(|e| format!("failed to encode P2P keypair: {}", e))?;
+                let mut txn = store
+                    .new_txn(false)
+                    .await
+                    .map_err(|e| format!("failed to create txn for P2P key store: {}", e))?;
+                txn.set(P2P_HOST_KEY, &key_bytes)
+                    .await
+                    .map_err(|e| format!("failed to store P2P keypair: {}", e))?;
+                txn.commit()
+                    .await
+                    .map_err(|e| format!("failed to commit P2P keypair: {}", e))?;
+
+                result
+            };
 
         // Spawn the P2P host event loop BEFORE sending any commands.
         // The host must be running to process commands like Listen/Dial.
@@ -468,6 +520,11 @@ pub unsafe extern "C" fn new_node_with_p2p(
             )
         };
 
+        // Wire document ACP into the merge handler so it can skip encrypted field
+        // merges for ACP-protected docs that aren't registered locally (Go compat:
+        // Go uses KMS for key distribution with ACP checks; Rust checks ACP directly).
+        merge_handler.set_document_acp(document_acp.clone());
+
         // Create NAC manager - use persistent store when file-based storage is configured
         let nac_manager: Arc<dyn db::NacManagerApi> = if let Some(ref path) = db_path_opt {
             let data_path = std::path::Path::new(path);
@@ -525,6 +582,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
             p2p: Some(p2p_state),
             node_identity_did,
             sourcehub_acp,
+            se_encryption_key: None,
         };
 
         // Register and get handle
@@ -865,6 +923,7 @@ pub unsafe extern "C" fn p2p_create_replicator(
                 let push_peer_id = parsed.peer_id;
                 let push_collections = effective_collections;
                 let push_event_bus = state.event_bus.clone();
+                let push_se_key = state.se_encryption_key.clone();
 
                 tokio::spawn(async move {
                     if let Err(e) = push_existing_docs(
@@ -872,6 +931,7 @@ pub unsafe extern "C" fn p2p_create_replicator(
                         &push_db,
                         push_peer_id,
                         &push_collections,
+                        push_se_key.as_deref(),
                     )
                     .await
                     {
@@ -901,14 +961,19 @@ pub unsafe extern "C" fn p2p_create_replicator(
 ///
 /// Matches Go's `pushHeadsForAllDocs`: for each collection, iterate all docs,
 /// get composite heads from headstore, load blocks, send PushLog to peer.
+/// If an SE encryption key is provided, also generates and pushes SE artifacts
+/// for collections with encrypted indexes.
 async fn push_existing_docs(
     handle: &p2p::P2PHostHandle,
     db: &crate::state::FfiDatabase,
     peer_id: libp2p::PeerId,
     collections: &[String],
+    se_encryption_key: Option<&[u8]>,
 ) -> Result<(), String> {
     // Wait for the connection to be fully established (dial is non-blocking).
-    let conn_timeout = std::time::Duration::from_secs(5);
+    // After a node restart, re-establishing connectivity can take longer than
+    // the initial connection, so we allow up to 15 seconds.
+    let conn_timeout = std::time::Duration::from_secs(15);
     let conn_start = std::time::Instant::now();
     loop {
         let peers = handle.connected_peers().await.unwrap_or_default();
@@ -1049,12 +1114,228 @@ async fn push_existing_docs(
         "[PUSH-EXISTING] Awaiting {} push tasks to complete",
         push_handles.len()
     );
-    for handle in push_handles {
-        let _ = handle.await;
+    for jh in push_handles {
+        let _ = jh.await;
     }
     eprintln!("[PUSH-EXISTING] All push tasks completed");
 
+    // Generate and push SE artifacts for collections with encrypted indexes.
+    if let Some(se_key) = se_encryption_key {
+        let coordinator = db::se::SECoordinator::with_key(se_key.to_vec());
+
+        for col_name in collections {
+            let collection = match db.get_collection(col_name) {
+                Ok(Some(c)) => c,
+                _ => continue,
+            };
+
+            let encrypted_indexes = &collection.schema().encrypted_indexes;
+            if encrypted_indexes.is_empty() {
+                continue;
+            }
+
+            eprintln!(
+                "[SE-PUSH] Collection {} has {} encrypted indexes, generating artifacts",
+                col_name,
+                encrypted_indexes.len()
+            );
+
+            // Iterate datastore to get doc IDs (same pattern as block push above)
+            let col_prefix = format!("/d/{}/", collection.collection_id()).into_bytes();
+            let opts = IterOptions::new()
+                .with_prefix(col_prefix)
+                .with_keys_only(true);
+            let mut doc_iter = datastore
+                .iterator(opts)
+                .await
+                .map_err(|e| format!("SE: failed to iterate datastore: {}", e))?;
+
+            let mut se_doc_ids = Vec::new();
+            while let Some(pair) = doc_iter
+                .next()
+                .await
+                .map_err(|e| format!("SE: datastore iteration error: {}", e))?
+            {
+                let key_str = String::from_utf8_lossy(&pair.key);
+                let parts: Vec<&str> = key_str.split('/').collect();
+                if parts.len() == 4 {
+                    se_doc_ids.push(parts[3].to_string());
+                }
+            }
+            doc_iter
+                .close()
+                .await
+                .map_err(|e| format!("SE: datastore close error: {}", e))?;
+
+            // For each document, load field values and generate artifacts.
+            let mut all_artifacts = Vec::new();
+            for doc_id in &se_doc_ids {
+                // Read document CBOR from datastore: /d/{collection_id}/{doc_id}
+                let doc_key = format!("/d/{}/{}", collection.collection_id(), doc_id).into_bytes();
+                let doc_data = match datastore.get(&doc_key).await {
+                    Ok(Some(data)) => data,
+                    _ => continue,
+                };
+
+                let doc = match document::Document::from_cbor(&doc_data) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(doc_id = %doc_id, error = %e, "SE: failed to deserialize document");
+                        continue;
+                    }
+                };
+
+                // Extract field values as HashMap<String, NormalValue>
+                let field_values: std::collections::HashMap<String, document::NormalValue> = doc
+                    .values()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.value().clone()))
+                    .collect();
+
+                match coordinator.generate_artifacts(
+                    collection.collection_id(),
+                    doc_id,
+                    encrypted_indexes,
+                    &[],
+                    &field_values,
+                ) {
+                    Ok(artifacts) => {
+                        for a in artifacts {
+                            all_artifacts.push(p2p::message::SEArtifact::new(
+                                &a.doc_id,
+                                &a.index_id,
+                                a.search_tag,
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(doc_id = %doc_id, error = %e, "SE: failed to generate artifacts");
+                    }
+                }
+            }
+
+            if !all_artifacts.is_empty() {
+                eprintln!(
+                    "[SE-PUSH] Sending {} SE artifacts for collection {} to peer {}",
+                    all_artifacts.len(),
+                    col_name,
+                    peer_id
+                );
+
+                let se_request = p2p::message::PushSEArtifactsRequest::new(
+                    collection.collection_id().to_string(),
+                    all_artifacts,
+                );
+
+                if let Err(e) = handle.send_se_artifacts(peer_id, se_request).await {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        collection = %col_name,
+                        error = %e,
+                        "Failed to send SE artifacts to replicator"
+                    );
+                }
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Retry pushing existing documents to all registered replicators.
+///
+/// For each registered replicator, re-pushes all existing documents.
+/// `push_existing_docs` internally waits up to 5s for the peer connection
+/// to be established, so this can be called immediately after dialing.
+///
+/// # Safety
+///
+/// `node_ptr` must be a valid node handle.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_retry_replicators(node_ptr: usize) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    let result = NODES
+        .get(node_ptr, |state| {
+            let p2p = match &state.p2p {
+                Some(p2p) => p2p,
+                None => return Err("no p2p system configured".to_string()),
+            };
+            let db = &state.database;
+
+            rt.block_on(async {
+                let replicators = p2p
+                    .handle
+                    .get_all_replicators()
+                    .await
+                    .map_err(|e| format!("failed to get replicators: {}", e))?;
+
+                let all_collections = db
+                    .list_collections()
+                    .map_err(|e| format!("failed to list collections: {}", e))?;
+
+                eprintln!(
+                    "[RETRY-REPLICATORS] Found {} replicators, {} collections",
+                    replicators.len(),
+                    all_collections.len()
+                );
+
+                let mut push_handles = Vec::new();
+
+                for rep in &replicators {
+                    let peer_id = match rep.peer_id() {
+                        Some(id) => id,
+                        None => continue,
+                    };
+
+                    eprintln!(
+                        "[RETRY-REPLICATORS] Pushing existing docs to peer {}",
+                        peer_id
+                    );
+
+                    let push_handle = p2p.handle.clone();
+                    let push_db = Arc::clone(db);
+                    let push_collections = all_collections.clone();
+                    let push_se_key = state.se_encryption_key.clone();
+
+                    push_handles.push(tokio::spawn(async move {
+                        if let Err(e) = push_existing_docs(
+                            &push_handle,
+                            &push_db,
+                            peer_id,
+                            &push_collections,
+                            push_se_key.as_deref(),
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                peer_id = %peer_id,
+                                error = %e,
+                                "Failed to retry push existing docs to replicator"
+                            );
+                        }
+                    }));
+                }
+
+                eprintln!(
+                    "[RETRY-REPLICATORS] Awaiting {} push tasks",
+                    push_handles.len()
+                );
+                for h in push_handles {
+                    let _ = h.await;
+                }
+                eprintln!("[RETRY-REPLICATORS] All push tasks completed");
+
+                Ok(())
+            })
+        })
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+        .and_then(|r| r);
+
+    match result {
+        Ok(()) => FfiResult::ok(),
+        Err(e) => FfiResult::error(e),
+    }
 }
 
 /// Delete a replicator.

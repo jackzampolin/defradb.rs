@@ -482,6 +482,27 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Send SE artifacts to a peer via the SE two-stream protocol.
+    ///
+    /// This sends a PushSEArtifactsRequest on the SE request protocol.
+    /// The response is not awaited (fire-and-forget).
+    pub async fn send_se_artifacts(
+        &self,
+        peer_id: PeerId,
+        request: crate::message::PushSEArtifactsRequest,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendSEArtifacts {
+                peer_id,
+                request,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
     /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
     pub async fn peer_addresses(&self) -> Result<Vec<String>> {
         let (response_tx, response_rx) = oneshot::channel();

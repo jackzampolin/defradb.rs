@@ -41,6 +41,24 @@ pub const REP_REQUEST_PROTOCOL: &str = "/defradb/rep_req/0.0.1";
 /// Go uses "rep" as the channel name: `/defradb/rep_resp/0.0.1`
 pub const REP_RESPONSE_PROTOCOL: &str = "/defradb/rep_resp/0.0.1";
 
+/// SE (Searchable Encryption) request protocol ID.
+/// Go uses "rep_se" as the channel name: `/defradb/rep_se_req/0.0.1`
+pub const SE_REQUEST_PROTOCOL: &str = "/defradb/rep_se_req/0.0.1";
+
+/// SE (Searchable Encryption) response protocol ID.
+/// Go uses "rep_se" as the channel name: `/defradb/rep_se_resp/0.0.1`
+pub const SE_RESPONSE_PROTOCOL: &str = "/defradb/rep_se_resp/0.0.1";
+
+/// StreamProtocol for the SE request protocol.
+pub fn se_request_protocol() -> StreamProtocol {
+    StreamProtocol::new(SE_REQUEST_PROTOCOL)
+}
+
+/// StreamProtocol for the SE response protocol.
+pub fn se_response_protocol() -> StreamProtocol {
+    StreamProtocol::new(SE_RESPONSE_PROTOCOL)
+}
+
 // Legacy aliases for backwards compatibility with existing code
 #[deprecated(note = "Use REP_REQUEST_PROTOCOL instead")]
 pub const PUSHLOG_REQUEST_PROTOCOL: &str = REP_REQUEST_PROTOCOL;
