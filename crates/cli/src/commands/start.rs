@@ -486,8 +486,13 @@ impl Node {
             info!("Initializing P2P network");
             let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
             let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
-            let (handle, events, host_task) =
-                Self::start_p2p(config, bitswap_store, peer_keypair).await?;
+            let (handle, events, host_task) = Self::start_p2p(
+                config,
+                bitswap_store,
+                peer_keypair,
+                config.net.pubsub_enabled,
+            )
+            .await?;
             (Some(handle), Some(events), Some(host_task))
         };
 
@@ -809,16 +814,19 @@ impl Node {
         config: &Config,
         bitswap_store: S,
         keypair: Option<p2p::Keypair>,
+        enable_pubsub: bool,
     ) -> Result<(
         p2p::P2PHostHandle,
         tokio::sync::mpsc::Receiver<p2p::HostEvent>,
         JoinHandle<()>,
     )> {
         let (host, handle, events, _replicators) = match keypair {
-            Some(kp) => p2p::P2PHost::with_keypair(kp, bitswap_store)
+            Some(kp) => p2p::P2PHost::with_keypair_and_config(kp, bitswap_store, enable_pubsub)
                 .await
                 .map_err(Error::P2P)?,
-            None => p2p::P2PHost::new(bitswap_store).await.map_err(Error::P2P)?,
+            None => p2p::P2PHost::with_pubsub(bitswap_store, enable_pubsub)
+                .await
+                .map_err(Error::P2P)?,
         };
 
         // Spawn the host event loop FIRST - it must be running to process commands
@@ -841,10 +849,12 @@ impl Node {
             info!("Note: Direct peer connection requires peer ID; mDNS will discover local peers");
         }
 
-        // Warn about unsupported P2P config flags
-        if !config.net.pubsub_enabled {
-            warn!("net.pubsub_enabled=false is not yet supported; GossipSub remains active");
+        if config.net.pubsub_enabled {
+            info!("GossipSub pubsub enabled");
+        } else {
+            info!("GossipSub pubsub disabled");
         }
+
         if config.net.relay_enabled {
             warn!("net.relay_enabled=true is not yet supported; relay is not available");
         }
