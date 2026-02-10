@@ -340,6 +340,20 @@ impl Filter {
                 }
             } else {
                 // Operator conditions
+                // When a JSON property is missing (null) and _eq/_ne compares against
+                // a complex value (object/array), exclude the document. Missing JSON
+                // properties can't match complex equality/inequality comparisons.
+                if field_value.is_null() {
+                    for (op_str, expected) in ops {
+                        if matches!(
+                            FilterOp::parse(op_str),
+                            Some(FilterOp::Eq | FilterOp::Ne)
+                        ) && (expected.is_object() || expected.is_array())
+                        {
+                            return Ok(false);
+                        }
+                    }
+                }
                 for (op_str, expected) in ops {
                     let op = FilterOp::parse(op_str).ok_or_else(|| {
                         QueryError::invalid_filter(format!("unknown operator: {}", op_str))
