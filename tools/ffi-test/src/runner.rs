@@ -244,6 +244,22 @@ fn build_env(ctx: &WorktreeContext) -> HashMap<String, String> {
     // Enable vector embedding tests
     env.insert("DEFRA_VECTOR_EMBEDDING".to_string(), "true".to_string());
 
+    // Enable file-based database tests (Rust FFI uses redb for persistence)
+    env.insert("DEFRA_BADGER_FILE".to_string(), "true".to_string());
+
+    // Pass through Go test framework configuration from the environment.
+    // These control the test matrix: which ACP type, mutation type, etc.
+    // Example: DEFRA_DOCUMENT_ACP_TYPE=source-hub ffi-test run encryption
+    for key in &[
+        "DEFRA_DOCUMENT_ACP_TYPE",
+        "DEFRA_MUTATION_TYPE",
+        "DEFRA_SOURCEHUB_IMAGE",
+    ] {
+        if let Ok(val) = std::env::var(key) {
+            env.insert(key.to_string(), val);
+        }
+    }
+
     env
 }
 
