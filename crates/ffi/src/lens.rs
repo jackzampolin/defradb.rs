@@ -6,7 +6,10 @@
 
 use std::ffi::c_char;
 
+use acp::nac::NodePermission;
+
 use crate::get_runtime;
+use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
@@ -144,8 +147,11 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn lens_list(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
-    let _ = identity_did;
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::LensList) {
+        return e;
+    }
 
     // Validate node handle before entering async block
     let lens_store = match NODES.get(node_ptr, |state| state.database.lens_store().clone()) {
