@@ -3,7 +3,6 @@
 //! This module combines multiple libp2p behaviours into a single
 //! composite behaviour that handles:
 //! - Peer identification (identify)
-//! - Local peer discovery (mDNS)
 //! - Kademlia DHT for peer discovery
 //! - Bitswap for block exchange (Go compatibility via iroh-bitswap)
 //! - Request-response for PushLog synchronization
@@ -33,9 +32,8 @@ use libp2p::{
     gossipsub::{self, MessageAuthenticity, MessageId, ValidationMode},
     identify,
     kad::{self, store::MemoryStore, Mode},
-    mdns,
     request_response::{self, ProtocolSupport},
-    swarm::NetworkBehaviour,
+    swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
     PeerId, StreamProtocol,
 };
 use libp2p_stream as stream;
@@ -55,9 +53,6 @@ pub struct DefraBehaviour<S: Store> {
     /// Peer identification protocol.
     pub identify: identify::Behaviour,
 
-    /// Local network peer discovery via mDNS.
-    pub mdns: mdns::tokio::Behaviour,
-
     /// Kademlia DHT for peer discovery and content routing.
     /// Required for Bitswap to find peers who have specific blocks.
     pub kademlia: kad::Behaviour<MemoryStore>,
@@ -69,8 +64,8 @@ pub struct DefraBehaviour<S: Store> {
     /// Request-response protocol for PushLog messages.
     pub pushlog: request_response::Behaviour<PushLogCodec>,
 
-    /// GossipSub for pubsub messaging.
-    pub gossipsub: gossipsub::Behaviour,
+    /// GossipSub for pubsub messaging (optional, controlled by `pubsub_enabled` config).
+    pub gossipsub: Toggle<gossipsub::Behaviour>,
 
     /// Raw stream protocol for Go two-stream compatibility.
     /// Go's DefraDB uses separate streams for request and response.
@@ -82,9 +77,6 @@ pub struct DefraBehaviour<S: Store> {
 pub enum DefraEvent {
     /// Identify protocol event.
     Identify(identify::Event),
-
-    /// mDNS discovery event.
-    Mdns(mdns::Event),
 
     /// Kademlia DHT event.
     Kademlia(kad::Event),
@@ -102,12 +94,6 @@ pub enum DefraEvent {
 impl From<identify::Event> for DefraEvent {
     fn from(event: identify::Event) -> Self {
         DefraEvent::Identify(event)
-    }
-}
-
-impl From<mdns::Event> for DefraEvent {
-    fn from(event: mdns::Event) -> Self {
-        DefraEvent::Mdns(event)
     }
 }
 
@@ -166,6 +152,7 @@ impl<S: Store> DefraBehaviour<S> {
         local_public_key: libp2p::identity::PublicKey,
         keypair: Keypair,
         bitswap_store: S,
+        enable_pubsub: bool,
     ) -> Result<Self, std::io::Error> {
         // Configure identify behaviour
         let identify_config =
@@ -173,9 +160,6 @@ impl<S: Store> DefraBehaviour<S> {
                 .with_agent_version(format!("defradb-rs/{}", env!("CARGO_PKG_VERSION")));
 
         let identify = identify::Behaviour::new(identify_config);
-
-        // Configure mDNS for local network discovery
-        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
 
         // Configure request-response for PushLog (Rust-to-Rust only)
         // NOTE: We do NOT register rep_request or rep_response protocols here
@@ -188,33 +172,35 @@ impl<S: Store> DefraBehaviour<S> {
             request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT),
         );
 
-        // Configure GossipSub with native message signing
-        // MessageAuthenticity::Signed uses libp2p's built-in signing
-        // This matches Go's approach where pubsub handles authentication
-        let gossipsub_config = gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(Duration::from_secs(1))
-            .validation_mode(ValidationMode::Strict)
-            // Use content-based message ID to match Go behavior for deduplication
-            .message_id_fn(|message: &gossipsub::Message| {
-                let hash = crypto::sha256(&message.data);
-                MessageId::from(hash.to_vec())
-            })
-            .build()
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("gossipsub config error: {}", e),
-                )
-            })?;
-
-        let gossipsub =
-            gossipsub::Behaviour::new(MessageAuthenticity::Signed(keypair), gossipsub_config)
+        // Configure GossipSub (matches Go's `if options.EnablePubSub` conditional)
+        let gossipsub = if enable_pubsub {
+            let gossipsub_config = gossipsub::ConfigBuilder::default()
+                .heartbeat_interval(Duration::from_secs(1))
+                .validation_mode(ValidationMode::Strict)
+                .message_id_fn(|message: &gossipsub::Message| {
+                    let hash = crypto::sha256(&message.data);
+                    MessageId::from(hash.to_vec())
+                })
+                .build()
                 .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("gossipsub config error: {}", e),
+                    )
+                })?;
+
+            let gs =
+                gossipsub::Behaviour::new(MessageAuthenticity::Signed(keypair), gossipsub_config)
+                    .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
                         format!("gossipsub creation error: {}", e),
                     )
                 })?;
+            Toggle::from(Some(gs))
+        } else {
+            Toggle::from(None)
+        };
 
         // Configure Kademlia DHT for peer discovery
         // Required for Bitswap to find peers who have specific blocks
@@ -233,7 +219,6 @@ impl<S: Store> DefraBehaviour<S> {
 
         Ok(Self {
             identify,
-            mdns,
             kademlia,
             bitswap,
             pushlog,
@@ -261,13 +246,13 @@ impl<S: Store> DefraBehaviour<S> {
         local_peer_id: PeerId,
         local_public_key: libp2p::identity::PublicKey,
         bitswap_store: S,
+        enable_pubsub: bool,
     ) -> Result<Self, std::io::Error> {
         let identify_config =
             identify::Config::new("/defra/identify/0.0.1".to_string(), local_public_key)
                 .with_agent_version(format!("defradb-rs/{}", env!("CARGO_PKG_VERSION")));
 
         let identify = identify::Behaviour::new(identify_config);
-        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
 
         // NOTE: Do NOT register rep_request or rep_response protocols here
         // because stream::Behaviour handles those for Go two-stream compatibility.
@@ -276,30 +261,34 @@ impl<S: Store> DefraBehaviour<S> {
             request_response::Config::default().with_request_timeout(REQUEST_TIMEOUT),
         );
 
-        // For testing, use RandomAuthor for gossipsub (no signing)
-        let gossipsub_config = gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(Duration::from_secs(1))
-            .validation_mode(ValidationMode::Permissive)
-            .message_id_fn(|message: &gossipsub::Message| {
-                let hash = crypto::sha256(&message.data);
-                MessageId::from(hash.to_vec())
-            })
-            .build()
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("gossipsub config error: {}", e),
-                )
-            })?;
+        // Configure GossipSub (optional, matches Go's `if options.EnablePubSub`)
+        let gossipsub = if enable_pubsub {
+            let gossipsub_config = gossipsub::ConfigBuilder::default()
+                .heartbeat_interval(Duration::from_secs(1))
+                .validation_mode(ValidationMode::Permissive)
+                .message_id_fn(|message: &gossipsub::Message| {
+                    let hash = crypto::sha256(&message.data);
+                    MessageId::from(hash.to_vec())
+                })
+                .build()
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("gossipsub config error: {}", e),
+                    )
+                })?;
 
-        let gossipsub =
-            gossipsub::Behaviour::new(MessageAuthenticity::RandomAuthor, gossipsub_config)
+            let gs = gossipsub::Behaviour::new(MessageAuthenticity::RandomAuthor, gossipsub_config)
                 .map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
                         format!("gossipsub creation error: {}", e),
                     )
                 })?;
+            Toggle::from(Some(gs))
+        } else {
+            Toggle::from(None)
+        };
 
         // Configure Kademlia DHT for peer discovery
         let kad_store = MemoryStore::new(local_peer_id);
@@ -315,7 +304,6 @@ impl<S: Store> DefraBehaviour<S> {
 
         Ok(Self {
             identify,
-            mdns,
             kademlia,
             bitswap,
             pushlog,
@@ -347,38 +335,52 @@ impl<S: Store> DefraBehaviour<S> {
 
     /// Subscribe to a GossipSub topic.
     ///
-    /// Returns `true` if this is a new subscription, `false` if already subscribed.
+    /// Returns `true` if this is a new subscription, `false` if already subscribed
+    /// or if pubsub is disabled.
     pub fn subscribe(
         &mut self,
         topic: &gossipsub::IdentTopic,
     ) -> Result<bool, gossipsub::SubscriptionError> {
-        self.gossipsub.subscribe(topic)
+        match self.gossipsub.as_mut() {
+            Some(gs) => gs.subscribe(topic),
+            None => Ok(false),
+        }
     }
 
     /// Unsubscribe from a GossipSub topic.
     ///
-    /// Returns `true` if was subscribed, `false` if wasn't subscribed.
+    /// Returns `true` if was subscribed, `false` if wasn't subscribed
+    /// or if pubsub is disabled.
     pub fn unsubscribe(
         &mut self,
         topic: &gossipsub::IdentTopic,
     ) -> Result<bool, gossipsub::PublishError> {
-        self.gossipsub.unsubscribe(topic)
+        match self.gossipsub.as_mut() {
+            Some(gs) => gs.unsubscribe(topic),
+            None => Ok(false),
+        }
     }
 
     /// Publish a message to a GossipSub topic.
     ///
-    /// Returns the message ID on success.
+    /// Returns the message ID on success, or `InsufficientPeers` if pubsub is disabled.
     pub fn publish(
         &mut self,
         topic: gossipsub::IdentTopic,
         data: Vec<u8>,
     ) -> Result<gossipsub::MessageId, gossipsub::PublishError> {
-        self.gossipsub.publish(topic, data)
+        match self.gossipsub.as_mut() {
+            Some(gs) => gs.publish(topic, data),
+            None => Err(gossipsub::PublishError::InsufficientPeers),
+        }
     }
 
     /// Get the list of subscribed topics.
-    pub fn subscribed_topics(&self) -> impl Iterator<Item = &gossipsub::TopicHash> {
-        self.gossipsub.topics()
+    pub fn subscribed_topics(&self) -> Box<dyn Iterator<Item = &gossipsub::TopicHash> + '_> {
+        match self.gossipsub.as_ref() {
+            Some(gs) => Box::new(gs.topics()),
+            None => Box::new(std::iter::empty()),
+        }
     }
 
     // === Bitswap operations ===
@@ -409,7 +411,7 @@ mod tests {
         let public_key = keypair.public();
         let store = MockBitswapStore::new();
 
-        let behaviour = DefraBehaviour::new(peer_id, public_key, keypair, store).await;
+        let behaviour = DefraBehaviour::new(peer_id, public_key, keypair, store, true).await;
         assert!(behaviour.is_ok());
     }
 
@@ -420,7 +422,20 @@ mod tests {
         let public_key = keypair.public();
         let store = MockBitswapStore::new();
 
-        let behaviour = DefraBehaviour::new_without_signing(peer_id, public_key, store).await;
+        let behaviour = DefraBehaviour::new_without_signing(peer_id, public_key, store, true).await;
         assert!(behaviour.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_behaviour_creation_pubsub_disabled() {
+        let keypair = Keypair::generate_ed25519();
+        let peer_id = keypair.public().to_peer_id();
+        let public_key = keypair.public();
+        let store = MockBitswapStore::new();
+
+        let behaviour = DefraBehaviour::new(peer_id, public_key, keypair, store, false).await;
+        assert!(behaviour.is_ok());
+        let behaviour = behaviour.unwrap();
+        assert!(behaviour.gossipsub.as_ref().is_none());
     }
 }

@@ -40,10 +40,15 @@ pub fn check_nac_permission(
 
     let identity_str = unsafe { c_str_to_string(identity_did) };
 
+    let err_msg = format!(
+        "not authorized to perform operation. Permission: {}",
+        permission.as_str()
+    );
+
     let did = match identity_str {
         Some(s) if !s.is_empty() => match identity::Did::new(&s) {
             Ok(d) => d,
-            Err(_) => return Err(FfiResult::error("not authorized to perform operation")),
+            Err(_) => return Err(FfiResult::error(&err_msg)),
         },
         _ => {
             // Empty identity: check if wildcard has the permission
@@ -54,7 +59,7 @@ pub fn check_nac_permission(
             if wildcard_has_perm {
                 return Ok(());
             }
-            return Err(FfiResult::error("not authorized to perform operation"));
+            return Err(FfiResult::error(&err_msg));
         }
     };
 
@@ -65,7 +70,7 @@ pub fn check_nac_permission(
     if has_perm {
         Ok(())
     } else {
-        Err(FfiResult::error("not authorized to perform operation"))
+        Err(FfiResult::error(&err_msg))
     }
 }
 

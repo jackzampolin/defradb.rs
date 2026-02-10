@@ -981,9 +981,12 @@ impl<S: Store> crate::database::DB<S> {
                 if let Some(other_col) = other_col {
                     let other_field =
                         other_col.field_by_relation(rel_name, &new_schema.name, &field.name);
-                    let other_is_array = other_field.map(|f| f.kind.is_array()).unwrap_or(false);
-                    // One-to-one: other side exists and is non-array, this field is primary
-                    if !other_is_array && field.is_primary {
+                    // One-to-one: other side explicitly exists, is non-array, and this field is primary.
+                    // When other_field is None (other collection not yet patched), skip creating a
+                    // unique index — matches finalize_relations() which treats missing other side
+                    // as one-to-many.
+                    let is_one_to_one = other_field.map(|f| !f.kind.is_array()).unwrap_or(false);
+                    if is_one_to_one && field.is_primary {
                         match new_schema.ensure_one_to_one_unique_index(&field.name, &mut || {
                             next_index_id += 1;
                             next_index_id

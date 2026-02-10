@@ -11,9 +11,6 @@ use super::ResponseChannel;
 /// Events emitted by the P2P host.
 #[derive(Debug)]
 pub enum HostEvent {
-    /// A new peer was discovered.
-    PeerDiscovered(PeerId),
-
     /// A peer connection was established.
     PeerConnected(PeerId),
 

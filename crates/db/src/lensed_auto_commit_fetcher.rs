@@ -866,6 +866,36 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
                     })?;
                 collect_with_limit(&mut iter, limit, offset, vf).await?
             }
+            IndexScanType::OrScan { branches } => {
+                // Discard this txn early; each recursive call creates its own
+                let _ = txn.discard();
+                let mut all_doc_ids = Vec::new();
+                let mut total_raw_fetches = 0u64;
+                for branch in branches {
+                    let branch_params = IndexScanParams {
+                        index_name: params.index_name.clone(),
+                        scan_type: branch.clone(),
+                        limit: None,
+                        offset: 0,
+                        value_filter: None,
+                    };
+                    let branch_result = self
+                        .get_by_index_scan(collection_name, &branch_params)
+                        .await?;
+                    total_raw_fetches += branch_result.raw_fetches();
+                    all_doc_ids.extend(branch_result.doc_ids().iter().cloned());
+                }
+                // Skip the txn.discard() below since we already discarded
+                let mut seen = HashSet::new();
+                let doc_ids: Vec<String> = all_doc_ids
+                    .into_iter()
+                    .filter(|id| seen.insert(id.clone()))
+                    .collect();
+                return Ok(query::fetcher::IndexScanResult::with_raw_count(
+                    doc_ids,
+                    total_raw_fetches,
+                ));
+            }
         };
 
         let _ = txn.discard();

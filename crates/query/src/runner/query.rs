@@ -12,7 +12,7 @@ use crate::document::{documents_to_plan_docs, documents_with_status_to_plan_docs
 use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
 use crate::planner::index_selection::{
-    can_be_ordered_by_index, filter_to_index_scan, select_best_index,
+    can_be_ordered_by_index, can_or_filter_use_index, filter_to_index_scan, select_best_index,
 };
 use crate::planner::Planner;
 use crate::query_parse::parse_query_with_variables;
@@ -288,6 +288,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 })
                 .unwrap_or(false);
 
+        // Check if an OR filter can use an index (planner needed for IndexScanNode with OrScan)
+        let has_or_filter_index = select.filter.is_some()
+            && fetcher.supports_index_queries()
+            && !collection.indexes.is_empty()
+            && select
+                .filter
+                .as_ref()
+                .map(|f| can_or_filter_use_index(f, &collection.indexes))
+                .unwrap_or(false);
+
         // Check if any similarity fields are present (require SimilarityNode in planner)
         let has_similarity = select
             .fields
@@ -375,6 +385,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             || aggregate_filter_has_relations
             || has_secondary_relation_id
             || has_ordering_index
+            || has_or_filter_index
             || has_similarity;
 
         if needs_planner {

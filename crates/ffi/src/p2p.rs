@@ -605,8 +605,12 @@ pub unsafe extern "C" fn new_node_with_p2p(
 ///
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
-pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, _identity_did: *const c_char) -> FfiResult {
+pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
     let rt = get_runtime!(FfiResult);
+
+    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pPeerInfo) {
+        return e;
+    }
 
     let result = NODES
         .get(node_ptr, |state| {

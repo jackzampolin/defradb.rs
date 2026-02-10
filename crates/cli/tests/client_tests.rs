@@ -11,7 +11,7 @@ use cli::config::{ApiConfig, Config};
 #[test]
 fn test_get_url_with_override() {
     let config = Config::default();
-    let url = get_url(&config, Some("http://custom:8080".to_string()));
+    let url = get_url(&config, Some("custom:8080".to_string()));
     assert_eq!(url, "http://custom:8080");
 }
 

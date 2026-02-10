@@ -102,6 +102,9 @@ pub enum IndexScanType {
         values: Vec<NormalValue>,
         suffix_values: Vec<NormalValue>,
     },
+    /// Multiple scans combined (for _or filters).
+    /// Each branch is executed separately and results are deduplicated.
+    OrScan { branches: Vec<IndexScanType> },
 }
 
 /// A parsed filter condition on a single field.
@@ -346,6 +349,47 @@ fn normalize_for_index_field(
     }
 }
 
+/// Determines if a filter condition should force a fallback to full scan instead of using the index.
+/// Matches Go's `shouldFallbackToFullScan` in indexer_iterators.go.
+fn should_fallback_to_full_scan(cond: &FieldCondition, is_json_field: bool) -> bool {
+    let is_null = matches!(&cond.value, ConditionValue::Single(NormalValue::Null));
+    let has_nested_path = cond
+        .json_path
+        .as_ref()
+        .map(|p| !p.is_empty())
+        .unwrap_or(false);
+
+    if is_null {
+        // _gte: null matches everything → fallback
+        if cond.op == FilterOp::Gte {
+            return true;
+        }
+        // _lte: null on nested JSON path → can't find missing fields
+        if cond.op == FilterOp::Lte && has_nested_path {
+            return true;
+        }
+        // _ne: null on root-level JSON → can't find empty objects/arrays
+        if cond.op == FilterOp::Ne && is_json_field && !has_nested_path {
+            return true;
+        }
+    }
+
+    // JSON indexes only store leaf values (scalars), not objects or arrays.
+    // If the filter value is a complex type, fall back to full scan.
+    if is_json_field {
+        // _in/_nin with empty values (all objects were filtered out) → fallback
+        if matches!(cond.op, FilterOp::In | FilterOp::Nin) {
+            if let ConditionValue::Multiple(vs) = &cond.value {
+                if vs.is_empty() {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 /// Extract field conditions from a filter.
 pub fn extract_field_conditions(filter: &Filter) -> Vec<FieldCondition> {
     let mut conditions = Vec::new();
@@ -580,6 +624,14 @@ pub fn filter_to_index_scan(
 
     if first_field_conditions.is_empty() {
         return None;
+    }
+
+    // Check if any condition requires falling back to full scan (matches Go's shouldFallbackToFullScan).
+    // Returns None to skip index when the index cannot produce correct results.
+    for cond in &first_field_conditions {
+        if should_fallback_to_full_scan(cond, first_field_is_json) {
+            return None;
+        }
     }
 
     // Analyze conditions to determine scan type
@@ -932,6 +984,90 @@ pub fn filter_to_index_scan(
         offset: if index_provides_ordering { offset } else { 0 },
         value_filter: scan_value_filter,
     })
+}
+
+/// Check if a filter with a top-level `_or` can use any of the given indexes.
+///
+/// Returns true if the filter has an `_or` whose branches ALL use the same index.
+pub fn can_or_filter_use_index(filter: &Filter, indexes: &[IndexDescription]) -> bool {
+    let branches = match extract_or_branches(filter) {
+        Some(b) => b,
+        None => return false,
+    };
+    indexes
+        .iter()
+        .any(|index| branches.iter().all(|branch| can_use_index(branch, index)))
+}
+
+/// Extract OR branches from a filter's top-level `_or` condition.
+///
+/// Returns `Some(branches)` if the filter has a single top-level `_or` with
+/// valid sub-filters, `None` otherwise.
+fn extract_or_branches(filter: &Filter) -> Option<Vec<Filter>> {
+    let conditions = filter.conditions();
+    let or_value = conditions.get("_or")?;
+    let arr = or_value.as_array()?;
+    let branches: Vec<Filter> = arr
+        .iter()
+        .filter_map(|item| {
+            item.as_object().map(|obj| {
+                let map: HashMap<String, JsonValue> =
+                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                Filter::from_conditions(map)
+            })
+        })
+        .collect();
+    if branches.len() == arr.len() && !branches.is_empty() {
+        Some(branches)
+    } else {
+        None
+    }
+}
+
+/// Try to convert an OR filter to index scan parameters.
+///
+/// Detects top-level `_or` in the filter, extracts each branch, and checks
+/// if ALL branches can use the same index. If so, returns `OrScan` with
+/// one sub-scan per branch.
+///
+/// Matches Go's `newMultiIndexIteratorForOrOp` / `extractOrBranches` pattern.
+pub fn or_filter_to_index_scan(
+    filter: &Filter,
+    indexes: &[IndexDescription],
+    collection_fields: &[schema::FieldDescription],
+) -> Option<IndexScanParams> {
+    let branches = extract_or_branches(filter)?;
+
+    // Try each index to see if all branches can use it
+    for index in indexes {
+        let mut branch_scans = Vec::new();
+        let mut all_work = true;
+
+        for branch in &branches {
+            if let Some(params) =
+                filter_to_index_scan(branch, index, None, collection_fields, None, 0)
+            {
+                branch_scans.push(params.scan_type);
+            } else {
+                all_work = false;
+                break;
+            }
+        }
+
+        if all_work && !branch_scans.is_empty() {
+            return Some(IndexScanParams {
+                index_name: index.name.clone(),
+                scan_type: IndexScanType::OrScan {
+                    branches: branch_scans,
+                },
+                limit: None,
+                offset: 0,
+                value_filter: None,
+            });
+        }
+    }
+
+    None
 }
 
 /// Select the best index for a filter from available indexes.

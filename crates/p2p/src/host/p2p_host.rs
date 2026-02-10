@@ -10,7 +10,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use iroh_bitswap::{BitswapEvent, Store};
 use libp2p::{
-    gossipsub, identity::Keypair, mdns, noise, request_response, swarm::SwarmEvent, tcp, yamux,
+    gossipsub, identity::Keypair, noise, request_response, swarm::SwarmEvent, tcp, yamux,
     Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
 use tokio::sync::mpsc;
@@ -79,6 +79,20 @@ impl<S: Store> P2PHost<S> {
         Self::with_keypair(keypair, bitswap_store).await
     }
 
+    /// Create a new P2P host with pubsub optionally disabled.
+    pub async fn with_pubsub(
+        bitswap_store: S,
+        enable_pubsub: bool,
+    ) -> Result<(
+        Self,
+        P2PHostHandle,
+        mpsc::Receiver<HostEvent>,
+        Arc<ReplicatorRegistry>,
+    )> {
+        let keypair = Keypair::generate_ed25519();
+        Self::with_keypair_and_config(keypair, bitswap_store, enable_pubsub).await
+    }
+
     /// Create a new P2P host with the given keypair and blockstore.
     ///
     /// # Arguments
@@ -104,6 +118,20 @@ impl<S: Store> P2PHost<S> {
         mpsc::Receiver<HostEvent>,
         Arc<ReplicatorRegistry>,
     )> {
+        Self::with_keypair_and_config(keypair, bitswap_store, true).await
+    }
+
+    /// Create a new P2P host with the given keypair, blockstore, and pubsub config.
+    pub async fn with_keypair_and_config(
+        keypair: Keypair,
+        bitswap_store: S,
+        enable_pubsub: bool,
+    ) -> Result<(
+        Self,
+        P2PHostHandle,
+        mpsc::Receiver<HostEvent>,
+        Arc<ReplicatorRegistry>,
+    )> {
         let local_peer_id = keypair.public().to_peer_id();
         let local_public_key = keypair.public();
 
@@ -113,12 +141,12 @@ impl<S: Store> P2PHost<S> {
         info!("Local peer ID: {}", local_peer_id);
 
         // Pass keypair and blockstore to behaviour for message signing and block exchange
-        // DefraBehaviour::new is now async
         let behaviour = DefraBehaviour::new(
             local_peer_id,
             local_public_key,
             keypair.clone(),
             bitswap_store,
+            enable_pubsub,
         )
         .await
         .map_err(|e| Error::Behaviour(e.to_string()))?;
@@ -421,36 +449,6 @@ impl<S: Store> P2PHost<S> {
                     .is_err()
                 {
                     warn!(peer_id = %peer_id, "Failed to send PeerDisconnected event - receiver dropped");
-                }
-            }
-
-            SwarmEvent::Behaviour(DefraEvent::Mdns(mdns::Event::Discovered(peers))) => {
-                for (peer_id, addr) in peers {
-                    debug!(peer_id = %peer_id, address = %addr, "mDNS discovered peer, dialing");
-                    // Dial discovered peers (matches Go's mDNS HandlePeerFound behavior).
-                    // Skip if already connected — dial returns AlreadyDialing or similar.
-                    if !self.swarm.is_connected(&peer_id) {
-                        let dial_opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
-                            .addresses(vec![addr])
-                            .build();
-                        if let Err(e) = self.swarm.dial(dial_opts) {
-                            debug!(peer_id = %peer_id, error = %e, "mDNS dial failed (may already be connecting)");
-                        }
-                    }
-                    if self
-                        .event_tx
-                        .send(HostEvent::PeerDiscovered(peer_id))
-                        .await
-                        .is_err()
-                    {
-                        warn!(peer_id = %peer_id, "Failed to send PeerDiscovered event - receiver dropped");
-                    }
-                }
-            }
-
-            SwarmEvent::Behaviour(DefraEvent::Mdns(mdns::Event::Expired(peers))) => {
-                for (peer_id, _addr) in peers {
-                    debug!("mDNS peer expired: {}", peer_id);
                 }
             }
 
@@ -762,7 +760,7 @@ impl<S: Store> P2PHost<S> {
             } => {
                 debug!(cid = %key, limit = limit, "Bitswap requests to find providers");
                 // Could query Kademlia DHT to find providers
-                // For now, send empty set (peer discovery via mDNS/manual dial)
+                // For now, send empty set (peer discovery via manual dial)
                 let _ = response.send(Ok(std::collections::HashSet::new())).await;
             }
             BitswapEvent::Ping { peer, response } => {

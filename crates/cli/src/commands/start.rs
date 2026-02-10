@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::config::{Config, DatastoreType};
+use crate::config::{AcpDocumentType, Config, DatastoreType};
 use crate::error::{Error, Result};
 use identity::Identity;
 
@@ -486,8 +486,13 @@ impl Node {
             info!("Initializing P2P network");
             let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
             let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
-            let (handle, events, host_task) =
-                Self::start_p2p(config, bitswap_store, peer_keypair).await?;
+            let (handle, events, host_task) = Self::start_p2p(
+                config,
+                bitswap_store,
+                peer_keypair,
+                config.net.pubsub_enabled,
+            )
+            .await?;
             (Some(handle), Some(events), Some(host_task))
         };
 
@@ -586,9 +591,6 @@ impl Node {
                                     }
                                     p2p::HostEvent::PeerDisconnected(peer) => {
                                         info!("Peer disconnected: {}", peer);
-                                    }
-                                    p2p::HostEvent::PeerDiscovered(peer) => {
-                                        info!("Peer discovered: {}", peer);
                                     }
                                     p2p::HostEvent::Listening(addr) => {
                                         info!("Now listening on: {}", addr);
@@ -729,26 +731,36 @@ impl Node {
                 }
             }
 
-            // Wire NAC (Node Access Control) to HTTP server
-            let nac_config = db::NacConfig::new();
-            let nac_manager: std::sync::Arc<dyn db::NacManagerApi> =
-                std::sync::Arc::new(db::create_memory_nac_manager(nac_config));
-            let nac_adapter = crate::nac_adapter::NacAdapter::new_arc(nac_manager);
-            server = server.with_nac_arc(nac_adapter);
-            info!("NAC HTTP endpoints enabled");
+            // Wire NAC (Node Access Control) to HTTP server only when enabled
+            if config.acp.node_enable {
+                let nac_config = db::NacConfig::new().with_enabled();
+                let nac_manager: std::sync::Arc<dyn db::NacManagerApi> =
+                    std::sync::Arc::new(db::create_memory_nac_manager(nac_config));
+                let nac_adapter = crate::nac_adapter::NacAdapter::new_arc(nac_manager);
+                server = server.with_nac_arc(nac_adapter);
+                info!("NAC HTTP endpoints enabled");
+            } else {
+                info!("NAC disabled (use --acp-node-enable to enable)");
+            }
 
-            // Wire ACP policy operations to HTTP server
-            let acp_adapter = crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store);
-            server = server.with_acp_arc(acp_adapter);
-            info!("ACP policy HTTP endpoints enabled");
+            // Wire ACP adapters only when document ACP is enabled
+            if config.acp.document_type != AcpDocumentType::None {
+                let acp_adapter = crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store);
+                server = server.with_acp_arc(acp_adapter);
+                info!(
+                    "ACP policy HTTP endpoints enabled (type: {})",
+                    config.acp.document_type
+                );
 
-            // Wire document ACP operations to HTTP server
-            let doc_acp_adapter = crate::doc_acp_adapter::DocumentAcpAdapter::new_arc(
-                database.clone(),
-                Arc::new(acp::LocalDocumentACP::new(acp_store_for_http)),
-            );
-            server = server.with_doc_acp_arc(doc_acp_adapter);
-            info!("Document ACP HTTP endpoints enabled");
+                let doc_acp_adapter = crate::doc_acp_adapter::DocumentAcpAdapter::new_arc(
+                    database.clone(),
+                    Arc::new(acp::LocalDocumentACP::new(acp_store_for_http)),
+                );
+                server = server.with_doc_acp_arc(doc_acp_adapter);
+                info!("Document ACP HTTP endpoints enabled");
+            } else {
+                info!("Document ACP disabled (use --document-acp-type to enable)");
+            }
 
             // Wire collection management operations to HTTP server
             let collection_mgmt_adapter =
@@ -799,16 +811,19 @@ impl Node {
         config: &Config,
         bitswap_store: S,
         keypair: Option<p2p::Keypair>,
+        enable_pubsub: bool,
     ) -> Result<(
         p2p::P2PHostHandle,
         tokio::sync::mpsc::Receiver<p2p::HostEvent>,
         JoinHandle<()>,
     )> {
         let (host, handle, events, _replicators) = match keypair {
-            Some(kp) => p2p::P2PHost::with_keypair(kp, bitswap_store)
+            Some(kp) => p2p::P2PHost::with_keypair_and_config(kp, bitswap_store, enable_pubsub)
                 .await
                 .map_err(Error::P2P)?,
-            None => p2p::P2PHost::new(bitswap_store).await.map_err(Error::P2P)?,
+            None => p2p::P2PHost::with_pubsub(bitswap_store, enable_pubsub)
+                .await
+                .map_err(Error::P2P)?,
         };
 
         // Spawn the host event loop FIRST - it must be running to process commands
@@ -825,10 +840,19 @@ impl Node {
             info!("P2P listening on {}", addr);
         }
 
-        // Log bootstrap peers (connection will be handled by mDNS discovery)
+        // Log bootstrap peers
         if !config.net.peers.is_empty() {
             info!("Bootstrap peers configured: {:?}", config.net.peers);
-            info!("Note: Direct peer connection requires peer ID; mDNS will discover local peers");
+        }
+
+        if config.net.pubsub_enabled {
+            info!("GossipSub pubsub enabled");
+        } else {
+            info!("GossipSub pubsub disabled");
+        }
+
+        if config.net.relay_enabled {
+            warn!("net.relay_enabled=true is not yet supported; relay is not available");
         }
 
         // Get and display peer ID

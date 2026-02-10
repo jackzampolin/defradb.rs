@@ -125,7 +125,7 @@ impl Cli {
             Command::Version(args) => args.execute(),
             Command::Keyring(args) => args.execute(config),
             Command::Client(args) => args.execute(config, self.url).await,
-            Command::Identity(args) => args.execute(),
+            Command::Identity(args) => args.execute(config),
             Command::Sdl(args) => args.execute(),
             Command::ServerDump(args) => args.execute(),
         }

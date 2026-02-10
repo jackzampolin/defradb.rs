@@ -37,8 +37,8 @@ use crate::plan::{
     PermissionFilterNode, ScanNode, SelectNode,
 };
 use crate::planner::index_selection::{
-    can_be_ordered_by_index, filter_to_index_scan, select_best_index, IndexScanParams,
-    IndexScanType,
+    can_be_ordered_by_index, filter_to_index_scan, or_filter_to_index_scan, select_best_index,
+    IndexScanParams, IndexScanType,
 };
 use crate::planner::PlanNode;
 use serde_json::Value as JsonValue;
@@ -1333,6 +1333,17 @@ impl Planner {
                             .unwrap_or(false);
                         return Some((params, provides_ordering));
                     }
+                }
+            }
+        }
+
+        // Try OR filter index selection (e.g., {_or: [{age: {_eq: 55}}, {age: {_eq: 19}}]})
+        if !has_relation_filter {
+            if let Some(filter) = select.filter.as_ref() {
+                if let Some(params) =
+                    or_filter_to_index_scan(filter, &collection.indexes, &collection.fields)
+                {
+                    return Some((params, false));
                 }
             }
         }

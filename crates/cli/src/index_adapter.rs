@@ -76,6 +76,7 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
                     name.unwrap_or("").to_string(),
                     indexed_fields,
                     unique,
+                    &schema.fields,
                 )
                 .await
                 .map_err(|e| format!("{}", e))?;

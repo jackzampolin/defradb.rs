@@ -14,10 +14,17 @@ use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
 
 /// Determine NAC permission based on query content.
-/// Mutations require DocumentUpdate, queries require DocumentRead.
+/// Delete mutations require DocumentDelete, other mutations require DocumentUpdate,
+/// and queries require DocumentRead.
 pub(crate) fn nac_permission_for_query(query_str: &str) -> NodePermission {
     let trimmed = query_str.trim_start();
     if trimmed.starts_with("mutation") {
+        if let Some(brace_pos) = trimmed.find('{') {
+            let after_brace = trimmed[brace_pos + 1..].trim_start();
+            if after_brace.starts_with("delete_") {
+                return NodePermission::DocumentDelete;
+            }
+        }
         NodePermission::DocumentUpdate
     } else {
         NodePermission::DocumentRead

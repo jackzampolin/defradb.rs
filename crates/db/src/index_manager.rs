@@ -8,7 +8,7 @@
 use crate::error::{Error, Result};
 use datastore::NamespaceView;
 use document::{Document, NormalValue};
-use schema::{CollectionVersion, IndexDescription, IndexedFieldDescription};
+use schema::{CollectionVersion, FieldDescription, IndexDescription, IndexedFieldDescription};
 use std::collections::HashMap;
 use storage::corekv::Key;
 use storage::index::IndexType;
@@ -136,6 +136,7 @@ impl IndexManager {
         name: String,
         fields: Vec<IndexedFieldDescription>,
         unique: bool,
+        schema_fields: &[FieldDescription],
     ) -> Result<IndexDescription> {
         // Auto-generate name if empty (matches Go behavior)
         let name = if name.is_empty() {
@@ -167,6 +168,18 @@ impl IndexManager {
             return Err(Error::Other(
                 "index must have at least one field".to_string(),
             ));
+        }
+
+        // Reject CRDT counter fields (matches Go's NewCollectionIndex validation)
+        for field in &fields {
+            if let Some(schema_field) = schema_fields.iter().find(|f| f.name == field.name) {
+                if schema_field.crdt_type.is_counter() {
+                    return Err(Error::Other(format!(
+                        "indexing accumulated CRDT fields is not yet supported. Field: {}, CRDTType: {}",
+                        field.name, schema_field.crdt_type.to_string().to_lowercase()
+                    )));
+                }
+            }
         }
 
         // Generate a new index ID

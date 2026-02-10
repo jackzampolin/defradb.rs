@@ -1,11 +1,11 @@
 //! Node-level permission types for NAC.
 //!
-//! Defines the 34 node-level permissions that control access to
+//! Defines the 36 node-level permissions that control access to
 //! database operations when Node Access Control is enabled.
 
 use serde::{Deserialize, Serialize};
 
-/// Node-level permissions (matches Go DefraDB's 34 node permissions).
+/// Node-level permissions (matches Go DefraDB's 36 node permissions).
 ///
 /// These permissions control access to node-level operations when NAC is enabled.
 /// By default (NAC disabled), all operations are allowed without authentication.
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 ///   `DacRelationAdd`, `DacRelationDelete`
 /// - NAC management: `NacReEnable`, `NacDisable`, `NacPurge`
 /// - P2P document replication: `P2pDocumentCreate`, `P2pDocumentDelete`, `P2pDocumentList`
-/// - Other: `SignatureVerify`
+/// - Other: `SignatureVerify`, `LensList`
 ///
 /// These permissions are defined for Go DefraDB compatibility but do not yet have
 /// corresponding HTTP endpoints in the Rust implementation.
@@ -151,6 +151,9 @@ pub enum NodePermission {
     /// List P2P collections (used by GET /api/v0/p2p/collections)
     P2pCollectionList,
 
+    /// Get P2P peer info (used by GET /api/v0/p2p/info)
+    P2pPeerInfo,
+
     /// Add document to P2P replication
     /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     P2pDocumentCreate,
@@ -169,6 +172,12 @@ pub enum NodePermission {
     /// Verify signatures
     /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     SignatureVerify,
+
+    // =========================================================================
+    // Lens Operations
+    // =========================================================================
+    /// List lens transforms (used by GET /api/v0/lens)
+    LensList,
 }
 
 impl NodePermission {
@@ -216,16 +225,20 @@ impl NodePermission {
             Self::P2pCollectionCreate => "p2p-collection-create",
             Self::P2pCollectionDelete => "p2p-collection-delete",
             Self::P2pCollectionList => "p2p-collection-list",
+            Self::P2pPeerInfo => "p2p-peer-info",
             Self::P2pDocumentCreate => "p2p-document-create",
             Self::P2pDocumentDelete => "p2p-document-delete",
             Self::P2pDocumentList => "p2p-document-list",
 
             // Other
             Self::SignatureVerify => "signature-verify",
+
+            // Lens
+            Self::LensList => "lens-list",
         }
     }
 
-    /// Returns all 34 node permissions.
+    /// Returns all 36 node permissions.
     pub fn all() -> &'static [NodePermission] {
         &[
             // DAC
@@ -264,11 +277,14 @@ impl NodePermission {
             Self::P2pCollectionCreate,
             Self::P2pCollectionDelete,
             Self::P2pCollectionList,
+            Self::P2pPeerInfo,
             Self::P2pDocumentCreate,
             Self::P2pDocumentDelete,
             Self::P2pDocumentList,
             // Other
             Self::SignatureVerify,
+            // Lens
+            Self::LensList,
         ]
     }
 
@@ -311,18 +327,21 @@ impl NodePermission {
             "p2p-collection-create" => Self::P2pCollectionCreate,
             "p2p-collection-delete" => Self::P2pCollectionDelete,
             "p2p-collection-list" => Self::P2pCollectionList,
+            "p2p-peer-info" => Self::P2pPeerInfo,
             "p2p-document-create" => Self::P2pDocumentCreate,
             "p2p-document-delete" => Self::P2pDocumentDelete,
             "p2p-document-list" => Self::P2pDocumentList,
             // Other
             "signature-verify" => Self::SignatureVerify,
+            // Lens
+            "lens-list" => Self::LensList,
             _ => return None,
         })
     }
 
     /// Check if this permission is admin-only (requires owner or admin relation).
     ///
-    /// In Go DefraDB, all 34 node permissions are defined with `expr: owner + admin`,
+    /// In Go DefraDB, all 36 node permissions are defined with `expr: owner + admin`,
     /// meaning they all require either the owner or admin relation to be granted.
     /// This matches that behavior.
     pub fn is_admin_only(&self) -> bool {
@@ -343,7 +362,7 @@ mod tests {
 
     #[test]
     fn test_all_permissions_count() {
-        assert_eq!(NodePermission::all().len(), 34);
+        assert_eq!(NodePermission::all().len(), 36);
     }
 
     #[test]
@@ -366,7 +385,7 @@ mod tests {
 
     #[test]
     fn test_admin_only_permissions() {
-        // All 34 permissions require owner or admin relation (matches Go behavior)
+        // All 36 permissions require owner or admin relation (matches Go behavior)
         for perm in NodePermission::all() {
             assert!(
                 perm.is_admin_only(),
