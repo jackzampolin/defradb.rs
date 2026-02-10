@@ -10,7 +10,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use iroh_bitswap::{BitswapEvent, Store};
 use libp2p::{
-    gossipsub, identity::Keypair, mdns, noise, request_response, swarm::SwarmEvent, tcp, yamux,
+    gossipsub, identity::Keypair, noise, request_response, swarm::SwarmEvent, tcp, yamux,
     Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
 use tokio::sync::mpsc;
@@ -444,36 +444,6 @@ impl<S: Store> P2PHost<S> {
                 }
             }
 
-            SwarmEvent::Behaviour(DefraEvent::Mdns(mdns::Event::Discovered(peers))) => {
-                for (peer_id, addr) in peers {
-                    debug!(peer_id = %peer_id, address = %addr, "mDNS discovered peer, dialing");
-                    // Dial discovered peers (matches Go's mDNS HandlePeerFound behavior).
-                    // Skip if already connected — dial returns AlreadyDialing or similar.
-                    if !self.swarm.is_connected(&peer_id) {
-                        let dial_opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer_id)
-                            .addresses(vec![addr])
-                            .build();
-                        if let Err(e) = self.swarm.dial(dial_opts) {
-                            debug!(peer_id = %peer_id, error = %e, "mDNS dial failed (may already be connecting)");
-                        }
-                    }
-                    if self
-                        .event_tx
-                        .send(HostEvent::PeerDiscovered(peer_id))
-                        .await
-                        .is_err()
-                    {
-                        warn!(peer_id = %peer_id, "Failed to send PeerDiscovered event - receiver dropped");
-                    }
-                }
-            }
-
-            SwarmEvent::Behaviour(DefraEvent::Mdns(mdns::Event::Expired(peers))) => {
-                for (peer_id, _addr) in peers {
-                    debug!("mDNS peer expired: {}", peer_id);
-                }
-            }
-
             SwarmEvent::Behaviour(DefraEvent::Identify(identify_event)) => {
                 self.handle_identify_event(identify_event).await;
             }
@@ -782,7 +752,7 @@ impl<S: Store> P2PHost<S> {
             } => {
                 debug!(cid = %key, limit = limit, "Bitswap requests to find providers");
                 // Could query Kademlia DHT to find providers
-                // For now, send empty set (peer discovery via mDNS/manual dial)
+                // For now, send empty set (peer discovery via manual dial)
                 let _ = response.send(Ok(std::collections::HashSet::new())).await;
             }
             BitswapEvent::Ping { peer, response } => {

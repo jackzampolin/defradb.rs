@@ -19,7 +19,7 @@ identity = { path = "../identity" }
 acp = { path = "../acp" }
 
 # P2P
-libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "mdns", "request-response", "macros", "tokio", "gossipsub", "kad"] }
+libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "request-response", "macros", "tokio", "gossipsub", "kad"] }
 iroh-bitswap = { workspace = true }
 libp2p-stream = { workspace = true }
 multiaddr = { workspace = true }

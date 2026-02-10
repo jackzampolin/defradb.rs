@@ -304,6 +304,37 @@ impl Key for P2PDocumentKey {
     }
 }
 
+/// LensConfigKey: Stores a serialized LensConfig for persistence across restarts.
+///
+/// Structure: /lens/config/[TransformID]
+/// Example: /lens/config/bafe98e8334bf1605a4ddd88cc11a20b330
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LensConfigKey {
+    pub transform_id: String,
+}
+
+impl LensConfigKey {
+    pub fn new(transform_id: impl Into<String>) -> Self {
+        Self {
+            transform_id: transform_id.into(),
+        }
+    }
+
+    pub fn prefix() -> Vec<u8> {
+        b"/lens/config/".to_vec()
+    }
+}
+
+impl Key for LensConfigKey {
+    fn bytes(&self) -> Vec<u8> {
+        format!("/lens/config/{}", self.transform_id).into_bytes()
+    }
+
+    fn to_string(&self) -> String {
+        format!("/lens/config/{}", self.transform_id)
+    }
+}
+
 /// CollectionIDSequenceKey: Monotonic sequence counter for generating collection IDs
 ///
 /// Structure: /seq/collection (singleton key with value as counter)

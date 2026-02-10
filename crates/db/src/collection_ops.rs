@@ -233,8 +233,10 @@ impl<S: Store> crate::database::DB<S> {
             })?;
 
             for versions in versions_by_collection.values() {
-                // Total versions = height of the latest version
-                let height = versions.len() as u64;
+                // Count only non-placeholder versions for height computation.
+                // Placeholders are created by set_migration before the real version
+                // exists and should not affect the CID priority calculation.
+                let height = versions.iter().filter(|v| !v.is_placeholder).count() as u64;
                 // Find the active version to use as head
                 if let Some(active) = versions.iter().find(|v| v.is_active) {
                     if let Ok(cid) = cid::Cid::try_from(active.version_id.as_str()) {

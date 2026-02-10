@@ -879,8 +879,9 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
                         offset: 0,
                         value_filter: None,
                     };
-                    let branch_result =
-                        self.get_by_index_scan(collection_name, &branch_params).await?;
+                    let branch_result = self
+                        .get_by_index_scan(collection_name, &branch_params)
+                        .await?;
                     total_raw_fetches += branch_result.raw_fetches();
                     all_doc_ids.extend(branch_result.doc_ids().iter().cloned());
                 }
