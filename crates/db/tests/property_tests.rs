@@ -58,7 +58,8 @@ proptest! {
                         descending: false,
                     }],
                     false,
-                , &[])
+                    &[],
+                )
                 .await
                 .unwrap();
 
@@ -116,7 +117,8 @@ proptest! {
                         descending: false,
                     }],
                     false,
-                , &[])
+                    &[],
+                )
                 .await
                 .unwrap();
 
@@ -192,7 +194,8 @@ proptest! {
                         descending: false,
                     }],
                     false,
-                , &[])
+                    &[],
+                )
                 .await
                 .unwrap();
 
@@ -270,7 +273,8 @@ proptest! {
                         descending: false,
                     }],
                     false, // NOT unique
-                , &[])
+                    &[],
+                )
                 .await
                 .unwrap();
 
@@ -333,7 +337,8 @@ proptest! {
                         descending: false,
                     }],
                     true, // UNIQUE
-                , &[])
+                    &[],
+                )
                 .await
                 .unwrap();
 
@@ -396,7 +401,8 @@ proptest! {
                         descending: false,
                     }],
                     false,
-                , &[])
+                    &[],
+                )
                 .await
                 .unwrap();
 

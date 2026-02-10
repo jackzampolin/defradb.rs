@@ -12,8 +12,8 @@ use lens::{
     TransformStore, DOC_ID_FIELD,
 };
 use schema::{CollectionSource, CollectionVersion, FieldKind, ScalarKind, ORPHAN_COLLECTION_ID};
-use storage::corekv::{Key, Store};
-use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
+use storage::corekv::{IterOptions, Key, Store};
+use storage::keys::systemstore::{CollectionKey, CollectionVersionKey, LensConfigKey};
 use tracing::instrument;
 
 use crate::collection::{collection_short_id, Collection};
@@ -51,6 +51,7 @@ impl<S: Store> DB<S> {
     pub async fn set_migration(&self, config: LensConfig) -> Result<TransformId> {
         let dest_version_id = config.destination_schema_version_id.clone();
         let source_version_id = config.source_schema_version_id.clone();
+        let config_for_persistence = config.clone();
 
         let txn = self.new_txn(false).await?;
 
@@ -194,6 +195,16 @@ impl<S: Store> DB<S> {
                     .await
                     .map_err(Error::Storage)?;
             }
+
+            // Persist the LensConfig so it can be reloaded on restart
+            let lens_key = LensConfigKey::new(transform_id.to_string());
+            let lens_data = serde_json::to_vec(&config_for_persistence).map_err(|e| {
+                Error::Serialization(format!("failed to serialize lens config: {}", e))
+            })?;
+            systemstore
+                .set(&lens_key.bytes(), &lens_data)
+                .await
+                .map_err(Error::Storage)?;
         }
         txn.commit().await?;
 
@@ -247,6 +258,7 @@ impl<S: Store> DB<S> {
     ) -> Result<TransformId> {
         let dest_version_id = config.destination_schema_version_id.clone();
         let source_version_id = config.source_schema_version_id.clone();
+        let config_for_persistence = config.clone();
 
         // Look up source and destination versions, creating placeholders if needed
         let (source_col, mut dst_col) = {
@@ -385,6 +397,16 @@ impl<S: Store> DB<S> {
                     .await
                     .map_err(Error::Storage)?;
             }
+
+            // Persist the LensConfig so it can be reloaded on restart
+            let lens_key = LensConfigKey::new(transform_id.to_string());
+            let lens_data = serde_json::to_vec(&config_for_persistence).map_err(|e| {
+                Error::Serialization(format!("failed to serialize lens config: {}", e))
+            })?;
+            systemstore
+                .set(&lens_key.bytes(), &lens_data)
+                .await
+                .map_err(Error::Storage)?;
         }
 
         // NOTE: We don't commit here - caller is responsible for transaction lifecycle
@@ -653,6 +675,49 @@ impl<S: Store> DB<S> {
     /// Check if a migration exists between two schema versions.
     pub fn has_migration(&self, transform_id: &TransformId) -> bool {
         self.lens_store.has_transform(transform_id)
+    }
+
+    /// Reload persisted lens configs from the systemstore into the lens store.
+    ///
+    /// Called during database open to restore transforms that were registered
+    /// before the last shutdown. Matches Go's `getLensStore().Reload()` call
+    /// in `db.initialize()`.
+    pub async fn reload_lens_configs(&self) -> Result<()> {
+        let txn = self.new_txn(true).await?;
+
+        {
+            let systemstore = txn.systemstore()?;
+            let prefix = LensConfigKey::prefix();
+            let opts = IterOptions::new().with_prefix(prefix);
+            let mut iter = systemstore.iterator(opts).await.map_err(Error::Storage)?;
+
+            while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+                let config: LensConfig = match serde_json::from_slice(&pair.value) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            key = ?String::from_utf8_lossy(&pair.key),
+                            "Skipping malformed lens config during reload"
+                        );
+                        continue;
+                    }
+                };
+
+                if let Err(e) = self.lens_store.add(config).await {
+                    tracing::warn!(
+                        error = %e,
+                        key = ?String::from_utf8_lossy(&pair.key),
+                        "Failed to reload lens config"
+                    );
+                }
+            }
+
+            iter.close().await.map_err(Error::Storage)?;
+        }
+
+        let _ = txn.discard();
+        Ok(())
     }
 }
 

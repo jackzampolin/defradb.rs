@@ -104,9 +104,7 @@ pub enum IndexScanType {
     },
     /// Multiple scans combined (for _or filters).
     /// Each branch is executed separately and results are deduplicated.
-    OrScan {
-        branches: Vec<IndexScanType>,
-    },
+    OrScan { branches: Vec<IndexScanType> },
 }
 
 /// A parsed filter condition on a single field.
@@ -996,9 +994,9 @@ pub fn can_or_filter_use_index(filter: &Filter, indexes: &[IndexDescription]) ->
         Some(b) => b,
         None => return false,
     };
-    indexes.iter().any(|index| {
-        branches.iter().all(|branch| can_use_index(branch, index))
-    })
+    indexes
+        .iter()
+        .any(|index| branches.iter().all(|branch| can_use_index(branch, index)))
 }
 
 /// Extract OR branches from a filter's top-level `_or` condition.
