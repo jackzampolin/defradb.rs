@@ -135,13 +135,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let exists = collection.fields.iter().any(|f| f.name == *field_name);
             if !exists {
                 return Err(QueryError::execution(format!(
-                    "Argument \"encryptFields\" has invalid value [{}].",
+                    "the given field does not exist. Name: {}",
                     field_name
                 )));
             }
             if field_name.starts_with('_') {
                 return Err(QueryError::execution(format!(
-                    "Argument \"encryptFields\" has invalid value [{}].",
+                    "can not encrypt build-in field. Name: {}",
                     field_name
                 )));
             }
