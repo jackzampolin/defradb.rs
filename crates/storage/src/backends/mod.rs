@@ -56,9 +56,6 @@ pub mod memory;
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub mod redb;
 
-#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
-pub mod redb_config;
-
 // LevelDB backend - pure Rust, WASM only (rusty-leveldb uses Rc internally, not Send/Sync)
 // On native platforms, use redb instead for full concurrency support.
 #[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
@@ -77,10 +74,7 @@ pub mod test_suite;
 pub use memory::MemoryStore;
 
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
-pub use redb::{CallbackCounts, IntegrityReport, RedbStore};
-
-#[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
-pub use redb_config::{DurabilityMode, RedbStoreOptions};
+pub use redb::{CallbackCounts, DurabilityMode, IntegrityReport, RedbStore, RedbStoreOptions};
 
 #[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
 pub use leveldb::LevelDbStore;
