@@ -64,7 +64,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::memory::ConflictTracker;
+use super::shared::ConflictTracker;
 
 use crate::corekv::{
     AsyncTxnCallback, Dropable, Error, IterOptions, Iterator, KvPair, Reader, Result, Store, Txn,

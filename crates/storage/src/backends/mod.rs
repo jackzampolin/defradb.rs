@@ -46,6 +46,9 @@
 // Memory backend uses tokio::sync::RwLock, only available on native platforms
 // For WASM, use the simplified memory store in the wasm crate
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod shared;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub mod memory;
 
 // Redb is only available on native platforms (not WASM)
