@@ -297,7 +297,10 @@ impl Filter {
                 }
             }
 
-            // Field condition - get the field value from the object
+            // Field condition - get the field value from the object.
+            // Track whether the field actually exists vs defaulting to null,
+            // because Go treats missing JSON sub-fields differently from explicit nulls.
+            let field_missing = !obj.contains_key(key);
             let field_value = obj.get(key).cloned().unwrap_or(JsonValue::Null);
 
             let ops = value
@@ -339,25 +342,19 @@ impl Filter {
                     )));
                 }
             } else {
-                // Operator conditions
-                // When a JSON property is missing (null) and _eq/_ne compares against
-                // a complex value (object/array), exclude the document. Missing JSON
-                // properties can't match complex equality/inequality comparisons.
-                if field_value.is_null() {
-                    for (op_str, expected) in ops {
-                        if matches!(
-                            FilterOp::parse(op_str),
-                            Some(FilterOp::Eq | FilterOp::Ne)
-                        ) && (expected.is_object() || expected.is_array())
-                        {
-                            return Ok(false);
-                        }
-                    }
-                }
+                // Operator conditions.
+                // When a field doesn't exist in a JSON object and the operator
+                // compares against a non-null value, the document doesn't match
+                // (Go compatibility: missing JSON sub-field != not-equal).
+                // But when comparing against null (e.g. _gte null), null >= null
+                // is valid and should proceed normally.
                 for (op_str, expected) in ops {
                     let op = FilterOp::parse(op_str).ok_or_else(|| {
                         QueryError::invalid_filter(format!("unknown operator: {}", op_str))
                     })?;
+                    if field_missing && !expected.is_null() {
+                        return Ok(false);
+                    }
                     if !eval_op(&field_value, op, expected)? {
                         return Ok(false);
                     }

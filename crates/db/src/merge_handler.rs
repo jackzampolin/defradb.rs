@@ -3,7 +3,7 @@
 //! This module implements the `MergeHandler` trait from the P2P layer,
 //! bridging incoming blocks to the CRDT system for document merging.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -109,12 +109,20 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     db: Arc<DB<S>>,
     /// Reference to the blockstore for loading linked blocks.
     blockstore: Arc<B>,
+    /// Tracks composite CIDs that have already been merged, preventing
+    /// duplicate processing from concurrent dual-broadcast paths (doc topic
+    /// + collection topic). Matches Go's `loadComposites` dedup guard.
+    merged_composites: std::sync::Mutex<HashSet<Cid>>,
 }
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     /// Create a new database merge handler.
     pub fn new(db: Arc<DB<S>>, blockstore: Arc<B>) -> Self {
-        Self { db, blockstore }
+        Self {
+            db,
+            blockstore,
+            merged_composites: std::sync::Mutex::new(HashSet::new()),
+        }
     }
 
     /// Get reference to blockstore.
@@ -432,8 +440,28 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // processing this block.  This matches Go's processLog which walks
         // the DAG backwards and merges from oldest to newest, ensuring all
         // prior CRDT deltas are applied before the current one.
+        //
+        // Dedup guard: use merged_composites to skip parents already processed
+        // by another path. Go serializes merge events per-collection and checks
+        // `mt.heads` in loadComposites. In Rust, dual broadcast (doc topic +
+        // collection topic) can trigger concurrent recursive walks that
+        // temporarily re-add stale headstore entries. The guard prevents
+        // re-processing parents that were already merged.
         if let Some(heads) = &block.heads {
             for head_cid in heads {
+                // Skip parents already processed by this or another path.
+                {
+                    let merged = self.merged_composites.lock().unwrap();
+                    if merged.contains(head_cid) {
+                        tracing::debug!(
+                            parent_cid = %head_cid,
+                            child_cid = %cid,
+                            "Parent composite already merged, skipping recursive processing"
+                        );
+                        continue;
+                    }
+                }
+
                 // Load the parent block from blockstore
                 let head_data = match self.blockstore.get(head_cid).await {
                     Ok(Some(data)) => data,
@@ -936,6 +964,14 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             None => {
                 // Commit the entire transaction (all field merges + document storage + headstore)
                 txn.force_commit().await?;
+
+                // Mark this composite as merged so concurrent/recursive paths
+                // skip re-processing it (prevents stale headstore entries).
+                {
+                    let mut merged = self.merged_composites.lock().unwrap();
+                    merged.insert(*cid);
+                }
+
                 tracing::info!(
                     cid = %cid,
                     doc_id = %doc_id_str,
