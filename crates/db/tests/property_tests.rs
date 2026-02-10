@@ -58,7 +58,7 @@ proptest! {
                         descending: false,
                     }],
                     false,
-                )
+                , &[])
                 .await
                 .unwrap();
 
@@ -116,7 +116,7 @@ proptest! {
                         descending: false,
                     }],
                     false,
-                )
+                , &[])
                 .await
                 .unwrap();
 
@@ -192,7 +192,7 @@ proptest! {
                         descending: false,
                     }],
                     false,
-                )
+                , &[])
                 .await
                 .unwrap();
 
@@ -270,7 +270,7 @@ proptest! {
                         descending: false,
                     }],
                     false, // NOT unique
-                )
+                , &[])
                 .await
                 .unwrap();
 
@@ -333,7 +333,7 @@ proptest! {
                         descending: false,
                     }],
                     true, // UNIQUE
-                )
+                , &[])
                 .await
                 .unwrap();
 
@@ -396,7 +396,7 @@ proptest! {
                         descending: false,
                     }],
                     false,
-                )
+                , &[])
                 .await
                 .unwrap();
 
@@ -464,7 +464,7 @@ proptest! {
 
             // Attempt to create index with empty fields
             let result = manager
-                .create_index(&datastore, "users", name, vec![], false)
+                .create_index(&datastore, "users", name, vec![], false, &[])
                 .await;
 
             // Property: Empty fields should always be rejected
@@ -500,13 +500,13 @@ proptest! {
 
             // First creation should succeed
             let result1 = manager
-                .create_index(&datastore, "users", name.clone(), fields.clone(), false)
+                .create_index(&datastore, "users", name.clone(), fields.clone(), false, &[])
                 .await;
             assert!(result1.is_ok(), "First creation should succeed");
 
             // Second creation with same name should fail
             let result2 = manager
-                .create_index(&datastore, "users", name, fields, false)
+                .create_index(&datastore, "users", name, fields, false, &[])
                 .await;
             assert!(result2.is_err(), "Duplicate name should be rejected");
         });

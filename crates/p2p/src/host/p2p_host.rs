@@ -79,6 +79,20 @@ impl<S: Store> P2PHost<S> {
         Self::with_keypair(keypair, bitswap_store).await
     }
 
+    /// Create a new P2P host with pubsub optionally disabled.
+    pub async fn with_pubsub(
+        bitswap_store: S,
+        enable_pubsub: bool,
+    ) -> Result<(
+        Self,
+        P2PHostHandle,
+        mpsc::Receiver<HostEvent>,
+        Arc<ReplicatorRegistry>,
+    )> {
+        let keypair = Keypair::generate_ed25519();
+        Self::with_keypair_and_config(keypair, bitswap_store, enable_pubsub).await
+    }
+
     /// Create a new P2P host with the given keypair and blockstore.
     ///
     /// # Arguments
@@ -104,6 +118,20 @@ impl<S: Store> P2PHost<S> {
         mpsc::Receiver<HostEvent>,
         Arc<ReplicatorRegistry>,
     )> {
+        Self::with_keypair_and_config(keypair, bitswap_store, true).await
+    }
+
+    /// Create a new P2P host with the given keypair, blockstore, and pubsub config.
+    pub async fn with_keypair_and_config(
+        keypair: Keypair,
+        bitswap_store: S,
+        enable_pubsub: bool,
+    ) -> Result<(
+        Self,
+        P2PHostHandle,
+        mpsc::Receiver<HostEvent>,
+        Arc<ReplicatorRegistry>,
+    )> {
         let local_peer_id = keypair.public().to_peer_id();
         let local_public_key = keypair.public();
 
@@ -113,12 +141,12 @@ impl<S: Store> P2PHost<S> {
         info!("Local peer ID: {}", local_peer_id);
 
         // Pass keypair and blockstore to behaviour for message signing and block exchange
-        // DefraBehaviour::new is now async
         let behaviour = DefraBehaviour::new(
             local_peer_id,
             local_public_key,
             keypair.clone(),
             bitswap_store,
+            enable_pubsub,
         )
         .await
         .map_err(|e| Error::Behaviour(e.to_string()))?;

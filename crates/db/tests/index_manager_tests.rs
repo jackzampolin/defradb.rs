@@ -39,7 +39,7 @@ async fn test_create_index() {
     }];
 
     let desc = manager
-        .create_index(&datastore, "users", "idx_name".to_string(), fields, false)
+        .create_index(&datastore, "users", "idx_name".to_string(), fields, false, &[])
         .await
         .unwrap();
 
@@ -64,7 +64,7 @@ async fn test_create_unique_index() {
     }];
 
     let desc = manager
-        .create_index(&datastore, "users", "idx_email".to_string(), fields, true)
+        .create_index(&datastore, "users", "idx_email".to_string(), fields, true, &[])
         .await
         .unwrap();
 
@@ -93,12 +93,12 @@ async fn test_create_duplicate_index_fails() {
             "idx_name".to_string(),
             fields.clone(),
             false,
-        )
+        , &[])
         .await
         .unwrap();
 
     let result = manager
-        .create_index(&datastore, "users", "idx_name".to_string(), fields, false)
+        .create_index(&datastore, "users", "idx_name".to_string(), fields, false, &[])
         .await;
 
     assert!(result.is_err());
@@ -115,7 +115,7 @@ async fn test_create_empty_fields_fails() {
     let mut manager = IndexManager::new(1);
 
     let result = manager
-        .create_index(&datastore, "users", "idx_empty".to_string(), vec![], false)
+        .create_index(&datastore, "users", "idx_empty".to_string(), vec![], false, &[])
         .await;
 
     assert!(result.is_err());
@@ -140,7 +140,7 @@ async fn test_drop_index() {
     }];
 
     manager
-        .create_index(&datastore, "users", "idx_name".to_string(), fields, false)
+        .create_index(&datastore, "users", "idx_name".to_string(), fields, false, &[])
         .await
         .unwrap();
 
@@ -183,7 +183,7 @@ async fn test_get_indexes() {
                 descending: false,
             }],
             false,
-        )
+        , &[])
         .await
         .unwrap();
 
@@ -197,7 +197,7 @@ async fn test_get_indexes() {
                 descending: false,
             }],
             true,
-        )
+        , &[])
         .await
         .unwrap();
 
@@ -258,7 +258,7 @@ async fn test_on_document_create() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -297,7 +297,7 @@ async fn test_index_id_sequence() {
                 descending: false,
             }],
             false,
-        )
+        , &[])
         .await
         .unwrap();
 
@@ -311,7 +311,7 @@ async fn test_index_id_sequence() {
                 descending: false,
             }],
             false,
-        )
+        , &[])
         .await
         .unwrap();
 
@@ -325,7 +325,7 @@ async fn test_index_id_sequence() {
                 descending: false,
             }],
             false,
-        )
+        , &[])
         .await
         .unwrap();
 
@@ -357,7 +357,7 @@ async fn test_on_document_update_changes_index_entry() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -440,7 +440,7 @@ async fn test_on_document_update_no_change_when_values_same() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -493,7 +493,7 @@ async fn test_on_document_delete_removes_index_entries() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -560,7 +560,7 @@ async fn test_bulk_index_indexes_all_documents() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -619,7 +619,7 @@ async fn test_bulk_index_skips_documents_without_id() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -690,7 +690,7 @@ async fn test_on_document_create_without_id_fails() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -728,7 +728,7 @@ async fn test_on_document_update_without_id_fails() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -773,7 +773,7 @@ async fn test_on_document_delete_without_id_fails() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -828,7 +828,7 @@ async fn test_multi_index_update() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -842,7 +842,7 @@ async fn test_multi_index_update() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -979,7 +979,7 @@ async fn test_composite_index_through_manager() {
                     },
                 ],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -1071,7 +1071,7 @@ async fn test_missing_field_indexed_as_null() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -1146,7 +1146,7 @@ async fn test_unique_index_allows_multiple_nulls() {
                     descending: false,
                 }],
                 true, // unique
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -1239,7 +1239,7 @@ async fn test_unique_constraint_violation_returns_error() {
                     descending: false,
                 }],
                 true, // unique
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -1309,7 +1309,7 @@ async fn test_index_field_not_in_schema_fails() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -1356,7 +1356,7 @@ async fn test_index_idempotence_create_same_document_twice() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 
@@ -1415,7 +1415,7 @@ async fn test_delete_then_recreate_same_value() {
                     descending: false,
                 }],
                 false,
-            )
+            , &[])
             .await
             .unwrap();
 

@@ -22,7 +22,9 @@ use crate::document::{documents_to_plan_docs, documents_with_status_to_plan_docs
 use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
 use crate::plan::PermissionFilterNode;
-use crate::planner::index_selection::{can_be_ordered_by_index, select_best_index};
+use crate::planner::index_selection::{
+    can_be_ordered_by_index, can_or_filter_use_index, select_best_index,
+};
 use crate::planner::Planner;
 use crate::query_parse::{parse_query_with_variables, ExplainType};
 use crate::txn::TransactionRegistry;
@@ -803,7 +805,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 })
                 .unwrap_or(false);
 
-        let can_use_index = can_use_filter_index || can_use_ordering_index;
+        let can_use_or_filter_index = select.doc_ids.is_none()
+            && select.filter.is_some()
+            && !collection.indexes.is_empty()
+            && fetcher.supports_index_queries()
+            && select
+                .filter
+                .as_ref()
+                .map(|f| can_or_filter_use_index(f, &collection.indexes))
+                .unwrap_or(false);
+
+        let can_use_index =
+            can_use_filter_index || can_use_ordering_index || can_use_or_filter_index;
 
         // Check if any aggregates reference relations (e.g., _sum(articles: {field: pages}))
         // Relation aggregates need the Planner to create TypeJoinMany nodes
