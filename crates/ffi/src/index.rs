@@ -122,6 +122,7 @@ pub unsafe extern "C" fn create_index(
                     index_input.name,
                     fields,
                     index_input.unique,
+                    &collection.schema().fields,
                 )
                 .await
                 .map_err(|e| format!("{}", e))?;
