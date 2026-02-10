@@ -519,7 +519,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         obj.get("_docID").and_then(|v| v.as_str()).map(String::from)
                     {
                         let version_data = self
-                            .fetch_version_data(fetcher, &doc_id, version_sel, None)
+                            .fetch_version_data(fetcher, &doc_id, version_sel, None, true)
                             .await?;
                         obj.insert(output_name.clone(), version_data);
                     }
