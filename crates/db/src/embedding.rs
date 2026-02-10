@@ -61,7 +61,7 @@ pub async fn set_embedding(
             call_embedding_provider(&embedding.provider, &embedding.model, &embedding.url, &text)
                 .await?;
 
-        doc.set(&embedding.field_name, NormalValue::Float32Array(vec));
+        doc.set(&embedding.field_name, NormalValue::Float64Array(vec));
         generated.push(embedding.field_name.clone());
     }
 
@@ -84,7 +84,7 @@ async fn call_embedding_provider(
     model: &str,
     url: &str,
     text: &str,
-) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<f64>, Box<dyn std::error::Error + Send + Sync>> {
     match provider {
         "ollama" => call_ollama(model, url, text).await,
         "openai" => call_openai(model, url, text).await,
@@ -96,7 +96,7 @@ async fn call_ollama(
     model: &str,
     url: &str,
     text: &str,
-) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<f64>, Box<dyn std::error::Error + Send + Sync>> {
     let base = if url.is_empty() {
         "http://localhost:11434/api"
     } else {
@@ -123,9 +123,9 @@ async fn call_ollama(
         .and_then(|v| v.as_array())
         .ok_or("ollama response missing 'embedding' array")?;
 
-    let vec: Vec<f32> = embedding
+    let vec: Vec<f64> = embedding
         .iter()
-        .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+        .map(|v| v.as_f64().unwrap_or(0.0))
         .collect();
 
     Ok(vec)
@@ -135,7 +135,7 @@ async fn call_openai(
     model: &str,
     url: &str,
     text: &str,
-) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<f64>, Box<dyn std::error::Error + Send + Sync>> {
     let base = if url.is_empty() {
         "https://api.openai.com/v1"
     } else {
@@ -170,9 +170,9 @@ async fn call_openai(
         .and_then(|v| v.as_array())
         .ok_or("openai response missing embedding data")?;
 
-    let vec: Vec<f32> = embedding
+    let vec: Vec<f64> = embedding
         .iter()
-        .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+        .map(|v| v.as_f64().unwrap_or(0.0))
         .collect();
 
     Ok(vec)

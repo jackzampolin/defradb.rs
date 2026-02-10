@@ -855,6 +855,7 @@ fn is_valid_embedding_kind(kind: &FieldKind) -> bool {
     matches!(
         kind,
         FieldKind::ScalarArray(schema::ScalarArrayKind::Float32Array)
+            | FieldKind::ScalarArray(schema::ScalarArrayKind::Float64Array)
     )
 }
 
