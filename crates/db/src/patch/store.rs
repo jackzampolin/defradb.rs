@@ -1,0 +1,371 @@
+use super::*;
+
+impl<S: Store> crate::database::DB<S> {
+    /// Create and store a new schema version from a validated patched schema.
+    ///
+    /// Handles default CRDTs for new fields, cross-collection validation,
+    /// unique index creation, CID generation, placeholder/pending migration
+    /// linking, IsActive handling, transaction writes, and cache updates.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn store_new_version(
+        &self,
+        mut new_schema: CollectionVersion,
+        old_schema: &CollectionVersion,
+        old_version_id: &str,
+        actual_name: &str,
+        collection_id: &str,
+        collection_name: &str,
+        is_active_explicitly_set: bool,
+    ) -> Result<CollectionVersion> {
+        // Go compatibility: default new fields with CType::None to CType::LwwRegister.
+        // Go's patchCollection does this in collection_define.go for new fields that
+        // don't have an explicit CRDT type. This must happen before CID generation.
+        {
+            let old_field_names: std::collections::HashSet<&str> =
+                old_schema.fields.iter().map(|f| f.name.as_str()).collect();
+            for field in &mut new_schema.fields {
+                if !old_field_names.contains(field.name.as_str())
+                    && field.crdt_type == schema::CType::None
+                {
+                    field.crdt_type = schema::CType::LwwRegister;
+                }
+            }
+        }
+
+        // Run Go-compatible cross-collection validators (before schema validate() which
+        // uses different error messages). These validators cover duplicate fields,
+        // CRDT/kind compatibility, and all Go-specific patch constraints.
+        let all_existing = self.get_all_collection_versions().await?;
+        let new_collections: Vec<CollectionVersion> = all_existing
+            .iter()
+            .filter(|c| c.version_id != old_version_id)
+            .cloned()
+            .chain(std::iter::once(new_schema.clone()))
+            .collect();
+        crate::definition_validation::validate_collection_changes(&all_existing, &new_collections)
+            .map_err(Error::InvalidPatch)?;
+
+        // Also run schema-level validation for checks not covered by definition validators
+        // (e.g., relation field requires relation_name, policy format validation)
+        new_schema.validate()?;
+
+        // Auto-create unique indexes for one-to-one relations added via patch.
+        // This runs AFTER validation (which rejects index mutations on existing schemas)
+        // but BEFORE CID generation (since indexes are part of the schema content).
+        {
+            // Go uses sequential IDs starting from the next available for this collection
+            let schema_max_index_id = new_schema
+                .indexes
+                .iter()
+                .map(|idx| idx.id)
+                .max()
+                .unwrap_or(0);
+            let mut next_index_id = schema_max_index_id;
+
+            let mut indexes_to_add = Vec::new();
+            for field in &new_schema.fields {
+                if !field.kind.is_relation() || field.kind.is_array() {
+                    continue;
+                }
+                let rel_name = match field.relation_name.as_ref() {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let other_col_id = match field.kind.relation_collection_id() {
+                    Some(id) => id,
+                    None => continue,
+                };
+                // Look up the other collection (may be the same collection for self-ref)
+                let other_col = all_existing.iter().find(|c| {
+                    (c.name == other_col_id || c.collection_id == other_col_id) && c.is_active
+                });
+                if let Some(other_col) = other_col {
+                    let other_field =
+                        other_col.field_by_relation(rel_name, &new_schema.name, &field.name);
+                    // One-to-one: other side explicitly exists, is non-array, and this field is primary.
+                    // When other_field is None (other collection not yet patched), skip creating a
+                    // unique index — matches finalize_relations() which treats missing other side
+                    // as one-to-many.
+                    let is_one_to_one = other_field.map(|f| !f.kind.is_array()).unwrap_or(false);
+                    if is_one_to_one && field.is_primary {
+                        match new_schema.ensure_one_to_one_unique_index(&field.name, &mut || {
+                            next_index_id += 1;
+                            next_index_id
+                        }) {
+                            Ok(Some(index)) => indexes_to_add.push(index),
+                            Ok(None) => {} // existing unique index is fine
+                            Err(e) => return Err(Error::InvalidPatch(e.to_string())),
+                        }
+                    }
+                }
+            }
+            for index in indexes_to_add {
+                new_schema.indexes.push(index);
+            }
+        }
+
+        // Read current heads from schema_heads (emulates Go's persistent headstore).
+        // For branching patches (v1→v2 then v1→v3), the headstore tracks the latest
+        // CID after v2, so v3 gets heads=[v2_cid] and priority=3, matching Go.
+        let (collection_heads, collection_priority) = {
+            let heads_map = self
+                .schema_heads
+                .read()
+                .map_err(|_| Error::LockPoisoned("schema_heads lock poisoned".into()))?;
+            match heads_map.get(actual_name) {
+                Some((heads, h)) => (heads.clone(), *h + 1),
+                None => {
+                    // Fallback: compute from version chain (for databases loaded from storage)
+                    let versions_map: std::collections::HashMap<&str, &CollectionVersion> =
+                        all_existing
+                            .iter()
+                            .map(|v| (v.version_id.as_str(), v))
+                            .collect();
+                    let mut depth = 0u64;
+                    let mut current_id = old_schema.version_id.as_str();
+                    while let Some(v) = versions_map.get(current_id) {
+                        match &v.previous_version {
+                            Some(prev) => {
+                                depth += 1;
+                                current_id = prev.source_collection_id.as_str();
+                            }
+                            None => break,
+                        }
+                    }
+                    let version_depth = depth + 1;
+                    let old_cid = cid::Cid::try_from(old_schema.version_id.as_str()).ok();
+                    (old_cid.into_iter().collect(), version_depth + 1)
+                }
+            }
+        };
+
+        // Build collection name → collection_id map for resolving FieldKind::Named
+        let collection_id_map: std::collections::HashMap<String, String> = all_existing
+            .iter()
+            .filter(|c| c.is_active)
+            .map(|c| (c.name.clone(), c.collection_id.clone()))
+            .collect();
+
+        // Generate new version_id from schema content with headstore heads and priority
+        let new_version_id = Self::generate_patch_version_id_with_heads(
+            &mut new_schema,
+            old_schema,
+            collection_priority,
+            &collection_heads,
+            &collection_id_map,
+        );
+
+        // Update new schema with version info
+        new_schema.version_id = new_version_id.clone();
+
+        // Update schema_heads with new version CID and priority
+        if let Ok(new_cid) = cid::Cid::try_from(new_version_id.as_str()) {
+            if let Ok(mut heads) = self.schema_heads.write() {
+                heads.insert(
+                    actual_name.to_string(),
+                    (vec![new_cid], collection_priority),
+                );
+            }
+        }
+
+        // Check if a placeholder version exists with this ID (from pre-registered migration).
+        // When set_migration is called before patch_collection, it creates a placeholder
+        // with previous_version.transform set. We need to copy that transform to preserve
+        // the migration link.
+        let placeholder_transform = {
+            let read_txn = self.new_txn(true).await?;
+            let systemstore = read_txn.systemstore()?;
+            let placeholder_key = CollectionKey::new(&new_version_id);
+            match systemstore
+                .get(&placeholder_key.bytes())
+                .await
+                .map_err(Error::Storage)?
+            {
+                Some(data) => {
+                    let placeholder: CollectionVersion =
+                        serde_json::from_slice(&data).map_err(|e| {
+                            Error::Serialization(format!(
+                                "failed to deserialize placeholder version: {}",
+                                e
+                            ))
+                        })?;
+                    tracing::debug!(
+                        new_version_id = %new_version_id,
+                        is_placeholder = placeholder.is_placeholder,
+                        has_previous_version = placeholder.previous_version.is_some(),
+                        transform = ?placeholder.previous_version.as_ref().and_then(|pv| pv.transform.as_ref()),
+                        "patch_collection: found existing version"
+                    );
+                    if placeholder.is_placeholder {
+                        // Found a placeholder - extract its transform
+                        placeholder.previous_version.and_then(|pv| pv.transform)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        };
+
+        // Use placeholder transform if available, otherwise None
+        new_schema.previous_version = Some(CollectionSource {
+            source_collection_id: old_version_id.to_string(),
+            transform: placeholder_transform.clone(),
+        });
+
+        if placeholder_transform.is_some() {
+            tracing::debug!(
+                new_version = %new_version_id,
+                transform_id = ?placeholder_transform,
+                "Linked pre-registered migration from placeholder to new schema version"
+            );
+        }
+
+        // Also check for pending migrations targeting this new version (in-memory fallback)
+        {
+            let pending = self.pending_migrations.read().map_err(|e| {
+                tracing::error!(error = ?e, "Pending migrations lock poisoned");
+                Error::LockPoisoned(
+                    "pending migrations lock poisoned during patch_collection".into(),
+                )
+            })?;
+            if let Some((_source_id, transform_id)) = pending.get(&new_version_id) {
+                if let Some(ref mut prev) = new_schema.previous_version {
+                    // Only override if we didn't already get a transform from the placeholder
+                    if prev.transform.is_none() {
+                        prev.transform = Some(transform_id.clone());
+                        tracing::debug!(
+                            new_version = %new_version_id,
+                            transform_id = %transform_id,
+                            "Linked pending migration to new schema version"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Go compatibility: respect explicit IsActive=false in the patch, otherwise default to true.
+        // When IsActive was explicitly set to false in the patch, preserve it.
+        // When the new version is inactive, keep the old version active.
+        if !is_active_explicitly_set {
+            new_schema.is_active = true;
+        }
+
+        // Create old schema copy for storage. If new schema is active, mark old as inactive.
+        // If new schema is inactive (explicit IsActive=false), old version stays active.
+        let mut old_schema_inactive = old_schema.clone();
+        if new_schema.is_active {
+            old_schema_inactive.is_active = false;
+        }
+
+        tracing::info!(
+            collection = %collection_name,
+            old_version = %old_version_id,
+            new_version = %new_version_id,
+            field_count = new_schema.fields.len(),
+            "Creating new schema version"
+        );
+
+        // Begin transaction to store all version data
+        let txn = self.new_txn(false).await?;
+
+        // Prepare serialized data before getting systemstore reference
+        let old_version_key = CollectionKey::new(old_version_id);
+        let old_version_data = serde_json::to_vec(&old_schema_inactive).map_err(|e| {
+            Error::Serialization(format!(
+                "failed to serialize old schema version '{}': {}",
+                old_version_id, e
+            ))
+        })?;
+        let new_version_key = CollectionKey::new(&new_version_id);
+        let new_version_data = serde_json::to_vec(&new_schema).map_err(|e| {
+            Error::Serialization(format!(
+                "failed to serialize new schema version '{}': {}",
+                new_version_id, e
+            ))
+        })?;
+        let name_key = CollectionNameKey::new(actual_name);
+        let version_index_key = CollectionVersionKey::new(collection_id, &new_version_id);
+        let old_version_index_key = CollectionVersionKey::new(collection_id, old_version_id);
+
+        // Perform all writes in a scoped block so systemstore reference is dropped
+        {
+            let systemstore = txn.systemstore()?;
+
+            // 1. Store old version at /collection/id/{old_version_id} with is_active = false
+            systemstore
+                .set(&old_version_key.bytes(), &old_version_data)
+                .await
+                .map_err(Error::Storage)?;
+
+            // 2. Store new version at /collection/id/{new_version_id}
+            systemstore
+                .set(&new_version_key.bytes(), &new_version_data)
+                .await
+                .map_err(Error::Storage)?;
+
+            // 3. Update /collection/name/{name} - only point to new version if it's active.
+            // If new version is inactive, keep name pointing to old version (which stays active).
+            if new_schema.is_active {
+                systemstore
+                    .set(&name_key.bytes(), new_version_id.as_bytes())
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+
+            // 4. Add version index at /collection/version/{collection_id}/{new_version_id}
+            systemstore
+                .set(&version_index_key.bytes(), b"1")
+                .await
+                .map_err(Error::Storage)?;
+
+            // 5. Also ensure old version is in the version index (may already exist)
+            systemstore
+                .set(&old_version_index_key.bytes(), b"1")
+                .await
+                .map_err(Error::Storage)?;
+        } // systemstore reference dropped here
+
+        txn.commit().await?;
+
+        // Clean up any pending migration that was linked to this version
+        {
+            let mut pending = self.pending_migrations.write().map_err(|e| {
+                tracing::error!(error = ?e, "Pending migrations lock poisoned during cleanup");
+                Error::CacheUpdateFailedAfterCommit(collection_name.to_string())
+            })?;
+            pending.remove(&new_version_id);
+        }
+
+        // Update cache based on which version is active
+        {
+            let mut cache = self.collections.write().map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    collection_name = %collection_name,
+                    "Collection cache lock poisoned during patch_collection update"
+                );
+                Error::CacheUpdateFailedAfterCommit(collection_name.to_string())
+            })?;
+            if new_schema.is_active {
+                // New version is active - cache it under the actual collection name
+                // (not collection_name, which might be a version_id for branching patches)
+                cache.insert(actual_name.to_string(), Collection::new(new_schema.clone()));
+            }
+            // If new version is inactive, old version stays in cache (already there)
+        }
+
+        // After switching active versions, reindex if the new version's history has migrations
+        if new_schema.is_active {
+            if let Err(e) = self.maybe_reindex_on_version_switch(actual_name).await {
+                tracing::warn!(
+                    error = %e,
+                    collection = %actual_name,
+                    "Failed to reindex after version switch"
+                );
+            }
+        }
+
+        Ok(new_schema)
+    }
+}
