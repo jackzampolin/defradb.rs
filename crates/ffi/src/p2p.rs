@@ -1958,6 +1958,8 @@ pub unsafe extern "C" fn p2p_sync_documents(
             };
             let db = &state.database;
 
+            let event_bus = &state.event_bus;
+
             rt.block_on(async {
                 // Verify the collection exists
                 let _collection = db
@@ -1993,30 +1995,72 @@ pub unsafe extern "C" fn p2p_sync_documents(
                     return Err(format!("failed to sign DocSync request: {}", e));
                 }
 
-                // Send DocSync request to each connected peer
-                // The response handling happens asynchronously via the coordinator:
-                // 1. Request is sent via two-stream protocol
-                // 2. Peer responds with DocSyncReply containing head CIDs
-                // 3. Coordinator receives DocSyncReply and initiates Bitswap fetch
-                // 4. Blocks are stored and merged via the replication loop
+                // Subscribe to merge_complete events BEFORE sending requests
+                // so we don't miss events that arrive quickly
+                let mut sub = event_bus.subscribe(&[events::EventName::MergeComplete]);
+
+                // Send DocSync request to each connected peer synchronously
                 for peer_id in &connected_peers {
                     eprintln!("[DOCSYNC] Sending DocSync request to peer={}", peer_id);
-                    let request_clone = request.clone();
-                    let handle = p2p.handle.clone();
-                    let peer_id = *peer_id;
-
-                    tokio::spawn(async move {
-                        eprintln!("[DOCSYNC] Spawned task sending to peer={}", peer_id);
-                        match handle.send_doc_sync_request(peer_id, request_clone).await {
-                            Ok(()) => {
-                                eprintln!("[DOCSYNC] Sent DocSync request to peer={}", peer_id)
-                            }
-                            Err(e) => eprintln!(
-                                "[DOCSYNC] Failed to send DocSync request to peer={}: {}",
-                                peer_id, e
-                            ),
+                    match p2p
+                        .handle
+                        .send_doc_sync_request(*peer_id, request.clone())
+                        .await
+                    {
+                        Ok(()) => {
+                            eprintln!("[DOCSYNC] Sent DocSync request to peer={}", peer_id)
                         }
-                    });
+                        Err(e) => eprintln!(
+                            "[DOCSYNC] Failed to send DocSync request to peer={}: {}",
+                            peer_id, e
+                        ),
+                    }
+                }
+
+                // Wait for all documents to be merged
+                let timeout = std::time::Duration::from_secs(30);
+                let start = std::time::Instant::now();
+                let mut remaining_docs: std::collections::HashSet<String> =
+                    doc_ids.iter().cloned().collect();
+
+                eprintln!(
+                    "[DOCSYNC] Waiting for {} documents to be merged",
+                    remaining_docs.len()
+                );
+
+                while !remaining_docs.is_empty() && start.elapsed() < timeout {
+                    match tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv())
+                        .await
+                    {
+                        Ok(Some(msg)) => {
+                            if let Some(data) = msg.as_merge_complete() {
+                                if remaining_docs.remove(&data.doc_id) {
+                                    eprintln!(
+                                        "[DOCSYNC] Doc merged: doc_id={} remaining={}",
+                                        data.doc_id,
+                                        remaining_docs.len()
+                                    );
+                                }
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {}
+                    }
+                }
+
+                event_bus.unsubscribe(sub.id());
+
+                if remaining_docs.is_empty() {
+                    eprintln!(
+                        "[DOCSYNC] All {} documents synced successfully",
+                        doc_ids.len()
+                    );
+                } else {
+                    eprintln!(
+                        "[DOCSYNC] Timeout waiting for {} documents: {:?}",
+                        remaining_docs.len(),
+                        remaining_docs
+                    );
                 }
 
                 Ok(())
@@ -2393,20 +2437,23 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                         }
                     };
 
-                    // Fetch all linked field blocks
-                    for link_cid in &linked_cids {
+                    // Fetch all linked blocks recursively.
+                    // For patched versions, heads point to previous version CIDs which
+                    // themselves have linked field blocks that also need fetching.
+                    let mut fetch_queue: std::collections::VecDeque<cid::Cid> = linked_cids.into_iter().collect();
+                    let mut fetched: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    fetched.insert(version_cid.to_string());
+
+                    while let Some(link_cid) = fetch_queue.pop_front() {
+                        if fetched.contains(&link_cid.to_string()) {
+                            continue;
+                        }
+                        fetched.insert(link_cid.to_string());
+
                         // Check if we already have this block
-                        match p2p.blockstore.get(link_cid).await {
-                            Ok(Some(_)) => {
-                                eprintln!(
-                                    "[FFI-COLLECTION-VERSION] Link {} already present",
-                                    link_cid
-                                );
-                                continue;
-                            }
-                            Ok(None) => {
-                                // Need to fetch
-                            }
+                        let already_present = match p2p.blockstore.get(&link_cid).await {
+                            Ok(Some(_)) => true,
+                            Ok(None) => false,
                             Err(e) => {
                                 eprintln!(
                                     "[FFI-COLLECTION-VERSION] Error checking link {}: {}",
@@ -2414,58 +2461,79 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                                 );
                                 continue;
                             }
-                        }
+                        };
 
-                        eprintln!(
-                            "[FFI-COLLECTION-VERSION] Fetching linked block {}",
-                            link_cid
-                        );
-
-                        // Start Bitswap sync for linked block
-                        if let Err(e) = p2p.handle
-                            .bitswap_sync(*link_cid, connected_peers.clone(), vec![*link_cid])
-                            .await
-                        {
+                        if !already_present {
                             eprintln!(
-                                "[FFI-COLLECTION-VERSION] Bitswap sync failed for link {}: {}",
-                                link_cid, e
+                                "[FFI-COLLECTION-VERSION] Fetching linked block {}",
+                                link_cid
                             );
-                            continue;
-                        }
 
-                        // Wait for linked block
-                        let link_timeout = std::time::Duration::from_secs(10);
-                        let link_start = std::time::Instant::now();
-                        let mut link_found = false;
+                            if let Err(e) = p2p.handle
+                                .bitswap_sync(link_cid, connected_peers.clone(), vec![link_cid])
+                                .await
+                            {
+                                eprintln!(
+                                    "[FFI-COLLECTION-VERSION] Bitswap sync failed for link {}: {}",
+                                    link_cid, e
+                                );
+                                continue;
+                            }
 
-                        while link_start.elapsed() < link_timeout {
-                            match p2p.blockstore.get(link_cid).await {
-                                Ok(Some(_)) => {
-                                    link_found = true;
-                                    eprintln!(
-                                        "[FFI-COLLECTION-VERSION] Linked block {} fetched",
-                                        link_cid
-                                    );
-                                    break;
+                            let link_timeout = std::time::Duration::from_secs(10);
+                            let link_start = std::time::Instant::now();
+                            let mut link_found = false;
+
+                            while link_start.elapsed() < link_timeout {
+                                match p2p.blockstore.get(&link_cid).await {
+                                    Ok(Some(_)) => {
+                                        link_found = true;
+                                        break;
+                                    }
+                                    Ok(None) => {
+                                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[FFI-COLLECTION-VERSION] Error waiting for link {}: {}",
+                                            link_cid, e
+                                        );
+                                        break;
+                                    }
                                 }
-                                Ok(None) => {
-                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "[FFI-COLLECTION-VERSION] Error waiting for link {}: {}",
-                                        link_cid, e
-                                    );
-                                    break;
-                                }
+                            }
+
+                            if !link_found {
+                                eprintln!(
+                                    "[FFI-COLLECTION-VERSION] Timeout waiting for linked block {}",
+                                    link_cid
+                                );
+                                continue;
                             }
                         }
 
-                        if !link_found {
-                            eprintln!(
-                                "[FFI-COLLECTION-VERSION] Timeout waiting for linked block {}",
-                                link_cid
-                            );
+                        eprintln!(
+                            "[FFI-COLLECTION-VERSION] Linked block {} available",
+                            link_cid
+                        );
+
+                        // If this linked block is a CollectionDefinition (previous version),
+                        // also fetch its linked blocks (field definitions)
+                        if let Ok(Some(link_data)) = p2p.blockstore.get(&link_cid).await {
+                            if let Ok(link_block) = Block::from_dag_cbor(&link_data) {
+                                if matches!(&link_block.delta, defra_core::block::CrdtDelta::CollectionDefinition(_)) {
+                                    let sub_links = link_block.all_links();
+                                    eprintln!(
+                                        "[FFI-COLLECTION-VERSION] Previous version {} has {} sub-links",
+                                        link_cid, sub_links.len()
+                                    );
+                                    for sub_cid in sub_links {
+                                        if !fetched.contains(&sub_cid.to_string()) {
+                                            fetch_queue.push_back(sub_cid);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 

@@ -54,6 +54,58 @@ impl<S: Store> crate::database::DB<S> {
         // Validate schema (includes policy validation for path traversal prevention)
         schema.validate()?;
         let name = collection_name.as_str().to_string();
+
+        // For views, regenerate version_id to include query_select in the CID
+        // (matching Go's saveBlocks which includes querySelect in the delta).
+        // This must happen before any systemstore writes that use version_id.
+        if schema.query.is_some() {
+            let (qs_bytes, qt_cid) = if let Some(ref qs) = schema.query {
+                let select_cbor = serde_cbor::to_vec(&qs.query).unwrap_or_default();
+                let transform_cid = qs
+                    .transform
+                    .as_ref()
+                    .and_then(|t| cid::Cid::try_from(t.as_str()).ok());
+                (Some(select_cbor), transform_cid)
+            } else {
+                (None, None)
+            };
+
+            // Regenerate field CIDs to compute the correct version_id
+            let mut sorted: Vec<&schema::FieldDescription> =
+                schema.fields.iter().filter(|f| !f.id.is_empty()).collect();
+            sorted.sort_by(|a, b| {
+                if a.name == "_docID" {
+                    std::cmp::Ordering::Less
+                } else if b.name == "_docID" {
+                    std::cmp::Ordering::Greater
+                } else {
+                    a.name.cmp(&b.name)
+                }
+            });
+            let mut fld_cids = Vec::new();
+            for field in &sorted {
+                if let Ok(cid) = schema::generate_field_cid_with_priority(field, 1) {
+                    fld_cids.push(cid);
+                }
+            }
+
+            if let Ok(new_cid) = schema::generate_collection_cid_full_with_query(
+                Some(&schema.name),
+                &fld_cids,
+                1,
+                &[],
+                qs_bytes.as_deref(),
+                qt_cid.as_ref(),
+            ) {
+                let new_version_id = new_cid.to_string();
+                let old_version_id = schema.version_id.clone();
+                schema.version_id = new_version_id.clone();
+                if schema.collection_id == old_version_id {
+                    schema.collection_id = new_version_id;
+                }
+            }
+        }
+
         let version_id = &schema.version_id.clone();
         let collection_id = &schema.collection_id.clone();
 
@@ -161,6 +213,7 @@ impl<S: Store> crate::database::DB<S> {
 
         // Store the collection definition block
         // This includes the collection name, field CIDs, priority, and head CIDs.
+        // For views, also includes query_select and query_transform in the delta.
         // For new collections (not patches), there are no heads, so we pass an empty slice.
         match schema::generate_collection_block_full(
             Some(&schema.name),

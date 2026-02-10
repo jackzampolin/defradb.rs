@@ -326,6 +326,94 @@ impl<S: Store> crate::database::DB<S> {
                 .map_err(Error::Storage)?;
         } // systemstore reference dropped here
 
+        // Store field and collection definition blocks in blockstore for Bitswap sync.
+        // This mirrors create_collection_with_txn's block storage but only for NEW fields
+        // and uses the patch-specific heads/priority.
+        {
+            let blockstore = txn.blockstore()?;
+
+            // Identify new fields (same logic as generate_patch_version_id_with_heads)
+            let old_field_names: std::collections::HashSet<&str> = old_schema
+                .fields
+                .iter()
+                .filter(|f| !f.id.is_empty())
+                .map(|f| f.name.as_str())
+                .collect();
+
+            let mut new_field_indices: Vec<usize> = new_schema
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| {
+                    let is_new = !old_field_names.contains(f.name.as_str());
+                    let is_secondary_relation = f.relation_name.is_some() && !f.is_primary;
+                    is_new && !is_secondary_relation
+                })
+                .map(|(i, _)| i)
+                .collect();
+            new_field_indices.sort_by(|&a, &b| {
+                let fa = &new_schema.fields[a];
+                let fb = &new_schema.fields[b];
+                if fa.name == "_docID" {
+                    std::cmp::Ordering::Less
+                } else if fb.name == "_docID" {
+                    std::cmp::Ordering::Greater
+                } else {
+                    fa.name.cmp(&fb.name)
+                }
+            });
+
+            // Generate and store field blocks for new fields
+            let mut field_cids = Vec::new();
+            for &idx in &new_field_indices {
+                let field = &new_schema.fields[idx];
+                match schema::generate_field_block_with_priority_and_heads(field, 1, &[]) {
+                    Ok(block_with_cid) => {
+                        blockstore
+                            .set(&block_with_cid.cid.to_bytes(), &block_with_cid.bytes)
+                            .await
+                            .map_err(Error::Storage)?;
+                        field_cids.push(block_with_cid.cid);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            field_name = %field.name,
+                            error = %e,
+                            "Failed to generate field block for patch"
+                        );
+                    }
+                }
+            }
+
+            // Generate and store the collection definition block
+            let name_changed = new_schema.name != old_schema.name;
+            let col_name = if name_changed {
+                Some(new_schema.name.as_str())
+            } else {
+                None
+            };
+            match schema::generate_collection_block_full(
+                col_name,
+                &field_cids,
+                collection_priority,
+                &collection_heads,
+            ) {
+                Ok(block_with_cid) => {
+                    blockstore
+                        .set(&block_with_cid.cid.to_bytes(), &block_with_cid.bytes)
+                        .await
+                        .map_err(Error::Storage)?;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        collection_name = %actual_name,
+                        error = %e,
+                        "Failed to generate collection block for patch"
+                    );
+                }
+            }
+        }
+
         txn.commit().await?;
 
         // Clean up any pending migration that was linked to this version
