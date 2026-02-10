@@ -55,6 +55,9 @@ pub enum Error {
     #[error("invalid datastore type: {0}")]
     InvalidDatastore(String),
 
+    #[error("invalid config: {0}")]
+    InvalidConfig(String),
+
     #[error("invalid ACP type: {0}")]
     InvalidAcpType(String),
 

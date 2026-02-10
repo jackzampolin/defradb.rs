@@ -30,14 +30,18 @@ pub struct RedbStoreOptions {
 }
 
 /// Controls when data is flushed to disk after a commit.
+///
+/// Default is `Eventual`, matching Go DefraDB's BadgerDB behavior
+/// (`SyncWrites = false`). Process crashes are safe due to redb's WAL;
+/// only OS crashes risk data loss.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DurabilityMode {
-    /// Flush to disk on every commit (default). Safe against process/OS crashes.
-    #[default]
+    /// Flush to disk on every commit. Safe against process and OS crashes.
     Immediate,
-    /// Rely on the OS to flush eventually. Faster for bulk imports but data may
-    /// be lost on OS crash (process crash is still safe due to redb's WAL).
+    /// Rely on the OS to flush eventually (default). Matches Go DefraDB's
+    /// BadgerDB defaults. Process crash is still safe due to redb's WAL.
+    #[default]
     Eventual,
 }
 
@@ -46,7 +50,7 @@ impl Default for RedbStoreOptions {
         Self {
             cache_size: None,
             close_timeout: Duration::from_secs(DEFAULT_CLOSE_TIMEOUT_SECS),
-            durability: DurabilityMode::Immediate,
+            durability: DurabilityMode::Eventual,
         }
     }
 }
@@ -97,9 +101,9 @@ impl RedbStoreOptions {
 
     /// Set the durability mode.
     ///
-    /// `DurabilityMode::Immediate` (default) flushes to disk on every commit.
-    /// `DurabilityMode::Eventual` defers flushing to the OS, which is faster
-    /// for bulk imports but risks data loss on OS crash.
+    /// `DurabilityMode::Eventual` (default) defers flushing to the OS,
+    /// matching Go DefraDB's BadgerDB defaults.
+    /// `DurabilityMode::Immediate` flushes to disk on every commit.
     pub fn with_durability(mut self, mode: DurabilityMode) -> Self {
         self.durability = mode;
         self

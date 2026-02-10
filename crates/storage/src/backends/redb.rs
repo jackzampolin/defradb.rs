@@ -988,9 +988,10 @@ impl Txn for RedbTxn {
                 }
             };
 
-            if self.durability == DurabilityMode::Eventual {
-                write_txn.set_durability(redb::Durability::Eventual);
-            }
+            write_txn.set_durability(match self.durability {
+                DurabilityMode::Immediate => redb::Durability::Immediate,
+                DurabilityMode::Eventual => redb::Durability::Eventual,
+            });
 
             {
                 let mut table = match write_txn.open_table(KV_TABLE) {

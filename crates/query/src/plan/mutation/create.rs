@@ -878,21 +878,27 @@ impl PlanNode for CreateNode {
             ));
         }
 
-        // On first call, create all documents
+        // On first call, create all documents in a single batch transaction
         if !self.did_create {
+            // Convert all inputs to Documents
+            let mut docs = Vec::with_capacity(self.inputs.len());
             for input in &self.inputs {
-                // Convert input to Document (using schema-aware conversion if available)
                 let doc = if let Some(ref collection) = self.collection {
                     input.to_document_with_schema_and_time(collection, self.request_time)?
                 } else {
                     input.to_document()?
                 };
+                docs.push(doc);
+            }
 
-                // Create in storage (generates DocID)
-                let result = self.mutator.create(&self.collection_name, doc).await?;
+            // Batch create: single transaction, single commit/fsync
+            let results = self
+                .mutator
+                .create_many(&self.collection_name, docs)
+                .await?;
 
-                // Convert result to plan Doc
-                let plan_doc = self.create_result_to_doc(&result)?;
+            for result in &results {
+                let plan_doc = self.create_result_to_doc(result)?;
                 self.created_docs.push(plan_doc);
             }
             self.did_create = true;

@@ -96,8 +96,8 @@ pub struct DatastoreConfig {
     pub default_key_type: String,
     /// Durability mode for the storage backend.
     ///
-    /// - `immediate` (default): fsync on every commit — safe against OS crashes
-    /// - `eventual`: defer fsync to OS — faster for bulk imports, data loss risk on OS crash
+    /// - `eventual` (default): defer fsync to OS, matching Go DefraDB's BadgerDB defaults
+    /// - `immediate`: fsync on every commit — safe against OS crashes
     #[serde(default)]
     pub durability: DurabilityMode,
 }
