@@ -283,6 +283,22 @@ pub trait DocMutator: MaybeSendSync {
     /// - A document with the same content already exists
     async fn create(&self, collection_name: &str, doc: Document) -> Result<CreateResult>;
 
+    /// Create multiple documents in a single transaction.
+    ///
+    /// The default implementation calls `create()` in a loop. Implementations
+    /// can override for single-transaction batching (one commit/fsync for N docs).
+    async fn create_many(
+        &self,
+        collection_name: &str,
+        docs: Vec<Document>,
+    ) -> Result<Vec<CreateResult>> {
+        let mut results = Vec::with_capacity(docs.len());
+        for doc in docs {
+            results.push(self.create(collection_name, doc).await?);
+        }
+        Ok(results)
+    }
+
     /// Update an existing document.
     ///
     /// The document must have a valid DocID set. Only dirty (modified) fields

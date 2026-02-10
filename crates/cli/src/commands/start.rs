@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 use crate::config::{AcpDocumentType, Config, DatastoreType};
 use crate::error::{Error, Result};
 use identity::Identity;
+use storage::backends::{DurabilityMode, RedbStoreOptions};
 
 const DEV_MODE_BANNER: &str = r#"
 ******************************************
@@ -96,6 +97,11 @@ pub struct StartArgs {
     /// Retry intervals for the replicator (comma-separated seconds)
     #[arg(long, value_delimiter = ',')]
     pub replicator_retry_intervals: Option<Vec<u32>>,
+
+    /// Storage durability mode: "eventual" (default, matches Go) or
+    /// "immediate" (fsync every commit, safer against OS crashes)
+    #[arg(long)]
+    pub durability: Option<String>,
 }
 
 impl StartArgs {
@@ -213,6 +219,18 @@ impl StartArgs {
         if let Some(ref intervals) = self.replicator_retry_intervals {
             config.replicator_retry_intervals = intervals.clone();
         }
+        if let Some(ref durability) = self.durability {
+            config.datastore.durability = match durability.as_str() {
+                "immediate" => DurabilityMode::Immediate,
+                "eventual" => DurabilityMode::Eventual,
+                other => {
+                    return Err(Error::InvalidConfig(format!(
+                        "invalid durability mode '{}': expected 'immediate' or 'eventual'",
+                        other
+                    )));
+                }
+            };
+        }
         Ok(())
     }
 }
@@ -288,7 +306,11 @@ impl Node {
             }
             DatastoreType::Badger => {
                 info!("Using Redb datastore at {}", config.data_path().display());
-                let store = Arc::new(storage::RedbStore::open(config.data_path())?);
+                let opts = RedbStoreOptions::new().with_durability(config.datastore.durability);
+                let store = Arc::new(storage::RedbStore::open_with_options(
+                    config.data_path(),
+                    opts,
+                )?);
                 // Use unified ACP store backed by main database with namespace isolation
                 info!("Using unified ACP store (namespace isolated in main database)");
                 let acp_store: Arc<dyn acp::AcpStore> =

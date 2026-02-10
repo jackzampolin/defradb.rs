@@ -164,6 +164,113 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
         ))
     }
 
+    async fn create_many(
+        &self,
+        collection_name: &str,
+        docs: Vec<Document>,
+    ) -> query::error::Result<Vec<query::mutator::CreateResult>> {
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+        let version_id = collection.version_id().to_string();
+        let collection_id = collection.collection_id().to_string();
+
+        // Delegate to inner (single transaction for all docs)
+        let results = self.inner.create_many(collection_name, docs).await?;
+
+        // Broadcast each result
+        let mut broadcast_results = Vec::with_capacity(results.len());
+        for result in results {
+            let (cid, block, doc_id_str) = if let (Some(cid), Some(block)) =
+                (result.commit_cid, result.commit_block.as_ref())
+            {
+                (cid, block.clone(), result.doc_id.to_string())
+            } else {
+                match build_blocks_from_document(
+                    &result.document,
+                    &version_id,
+                    self.sync.blockstore(),
+                )
+                .await
+                {
+                    Ok(br) => (br.cid, br.block, br.doc_id),
+                    Err(e) => {
+                        tracing::error!(
+                            doc_id = %result.doc_id,
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to build blocks for P2P broadcast"
+                        );
+                        broadcast_results.push(CreateResult::with_broadcast(
+                            result.doc_id,
+                            result.document,
+                            BroadcastStatus::Failed(format!("Block build failed: {}", e)),
+                        ));
+                        continue;
+                    }
+                }
+            };
+
+            let block_result = BlockResult {
+                cid,
+                block,
+                doc_id: doc_id_str,
+                field_cids: vec![],
+            };
+
+            self.sync
+                .push_to_replicators(
+                    &block_result.cid,
+                    &block_result.block,
+                    &block_result.doc_id,
+                    &collection_id,
+                )
+                .await;
+
+            let broadcast_status =
+                broadcast_with_retry(&self.sync, &block_result, &collection_id, collection_name)
+                    .await;
+
+            if let (Some(col_cid), Some(col_block)) =
+                (result.broadcast_cid, result.broadcast_block.as_ref())
+            {
+                let col_block_result = BlockResult {
+                    cid: col_cid,
+                    block: col_block.clone(),
+                    doc_id: block_result.doc_id.clone(),
+                    field_cids: vec![],
+                };
+                self.sync
+                    .push_to_replicators(
+                        &col_block_result.cid,
+                        &col_block_result.block,
+                        &col_block_result.doc_id,
+                        &collection_id,
+                    )
+                    .await;
+                let _ = broadcast_with_retry(
+                    &self.sync,
+                    &col_block_result,
+                    &collection_id,
+                    collection_name,
+                )
+                .await;
+            }
+
+            broadcast_results.push(CreateResult::with_commit_and_broadcast(
+                result.doc_id,
+                result.document,
+                block_result.cid,
+                block_result.block,
+                broadcast_status,
+            ));
+        }
+
+        Ok(broadcast_results)
+    }
+
     async fn update(
         &self,
         collection_name: &str,

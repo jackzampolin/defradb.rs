@@ -231,6 +231,13 @@ fn like_match(text: &str, pattern: &str) -> bool {
         }
     }
 
+    // Propagate through trailing % wildcards (each matches empty string)
+    for j in 0..p_len {
+        if pattern_bytes[j] == b'%' && dp[j] {
+            dp[j + 1] = true;
+        }
+    }
+
     dp[p_len]
 }
 

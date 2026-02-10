@@ -21,7 +21,7 @@
 /// | Persistence | No | Yes |
 /// | WASM Support | Yes | **No** |
 /// | Performance | Very Fast | Fast |
-/// | Memory Usage | High (all in RAM) | High (snapshot per txn) |
+/// | Memory Usage | High (all in RAM) | Low (MVCC snapshots) |
 /// | Crash Recovery | No | Yes |
 /// | Concurrent Access | Yes | Yes |
 /// | ACID Transactions | Yes | Yes |
@@ -77,7 +77,7 @@ pub use memory::MemoryStore;
 pub use redb::{CallbackCounts, IntegrityReport, RedbStore};
 
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
-pub use redb_config::RedbStoreOptions;
+pub use redb_config::{DurabilityMode, RedbStoreOptions};
 
 #[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
 pub use leveldb::LevelDbStore;

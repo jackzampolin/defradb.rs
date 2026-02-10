@@ -410,11 +410,14 @@ pub async fn write_document_blocks(
     let mut field_links: Vec<DAGLink> = Vec::new();
     let mut field_cids: Vec<Cid> = Vec::new();
 
-    // Get max existing priority for this document and increment by 1.
-    // For new documents, max is 0, so priority becomes 1.
-    // For updates, priority = max_existing + 1 (matches Go behavior).
-    let max_priority = get_max_priority(headstore, &doc_id_str).await?;
-    let priority: u64 = max_priority + 1;
+    // For creates (modified_fields=None), priority is always 1 and no heads exist.
+    // For updates, scan headstore for max priority (matches Go behavior).
+    let is_create = modified_fields.is_none();
+    let priority: u64 = if is_create {
+        1
+    } else {
+        get_max_priority(headstore, &doc_id_str).await? + 1
+    };
 
     // Create LWW blocks for each field
     // For updates with modified_fields, only create blocks for changed fields.
@@ -432,8 +435,12 @@ pub async fn write_document_blocks(
             Some(fields) => fields.contains(field_name), // Update: only modified fields
         };
 
-        // Get all existing heads for this field (may have multiple during concurrent updates)
-        let field_head_entries = get_all_field_heads(headstore, &doc_id_str, field_name).await?;
+        // For creates, no heads exist yet — skip the headstore scan.
+        let field_head_entries = if is_create {
+            Vec::new()
+        } else {
+            get_all_field_heads(headstore, &doc_id_str, field_name).await?
+        };
 
         if should_create_block {
             // Create new block for this field (LWW or Counter depending on CRDT type)
@@ -621,12 +628,14 @@ pub async fn write_document_blocks(
         // Go only includes newly created field blocks in the composite's links array.
     }
 
-    // Get all existing composite heads to build proper DAG links.
-    // "C" is the marker for composite/document-level commits (matches Go).
-    // During concurrent P2P updates, there can be multiple composite heads
-    // (branches) that this new composite must merge.
-    let composite_head_entries = get_all_field_heads(headstore, &doc_id_str, "C").await?;
-    let composite_heads: Vec<Cid> = composite_head_entries.iter().map(|h| h.cid).collect();
+    // For creates, no composite heads exist yet — skip the headstore scan.
+    let (composite_head_entries, composite_heads) = if is_create {
+        (Vec::new(), Vec::new())
+    } else {
+        let entries = get_all_field_heads(headstore, &doc_id_str, "C").await?;
+        let heads: Vec<Cid> = entries.iter().map(|h| h.cid).collect();
+        (entries, heads)
+    };
 
     // Create the Composite delta payload
     let composite_payload = CompositeDeltaPayload {
