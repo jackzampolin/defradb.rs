@@ -202,11 +202,14 @@ pub fn generate_auth_token(identity_hex: &str, audience: &str) -> Result<String>
     let identity = RawIdentity::from_bytes(key_type, &key_bytes)
         .map_err(|e| Error::InvalidIdentity(format!("invalid private key: {}", e)))?;
 
+    // The audience must be bare host:port (matches Go's req.Host behavior)
+    let audience_host = strip_url_scheme(audience);
+
     // Generate JWT token with 15-minute expiration (matches Go CLI)
     let token_bytes = new_token(
         &identity,
         std::time::Duration::from_secs(15 * 60),
-        Some(audience.to_string()),
+        Some(audience_host.to_string()),
         None,
     )
     .map_err(|e| Error::InvalidIdentity(format!("failed to generate token: {}", e)))?;
@@ -267,16 +270,28 @@ fn generate_auth_token_from_keyring(config: &Config, name: &str, audience: &str)
     let identity = RawIdentity::from_bytes(key_type, &key_bytes)
         .map_err(|e| Error::InvalidIdentity(format!("invalid key '{}': {}", name, e)))?;
 
+    let audience_host = strip_url_scheme(audience);
+
     let token_bytes = new_token(
         &identity,
         std::time::Duration::from_secs(15 * 60),
-        Some(audience.to_string()),
+        Some(audience_host.to_string()),
         None,
     )
     .map_err(|e| Error::InvalidIdentity(format!("failed to generate token: {}", e)))?;
 
     String::from_utf8(token_bytes)
         .map_err(|e| Error::InvalidIdentity(format!("token is not valid UTF-8: {}", e)))
+}
+
+/// Strip the URL scheme to get bare host:port for JWT audience.
+///
+/// The server uses `req.Host` (bare host:port) as the expected audience,
+/// matching Go DefraDB behavior.
+fn strip_url_scheme(url: &str) -> &str {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
 }
 
 /// Get the URL to connect to, prioritizing command-line override.
