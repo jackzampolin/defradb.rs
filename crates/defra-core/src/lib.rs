@@ -10,6 +10,7 @@ pub mod document;
 pub mod encryption;
 pub mod error;
 pub mod ipld;
+pub mod lens_block;
 pub mod signing;
 pub mod store;
 pub mod thread_bounds;
@@ -24,6 +25,7 @@ pub use block::{
 };
 pub use error::{Error, Result};
 pub use ipld::{collect_block_links, extract_links, walk_ipld, IpldVisitor};
+pub use lens_block::{LensConfigBlock, LensKeyValue, LensModuleBlock, LensWasmBlock};
 
 /// Version information for DefraDB
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

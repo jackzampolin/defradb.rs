@@ -2565,6 +2565,24 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                         "[FFI-COLLECTION-VERSION] Successfully synced version {}",
                         version_id_str
                     );
+
+                    // After merge, check if this is a view with a lens transform to sync
+                    if let Ok(block) = Block::from_dag_cbor(&block_data) {
+                        if let defra_core::CrdtDelta::CollectionDefinition(ref payload) = block.delta {
+                            if let Some(ref transform_cid) = payload.query_transform {
+                                eprintln!(
+                                    "[FFI-COLLECTION-VERSION] View has transform CID={}, syncing lens...",
+                                    transform_cid
+                                );
+                                if let Err(e) = sync_lens(transform_cid, p2p, db, &connected_peers).await {
+                                    eprintln!(
+                                        "[FFI-COLLECTION-VERSION] Lens sync failed: {}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
 
                 Ok(())
@@ -2577,4 +2595,136 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
         Ok(()) => FfiResult::ok(),
         Err(e) => FfiResult::error(e),
     }
+}
+
+/// Fetch a single block via Bitswap, polling until available.
+async fn fetch_lens_block(
+    target_cid: cid::Cid,
+    blockstore: &Arc<DefraBlockstore<crate::state::FfiStore>>,
+    handle: &p2p::P2PHostHandle,
+    peers: &[libp2p::PeerId],
+) -> Result<Vec<u8>, String> {
+    // Check local blockstore first
+    if let Ok(Some(data)) = blockstore.get(&target_cid).await {
+        return Ok(data);
+    }
+    // Fetch via Bitswap
+    handle
+        .bitswap_sync(target_cid, peers.to_vec(), vec![target_cid])
+        .await
+        .map_err(|e| format!("bitswap sync for {}: {}", target_cid, e))?;
+
+    // Poll until available
+    let timeout = std::time::Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(Some(data)) = blockstore.get(&target_cid).await {
+            return Ok(data);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Err(format!("timeout fetching block {}", target_cid))
+}
+
+/// Fetch lens IPLD blocks via Bitswap and register the WASM module.
+///
+/// Follows Go's 3-level block hierarchy: ConfigBlock -> ModuleBlock -> LensBlock.
+async fn sync_lens(
+    transform_cid: &cid::Cid,
+    p2p: &P2PState,
+    db: &Arc<crate::state::FfiDatabase>,
+    connected_peers: &[libp2p::PeerId],
+) -> Result<(), String> {
+    use defra_core::{LensConfigBlock, LensModuleBlock, LensWasmBlock};
+
+    // 1. Fetch ConfigBlock
+    let config_data = fetch_lens_block(
+        *transform_cid,
+        &p2p.blockstore,
+        &p2p.handle,
+        connected_peers,
+    )
+    .await?;
+    let config_block: LensConfigBlock = serde_ipld_dagcbor::from_slice(&config_data)
+        .map_err(|e| format!("decode config block: {}", e))?;
+
+    eprintln!(
+        "[FFI-LENS-SYNC] Config block has {} module(s)",
+        config_block.modules.len()
+    );
+
+    let mut lens_modules = Vec::new();
+
+    for module_cid in &config_block.modules {
+        // 2. Fetch ModuleBlock
+        let module_data =
+            fetch_lens_block(*module_cid, &p2p.blockstore, &p2p.handle, connected_peers).await?;
+        let module_block: LensModuleBlock = serde_ipld_dagcbor::from_slice(&module_data)
+            .map_err(|e| format!("decode module block {}: {}", module_cid, e))?;
+
+        // 3. Fetch LensBlock (WASM bytes)
+        let lens_data = fetch_lens_block(
+            module_block.lens,
+            &p2p.blockstore,
+            &p2p.handle,
+            connected_peers,
+        )
+        .await?;
+        let wasm_block: LensWasmBlock = serde_ipld_dagcbor::from_slice(&lens_data)
+            .map_err(|e| format!("decode lens block {}: {}", module_block.lens, e))?;
+
+        let wasm_bytes = match &wasm_block {
+            LensWasmBlock::Direct { wasm_bytes } => wasm_bytes.clone(),
+            LensWasmBlock::Chunked { chunks } => {
+                let mut all_bytes = Vec::new();
+                for chunk_cid in chunks {
+                    let chunk_data =
+                        fetch_lens_block(*chunk_cid, &p2p.blockstore, &p2p.handle, connected_peers)
+                            .await?;
+                    all_bytes.extend_from_slice(&chunk_data);
+                }
+                all_bytes
+            }
+        };
+
+        eprintln!(
+            "[FFI-LENS-SYNC] Got WASM module ({} bytes), inverse={}",
+            wasm_bytes.len(),
+            module_block.inverse
+        );
+
+        let mut lens_mod = lens::LensModule::from_bytes(wasm_bytes);
+        lens_mod.inverse = module_block.inverse;
+
+        // Convert arguments from key-value pairs to JSON object
+        if !module_block.arguments.is_empty() {
+            let args_map: serde_json::Map<String, serde_json::Value> = module_block
+                .arguments
+                .iter()
+                .map(|kv| (kv.key.clone(), serde_json::Value::String(kv.value.clone())))
+                .collect();
+            lens_mod.arguments = Some(serde_json::Value::Object(args_map));
+        }
+
+        lens_modules.push(lens_mod);
+    }
+
+    // Build LensConfig and register under the Go CID
+    let config = lens::LensConfig {
+        source_schema_version_id: String::new(),
+        destination_schema_version_id: String::new(),
+        lenses: lens_modules,
+    };
+
+    let transform_id = lens::TransformId::new(transform_cid.to_string());
+    db.lens_store()
+        .add_with_id(transform_id, config)
+        .await
+        .map_err(|e| format!("register lens: {}", e))?;
+
+    eprintln!(
+        "[FFI-LENS-SYNC] Lens registered under CID {}",
+        transform_cid
+    );
+    Ok(())
 }

@@ -166,6 +166,36 @@ impl TransformStore for WasmTransformStore {
         Ok(id)
     }
 
+    async fn add_with_id(&self, id: TransformId, config: LensConfig) -> Result<()> {
+        info!(
+            transform_id = %id,
+            "Adding transform to WASM store with explicit ID"
+        );
+
+        // Check if this transform already exists
+        {
+            let modules = self.modules.read();
+            if modules.contains_key(&id) {
+                info!(transform_id = %id, "Transform already exists");
+                return Ok(());
+            }
+        }
+
+        let first_lens = config.lens().cloned().unwrap_or_default();
+        let module = self.load_module(&first_lens)?;
+
+        let compiled = CompiledModule {
+            module,
+            arguments: first_lens.arguments.clone(),
+        };
+
+        self.modules.write().insert(id.clone(), compiled);
+        self.configs.write().insert(id.clone(), config);
+
+        info!(transform_id = %id, "Transform added with explicit ID");
+        Ok(())
+    }
+
     async fn list(&self) -> Result<std::collections::HashMap<String, crate::LensModule>> {
         let configs = self.configs.read();
         let result = configs
