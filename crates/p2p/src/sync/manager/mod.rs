@@ -14,7 +14,7 @@
 
 mod config;
 mod events;
-mod links;
+pub(crate) mod links;
 mod pending;
 mod process;
 

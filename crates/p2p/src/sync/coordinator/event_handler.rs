@@ -395,73 +395,61 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             "Bitswap fetch completed"
         );
 
-        if success {
-            let pending_dags: Vec<Cid> = self.manager.pending_dag_cids();
-            tracing::debug!(
-                pending_dag_count = pending_dags.len(),
-                "Processing pending DAGs after Bitswap completion"
-            );
+        if !success {
+            if let Some(ref err) = error {
+                tracing::warn!(
+                    query_id = query_id.0,
+                    error = %err,
+                    "Bitswap fetch failed, retrying pending DAGs"
+                );
+            }
+        }
 
-            for root_cid in pending_dags {
-                tracing::debug!(root_cid = %root_cid, "Retrying pending DAG");
-                match self.manager.retry_pending_dag(&root_cid).await {
-                    Ok(true) => {
-                        tracing::info!(
-                            query_id = query_id.0,
-                            root_cid = %root_cid,
-                            "Pending DAG completed after Bitswap fetch"
-                        );
-                    }
-                    Ok(false) => {
-                        let missing = self.manager.pending_dag_missing(&root_cid);
-                        if !missing.is_empty() {
-                            tracing::debug!(
-                                root_cid = %root_cid,
-                                missing_count = missing.len(),
-                                "Pending DAG has missing child blocks, fetching via Bitswap"
-                            );
-                            let providers = self
-                                .peer_state
-                                .connected_peers()
-                                .into_iter()
-                                .collect::<Vec<_>>();
-                            if let Err(e) =
-                                self.host.bitswap_sync(root_cid, providers, missing).await
-                            {
-                                tracing::warn!(
-                                    root_cid = %root_cid,
-                                    error = %e,
-                                    "Failed to start Bitswap fetch for child blocks"
-                                );
+        // Retry ALL pending DAGs on both success AND failure.
+        // On success: newly fetched blocks may complete other DAGs.
+        // On failure: the timeout ensures we re-issue bitswap_sync with
+        //   a fresh session so the retry loop doesn't stall.
+        let pending_dags: Vec<Cid> = self.manager.pending_dag_cids();
+        for root_cid in pending_dags {
+            match self.manager.retry_pending_dag(&root_cid).await {
+                Ok(true) => {
+                    tracing::info!(
+                        query_id = query_id.0,
+                        root_cid = %root_cid,
+                        "Pending DAG completed after Bitswap fetch"
+                    );
+                }
+                Ok(false) => {
+                    let missing = self.manager.pending_dag_missing(&root_cid);
+                    if !missing.is_empty() {
+                        // Build provider list: connected peers + the original source peer.
+                        // The source peer is the one that sent the DocSync/Branchable reply
+                        // and definitely has the blocks.
+                        let mut providers: Vec<libp2p::PeerId> =
+                            self.peer_state.connected_peers().into_iter().collect();
+                        if let Some(source) = self.manager.pending_dag_source_peer(&root_cid) {
+                            if !providers.contains(&source) {
+                                providers.push(source);
                             }
-                        } else {
-                            tracing::debug!(
+                        }
+                        if let Err(e) = self.host.bitswap_sync(root_cid, providers, missing).await {
+                            tracing::warn!(
                                 root_cid = %root_cid,
-                                "Pending DAG still has missing links but no missing CIDs reported"
+                                error = %e,
+                                "Failed to start Bitswap fetch for child blocks"
                             );
                         }
-                        tracing::debug!(
-                            query_id = query_id.0,
-                            root_cid = %root_cid,
-                            "Pending DAG still has missing links, initiated additional fetch"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            query_id = query_id.0,
-                            root_cid = %root_cid,
-                            error = %e,
-                            "Failed to retry pending DAG"
-                        );
                     }
                 }
+                Err(e) => {
+                    tracing::warn!(
+                        query_id = query_id.0,
+                        root_cid = %root_cid,
+                        error = %e,
+                        "Failed to retry pending DAG"
+                    );
+                }
             }
-        } else if let Some(ref err) = error {
-            tracing::warn!(
-                query_id = query_id.0,
-                error = %err,
-                "Bitswap fetch failed"
-            );
         }
         Ok(())
     }
@@ -548,7 +536,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             results_count = reply.results.len(),
             "Processing DocSync reply"
         );
-
         let mut cids_to_fetch: Vec<(Cid, String)> = Vec::new();
         for item in &reply.results {
             for head_bytes in &item.heads {
@@ -592,30 +579,34 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         if !cids_to_fetch.is_empty() {
             tracing::info!(
                 cid_count = cids_to_fetch.len(),
-                "Initiating Bitswap fetch for DocSync blocks"
+                "Spawning poll-based DAG fetchers for DocSync blocks"
             );
 
-            for (root_cid, doc_id) in &cids_to_fetch {
+            let host = self.host.clone();
+            let blockstore = self.manager.blockstore().clone();
+            let event_tx = self.manager.event_sender();
+
+            for (root_cid, doc_id) in cids_to_fetch {
                 tracing::debug!(
                     cid = %root_cid,
                     doc_id = %doc_id,
-                    "Registering pending DAG for DocSync"
+                    "Spawning poll-based DAG fetcher for DocSync"
                 );
-                self.manager.register_docsync_dag(*root_cid, doc_id.clone());
 
-                tracing::debug!(cid = %root_cid, "Starting Bitswap sync");
-                if let Err(e) = self
-                    .host
-                    .bitswap_sync(*root_cid, vec![peer_id], vec![*root_cid])
-                    .await
-                {
-                    tracing::warn!(
-                        error = %e,
-                        cid = %root_cid,
-                        doc_id = %doc_id,
-                        "Failed to initiate Bitswap sync for DocSync CID"
-                    );
-                }
+                let host = host.clone();
+                let blockstore = blockstore.clone();
+                let event_tx = event_tx.clone();
+
+                tokio::spawn(super::dag_fetcher::poll_fetch_dag(
+                    host,
+                    blockstore,
+                    event_tx,
+                    root_cid,
+                    doc_id,
+                    String::new(),
+                    String::new(),
+                    peer_id,
+                ));
             }
         } else {
             tracing::debug!("No blocks to fetch from DocSync reply (all local)");
@@ -735,24 +726,29 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             tracing::info!(
                 collection_id = %reply.collection_id,
                 cid_count = cids_to_fetch.len(),
-                "Initiating Bitswap fetch for collection blocks"
+                "Spawning poll-based DAG fetchers for collection blocks"
             );
 
-            for root_cid in &cids_to_fetch {
-                self.manager
-                    .register_branchable_dag(*root_cid, reply.collection_id.clone());
+            let host = self.host.clone();
+            let blockstore = self.manager.blockstore().clone();
+            let event_tx = self.manager.event_sender();
 
-                if let Err(e) = self
-                    .host
-                    .bitswap_sync(*root_cid, vec![peer_id], vec![*root_cid])
-                    .await
-                {
-                    tracing::warn!(
-                        cid = %root_cid,
-                        error = %e,
-                        "Failed to start Bitswap for collection block"
-                    );
-                }
+            for root_cid in cids_to_fetch {
+                let host = host.clone();
+                let blockstore = blockstore.clone();
+                let event_tx = event_tx.clone();
+                let collection_id = reply.collection_id.clone();
+
+                tokio::spawn(super::dag_fetcher::poll_fetch_dag(
+                    host,
+                    blockstore,
+                    event_tx,
+                    root_cid,
+                    String::new(),
+                    collection_id,
+                    String::new(),
+                    peer_id,
+                ));
             }
         } else {
             tracing::debug!(

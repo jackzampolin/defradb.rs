@@ -34,9 +34,9 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// State for tracking pending responses.
 #[derive(Default)]
-struct PendingResponses {
+pub(crate) struct PendingResponses {
     /// Map of MessageID to response channel.
-    channels: HashMap<String, oneshot::Sender<PushLogReply>>,
+    pub(crate) channels: HashMap<String, oneshot::Sender<PushLogReply>>,
 }
 
 /// Two-stream protocol handler.
@@ -59,6 +59,11 @@ impl TwoStreamHandler {
             control,
             pending: Arc::new(Mutex::new(PendingResponses::default())),
         }
+    }
+
+    /// Get a clone of the pending responses Arc for lock-free response processing.
+    pub(crate) fn pending_responses(&self) -> Arc<Mutex<PendingResponses>> {
+        self.pending.clone()
     }
 
     /// Get the request protocol.
@@ -138,8 +143,11 @@ impl TwoStreamHandler {
     /// DocSyncReply is a superset of PushLogReply (same fields plus Results),
     /// so we deserialize as DocSyncReply first. We then check if there's a
     /// pending PushLog channel for the message_id to determine the routing.
-    pub async fn handle_response_stream(
-        &self,
+    ///
+    /// This is an associated function (no `&self`) so it can be called without
+    /// holding the handler lock. Only needs the pending responses Arc.
+    pub(crate) async fn handle_response_stream(
+        pending: &Arc<Mutex<PendingResponses>>,
         peer_id: PeerId,
         mut stream: Stream,
     ) -> Result<Option<TwoStreamEvent>> {
@@ -191,7 +199,7 @@ impl TwoStreamHandler {
             // Check if there's a pending PushLog channel for this message_id.
             // If yes, this is actually a PushLogReply being routed.
             let pending_sender = {
-                let mut pending = self.pending.lock();
+                let mut pending = pending.lock();
                 pending.channels.remove(&message_id)
             };
 
@@ -235,7 +243,7 @@ impl TwoStreamHandler {
             );
 
             let sender = {
-                let mut pending = self.pending.lock();
+                let mut pending = pending.lock();
                 pending.channels.remove(&message_id)
             };
 

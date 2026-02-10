@@ -442,7 +442,14 @@ pub unsafe extern "C" fn new_node_with_p2p(
                         break;
                     }
                     ReplicationResult::Failed { cid, error } => {
+                        eprintln!("[REPL-LOOP] FAILED cid={} error={}", cid, error);
                         tracing::error!(cid = %cid, error = %error, "Block merge failed");
+                    }
+                    ReplicationResult::Skipped { cid, reason } => {
+                        eprintln!("[REPL-LOOP] SKIPPED cid={} reason={}", cid, reason);
+                    }
+                    ReplicationResult::BitswapFetchStarted { root_cid, .. } => {
+                        eprintln!("[REPL-LOOP] BITSWAP_FETCH root={}", root_cid);
                     }
                     _ => {}
                 }
@@ -1987,81 +1994,92 @@ pub unsafe extern "C" fn p2p_sync_documents(
                     connected_peers.len()
                 );
 
-                // Create DocSync request
-                let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
-
-                // Sign the request
-                if let Err(e) = p2p::signing::sign_message(p2p.handle.keypair(), &mut request) {
-                    return Err(format!("failed to sign DocSync request: {}", e));
-                }
-
                 // Subscribe to merge_complete events BEFORE sending requests
                 // so we don't miss events that arrive quickly
                 let mut sub = event_bus.subscribe(&[events::EventName::MergeComplete]);
 
-                // Send DocSync request to each connected peer synchronously
-                for peer_id in &connected_peers {
-                    eprintln!("[DOCSYNC] Sending DocSync request to peer={}", peer_id);
-                    match p2p
-                        .handle
-                        .send_doc_sync_request(*peer_id, request.clone())
-                        .await
-                    {
-                        Ok(()) => {
-                            eprintln!("[DOCSYNC] Sent DocSync request to peer={}", peer_id)
-                        }
-                        Err(e) => eprintln!(
-                            "[DOCSYNC] Failed to send DocSync request to peer={}: {}",
-                            peer_id, e
-                        ),
-                    }
-                }
-
-                // Wait for all documents to be merged
-                let timeout = std::time::Duration::from_secs(30);
+                let total_expected = connected_peers.len() * doc_ids.len();
+                let mut total_received = 0;
+                let overall_timeout = std::time::Duration::from_secs(30);
+                let idle_timeout = std::time::Duration::from_secs(3);
                 let start = std::time::Instant::now();
-                let mut remaining_docs: std::collections::HashSet<String> =
-                    doc_ids.iter().cloned().collect();
+                let doc_set: std::collections::HashSet<String> = doc_ids.iter().cloned().collect();
 
-                eprintln!(
-                    "[DOCSYNC] Waiting for {} documents to be merged",
-                    remaining_docs.len()
-                );
+                // Retry DocSync up to 3 times to handle "connection is closed" errors
+                // where a peer fails to send the response back.
+                for attempt in 0..3 {
+                    if total_received >= total_expected || start.elapsed() >= overall_timeout {
+                        break;
+                    }
 
-                while !remaining_docs.is_empty() && start.elapsed() < timeout {
-                    match tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv())
+                    // Create a fresh request per attempt (unique message_id)
+                    let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
+                    if let Err(e) = p2p::signing::sign_message(p2p.handle.keypair(), &mut request) {
+                        return Err(format!("failed to sign DocSync request: {}", e));
+                    }
+
+                    eprintln!(
+                        "[DOCSYNC] Attempt {} - sending to {} peers, have {}/{} merges",
+                        attempt + 1,
+                        connected_peers.len(),
+                        total_received,
+                        total_expected
+                    );
+
+                    for peer_id in &connected_peers {
+                        eprintln!("[DOCSYNC] Sending DocSync request to peer={}", peer_id);
+                        match p2p
+                            .handle
+                            .send_doc_sync_request(*peer_id, request.clone())
+                            .await
+                        {
+                            Ok(()) => {
+                                eprintln!("[DOCSYNC] Sent DocSync request to peer={}", peer_id)
+                            }
+                            Err(e) => eprintln!(
+                                "[DOCSYNC] Failed to send DocSync request to peer={}: {}",
+                                peer_id, e
+                            ),
+                        }
+                    }
+
+                    // Wait for merges with idle timeout
+                    let mut last_merge = std::time::Instant::now();
+                    while total_received < total_expected && start.elapsed() < overall_timeout {
+                        if total_received >= doc_ids.len() && last_merge.elapsed() > idle_timeout {
+                            break;
+                        }
+
+                        match tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            sub.recv(),
+                        )
                         .await
-                    {
-                        Ok(Some(msg)) => {
-                            if let Some(data) = msg.as_merge_complete() {
-                                if remaining_docs.remove(&data.doc_id) {
-                                    eprintln!(
-                                        "[DOCSYNC] Doc merged: doc_id={} remaining={}",
-                                        data.doc_id,
-                                        remaining_docs.len()
-                                    );
+                        {
+                            Ok(Some(msg)) => {
+                                if let Some(data) = msg.as_merge_complete() {
+                                    if doc_set.contains(&data.doc_id) {
+                                        total_received += 1;
+                                        last_merge = std::time::Instant::now();
+                                        eprintln!(
+                                            "[DOCSYNC] Doc merged: doc_id={} ({}/{})",
+                                            data.doc_id, total_received, total_expected
+                                        );
+                                    }
                                 }
                             }
+                            Ok(None) => break,
+                            Err(_) => {}
                         }
-                        Ok(None) => break,
-                        Err(_) => {}
                     }
                 }
 
                 event_bus.unsubscribe(sub.id());
 
-                if remaining_docs.is_empty() {
-                    eprintln!(
-                        "[DOCSYNC] All {} documents synced successfully",
-                        doc_ids.len()
-                    );
-                } else {
-                    eprintln!(
-                        "[DOCSYNC] Timeout waiting for {} documents: {:?}",
-                        remaining_docs.len(),
-                        remaining_docs
-                    );
-                }
+                eprintln!(
+                    "[DOCSYNC] Done: {}/{} merges received",
+                    total_received, total_expected
+                );
 
                 Ok(())
             })
@@ -2566,7 +2584,7 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                         version_id_str
                     );
 
-                    // After merge, check if this is a view with a lens transform to sync
+                    // After merge, check if this is a view with a lens transform to sync.
                     if let Ok(block) = Block::from_dag_cbor(&block_data) {
                         if let defra_core::CrdtDelta::CollectionDefinition(ref payload) = block.delta {
                             if let Some(ref transform_cid) = payload.query_transform {
@@ -2657,6 +2675,7 @@ async fn sync_lens(
 
     for module_cid in &config_block.modules {
         // 2. Fetch ModuleBlock
+        eprintln!("[FFI-LENS-SYNC] Fetching module block cid={}", module_cid);
         let module_data =
             fetch_lens_block(*module_cid, &p2p.blockstore, &p2p.handle, connected_peers).await?;
         let module_block: LensModuleBlock = serde_ipld_dagcbor::from_slice(&module_data)
@@ -2676,12 +2695,16 @@ async fn sync_lens(
         let wasm_bytes = match &wasm_block {
             LensWasmBlock::Direct { wasm_bytes } => wasm_bytes.clone(),
             LensWasmBlock::Chunked { chunks } => {
+                eprintln!("[FFI-LENS-SYNC] Fetching {} WASM chunks", chunks.len());
                 let mut all_bytes = Vec::new();
                 for chunk_cid in chunks {
                     let chunk_data =
                         fetch_lens_block(*chunk_cid, &p2p.blockstore, &p2p.handle, connected_peers)
                             .await?;
-                    all_bytes.extend_from_slice(&chunk_data);
+                    // Chunks are CBOR-encoded byte strings, decode to get raw bytes
+                    let decoded: serde_bytes::ByteBuf = serde_ipld_dagcbor::from_slice(&chunk_data)
+                        .map_err(|e| format!("decode WASM chunk {}: {}", chunk_cid, e))?;
+                    all_bytes.extend_from_slice(&decoded);
                 }
                 all_bytes
             }

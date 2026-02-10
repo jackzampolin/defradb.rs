@@ -332,6 +332,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         collection_id: msg.collection_id.clone(),
                         creator: msg.creator.clone(),
                         missing: missing.iter().cloned().collect(),
+                        source_peer: None,
                     },
                 );
             }
@@ -505,6 +506,14 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .unwrap_or_default()
     }
 
+    /// Get the source peer for a pending DAG (the peer that originally provided it).
+    pub fn pending_dag_source_peer(&self, root_cid: &Cid) -> Option<libp2p::PeerId> {
+        self.pending_dags
+            .read()
+            .get(root_cid)
+            .and_then(|dag| dag.source_peer)
+    }
+
     /// Register a pending DAG for DocSync.
     ///
     /// This is called when a DocSyncReply contains head CIDs that need to be
@@ -516,10 +525,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     ///
     /// * `root_cid` - The head CID to fetch
     /// * `doc_id` - Document ID from the DocSyncItem
-    pub fn register_docsync_dag(&self, root_cid: Cid, doc_id: String) {
+    pub fn register_docsync_dag(&self, root_cid: Cid, doc_id: String, source_peer: libp2p::PeerId) {
         tracing::debug!(
             cid = %root_cid,
             doc_id = %doc_id,
+            source_peer = %source_peer,
             "Registering DocSync pending DAG"
         );
 
@@ -533,6 +543,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 collection_id: String::new(),
                 creator: String::new(),
                 missing: std::iter::once(root_cid).collect(),
+                source_peer: Some(source_peer),
             },
         );
     }
@@ -542,7 +553,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// Unlike `register_docsync_dag` which stores the document ID,
     /// this stores the collection ID so the merge handler can look up
     /// the local collection for cross-schema-version merges.
-    pub fn register_branchable_dag(&self, root_cid: Cid, collection_id: String) {
+    pub fn register_branchable_dag(
+        &self,
+        root_cid: Cid,
+        collection_id: String,
+        source_peer: libp2p::PeerId,
+    ) {
         tracing::debug!(
             cid = %root_cid,
             collection_id = %collection_id,
@@ -557,6 +573,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 collection_id,
                 creator: String::new(),
                 missing: std::iter::once(root_cid).collect(),
+                source_peer: Some(source_peer),
             },
         );
     }
@@ -588,6 +605,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// Get the blockstore reference.
     pub fn blockstore(&self) -> &Arc<B> {
         &self.blockstore
+    }
+
+    /// Get a clone of the sync event sender for spawning background tasks.
+    pub fn event_sender(&self) -> mpsc::Sender<SyncEvent> {
+        self.event_tx.clone()
     }
 
     /// Store a block received via Bitswap and check if pending DAGs can now proceed.

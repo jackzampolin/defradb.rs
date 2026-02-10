@@ -25,7 +25,9 @@ pub use block::{
 };
 pub use error::{Error, Result};
 pub use ipld::{collect_block_links, extract_links, walk_ipld, IpldVisitor};
-pub use lens_block::{LensConfigBlock, LensKeyValue, LensModuleBlock, LensWasmBlock};
+pub use lens_block::{
+    build_lens_ipld_blocks, CidBlock, LensConfigBlock, LensKeyValue, LensModuleBlock, LensWasmBlock,
+};
 
 /// Version information for DefraDB
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -46,6 +46,7 @@ mod access;
 mod accessors;
 mod broadcast;
 mod constructor;
+pub(crate) mod dag_fetcher;
 mod event_handler;
 mod replicators;
 mod result_types;

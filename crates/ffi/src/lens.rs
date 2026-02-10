@@ -5,6 +5,9 @@
 //! - Listing lens transforms
 
 use std::ffi::c_char;
+use std::sync::Arc;
+
+use blockstore::{Blockstore, DefraBlockstore};
 
 use acp::nac::NodePermission;
 
@@ -14,24 +17,53 @@ use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
 
-use lens::{LensConfig, LensModule};
+use lens::{LensConfig, LensModule, TransformId};
+
+/// Read WASM bytes from a LensModule (from path or embedded bytes).
+fn read_wasm_bytes(module: &LensModule) -> Result<Vec<u8>, String> {
+    if let Some(ref bytes) = module.module {
+        return Ok(bytes.clone());
+    }
+    if let Some(ref path_str) = module.path {
+        let clean_path = path_str.strip_prefix("file://").unwrap_or(path_str);
+        std::fs::read(clean_path)
+            .map_err(|e| format!("failed to read WASM file {}: {}", clean_path, e))
+    } else {
+        Err("lens module has neither path nor module bytes".to_string())
+    }
+}
+
+/// Extract arguments from a LensModule as key-value pairs for IPLD blocks.
+fn extract_arguments(module: &LensModule) -> Vec<(String, String)> {
+    match &module.arguments {
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .map(|(k, v)| {
+                let val = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                (k.clone(), val)
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
 
 /// Add a lens transform to the database.
 ///
-/// This registers a lens transform without linking it to schema versions.
-/// Use `set_migration` to link a transform between specific versions.
+/// Builds Go-compatible IPLD blocks (ConfigBlock -> ModuleBlock -> LensBlock),
+/// stores them in the blockstore for P2P Bitswap, and registers the transform
+/// under the ConfigBlock CID.
 ///
 /// # Arguments
 ///
 /// * `node_ptr` - Handle to the node
-/// * `lens_json` - JSON string containing the lens configuration:
-///   - `Path`: Optional path to WASM module file
-///   - `Module`: Optional base64-encoded WASM bytes
-///   - `Arguments`: Optional JSON arguments for the module
+/// * `lens_json` - JSON string containing the lens configuration
 ///
 /// # Returns
 ///
-/// - Status 0: Success (value contains the lens ID)
+/// - Status 0: Success (value contains the lens CID)
 /// - Status 1: Error (error field contains message)
 ///
 /// # Safety
@@ -72,9 +104,15 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
         }
     }
 
-    // No version IDs — register as standalone lens module(s)
-    let lens_store = match NODES.get(node_ptr, |state| state.database.lens_store().clone()) {
-        Some(store) => store,
+    // No version IDs — register as standalone lens module(s).
+    // Get both the lens store and the database store for blockstore access.
+    let (lens_store, db_store) = match NODES.get(node_ptr, |state| {
+        (
+            state.database.lens_store().clone(),
+            state.database.store().clone(),
+        )
+    }) {
+        Some(pair) => pair,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
@@ -100,14 +138,47 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
                     .map_err(|e| format!("failed to parse lens config: {}", e))?]
             };
 
+        // Create a blockstore for storing IPLD blocks (non-P2P mode, no merge tracking)
+        let blockstore = Arc::new(DefraBlockstore::new(db_store, false));
+
         let mut all_ids = Vec::new();
-        for lens_module in modules {
-            let config = LensConfig::new("", "", lens_module);
-            let lens_id = lens_store
-                .add(config)
+        for lens_module in &modules {
+            // Read WASM bytes from file or embedded bytes
+            let wasm_bytes = read_wasm_bytes(lens_module)?;
+            let arguments = extract_arguments(lens_module);
+
+            // Build the 3-level IPLD block hierarchy matching Go's format
+            let (config_cid, blocks) =
+                defra_core::build_lens_ipld_blocks(&wasm_bytes, lens_module.inverse, &arguments)?;
+
+            // Store all blocks in the blockstore for Bitswap availability
+            for (cid, data) in &blocks {
+                eprintln!(
+                    "[FFI-LENS-ADD] Storing block cid={} ({} bytes)",
+                    cid,
+                    data.len()
+                );
+                blockstore
+                    .put(cid, data)
+                    .await
+                    .map_err(|e| format!("failed to store lens block: {}", e))?;
+                // Verify the block was stored
+                let has = blockstore
+                    .has(cid)
+                    .await
+                    .map_err(|e| format!("failed to check block: {}", e))?;
+                eprintln!("[FFI-LENS-ADD] Block {} stored: {}", cid, has);
+            }
+
+            // Register the transform under the real IPLD CID
+            let config = LensConfig::new("", "", lens_module.clone());
+            let transform_id = TransformId::new(config_cid.to_string());
+            lens_store
+                .add_with_id(transform_id, config)
                 .await
                 .map_err(|e| format!("failed to add lens: {}", e))?;
-            all_ids.push(lens_id.to_string());
+
+            all_ids.push(config_cid.to_string());
         }
 
         // Return comma-joined IDs so chained transforms are preserved
@@ -123,24 +194,6 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
 /// List all lens transforms.
 ///
 /// Returns a JSON object mapping lens IDs to their configurations.
-///
-/// # Arguments
-///
-/// * `node_ptr` - Handle to the node
-///
-/// # Returns
-///
-/// - Status 0: Success (value contains JSON object of lenses)
-/// - Status 1: Error (error field contains message)
-///
-/// # Example Response
-///
-/// ```json
-/// {
-///   "lens_0": {"Path": "/path/to/transform.wasm"},
-///   "lens_1": {"Module": "base64...", "Arguments": {...}}
-/// }
-/// ```
 ///
 /// # Safety
 ///

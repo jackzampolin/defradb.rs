@@ -7,17 +7,20 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use libp2p_stream as stream;
+use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use super::event::TwoStreamEvent;
-use super::handler::TwoStreamHandler;
+use super::handler::{PendingResponses, TwoStreamHandler};
 
 /// Runner that accepts incoming streams and emits events.
 ///
 /// This should be spawned as a separate task.
 pub struct TwoStreamRunner {
-    /// Handler for processing streams.
-    handler: Arc<tokio::sync::Mutex<TwoStreamHandler>>,
+    /// Pending responses for lock-free response processing.
+    /// Stored separately from the handler to avoid holding the handler's
+    /// tokio::sync::Mutex during network I/O in response stream reads.
+    pending: Arc<Mutex<PendingResponses>>,
     /// Incoming request streams.
     request_streams: stream::IncomingStreams,
     /// Incoming response streams.
@@ -32,8 +35,8 @@ pub struct TwoStreamRunner {
 
 impl TwoStreamRunner {
     /// Create a new runner.
-    pub fn new(
-        handler: Arc<tokio::sync::Mutex<TwoStreamHandler>>,
+    pub(crate) fn new(
+        pending: Arc<Mutex<PendingResponses>>,
         request_streams: stream::IncomingStreams,
         response_streams: stream::IncomingStreams,
         se_request_streams: stream::IncomingStreams,
@@ -41,7 +44,7 @@ impl TwoStreamRunner {
         event_tx: mpsc::Sender<TwoStreamEvent>,
     ) -> Self {
         Self {
-            handler,
+            pending,
             request_streams,
             response_streams,
             se_request_streams,
@@ -100,11 +103,10 @@ impl TwoStreamRunner {
                         peer_id = %peer_id,
                         "Received incoming stream on response protocol"
                     );
-                    let handler = self.handler.clone();
+                    let pending = self.pending.clone();
                     let event_tx = self.event_tx.clone();
                     tokio::spawn(async move {
-                        let h = handler.lock().await;
-                        match h.handle_response_stream(peer_id, stream).await {
+                        match TwoStreamHandler::handle_response_stream(&pending, peer_id, stream).await {
                             Ok(Some(event)) => {
                                 // DocSyncReply events should be forwarded to the coordinator
                                 tracing::debug!(peer_id = %peer_id, "Sending DocSyncReply event to host channel");
