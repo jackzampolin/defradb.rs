@@ -403,6 +403,21 @@ impl<S: Store> P2PHost<S> {
                 });
             }
 
+            HostCommand::SendSEArtifacts {
+                peer_id,
+                request,
+                response,
+            } => {
+                let handler = self.two_stream_handler.clone();
+                self.spawned_tasks.spawn(async move {
+                    let mut h = handler.lock().await;
+                    let result = h.send_se_artifacts_fire_and_forget(peer_id, request).await;
+                    if response.send(result).is_err() {
+                        debug!(peer_id = %peer_id, "SendSEArtifacts command response dropped - caller cancelled");
+                    }
+                });
+            }
+
             HostCommand::PeerAddresses { response } => {
                 // Build full multiaddrs for connected peers (matches Go's ActivePeers).
                 let connected: HashSet<PeerId> = self.swarm.connected_peers().cloned().collect();

@@ -21,9 +21,11 @@ use crate::codec::write_message;
 use crate::error::{Error, Result};
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogReply,
-    PushLogRequest,
+    PushLogRequest, PushSEArtifactsRequest,
 };
-use crate::protocol::{REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL};
+use crate::protocol::{
+    REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL, SE_REQUEST_PROTOCOL, SE_RESPONSE_PROTOCOL,
+};
 
 use super::event::TwoStreamEvent;
 
@@ -524,6 +526,50 @@ impl TwoStreamHandler {
             peer_id = %peer_id,
             message_id = %message_id,
             "Sent BranchableSync response on two-stream protocol"
+        );
+
+        Ok(())
+    }
+
+    /// Get the SE request protocol.
+    pub fn se_request_protocol() -> StreamProtocol {
+        StreamProtocol::new(SE_REQUEST_PROTOCOL)
+    }
+
+    /// Get the SE response protocol.
+    pub fn se_response_protocol() -> StreamProtocol {
+        StreamProtocol::new(SE_RESPONSE_PROTOCOL)
+    }
+
+    /// Send SE artifacts to a peer (fire-and-forget).
+    ///
+    /// Opens a stream on the SE request protocol, sends the request, and returns.
+    /// The Go receiver will process the artifacts and send a reply on the SE response
+    /// protocol, but we don't wait for it.
+    pub async fn send_se_artifacts_fire_and_forget(
+        &mut self,
+        peer_id: PeerId,
+        request: PushSEArtifactsRequest,
+    ) -> Result<()> {
+        let message_id = request.metadata.message_id.clone();
+        let artifacts_count = request.artifacts.len();
+
+        let mut stream = self
+            .control
+            .open_stream(peer_id, Self::se_request_protocol())
+            .await
+            .map_err(|e| Error::Transport(format!("failed to open SE stream: {}", e)))?;
+
+        write_message(&mut stream, &request)
+            .await
+            .map_err(|e| Error::CborSerialization(format!("failed to write SE request: {}", e)))?;
+
+        tracing::info!(
+            peer_id = %peer_id,
+            message_id = %message_id,
+            artifacts_count = artifacts_count,
+            collection_id = %request.collection_id,
+            "Sent PushSEArtifacts request on SE protocol (fire-and-forget)"
         );
 
         Ok(())

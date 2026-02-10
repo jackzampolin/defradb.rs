@@ -65,9 +65,9 @@ async fn should_skip_encrypted_merge(
         .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
         .await
     {
-        Ok(true) => false,  // Registered → allow decryption
-        Ok(false) => true,  // Not registered → skip (replicated doc, no local access)
-        Err(_) => true,     // Error checking → fail-closed, skip
+        Ok(true) => false, // Registered → allow decryption
+        Ok(false) => true, // Not registered → skip (replicated doc, no local access)
+        Err(_) => true,    // Error checking → fail-closed, skip
     }
 }
 

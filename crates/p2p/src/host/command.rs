@@ -177,6 +177,13 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<()>>,
     },
 
+    /// Send SE artifacts to a peer via SE two-stream protocol.
+    SendSEArtifacts {
+        peer_id: PeerId,
+        request: crate::message::PushSEArtifactsRequest,
+        response: oneshot::Sender<Result<()>>,
+    },
+
     /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
     PeerAddresses {
         response: oneshot::Sender<Vec<String>>,

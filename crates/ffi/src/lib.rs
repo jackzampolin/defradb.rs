@@ -48,6 +48,7 @@ mod policy_yaml;
 pub mod query;
 pub mod runtime;
 pub mod schema;
+pub mod se_key;
 pub mod state;
 pub mod subscription;
 pub mod txn;
@@ -98,14 +99,14 @@ pub use index::{create_index, drop_index, get_all_indexes, get_indexes};
 pub use lens::{lens_add, lens_list};
 pub use node::{new_node, node_close};
 pub use p2p::{
-    new_node_with_p2p, p2p_active_peers, p2p_connect, p2p_create_collections,
-    p2p_create_documents, p2p_create_replicator, p2p_delete_collections, p2p_delete_documents,
-    p2p_delete_replicator, p2p_list_collections, p2p_list_documents, p2p_list_replicators,
-    p2p_peer_info, p2p_sync_branchable_collection, p2p_sync_collection_versions,
-    p2p_sync_documents,
+    new_node_with_p2p, p2p_active_peers, p2p_connect, p2p_create_collections, p2p_create_documents,
+    p2p_create_replicator, p2p_delete_collections, p2p_delete_documents, p2p_delete_replicator,
+    p2p_list_collections, p2p_list_documents, p2p_list_replicators, p2p_peer_info,
+    p2p_sync_branchable_collection, p2p_sync_collection_versions, p2p_sync_documents,
 };
 pub use query::exec_request;
 pub use schema::{add_schema, get_collections, get_collections_in_txn};
+pub use se_key::set_se_encryption_key;
 pub use subscription::{
     close_graphql_subscription, close_subscription, create_merge_complete_subscription,
     create_subscription, poll_graphql_subscription, poll_subscription,
