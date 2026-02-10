@@ -123,9 +123,7 @@ pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_ch
 
         // Empty DID means no identity - not authorized
         if requestor_str.is_empty() {
-            return Err(
-                "not authorized to perform operation. Permission: nac-disable".to_string(),
-            );
+            return Err("not authorized to perform operation. Permission: nac-disable".to_string());
         }
 
         let requestor = identity::Did::new(&requestor_str)
@@ -322,8 +320,9 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
             if wildcard_is_admin {
                 return Err("node acp relationship operation requires identity".to_string());
             } else {
-                return Err("not authorized to perform operation. Permission: nac-relation-add"
-                    .to_string());
+                return Err(
+                    "not authorized to perform operation. Permission: nac-relation-add".to_string(),
+                );
             }
         }
 
