@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
+use storage::backends::DurabilityMode;
+
 use super::types::{
     AcpDocumentType, DatastoreType, KeyringBackend, LogFormat, LogLevel, LogOutput,
 };
@@ -92,6 +94,12 @@ pub struct DatastoreConfig {
     pub no_searchable_encryption: bool,
     pub no_signing: bool,
     pub default_key_type: String,
+    /// Durability mode for the storage backend.
+    ///
+    /// - `immediate` (default): fsync on every commit — safe against OS crashes
+    /// - `eventual`: defer fsync to OS — faster for bulk imports, data loss risk on OS crash
+    #[serde(default)]
+    pub durability: DurabilityMode,
 }
 
 impl Default for DatastoreConfig {
@@ -105,6 +113,7 @@ impl Default for DatastoreConfig {
             no_searchable_encryption: false,
             no_signing: false,
             default_key_type: "secp256k1".to_string(),
+            durability: DurabilityMode::default(),
         }
     }
 }

@@ -19,22 +19,9 @@
 ///
 /// # MVCC Behavior
 ///
-/// When a transaction is created, it captures a snapshot of the database state.
-/// All reads within the transaction see the database state as it was at that moment,
-/// regardless of concurrent writes by other transactions.
-///
-/// # Memory Considerations
-///
-/// **WARNING**: This implementation loads the entire database snapshot into memory
-/// (via `BTreeMap`) when a transaction is created. This approach provides correct
-/// snapshot isolation but has significant memory implications:
-///
-/// - Memory usage scales linearly with database size
-/// - Multiple concurrent read transactions multiply memory usage
-/// - Not suitable for databases larger than available RAM
-///
-/// For large datasets, consider using a different backend or implementing
-/// lazy-loading snapshots.
+/// When a transaction is created, it opens a redb `ReadTransaction` which provides
+/// zero-copy MVCC snapshot isolation. All reads within the transaction see the
+/// database state as it was at creation time, regardless of concurrent writes.
 ///
 /// # Async Callback Lifecycle
 ///
@@ -54,7 +41,6 @@
 ///
 /// - Production deployments on native platforms (Linux, macOS, Windows)
 /// - Embedded applications with filesystem access
-/// - Small to medium databases (< 1M keys recommended)
 ///
 /// # Example
 ///
@@ -85,7 +71,7 @@ use crate::corekv::{
     TxnCallback, Writer,
 };
 
-use super::redb_config::RedbStoreOptions;
+use super::redb_config::{DurabilityMode, RedbStoreOptions};
 
 /// Table definition for the main key-value store.
 const KV_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv");
@@ -108,10 +94,10 @@ pub struct RedbStore {
     close_timeout: std::time::Duration,
     /// Database file path (for error messages)
     db_path: std::path::PathBuf,
-    /// Maximum keys allowed in a snapshot (OOM safeguard)
-    max_snapshot_keys: Option<usize>,
     /// Conflict tracker for write-write conflict detection
     conflict_tracker: Arc<ConflictTracker>,
+    /// Durability mode for write transactions
+    durability: DurabilityMode,
 }
 
 impl RedbStore {
@@ -225,8 +211,8 @@ impl RedbStore {
             active_txn_count: Arc::new(AtomicUsize::new(0)),
             close_timeout: opts.close_timeout(),
             db_path,
-            max_snapshot_keys: opts.max_snapshot_keys(),
             conflict_tracker: Arc::new(ConflictTracker::new()),
+            durability: opts.durability(),
         })
     }
 
@@ -364,9 +350,8 @@ impl Store for RedbStore {
         // Record version before taking snapshot for conflict detection
         let read_version = self.conflict_tracker.current_version();
 
-        // Capture a snapshot for read isolation
+        // Use redb's MVCC ReadTransaction for snapshot isolation (O(1) creation)
         let read_txn = self.db.begin_read()?;
-        let snapshot = capture_snapshot(&read_txn, self.max_snapshot_keys)?;
 
         // Defuse the guard - transaction will manage its own count via its Drop impl
         guard.1 = true;
@@ -376,9 +361,10 @@ impl Store for RedbStore {
             active_txn_count: Arc::clone(&self.active_txn_count),
             conflict_tracker: Arc::clone(&self.conflict_tracker),
             read_version,
-            snapshot,
+            read_txn,
             pending: Mutex::new(BTreeMap::new()),
             readonly,
+            durability: self.durability,
             discarded: Mutex::new(false),
             committed: Mutex::new(false),
             on_success: Mutex::new(Vec::new()),
@@ -518,6 +504,15 @@ fn compute_range_bounds(opts: &IterOptions) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) 
     (start_bound, end_bound)
 }
 
+/// Convert a `Bound<Vec<u8>>` to `Bound<&[u8]>` for redb range queries.
+fn bound_as_ref(bound: &Bound<Vec<u8>>) -> Bound<&[u8]> {
+    match bound {
+        Bound::Included(v) => Bound::Included(v.as_slice()),
+        Bound::Excluded(v) => Bound::Excluded(v.as_slice()),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
 /// Compute the exclusive end bound for a prefix.
 ///
 /// Given a prefix like "foo", returns "fop" (the first key that doesn't match the prefix).
@@ -539,77 +534,6 @@ fn prefix_to_end_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     }
     // All bytes were 0xFF
     None
-}
-
-/// Capture a snapshot of the current database state into memory.
-///
-/// # Arguments
-///
-/// * `read_txn` - The redb read transaction to snapshot
-/// * `max_keys` - Optional limit on number of keys to prevent OOM
-///
-/// # Returns
-///
-/// * `Ok(BTreeMap)` - The snapshot of all key-value pairs
-/// * `Err(Error::Backend)` - If max_keys limit is exceeded
-fn capture_snapshot(
-    read_txn: &ReadTransaction,
-    max_keys: Option<usize>,
-) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
-    let mut snapshot = BTreeMap::new();
-    let mut key_count: usize = 0;
-    let mut total_bytes: usize = 0;
-
-    let table = match read_txn.open_table(KV_TABLE) {
-        Ok(t) => t,
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(snapshot),
-        Err(e) => return Err(e.into()),
-    };
-
-    let range = table.range::<&[u8]>(..)?;
-    for result in range {
-        let (key, value) = result?;
-        key_count += 1;
-
-        // Check limit before allocating more memory
-        if let Some(limit) = max_keys {
-            if key_count > limit {
-                tracing::error!(
-                    key_count = key_count,
-                    limit = limit,
-                    "Snapshot exceeds maximum key limit - database too large for in-memory snapshot"
-                );
-                return Err(Error::Backend(format!(
-                    "database has more than {} keys which exceeds snapshot limit. \
-                     Consider using a different backend or increasing the limit via \
-                     RedbStoreOptions::with_max_snapshot_keys()",
-                    limit
-                )));
-            }
-        }
-
-        let key_vec = key.value().to_vec();
-        let value_vec = value.value().to_vec();
-        total_bytes += key_vec.len() + value_vec.len();
-        snapshot.insert(key_vec, value_vec);
-    }
-
-    // Log for observability on large snapshots
-    if key_count > 100_000 {
-        tracing::warn!(
-            key_count = key_count,
-            total_bytes = total_bytes,
-            "Large snapshot captured - consider memory implications for concurrent transactions"
-        );
-    } else {
-        tracing::debug!(
-            key_count = key_count,
-            total_bytes = total_bytes,
-            "Database snapshot captured"
-        );
-    }
-
-    Ok(snapshot)
 }
 
 /// Redb transaction with snapshot isolation and buffered writes.
@@ -638,14 +562,17 @@ struct RedbTxn {
     /// Version at which this transaction's snapshot was taken
     read_version: u64,
 
-    /// Snapshot of store at transaction start (for reads)
-    snapshot: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// Redb MVCC read transaction for snapshot isolation (O(1) creation)
+    read_txn: ReadTransaction,
 
     /// Pending changes (Some(value) = set, None = delete)
     pending: Mutex<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
 
     /// Whether this is a read-only transaction
     readonly: bool,
+
+    /// Durability mode for write commits
+    durability: DurabilityMode,
 
     /// Whether the transaction has been discarded
     discarded: Mutex<bool>,
@@ -778,28 +705,43 @@ impl RedbTxn {
         }
     }
 
-    /// Get a value, checking pending changes first, then snapshot.
-    fn get_internal(&self, key: &[u8]) -> Option<Vec<u8>> {
+    /// Get a value, checking pending changes first, then the read transaction.
+    fn get_internal(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         // Check pending changes first
         let pending = self.pending.lock();
         if let Some(pending_value) = pending.get(key) {
-            return pending_value.clone();
+            return Ok(pending_value.clone());
         }
+        drop(pending);
 
-        // Fall back to snapshot
-        self.snapshot.get(key).cloned()
+        // Fall back to redb ReadTransaction
+        let table = match self.read_txn.open_table(KV_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        match table.get(key)? {
+            Some(value) => Ok(Some(value.value().to_vec())),
+            None => Ok(None),
+        }
     }
 
     /// Check if a key exists.
-    fn has_internal(&self, key: &[u8]) -> bool {
+    fn has_internal(&self, key: &[u8]) -> Result<bool> {
         // Check pending changes first
         let pending = self.pending.lock();
         if let Some(pending_value) = pending.get(key) {
-            return pending_value.is_some();
+            return Ok(pending_value.is_some());
         }
+        drop(pending);
 
-        // Fall back to snapshot
-        self.snapshot.contains_key(key)
+        // Fall back to redb ReadTransaction
+        let table = match self.read_txn.open_table(KV_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(table.get(key)?.is_some())
     }
 
     /// Execute sync callbacks with panic protection.
@@ -877,7 +819,7 @@ impl Reader for RedbTxn {
             return Err(Error::EmptyKey);
         }
 
-        Ok(self.get_internal(key))
+        self.get_internal(key)
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {
@@ -889,7 +831,7 @@ impl Reader for RedbTxn {
             return Err(Error::EmptyKey);
         }
 
-        Ok(self.has_internal(key))
+        self.has_internal(key)
     }
 
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
@@ -901,7 +843,7 @@ impl Reader for RedbTxn {
             return Err(Error::EmptyKey);
         }
 
-        Ok(self.get_internal(key).map(|v| v.len()))
+        Ok(self.get_internal(key)?.map(|v| v.len()))
     }
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
@@ -916,13 +858,24 @@ impl Reader for RedbTxn {
         let matches_prefix =
             |key: &[u8]| -> bool { opts.prefix().is_none_or(|p| key.starts_with(p)) };
 
-        // Extract snapshot items into Vec (already sorted by BTreeMap)
-        let snapshot_items: Vec<(Vec<u8>, Vec<u8>)> = self
-            .snapshot
-            .range((start_bound.clone(), end_bound.clone()))
-            .filter(|(k, _)| matches_prefix(k))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        // Read matching items from the redb ReadTransaction (only matching range)
+        let snapshot_items: Vec<(Vec<u8>, Vec<u8>)> = match self.read_txn.open_table(KV_TABLE) {
+            Ok(table) => {
+                let range =
+                    table.range::<&[u8]>((bound_as_ref(&start_bound), bound_as_ref(&end_bound)))?;
+                let mut items = Vec::new();
+                for result in range {
+                    let (key, value) = result?;
+                    let k = key.value().to_vec();
+                    if matches_prefix(&k) {
+                        items.push((k, value.value().to_vec()));
+                    }
+                }
+                items
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
 
         // Extract pending items into Vec (sorted by BTreeMap, with Option for deletions)
         let pending = self.pending.lock();
@@ -931,19 +884,6 @@ impl Reader for RedbTxn {
             .filter(|(k, _)| matches_prefix(k))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-
-        // Log warning for large result sets (memory is proportional to matched keys)
-        let total_items = snapshot_items.len() + pending_items.len();
-        if total_items > 100_000 {
-            tracing::warn!(
-                snapshot_items = snapshot_items.len(),
-                pending_items = pending_items.len(),
-                total_items = total_items,
-                has_prefix = opts.prefix().is_some(),
-                has_range = opts.start().is_some() || opts.end().is_some(),
-                "Iterator materialized large result set - consider using a more specific query"
-            );
-        }
 
         Ok(Box::new(MergingIterator::new(
             snapshot_items,
@@ -1012,8 +952,8 @@ impl Txn for RedbTxn {
             return Err(Error::Other("Transaction already committed".into()));
         }
 
-        // Clone pending changes before any async operations
-        let pending = self.pending.lock().clone();
+        // Take pending changes (avoids clone — commit consumes self via Box<Self>)
+        let pending = std::mem::take(&mut *self.pending.lock());
 
         // Check for write-write conflicts before applying
         if !pending.is_empty() {
@@ -1032,7 +972,7 @@ impl Txn for RedbTxn {
 
         // Apply pending changes to the database if there are any
         if !pending.is_empty() {
-            let write_txn = match self.db.begin_write() {
+            let mut write_txn = match self.db.begin_write() {
                 Ok(txn) => txn,
                 Err(e) => {
                     tracing::error!(
@@ -1047,6 +987,10 @@ impl Txn for RedbTxn {
                     return Err(e.into());
                 }
             };
+
+            if self.durability == DurabilityMode::Eventual {
+                write_txn.set_durability(redb::Durability::Eventual);
+            }
 
             {
                 let mut table = match write_txn.open_table(KV_TABLE) {
@@ -2984,76 +2928,6 @@ mod redb_specific_tests {
     }
 
     #[tokio::test]
-    async fn test_redb_max_snapshot_keys_limit() {
-        let temp_dir = TempDir::new().unwrap();
-
-        // First, create a database with some data
-        {
-            let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
-            let mut txn = store.new_txn(false).await.unwrap();
-            // Insert 100 keys
-            for i in 0..100 {
-                let key = format!("key_{:04}", i);
-                let value = format!("value_{}", i);
-                txn.set(key.as_bytes(), value.as_bytes()).await.unwrap();
-            }
-            txn.commit().await.unwrap();
-            store.close().await.unwrap();
-        }
-
-        // Reopen with a max_snapshot_keys limit less than the number of keys
-        let opts = RedbStoreOptions::new().with_max_snapshot_keys(50);
-        let store = RedbStore::open_with_options(temp_dir.path().join("test.redb"), opts).unwrap();
-
-        // Creating a new transaction should fail because it exceeds the snapshot limit
-        let result = store.new_txn(false).await;
-        assert!(
-            result.is_err(),
-            "Should fail when snapshot exceeds max_snapshot_keys"
-        );
-
-        // Use pattern matching to extract error (Box<dyn Txn> doesn't impl Debug)
-        if let Err(err) = result {
-            let err_msg = err.to_string();
-            assert!(
-                err_msg.contains("exceeds snapshot limit"),
-                "Error should mention snapshot limit: {}",
-                err_msg
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_redb_max_snapshot_keys_allows_within_limit() {
-        let temp_dir = TempDir::new().unwrap();
-
-        // Create a database with some data
-        {
-            let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
-            let mut txn = store.new_txn(false).await.unwrap();
-            // Insert 50 keys
-            for i in 0..50 {
-                let key = format!("key_{:04}", i);
-                let value = format!("value_{}", i);
-                txn.set(key.as_bytes(), value.as_bytes()).await.unwrap();
-            }
-            txn.commit().await.unwrap();
-            store.close().await.unwrap();
-        }
-
-        // Reopen with a max_snapshot_keys limit equal to the number of keys
-        let opts = RedbStoreOptions::new().with_max_snapshot_keys(50);
-        let store = RedbStore::open_with_options(temp_dir.path().join("test.redb"), opts).unwrap();
-
-        // Creating a new transaction should succeed (exactly at limit)
-        let result = store.new_txn(false).await;
-        assert!(
-            result.is_ok(),
-            "Should succeed when snapshot equals max_snapshot_keys"
-        );
-    }
-
-    #[tokio::test]
     async fn test_redb_callback_count() {
         let temp_dir = TempDir::new().unwrap();
         let store = RedbStore::open(temp_dir.path().join("test.redb")).unwrap();
@@ -3105,11 +2979,7 @@ mod redb_specific_tests {
 
         let temp_dir = TempDir::new().unwrap();
 
-        // Use a reasonable max_snapshot_keys limit for this test
-        let opts = RedbStoreOptions::new().with_max_snapshot_keys(100_000);
-        let store = Arc::new(
-            RedbStore::open_with_options(temp_dir.path().join("test.redb"), opts).unwrap(),
-        );
+        let store = Arc::new(RedbStore::open(temp_dir.path().join("test.redb")).unwrap());
 
         // Setup: Create 10K keys with 100-byte values (~1MB total)
         let value = vec![0xAB; 100];
