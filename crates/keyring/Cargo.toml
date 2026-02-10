@@ -17,7 +17,18 @@ zeroize = "1.8"
 josekit = "0.8"
 
 # OS keyring (macOS Keychain, Linux Secret Service, Windows Credential Manager)
-# Renamed to avoid conflict with our crate name
+# Renamed to avoid conflict with our crate name.
+# Platform features required: without them keyring v3 uses a no-op mock store.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring_crate = { package = "keyring", version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring_crate = { package = "keyring", version = "3", features = ["sync-secret-service", "crypto-rust"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring_crate = { package = "keyring", version = "3", features = ["windows-native"] }
+
+[target.'cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))'.dependencies]
 keyring_crate = { package = "keyring", version = "3" }
 
 [dev-dependencies]

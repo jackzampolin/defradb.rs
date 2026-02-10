@@ -81,6 +81,10 @@ pub struct ClientArgs {
     #[arg(long, short = 'i', global = true)]
     pub identity: Option<String>,
 
+    /// Load identity from keyring by name (alternative to --identity)
+    #[arg(long, global = true)]
+    pub identity_name: Option<String>,
+
     /// Transaction ID to execute commands within
     #[arg(long, global = true)]
     pub tx: Option<u64>,
@@ -133,9 +137,11 @@ impl ClientArgs {
     pub async fn execute(&self, config: Config, url_override: Option<String>) -> Result<()> {
         let url = get_url(&config, url_override);
 
-        // Generate auth token from identity if provided
+        // Generate auth token from identity (hex key or keyring name)
         let auth_token = if let Some(ref identity_hex) = self.identity {
             Some(generate_auth_token(identity_hex, &url)?)
+        } else if let Some(ref name) = self.identity_name {
+            Some(generate_auth_token_from_keyring(&config, name, &url)?)
         } else {
             None
         };
@@ -196,11 +202,14 @@ pub fn generate_auth_token(identity_hex: &str, audience: &str) -> Result<String>
     let identity = RawIdentity::from_bytes(key_type, &key_bytes)
         .map_err(|e| Error::InvalidIdentity(format!("invalid private key: {}", e)))?;
 
+    // The audience must be bare host:port (matches Go's req.Host behavior)
+    let audience_host = strip_url_scheme(audience);
+
     // Generate JWT token with 15-minute expiration (matches Go CLI)
     let token_bytes = new_token(
         &identity,
         std::time::Duration::from_secs(15 * 60),
-        Some(audience.to_string()),
+        Some(audience_host.to_string()),
         None,
     )
     .map_err(|e| Error::InvalidIdentity(format!("failed to generate token: {}", e)))?;
@@ -210,20 +219,90 @@ pub fn generate_auth_token(identity_hex: &str, audience: &str) -> Result<String>
         .map_err(|e| Error::InvalidIdentity(format!("token is not valid UTF-8: {}", e)))
 }
 
+/// Generate a JWT auth token from a named key in the keyring.
+fn generate_auth_token_from_keyring(config: &Config, name: &str, audience: &str) -> Result<String> {
+    use crate::config::KeyringBackend;
+    use crypto::KeyType;
+    use identity::{new_token, RawIdentity};
+    use std::path::PathBuf;
+
+    if config.keyring.disabled {
+        return Err(Error::Keyring("keyring is disabled".to_string()));
+    }
+
+    let keyring: Box<dyn keyring::Keyring> = match config.keyring.backend {
+        KeyringBackend::File => {
+            let path = {
+                let p = PathBuf::from(&config.keyring.path);
+                if p.is_absolute() {
+                    p
+                } else {
+                    config.rootdir.join(p)
+                }
+            };
+            let secret =
+                keyring::load_secret_from_env().map_err(|e| Error::Keyring(e.to_string()))?;
+            let kr = keyring::FileKeyring::open(&path, secret)
+                .map_err(|e| Error::Keyring(e.to_string()))?;
+            Box::new(kr)
+        }
+        KeyringBackend::System => {
+            let kr = keyring::SystemKeyring::open(&config.keyring.namespace);
+            Box::new(kr)
+        }
+    };
+
+    let key_bytes = keyring
+        .get(name)
+        .map_err(|e| Error::Keyring(e.to_string()))?;
+
+    let key_type = match key_bytes.len() {
+        32 => KeyType::Secp256k1,
+        64 => KeyType::Ed25519,
+        len => {
+            return Err(Error::InvalidIdentity(format!(
+            "key '{}' has invalid length: {} bytes (expected 32 for secp256k1 or 64 for ed25519)",
+            name, len
+        )))
+        }
+    };
+
+    let identity = RawIdentity::from_bytes(key_type, &key_bytes)
+        .map_err(|e| Error::InvalidIdentity(format!("invalid key '{}': {}", name, e)))?;
+
+    let audience_host = strip_url_scheme(audience);
+
+    let token_bytes = new_token(
+        &identity,
+        std::time::Duration::from_secs(15 * 60),
+        Some(audience_host.to_string()),
+        None,
+    )
+    .map_err(|e| Error::InvalidIdentity(format!("failed to generate token: {}", e)))?;
+
+    String::from_utf8(token_bytes)
+        .map_err(|e| Error::InvalidIdentity(format!("token is not valid UTF-8: {}", e)))
+}
+
+/// Strip the URL scheme to get bare host:port for JWT audience.
+///
+/// The server uses `req.Host` (bare host:port) as the expected audience,
+/// matching Go DefraDB behavior.
+fn strip_url_scheme(url: &str) -> &str {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
+}
+
 /// Get the URL to connect to, prioritizing command-line override.
 ///
 /// Uses HTTPS if TLS is configured (both pubkey_path and privkey_path are set).
 pub fn get_url(config: &Config, url_override: Option<String>) -> String {
-    if let Some(url) = url_override {
-        return url;
-    }
-
-    // Use HTTPS if TLS is configured
+    let address = url_override.unwrap_or_else(|| config.api.address.clone());
     let scheme = if config.api.tls_enabled() {
         "https"
     } else {
         "http"
     };
-
-    format!("{}://{}", scheme, config.api.address)
+    format!("{}://{}", scheme, address)
 }
