@@ -592,9 +592,6 @@ impl Node {
                                     p2p::HostEvent::PeerDisconnected(peer) => {
                                         info!("Peer disconnected: {}", peer);
                                     }
-                                    p2p::HostEvent::PeerDiscovered(peer) => {
-                                        info!("Peer discovered: {}", peer);
-                                    }
                                     p2p::HostEvent::Listening(addr) => {
                                         info!("Now listening on: {}", addr);
                                     }
@@ -843,10 +840,9 @@ impl Node {
             info!("P2P listening on {}", addr);
         }
 
-        // Log bootstrap peers (connection will be handled by mDNS discovery)
+        // Log bootstrap peers
         if !config.net.peers.is_empty() {
             info!("Bootstrap peers configured: {:?}", config.net.peers);
-            info!("Note: Direct peer connection requires peer ID; mDNS will discover local peers");
         }
 
         if config.net.pubsub_enabled {

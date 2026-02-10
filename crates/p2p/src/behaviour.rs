@@ -3,7 +3,6 @@
 //! This module combines multiple libp2p behaviours into a single
 //! composite behaviour that handles:
 //! - Peer identification (identify)
-//! - Local peer discovery (mDNS)
 //! - Kademlia DHT for peer discovery
 //! - Bitswap for block exchange (Go compatibility via iroh-bitswap)
 //! - Request-response for PushLog synchronization
@@ -33,7 +32,6 @@ use libp2p::{
     gossipsub::{self, MessageAuthenticity, MessageId, ValidationMode},
     identify,
     kad::{self, store::MemoryStore, Mode},
-    mdns,
     request_response::{self, ProtocolSupport},
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
     PeerId, StreamProtocol,
@@ -54,9 +52,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct DefraBehaviour<S: Store> {
     /// Peer identification protocol.
     pub identify: identify::Behaviour,
-
-    /// Local network peer discovery via mDNS.
-    pub mdns: mdns::tokio::Behaviour,
 
     /// Kademlia DHT for peer discovery and content routing.
     /// Required for Bitswap to find peers who have specific blocks.
@@ -83,9 +78,6 @@ pub enum DefraEvent {
     /// Identify protocol event.
     Identify(identify::Event),
 
-    /// mDNS discovery event.
-    Mdns(mdns::Event),
-
     /// Kademlia DHT event.
     Kademlia(kad::Event),
 
@@ -102,12 +94,6 @@ pub enum DefraEvent {
 impl From<identify::Event> for DefraEvent {
     fn from(event: identify::Event) -> Self {
         DefraEvent::Identify(event)
-    }
-}
-
-impl From<mdns::Event> for DefraEvent {
-    fn from(event: mdns::Event) -> Self {
-        DefraEvent::Mdns(event)
     }
 }
 
@@ -175,9 +161,6 @@ impl<S: Store> DefraBehaviour<S> {
 
         let identify = identify::Behaviour::new(identify_config);
 
-        // Configure mDNS for local network discovery
-        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
-
         // Configure request-response for PushLog (Rust-to-Rust only)
         // NOTE: We do NOT register rep_request or rep_response protocols here
         // because stream::Behaviour handles those for Go two-stream compatibility.
@@ -236,7 +219,6 @@ impl<S: Store> DefraBehaviour<S> {
 
         Ok(Self {
             identify,
-            mdns,
             kademlia,
             bitswap,
             pushlog,
@@ -271,7 +253,6 @@ impl<S: Store> DefraBehaviour<S> {
                 .with_agent_version(format!("defradb-rs/{}", env!("CARGO_PKG_VERSION")));
 
         let identify = identify::Behaviour::new(identify_config);
-        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
 
         // NOTE: Do NOT register rep_request or rep_response protocols here
         // because stream::Behaviour handles those for Go two-stream compatibility.
@@ -323,7 +304,6 @@ impl<S: Store> DefraBehaviour<S> {
 
         Ok(Self {
             identify,
-            mdns,
             kademlia,
             bitswap,
             pushlog,
