@@ -283,16 +283,11 @@ fn generate_auth_token_from_keyring(config: &Config, name: &str, audience: &str)
 ///
 /// Uses HTTPS if TLS is configured (both pubkey_path and privkey_path are set).
 pub fn get_url(config: &Config, url_override: Option<String>) -> String {
-    if let Some(url) = url_override {
-        return url;
-    }
-
-    // Use HTTPS if TLS is configured
+    let address = url_override.unwrap_or_else(|| config.api.address.clone());
     let scheme = if config.api.tls_enabled() {
         "https"
     } else {
         "http"
     };
-
-    format!("{}://{}", scheme, config.api.address)
+    format!("{}://{}", scheme, address)
 }
