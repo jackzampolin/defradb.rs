@@ -1058,6 +1058,96 @@ async fn push_existing_docs(
     Ok(())
 }
 
+/// Retry pushing existing documents to all registered replicators.
+///
+/// For each registered replicator, re-pushes all existing documents.
+/// `push_existing_docs` internally waits up to 5s for the peer connection
+/// to be established, so this can be called immediately after dialing.
+///
+/// # Safety
+///
+/// `node_ptr` must be a valid node handle.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_retry_replicators(node_ptr: usize) -> FfiResult {
+    let rt = get_runtime!(FfiResult);
+
+    let result = NODES
+        .get(node_ptr, |state| {
+            let p2p = match &state.p2p {
+                Some(p2p) => p2p,
+                None => return Err("no p2p system configured".to_string()),
+            };
+            let db = &state.database;
+
+            rt.block_on(async {
+                let replicators = p2p
+                    .handle
+                    .get_all_replicators()
+                    .await
+                    .map_err(|e| format!("failed to get replicators: {}", e))?;
+
+                let all_collections = db
+                    .list_collections()
+                    .map_err(|e| format!("failed to list collections: {}", e))?;
+
+                eprintln!(
+                    "[RETRY-REPLICATORS] Found {} replicators, {} collections",
+                    replicators.len(),
+                    all_collections.len()
+                );
+
+                let mut push_handles = Vec::new();
+
+                for rep in &replicators {
+                    let peer_id = match rep.peer_id() {
+                        Some(id) => id,
+                        None => continue,
+                    };
+
+                    eprintln!(
+                        "[RETRY-REPLICATORS] Pushing existing docs to peer {}",
+                        peer_id
+                    );
+
+                    let push_handle = p2p.handle.clone();
+                    let push_db = Arc::clone(db);
+                    let push_collections = all_collections.clone();
+
+                    push_handles.push(tokio::spawn(async move {
+                        if let Err(e) =
+                            push_existing_docs(&push_handle, &push_db, peer_id, &push_collections)
+                                .await
+                        {
+                            tracing::error!(
+                                peer_id = %peer_id,
+                                error = %e,
+                                "Failed to retry push existing docs to replicator"
+                            );
+                        }
+                    }));
+                }
+
+                eprintln!(
+                    "[RETRY-REPLICATORS] Awaiting {} push tasks",
+                    push_handles.len()
+                );
+                for h in push_handles {
+                    let _ = h.await;
+                }
+                eprintln!("[RETRY-REPLICATORS] All push tasks completed");
+
+                Ok(())
+            })
+        })
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+        .and_then(|r| r);
+
+    match result {
+        Ok(()) => FfiResult::ok(),
+        Err(e) => FfiResult::error(e),
+    }
+}
+
 /// Delete a replicator.
 ///
 /// # Arguments
