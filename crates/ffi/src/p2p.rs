@@ -468,6 +468,11 @@ pub unsafe extern "C" fn new_node_with_p2p(
             )
         };
 
+        // Wire document ACP into the merge handler so it can skip encrypted field
+        // merges for ACP-protected docs that aren't registered locally (Go compat:
+        // Go uses KMS for key distribution with ACP checks; Rust checks ACP directly).
+        merge_handler.set_document_acp(document_acp.clone());
+
         // Create NAC manager - use persistent store when file-based storage is configured
         let nac_manager: Arc<dyn db::NacManagerApi> = if let Some(ref path) = db_path_opt {
             let data_path = std::path::Path::new(path);

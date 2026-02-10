@@ -74,7 +74,10 @@ pub async fn run_tests(
 
     // Build the go test command
     let mut cmd = Command::new("go");
-    cmd.arg("test").arg("-json").arg("-count=1");
+    cmd.arg("test")
+        .arg("-json")
+        .arg("-count=1")
+        .arg("-tags=rust_ffi");
 
     if let Some(filter) = test_filter {
         cmd.arg("-run").arg(filter);
