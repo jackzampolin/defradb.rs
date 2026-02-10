@@ -28,6 +28,7 @@ use p2p::sync::{
 use p2p::topics::DefraTopic;
 use p2p::P2PHost;
 use storage::corekv::IterOptions;
+use storage::Store as _;
 
 /// Parsed multiaddr containing peer ID and transport address.
 struct ParsedMultiaddr {
@@ -224,10 +225,61 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
         let bitswap_store = BitswapStoreAdapter::new(blockstore.clone());
 
-        // Create P2P host
-        let (host, handle, event_rx, _replicator_registry) = P2PHost::new(bitswap_store.clone())
-            .await
-            .map_err(|e| format!("failed to create P2P host: {}", e))?;
+        // Try to load persisted P2P keypair from the store.
+        // Key uses systemstore prefix 's' + '/p2p/host_key'.
+        const P2P_HOST_KEY: &[u8] = b"s/p2p/host_key";
+
+        let stored_keypair = {
+            let txn = store
+                .new_txn(true)
+                .await
+                .map_err(|e| format!("failed to create txn for P2P key load: {}", e))?;
+            match txn.get(P2P_HOST_KEY).await {
+                Ok(Some(bytes)) => {
+                    match libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {
+                        Ok(kp) => Some(kp),
+                        Err(e) => {
+                            eprintln!(
+                                "[P2P] Warning: failed to decode stored keypair: {}, generating new one",
+                                e
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            }
+        };
+
+        let (host, handle, event_rx, _replicator_registry) =
+            if let Some(kp) = stored_keypair {
+                P2PHost::with_keypair(kp, bitswap_store.clone())
+                    .await
+                    .map_err(|e| format!("failed to create P2P host with stored keypair: {}", e))?
+            } else {
+                let result = P2PHost::new(bitswap_store.clone())
+                    .await
+                    .map_err(|e| format!("failed to create P2P host: {}", e))?;
+
+                // Persist the newly generated keypair
+                let key_bytes = result
+                    .1
+                    .keypair()
+                    .to_protobuf_encoding()
+                    .map_err(|e| format!("failed to encode P2P keypair: {}", e))?;
+                let mut txn = store
+                    .new_txn(false)
+                    .await
+                    .map_err(|e| format!("failed to create txn for P2P key store: {}", e))?;
+                txn.set(P2P_HOST_KEY, &key_bytes)
+                    .await
+                    .map_err(|e| format!("failed to store P2P keypair: {}", e))?;
+                txn.commit()
+                    .await
+                    .map_err(|e| format!("failed to commit P2P keypair: {}", e))?;
+
+                result
+            };
 
         // Spawn the P2P host event loop BEFORE sending any commands.
         // The host must be running to process commands like Listen/Dial.
