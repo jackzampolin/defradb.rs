@@ -1920,6 +1920,7 @@ dependencies = [
  "async-trait",
  "axum 0.7.9",
  "crypto",
+ "defra-core",
  "defra-http",
  "events",
  "futures",

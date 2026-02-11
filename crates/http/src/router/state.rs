@@ -30,6 +30,7 @@ pub struct AppState {
     pub view: Option<Arc<dyn ViewOperations>>,
     pub txn_ops: Option<Arc<dyn TransactionOperations>>,
     pub event_bus: Option<Arc<dyn events::Bus>>,
+    pub node_identity_did: Option<String>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -75,6 +76,7 @@ impl std::fmt::Debug for AppState {
                 &self.txn_ops.as_ref().map(|_| "<TransactionOperations>"),
             )
             .field("event_bus", &self.event_bus.as_ref().map(|_| "<EventBus>"))
+            .field("node_identity_did", &self.node_identity_did)
             .finish()
     }
 }
@@ -220,6 +222,7 @@ pub struct AppStateBuilder {
     view: Option<Arc<dyn ViewOperations>>,
     txn_ops: Option<Arc<dyn TransactionOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
+    node_identity_did: Option<String>,
 }
 
 impl AppStateBuilder {
@@ -242,6 +245,7 @@ impl AppStateBuilder {
             view: None,
             txn_ops: None,
             event_bus: None,
+            node_identity_did: None,
         }
     }
 
@@ -341,6 +345,12 @@ impl AppStateBuilder {
         self
     }
 
+    /// Set the node identity DID for signing config fallback.
+    pub fn with_node_identity_did(mut self, did: String) -> Self {
+        self.node_identity_did = Some(did);
+        self
+    }
+
     /// Build the AppState.
     pub fn build(self) -> AppState {
         AppState {
@@ -360,6 +370,7 @@ impl AppStateBuilder {
             view: self.view,
             txn_ops: self.txn_ops,
             event_bus: self.event_bus,
+            node_identity_did: self.node_identity_did,
         }
     }
 }

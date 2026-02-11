@@ -70,6 +70,7 @@ pub mod error;
 pub mod handlers;
 pub mod identity_extractor;
 pub mod nac_guard;
+pub mod query_context;
 pub mod router;
 pub mod server;
 pub mod validation;

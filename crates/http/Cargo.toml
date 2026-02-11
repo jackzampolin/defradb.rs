@@ -18,6 +18,7 @@ identity = { path = "../identity" }
 schema = { path = "../schema" }
 acp = { path = "../acp" }
 events = { path = "../events" }
+defra-core = { path = "../defra-core" }
 
 # Async runtime
 tokio.workspace = true

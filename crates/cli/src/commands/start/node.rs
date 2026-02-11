@@ -50,14 +50,16 @@ impl Node {
         info!("Data directory: {}", config.data_path().display());
 
         // Initialize peer keypair from keyring (if P2P enabled and keyring not disabled)
-        let peer_keypair = if !config.net.p2p_disabled && !config.keyring.disabled {
-            Some(Self::init_peer_key(&config)?)
-        } else if !config.net.p2p_disabled {
-            info!("Keyring disabled, using ephemeral peer identity");
-            None
-        } else {
-            None
-        };
+        let (peer_keypair, node_identity_did) =
+            if !config.net.p2p_disabled && !config.keyring.disabled {
+                let (kp, did) = Self::init_peer_key(&config)?;
+                (Some(kp), Some(did))
+            } else if !config.net.p2p_disabled {
+                info!("Keyring disabled, using ephemeral peer identity");
+                (None, None)
+            } else {
+                (None, None)
+            };
 
         // Initialize storage, database, and set up P2P and HTTP server
         let (p2p_handle, p2p_tasks, http_server) = match config.datastore.store {
@@ -76,6 +78,7 @@ impl Node {
                     user_identity.clone(),
                     acp_store,
                     zanzibar_store,
+                    node_identity_did.clone(),
                 )
                 .await?
             }
@@ -99,6 +102,7 @@ impl Node {
                     user_identity.clone(),
                     acp_store,
                     zanzibar_store,
+                    node_identity_did.clone(),
                 )
                 .await?
             }

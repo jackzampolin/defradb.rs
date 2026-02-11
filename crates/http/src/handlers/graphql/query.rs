@@ -24,6 +24,9 @@ use query::{parse_request, ParsedOperation};
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::query_context::{
+    execute_in_txn_with_context, execute_with_context, execute_with_resolved_context,
+};
 use crate::router::{AppState, NodePermission};
 
 use super::TX_HEADER_NAME;
@@ -79,8 +82,8 @@ pub async fn graphql(
     require_permission(&state, &identity, required_permission).await?;
 
     // Wire identity from Authorization header into the request
-    request.identity = identity.into_did();
-    let response = state.executor.execute(request).await;
+    request.identity = identity.did().cloned();
+    let response = execute_with_context(&state, &identity, request).await;
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL POST query returned errors");
     }
@@ -128,10 +131,10 @@ pub async fn graphql_get(
         query: params.query,
         operation_name: params.operation_name,
         variables,
-        identity: identity.into_did(),
+        identity: identity.did().cloned(),
     };
 
-    let response = state.executor.execute(request).await;
+    let response = execute_with_context(&state, &identity, request).await;
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL GET query returned errors");
     }
@@ -201,7 +204,7 @@ pub async fn graphql_transactional(
         query: request.query,
         operation_name: request.operation_name,
         variables: request.variables,
-        identity: identity.into_did(),
+        identity: identity.did().cloned(),
     };
 
     // Check for transaction ID in header first (Go-compatible), then body
@@ -223,9 +226,9 @@ pub async fn graphql_transactional(
                     .into_response());
                 }
             };
-            state.executor.execute_in_txn(query_request, &handle).await
+            execute_in_txn_with_context(&state, &identity, query_request, handle).await
         }
-        None => state.executor.execute(query_request).await,
+        None => execute_with_context(&state, &identity, query_request).await,
     };
 
     if response.has_errors() {
@@ -254,7 +257,11 @@ async fn graphql_sse(
 
     let mut subscription = event_bus.subscribe(&[events::EventName::Update]);
     let query_str = request.query;
-    let did = identity.into_did();
+    let did = identity.did().cloned();
+
+    // Resolve signing config and DAC bypass once at subscription setup time
+    let signing_config = crate::query_context::resolve_signing_config(&state, &identity);
+    let dac_bypass = crate::query_context::resolve_dac_bypass(&state, &identity).await;
 
     let subscription_doc_id = extract_doc_id_from_query(&query_str);
     let is_commits = is_commits_subscription(&query_str);
@@ -285,7 +292,12 @@ async fn graphql_sse(
                 if did.is_some() {
                     req = req.with_identity(did.clone());
                 }
-                let response = executor.execute(req).await;
+                let response = execute_with_resolved_context(
+                    executor.clone(),
+                    req,
+                    signing_config.clone(),
+                    dac_bypass,
+                ).await;
 
                 // Skip empty results (filter excluded the document)
                 if !response_has_data(&response) {
