@@ -303,6 +303,7 @@ impl Node {
                     None,
                 )
             };
+            let document_acp_for_block = document_acp.clone();
 
             // Create query runner with transaction, mutation, and ACP support
             // Use Arc-shared registry so it can also be used by TxnRegistryAdapter
@@ -323,6 +324,7 @@ impl Node {
             }
 
             let runner = Arc::new(query_runner);
+            let runner_for_backup: Arc<dyn query::executor::QueryExecutor> = runner.clone();
 
             // Create REST operations that wrap the query runner
             let rest_ops = query::rest::RestOperationsImpl::new(Arc::clone(&runner));
@@ -432,6 +434,20 @@ impl Node {
                 crate::encrypted_index_adapter::EncryptedIndexAdapter::new_arc(database.clone());
             server = server.with_encrypted_index_arc(encrypted_index_adapter);
             info!("Encrypted index HTTP endpoints enabled");
+
+            // Wire backup operations to HTTP server
+            let backup_adapter =
+                crate::backup_adapter::BackupAdapter::new_arc(database.clone(), runner_for_backup);
+            server = server.with_backup_arc(backup_adapter);
+            info!("Backup HTTP endpoints enabled");
+
+            // Wire block operations to HTTP server
+            let block_adapter = crate::block_adapter::BlockAdapter::new_arc(
+                database.clone(),
+                document_acp_for_block,
+            );
+            server = server.with_block_arc(block_adapter);
+            info!("Block HTTP endpoints enabled");
 
             // Wire event bus to HTTP server for GraphQL subscriptions
             server = server.with_event_bus_arc(event_bus);

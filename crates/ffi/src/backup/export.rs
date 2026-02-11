@@ -1,17 +1,12 @@
-use std::collections::HashMap;
 use std::ffi::c_char;
 use std::fs;
-
-use serde_json::{Map, Value as JsonValue};
-
-use schema::CollectionVersion;
 
 use crate::helpers::{get_rt, require_c_str};
 use crate::state::NODES;
 use crate::types::FfiResult;
 use crate::{ffi_async_ok, try_ffi, ERR_INVALID_NODE_HANDLE};
 
-use super::{classify_schema_fields, compute_doc_id_new, BackupConfig};
+use super::BackupConfig;
 
 /// Export the database to a JSON file.
 ///
@@ -47,263 +42,15 @@ pub unsafe extern "C" fn basic_export(node_ptr: usize, config_json: *const c_cha
     };
 
     ffi_async_ok!(rt, {
-        // Get all collection names
-        let all_names = database
-            .list_collections()
-            .map_err(|e| format!("failed to list collections: {}", e))?;
-
-        // Filter to requested collections (or all)
-        let filtered_names: Vec<String> = if config.collections.is_empty() {
-            all_names
-        } else {
-            for name in &config.collections {
-                if !all_names.contains(name) {
-                    return Err(format!(
-                        "failed to get collection: key not found. Name: {}",
-                        name
-                    ));
-                }
-            }
-            config.collections.clone()
-        };
-
-        // Sort collections by collection_id (CID) to match Go's ordering.
-        // Go's getCollections iterates by storage key which orders by collection_id.
-        let mut name_cid_pairs: Vec<(String, String)> = Vec::new();
-        for name in &filtered_names {
-            let col = database
-                .get_collection(name)
-                .map_err(|e| format!("failed to get collection '{}': {}", name, e))?
-                .ok_or_else(|| {
-                    format!("failed to get collection: key not found. Name: {}", name)
-                })?;
-            name_cid_pairs.push((name.clone(), col.schema().collection_id.clone()));
-        }
-        name_cid_pairs.sort_by(|a, b| a.1.cmp(&b.1));
-        let collection_names: Vec<String> = name_cid_pairs.into_iter().map(|(n, _)| n).collect();
-
-        // Three-phase export:
-        // Phase 1: Query all docs, compute initial _docIDNew (including FK fields)
-        // Phase 2: Remap FK values to _docIDNew and recompute _docIDNew
-        // Phase 3: Build export output
-
-        struct DocEntry {
-            doc_map: Map<String, JsonValue>,
-            own_doc_id: String,
-            self_ref_excludes: Vec<String>,
-        }
-
-        struct CollectionData {
-            name: String,
-            schema: CollectionVersion,
-            docs: Vec<DocEntry>,
-            fk_field_names: Vec<String>,
-        }
-
-        let mut all_collections: Vec<CollectionData> = Vec::new();
-        let mut doc_id_map: HashMap<String, String> = HashMap::new();
-
-        // Phase 1: Query all docs and compute initial _docIDNew
-        for name in &collection_names {
-            let collection = database
-                .get_collection(name)
-                .map_err(|e| format!("failed to get collection '{}': {}", name, e))?
-                .ok_or_else(|| {
-                    format!("failed to get collection: key not found. Name: {}", name)
-                })?;
-
-            let schema = collection.schema().clone();
-            let fields = classify_schema_fields(&schema);
-
-            // Build GraphQL query field list
-            let mut query_parts = vec!["_docID".to_string()];
-            let mut relation_field_names: Vec<String> = Vec::new();
-            let mut fk_field_names: Vec<String> = Vec::new();
-            let mut self_ref_candidate_fks: Vec<String> = Vec::new();
-
-            for field in &fields {
-                if field.is_relation {
-                    // Only include primary (non-secondary) relation fields.
-                    // Secondary relation fields don't store FK values.
-                    if !field.is_array && field.is_primary {
-                        query_parts.push(format!("{} {{ _docID }}", field.name));
-                        relation_field_names.push(field.name.clone());
-                        let fk_name = format!("_{}ID", field.name);
-                        fk_field_names.push(fk_name.clone());
-                        if field.is_self_ref {
-                            self_ref_candidate_fks.push(fk_name);
-                        }
-                    }
-                } else {
-                    query_parts.push(field.name.clone());
-                }
-            }
-
-            let query = format!("{{ {} {{ {} }} }}", name, query_parts.join(" "));
-
-            let request = query::QueryRequest::new(query);
-            let response = runner.execute(request).await;
-
-            if !response.errors.is_empty() {
-                let errs: Vec<String> = response.errors.iter().map(|e| e.message.clone()).collect();
-                return Err(format!("query errors for '{}': {}", name, errs.join("; ")));
-            }
-
-            let response_json = serde_json::to_value(&response.data)
-                .map_err(|e| format!("failed to serialize response: {}", e))?;
-
-            let docs = response_json
-                .get(name.as_str())
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-
-            let mut doc_entries = Vec::new();
-            for doc in docs {
-                let mut doc_map = match doc.as_object() {
-                    Some(m) => m.clone(),
-                    None => continue,
-                };
-
-                // Transform relation fields: {author: {_docID: "..."}} → {_authorID: "..."}
-                for rel_name in &relation_field_names {
-                    if let Some(related) = doc_map.remove(rel_name) {
-                        if related.is_null() {
-                            continue;
-                        }
-                        if let Some(related_id) = related.get("_docID") {
-                            let fk_name = format!("_{}ID", rel_name);
-                            doc_map.insert(fk_name, related_id.clone());
-                        }
-                    }
-                }
-
-                let own_doc_id = doc_map
-                    .get("_docID")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                // Detect document-level self-references (doc referencing itself)
-                // Go only excludes FK fields where the value equals the doc's own _docID
-                let mut self_ref_excludes: Vec<String> = Vec::new();
-                for fk_name in &self_ref_candidate_fks {
-                    if let Some(fk_value) = doc_map.get(fk_name).and_then(|v| v.as_str()) {
-                        if fk_value == own_doc_id {
-                            self_ref_excludes.push(fk_name.clone());
-                        }
-                    }
-                }
-
-                // Compute initial _docIDNew (including FK fields, excluding self-refs)
-                let doc_id_new = compute_doc_id_new(&doc_map, &self_ref_excludes, &schema)?;
-
-                doc_id_map.insert(own_doc_id.clone(), doc_id_new.clone());
-                doc_map.insert("_docIDNew".to_string(), JsonValue::String(doc_id_new));
-
-                // Strip null fields (Go omits them in export)
-                doc_map.retain(|_, v| !v.is_null());
-
-                doc_entries.push(DocEntry {
-                    doc_map,
-                    own_doc_id,
-                    self_ref_excludes,
-                });
-            }
-
-            all_collections.push(CollectionData {
-                name: name.clone(),
-                schema,
-                docs: doc_entries,
-                fk_field_names,
-            });
-        }
-
-        // Phase 2: Remap FK values to _docIDNew and recompute _docIDNew
-        // This handles cross-collection references where the referenced doc's
-        // _docIDNew differs from its _docID (because it was updated).
-        for col_data in &mut all_collections {
-            if col_data.fk_field_names.is_empty() {
-                continue;
-            }
-
-            for entry in &mut col_data.docs {
-                let mut needs_recompute = false;
-
-                for fk_name in &col_data.fk_field_names {
-                    if let Some(fk_value) = entry
-                        .doc_map
-                        .get(fk_name)
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                    {
-                        if let Some(new_id) = doc_id_map.get(&fk_value) {
-                            if new_id != &fk_value {
-                                entry
-                                    .doc_map
-                                    .insert(fk_name.clone(), JsonValue::String(new_id.clone()));
-                                needs_recompute = true;
-                            }
-                        }
-                    }
-                }
-
-                if needs_recompute {
-                    let doc_id_new = compute_doc_id_new(
-                        &entry.doc_map,
-                        &entry.self_ref_excludes,
-                        &col_data.schema,
-                    )?;
-
-                    doc_id_map.insert(entry.own_doc_id.clone(), doc_id_new.clone());
-                    entry
-                        .doc_map
-                        .insert("_docIDNew".to_string(), JsonValue::String(doc_id_new));
-                }
-            }
-        }
-
-        // Phase 3: Build export output
-        // Build JSON manually to preserve collection ordering (matching Go).
-        // Go builds JSON by iterating collections and writing each one in order,
-        // not by marshaling a map (which would sort keys alphabetically).
-        let mut collection_json_parts: Vec<String> = Vec::new();
-        for col_data in all_collections {
-            let export_docs: Vec<JsonValue> = col_data
-                .docs
-                .into_iter()
-                .map(|entry| JsonValue::Object(entry.doc_map))
-                .collect();
-            let docs_json = serde_json::to_string(&export_docs)
-                .map_err(|e| format!("failed to serialize docs: {}", e))?;
-            collection_json_parts.push(format!("\"{}\":{}", col_data.name, docs_json));
-        }
-
-        let json_output = if config.pretty {
-            // For pretty output, re-serialize each collection's docs with indentation
-            let mut pretty_parts: Vec<String> = Vec::new();
-            for part in &collection_json_parts {
-                // Parse and re-serialize with pretty printing
-                let val: JsonValue = serde_json::from_str(&format!("{{{}}}", part))
-                    .map_err(|e| format!("failed to parse for pretty print: {}", e))?;
-                let pretty = serde_json::to_string_pretty(&val)
-                    .map_err(|e| format!("failed to pretty print: {}", e))?;
-                // Strip outer braces and newlines, keeping inner content
-                let inner = pretty.trim().strip_prefix('{').unwrap_or(&pretty);
-                let inner = inner.strip_suffix('}').unwrap_or(inner);
-                pretty_parts.push(inner.trim_end().to_string());
-            }
-            format!("{{\n{}\n}}", pretty_parts.join(",\n"))
-        } else {
-            format!("{{{}}}", collection_json_parts.join(","))
-        };
+        let json_output =
+            db::backup::export_database(&database, &runner, &config.collections, config.pretty)
+                .await?;
 
         // Write via temp file for atomic operation
         let temp_path = format!("{}.temp", config.filepath);
         fs::write(&temp_path, &json_output)
             .map_err(|e| format!("failed to create file '{}': {}", temp_path, e))?;
         fs::rename(&temp_path, &config.filepath).map_err(|e| {
-            // Clean up temp file on rename failure
             let _ = fs::remove_file(&temp_path);
             format!("failed to rename temp file: {}", e)
         })?;
@@ -319,6 +66,7 @@ mod tests {
     use crate::query::exec_request;
     use crate::schema::add_schema;
     use crate::types::NodeInitOptions;
+    use serde_json::Value as JsonValue;
     use std::ffi::CString;
     use std::ptr;
 

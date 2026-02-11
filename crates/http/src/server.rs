@@ -15,9 +15,10 @@ use query::rest::RestOperations;
 
 use crate::error::Result;
 use crate::router::{
-    create_router_with_state, AcpOperations, AppStateBuilder, CollectionManagementOperations,
-    DocumentAcpOperations, EncryptedIndexOperations, IndexOperations, LensOperations,
-    NodeAcpOperations, P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
+    create_router_with_state, AcpOperations, AppStateBuilder, BackupOperations, BlockOperations,
+    CollectionManagementOperations, DocumentAcpOperations, EncryptedIndexOperations,
+    IndexOperations, LensOperations, NodeAcpOperations, P2POperations, SchemaOperations,
+    TransactionOperations, ViewOperations,
 };
 
 /// Server configuration options.
@@ -48,6 +49,8 @@ pub struct Server {
     acp: Option<Arc<dyn AcpOperations>>,
     index: Option<Arc<dyn IndexOperations>>,
     encrypted_index: Option<Arc<dyn EncryptedIndexOperations>>,
+    backup: Option<Arc<dyn BackupOperations>>,
+    block: Option<Arc<dyn BlockOperations>>,
     schema: Option<Arc<dyn SchemaOperations>>,
     lens: Option<Arc<dyn LensOperations>>,
     nac: Option<Arc<dyn NodeAcpOperations>>,
@@ -69,6 +72,8 @@ impl Server {
             acp: None,
             index: None,
             encrypted_index: None,
+            backup: None,
+            block: None,
             schema: None,
             lens: None,
             nac: None,
@@ -90,6 +95,8 @@ impl Server {
             acp: None,
             index: None,
             encrypted_index: None,
+            backup: None,
+            block: None,
             schema: None,
             lens: None,
             nac: None,
@@ -111,6 +118,8 @@ impl Server {
             acp: None,
             index: None,
             encrypted_index: None,
+            backup: None,
+            block: None,
             schema: None,
             lens: None,
             nac: None,
@@ -132,6 +141,8 @@ impl Server {
             acp: None,
             index: None,
             encrypted_index: None,
+            backup: None,
+            block: None,
             schema: None,
             lens: None,
             nac: None,
@@ -199,6 +210,18 @@ impl Server {
         encrypted_index: Arc<dyn EncryptedIndexOperations>,
     ) -> Self {
         self.encrypted_index = Some(encrypted_index);
+        self
+    }
+
+    /// Set backup operations from an Arc.
+    pub fn with_backup_arc(mut self, backup: Arc<dyn BackupOperations>) -> Self {
+        self.backup = Some(backup);
+        self
+    }
+
+    /// Set block operations from an Arc.
+    pub fn with_block_arc(mut self, block: Arc<dyn BlockOperations>) -> Self {
+        self.block = Some(block);
         self
     }
 
@@ -303,6 +326,12 @@ impl Server {
         }
         if let Some(ref encrypted_index) = self.encrypted_index {
             builder = builder.with_encrypted_index(Arc::clone(encrypted_index));
+        }
+        if let Some(ref backup) = self.backup {
+            builder = builder.with_backup(Arc::clone(backup));
+        }
+        if let Some(ref block) = self.block {
+            builder = builder.with_block(Arc::clone(block));
         }
         if let Some(ref schema) = self.schema {
             builder = builder.with_schema(Arc::clone(schema));

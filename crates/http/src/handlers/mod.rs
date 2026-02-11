@@ -11,6 +11,7 @@
 
 pub mod acp;
 pub mod backup;
+pub mod block;
 pub mod collections;
 pub mod documents;
 pub mod encrypted_index;

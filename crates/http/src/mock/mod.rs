@@ -2,6 +2,7 @@
 
 mod acp;
 mod backup;
+mod block;
 mod collections;
 mod doc_acp;
 mod encrypted_index;
@@ -15,6 +16,7 @@ mod txn_ops;
 
 pub use acp::{FailingMockAcpOperations, MockAcpOperations};
 pub use backup::{FailingMockBackupOperations, MockBackupOperations};
+pub use block::MockBlockOperations;
 pub use collections::MockCollectionManagementOperations;
 pub use doc_acp::MockDocumentAcpOperations;
 pub use encrypted_index::MockEncryptedIndexOperations;

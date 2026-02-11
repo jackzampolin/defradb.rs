@@ -4,6 +4,8 @@
 //! It is primarily used by the `defra` binary but can also be used for testing.
 
 pub mod acp_adapter;
+pub mod backup_adapter;
+pub mod block_adapter;
 pub mod cli;
 pub mod collection_mgmt_adapter;
 pub mod commands;
