@@ -508,7 +508,7 @@ mod tests {
     fn test_from_implementations() {
         assert_eq!(NormalValue::from(true), NormalValue::Bool(true));
         assert_eq!(NormalValue::from(42i64), NormalValue::Int(42));
-        assert_eq!(NormalValue::from(3.14f64), NormalValue::Float64(3.14));
+        assert_eq!(NormalValue::from(3.15f64), NormalValue::Float64(3.15));
         assert_eq!(
             NormalValue::from("hello"),
             NormalValue::String("hello".into())

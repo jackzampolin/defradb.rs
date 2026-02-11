@@ -474,10 +474,6 @@ async fn broadcast_with_retry<B: Blockstore + 'static>(
             .await
         {
             Ok(BroadcastResult::Success) => {
-                eprintln!(
-                    "[BROADCAST-RETRY] SUCCESS doc_id={} cid={} attempts={}",
-                    block_result.doc_id, block_result.cid, attempt
-                );
                 tracing::debug!(
                     doc_id = %block_result.doc_id,
                     cid = %block_result.cid,
@@ -517,10 +513,6 @@ async fn broadcast_with_retry<B: Blockstore + 'static>(
                 if err_str.contains("InsufficientPeers") && attempt <= MAX_RETRIES {
                     // Exponential backoff: 100ms, 200ms, 400ms, ... capped at 3.2s
                     let delay_ms = 100 * (1u64 << attempt.min(5));
-                    eprintln!(
-                        "[BROADCAST-RETRY] InsufficientPeers doc_id={} attempt={}/{} delay={}ms",
-                        block_result.doc_id, attempt, MAX_RETRIES, delay_ms
-                    );
                     tracing::trace!(
                         doc_id = %block_result.doc_id,
                         attempt = attempt,
@@ -530,10 +522,6 @@ async fn broadcast_with_retry<B: Blockstore + 'static>(
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     continue;
                 }
-                eprintln!(
-                    "[BROADCAST-RETRY] FAILED doc_id={} collection={} err={} attempts={}",
-                    block_result.doc_id, collection_name, e, attempt
-                );
                 tracing::warn!(
                     doc_id = %block_result.doc_id,
                     collection = %collection_name,

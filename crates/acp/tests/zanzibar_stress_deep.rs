@@ -69,7 +69,7 @@ async fn test_deep_folder_hierarchy_10_levels() {
 
         let rel = Relationship::new(
             "folder",
-            &format!("folder{}", i),
+            format!("folder{}", i),
             "parent",
             Subject::entity_set("folder", &parent_name, "reader"),
         );
@@ -174,7 +174,7 @@ async fn test_large_fanout_100_readers() {
 
     // Create 100 readers
     for i in 0..100 {
-        let did = Did::new(&format!(
+        let did = Did::new(format!(
             "did:key:z6Mk{}AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             i
         ))
@@ -239,7 +239,7 @@ async fn test_large_fanout_group_memberships() {
         store.store_relationship("policy1", &rel).await.unwrap();
 
         // Add member to group
-        let member = Did::new(&format!(
+        let member = Did::new(format!(
             "did:key:z6MkMember{}AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             i
         ))

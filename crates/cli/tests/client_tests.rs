@@ -17,9 +17,11 @@ fn test_get_url_with_override() {
 
 #[test]
 fn test_get_url_from_config() {
-    let mut config = Config::default();
-    config.api = ApiConfig {
-        address: "192.168.1.1:9000".to_string(),
+    let config = Config {
+        api: ApiConfig {
+            address: "192.168.1.1:9000".to_string(),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let url = get_url(&config, None);
@@ -35,11 +37,13 @@ fn test_get_url_default() {
 
 #[test]
 fn test_get_url_with_tls() {
-    let mut config = Config::default();
-    config.api = ApiConfig {
-        address: "127.0.0.1:9181".to_string(),
-        pubkey_path: "/path/to/pub.key".to_string(),
-        privkey_path: "/path/to/priv.key".to_string(),
+    let config = Config {
+        api: ApiConfig {
+            address: "127.0.0.1:9181".to_string(),
+            pubkey_path: "/path/to/pub.key".to_string(),
+            privkey_path: "/path/to/priv.key".to_string(),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let url = get_url(&config, None);

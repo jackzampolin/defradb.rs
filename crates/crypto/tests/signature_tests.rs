@@ -1,7 +1,7 @@
 //! Integration tests for digital signatures
 
 use crypto::keys::generation::{generate_ed25519, generate_secp256k1};
-use crypto::keys::{PrivateKey, PublicKey};
+use crypto::keys::PrivateKey;
 
 // ===== Ed25519 Signature Tests =====
 

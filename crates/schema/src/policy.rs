@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_policy_validate_id_with_null_byte() {
-        let policy = PolicyDescription::new("policy\0123", "users");
+        let policy = PolicyDescription::new("policy\x00123", "users");
         let result = policy.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("null bytes"));

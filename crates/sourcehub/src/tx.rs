@@ -51,7 +51,7 @@ impl TxSigner {
     ) -> Result<String, TxSignerError> {
         let msg = build_msg_create_policy(&self.address(), policy_yaml);
         let tx_hash = self.sign_and_broadcast(client, vec![msg]).await?;
-        eprintln!("[SH-DEBUG] create_policy: tx_hash={}", tx_hash);
+        tracing::debug!(tx_hash = %tx_hash, "create_policy: broadcast complete");
         let tx_result = client
             .await_tx(&tx_hash, 30_000)
             .await
@@ -59,19 +59,13 @@ impl TxSigner {
 
         // Extract policy ID from tx_result.data (protobuf-encoded TxMsgData)
         if let Some(policy_id) = extract_policy_id_from_tx_data(&tx_result) {
-            eprintln!(
-                "[SH-DEBUG] create_policy: extracted policy_id={}",
-                policy_id
-            );
+            tracing::debug!(policy_id = %policy_id, "create_policy: extracted from tx data");
             return Ok(policy_id);
         }
 
         // Fallback: try to extract from events
         if let Some(policy_id) = extract_policy_id_from_events(&tx_result) {
-            eprintln!(
-                "[SH-DEBUG] create_policy: extracted policy_id from events={}",
-                policy_id
-            );
+            tracing::debug!(policy_id = %policy_id, "create_policy: extracted from events");
             return Ok(policy_id);
         }
 
@@ -124,11 +118,11 @@ impl TxSigner {
             .await
             .map_err(|e| TxSignerError::Broadcast(format!("account query: {}", e)))?;
 
-        eprintln!(
-            "[SH-DEBUG] sign_and_broadcast: {} msgs, account_number={}, sequence={}",
-            messages.len(),
+        tracing::debug!(
+            msg_count = messages.len(),
             account_number,
-            sequence
+            sequence,
+            "sign_and_broadcast"
         );
 
         let body = Body::new(messages, "", 0u32);
@@ -155,7 +149,7 @@ impl TxSigner {
             .to_bytes()
             .map_err(|e| TxSignerError::Sign(format!("tx serialization: {}", e)))?;
 
-        eprintln!("[SH-DEBUG] tx_bytes len={}", tx_bytes.len());
+        tracing::debug!(tx_bytes_len = tx_bytes.len(), "transaction serialized");
 
         client
             .broadcast_tx_sync(&tx_bytes)

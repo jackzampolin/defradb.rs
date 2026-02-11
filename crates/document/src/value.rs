@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_new_counter_with_float() {
-        let fv = FieldValue::new(CType::PnCounter, NormalValue::Float64(3.14));
+        let fv = FieldValue::new(CType::PnCounter, NormalValue::Float64(3.15));
         assert!(fv.is_ok());
     }
 

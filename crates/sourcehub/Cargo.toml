@@ -37,5 +37,8 @@ identity = { path = "../identity" }
 defra-core = { path = "../defra-core" }
 crypto = { path = "../crypto" }
 
+# Logging
+tracing.workspace = true
+
 # Base64 for bearer token
 base64.workspace = true

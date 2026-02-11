@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_float64_to_json_valid() {
-        assert_eq!(float64_to_json(3.14).unwrap(), serde_json::json!(3.14));
+        assert_eq!(float64_to_json(3.15).unwrap(), serde_json::json!(3.15));
         // Whole-number floats are serialized as integers to match Go's json.Marshal
         assert_eq!(float64_to_json(0.0).unwrap(), serde_json::json!(0));
         assert_eq!(float64_to_json(-42.5).unwrap(), serde_json::json!(-42.5));

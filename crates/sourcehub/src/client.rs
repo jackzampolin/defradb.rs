@@ -119,10 +119,7 @@ impl SourceHubClient {
             let log = body["result"]["response"]["log"]
                 .as_str()
                 .unwrap_or("unknown");
-            eprintln!(
-                "[SH-DEBUG] verify_access ABCI error: code={} log={}",
-                abci_code, log
-            );
+            tracing::debug!(abci_code, log, "verify_access ABCI error");
             return Ok(false);
         }
 
@@ -138,10 +135,7 @@ impl SourceHubClient {
         // QueryVerifyAccessRequestResponse: field 1 (bool) valid
         // Protobuf: tag 0x08 (field 1, varint), value 0x01 (true)
         let valid = result_bytes.len() >= 2 && result_bytes[0] == 0x08 && result_bytes[1] == 0x01;
-        eprintln!(
-            "[SH-DEBUG] verify_access: perm={} actor={} => valid={}",
-            permission, actor_did, valid
-        );
+        tracing::debug!(permission, actor_did, valid, "verify_access result");
         Ok(valid)
     }
 

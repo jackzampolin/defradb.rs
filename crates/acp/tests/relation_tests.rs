@@ -38,7 +38,7 @@ fn test_relation_tuple_try_new() {
     // Null bytes should fail
     assert!(RelationTuple::try_new(did.clone(), "reader\0admin", "users", "doc123").is_err());
     assert!(RelationTuple::try_new(did.clone(), "reader", "users\0internal", "doc123").is_err());
-    assert!(RelationTuple::try_new(did.clone(), "reader", "users", "doc\0123").is_err());
+    assert!(RelationTuple::try_new(did.clone(), "reader", "users", "doc\x00123").is_err());
 }
 
 #[test]

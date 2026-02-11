@@ -162,8 +162,8 @@ async fn test_redb_pending_changes_merged_with_snapshot() {
     while let Some(kv) = iter.next().await.unwrap() {
         found_keys.insert(kv.key);
     }
-    assert!(found_keys.contains(&b"existing".to_vec()));
-    assert!(found_keys.contains(&b"new_key".to_vec()));
+    assert!(found_keys.contains(b"existing".as_slice()));
+    assert!(found_keys.contains(b"new_key".as_slice()));
 }
 
 #[tokio::test]

@@ -76,7 +76,7 @@ fn test_encode_decode_string() {
 #[test]
 fn test_encode_decode_time() {
     let dt = Utc.with_ymd_and_hms(2024, 1, 15, 12, 30, 45).unwrap();
-    let val = NormalValue::Time(dt);
+    let val = NormalValue::Time(dt.into());
 
     let buf = encode_field_value(vec![], &val, false).unwrap();
     let (_, decoded) = decode_field_value(&buf, false, &FieldKind::datetime()).unwrap();
@@ -136,7 +136,7 @@ fn test_sort_order_int_descending() {
 
 #[test]
 fn test_sort_order_string_ascending() {
-    let values = vec!["", "a", "aa", "ab", "b", "ba"];
+    let values = ["", "a", "aa", "ab", "b", "ba"];
     let encoded: Vec<Vec<u8>> = values
         .iter()
         .map(|v| encode_field_value(vec![], &NormalValue::String(v.to_string()), false).unwrap())
@@ -169,7 +169,7 @@ fn test_indexed_field() {
 fn test_pre_epoch_timestamp() {
     // Test a date before Unix epoch (1969-06-15)
     let dt = Utc.with_ymd_and_hms(1969, 6, 15, 12, 30, 45).unwrap();
-    let val = NormalValue::Time(dt);
+    let val = NormalValue::Time(dt.into());
 
     let buf = encode_field_value(vec![], &val, false).unwrap();
     let (_, decoded) = decode_field_value(&buf, false, &FieldKind::datetime()).unwrap();
@@ -196,16 +196,16 @@ fn test_nillable_variants() {
     assert_eq!(decoded, NormalValue::Int(42));
 
     // Test NillableFloat32
-    let val = NormalValue::NillableFloat32(Some(3.14));
+    let val = NormalValue::NillableFloat32(Some(3.15));
     let buf = encode_field_value(vec![], &val, false).unwrap();
     let (_, decoded) = decode_field_value(&buf, false, &FieldKind::float32()).unwrap();
-    assert_eq!(decoded, NormalValue::Float32(3.14));
+    assert_eq!(decoded, NormalValue::Float32(3.15));
 
     // Test NillableFloat64
-    let val = NormalValue::NillableFloat64(Some(3.14159));
+    let val = NormalValue::NillableFloat64(Some(3.15159));
     let buf = encode_field_value(vec![], &val, false).unwrap();
     let (_, decoded) = decode_field_value(&buf, false, &FieldKind::float64()).unwrap();
-    assert_eq!(decoded, NormalValue::Float64(3.14159));
+    assert_eq!(decoded, NormalValue::Float64(3.15159));
 
     // Test NillableString
     let val = NormalValue::NillableString(Some("hello".to_string()));
@@ -221,10 +221,11 @@ fn test_nillable_variants() {
 
     // Test NillableTime
     let dt = Utc.with_ymd_and_hms(2024, 1, 15, 12, 30, 45).unwrap();
-    let val = NormalValue::NillableTime(Some(dt));
+    let dt_fixed: chrono::DateTime<chrono::FixedOffset> = dt.into();
+    let val = NormalValue::NillableTime(Some(dt_fixed));
     let buf = encode_field_value(vec![], &val, false).unwrap();
     let (_, decoded) = decode_field_value(&buf, false, &FieldKind::datetime()).unwrap();
-    assert_eq!(decoded.as_time(), Some(&dt));
+    assert_eq!(decoded.as_time(), Some(&dt_fixed));
 
     // Test Nillable None variants encode as null
     let val = NormalValue::NillableInt(None);

@@ -179,7 +179,7 @@ fn test_validate_collection_with_invalid_policy_dotdot() {
 #[test]
 fn test_validate_collection_with_invalid_policy_null_byte() {
     let coll = CollectionVersion::new("users", "v1", "coll-1", sample_fields())
-        .with_policy(PolicyDescription::new("policy\0123", "users"));
+        .with_policy(PolicyDescription::new("policy\x00123", "users"));
     let result = coll.validate();
     assert!(result.is_err());
     let err = result.unwrap_err();

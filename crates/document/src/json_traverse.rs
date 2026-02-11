@@ -234,7 +234,7 @@ mod tests {
             json!(true),
             json!(false),
             json!(42),
-            json!(3.14),
+            json!(3.15),
             json!("hello"),
             json!(null),
         ];

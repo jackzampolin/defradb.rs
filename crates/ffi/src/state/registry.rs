@@ -303,6 +303,6 @@ mod tests {
     fn test_registry_handles() {
         // Handles should be non-zero and incrementing
         let registry = nodes();
-        assert!(registry.is_empty() || registry.len() > 0);
+        assert!(registry.is_empty() || !registry.is_empty());
     }
 }

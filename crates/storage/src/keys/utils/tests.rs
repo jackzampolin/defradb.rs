@@ -45,11 +45,11 @@ fn test_varint_encoding() {
 fn test_bool_encoding() {
     let buf = encode_bool_ascending(vec![], true);
     let (_, decoded) = decode_bool_ascending(&buf).unwrap();
-    assert_eq!(decoded, true);
+    assert!(decoded);
 
     let buf = encode_bool_ascending(vec![], false);
     let (_, decoded) = decode_bool_ascending(&buf).unwrap();
-    assert_eq!(decoded, false);
+    assert!(!decoded);
 }
 
 #[test]

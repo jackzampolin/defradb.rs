@@ -269,8 +269,8 @@ fn test_json_to_normal_value() {
     );
     assert_eq!(json_to_normal_value(&json!(42)), Some(NormalValue::Int(42)));
     assert_eq!(
-        json_to_normal_value(&json!(3.14)),
-        Some(NormalValue::Float64(3.14))
+        json_to_normal_value(&json!(3.15)),
+        Some(NormalValue::Float64(3.15))
     );
     assert_eq!(
         json_to_normal_value(&json!("hello")),

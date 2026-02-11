@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod unit_tests {
     use acp::nac::{NacStatus, NodePermission};
     use identity::Did;
 
