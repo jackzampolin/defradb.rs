@@ -8,6 +8,7 @@ use blockstore::Blockstore;
 
 use defra_http::router::{P2POperations, ReplicatorInfo};
 use p2p::sync::SyncCoordinator;
+use p2p::topics::DefraTopic;
 use p2p::P2PHostHandle;
 
 /// Trait for looking up collection IDs by name.
@@ -40,6 +41,12 @@ pub trait DocPusher: Send + Sync {
         -> Result<(), String>;
 
     async fn delete_persisted_replicator(&self, peer_id: &str) -> Result<(), String>;
+
+    async fn persist_p2p_documents(&self, doc_ids: &[String]) -> Result<(), String>;
+
+    async fn load_p2p_documents(&self) -> Result<Vec<String>, String>;
+
+    async fn persist_p2p_collections(&self, collections: &[String]) -> Result<(), String>;
 }
 
 /// Database-backed `DocPusher` implementation.
@@ -122,6 +129,39 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             .await
             .map_err(|e| format!("failed to delete persisted replicator: {}", e))
     }
+
+    async fn persist_p2p_documents(&self, doc_ids: &[String]) -> Result<(), String> {
+        let data = serde_json::to_vec(doc_ids)
+            .map_err(|e| format!("failed to serialize P2P documents: {}", e))?;
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        peerstore
+            .set_p2p_documents(&data)
+            .await
+            .map_err(|e| format!("failed to persist P2P documents: {}", e))
+    }
+
+    async fn load_p2p_documents(&self) -> Result<Vec<String>, String> {
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        match peerstore
+            .get_p2p_documents()
+            .await
+            .map_err(|e| format!("failed to load P2P documents: {}", e))?
+        {
+            Some(data) => serde_json::from_slice(&data)
+                .map_err(|e| format!("failed to deserialize P2P documents: {}", e)),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    async fn persist_p2p_collections(&self, collections: &[String]) -> Result<(), String> {
+        let data = serde_json::to_vec(collections)
+            .map_err(|e| format!("failed to serialize P2P collections: {}", e))?;
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        peerstore
+            .set_p2p_collections(&data)
+            .await
+            .map_err(|e| format!("failed to persist P2P collections: {}", e))
+    }
 }
 
 /// Also implement `CollectionLookup` so `DbDocPusher` can be used anywhere
@@ -144,7 +184,6 @@ pub struct P2PAdapter<
     doc_pusher: Option<Arc<dyn DocPusher>>,
     event_bus: Option<Arc<dyn events::Bus>>,
     peer_addresses: Arc<std::sync::RwLock<HashMap<String, String>>>,
-    #[allow(dead_code)]
     tracked_documents: Arc<std::sync::RwLock<HashSet<String>>>,
 }
 
@@ -290,6 +329,18 @@ impl DocPusher for LookupOnlyDocPusher {
 
     async fn delete_persisted_replicator(&self, _peer_id: &str) -> Result<(), String> {
         Err("delete_persisted_replicator not available (no database context)".to_string())
+    }
+
+    async fn persist_p2p_documents(&self, _doc_ids: &[String]) -> Result<(), String> {
+        Err("persist_p2p_documents not available (no database context)".to_string())
+    }
+
+    async fn load_p2p_documents(&self) -> Result<Vec<String>, String> {
+        Err("load_p2p_documents not available (no database context)".to_string())
+    }
+
+    async fn persist_p2p_collections(&self, _collections: &[String]) -> Result<(), String> {
+        Err("persist_p2p_collections not available (no database context)".to_string())
     }
 }
 
@@ -631,6 +682,18 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                     .await
                     .map_err(|e| e.to_string())?;
             }
+
+            // Persist all subscribed collections (best-effort)
+            if let Some(ref pusher) = self.doc_pusher {
+                let all_cols = coordinator
+                    .get_subscribed_collections()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if let Err(e) = pusher.persist_p2p_collections(&all_cols).await {
+                    tracing::warn!(error = %e, "failed to persist P2P collections");
+                }
+            }
+
             Ok(())
         } else {
             Err("p2p collections functionality requires sync coordinator".to_string())
@@ -652,21 +715,83 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn get_documents(&self) -> Result<Vec<defra_http::router::P2pDocumentInfo>, String> {
-        Ok(Vec::new())
+        let docs = self
+            .tracked_documents
+            .read()
+            .map_err(|e| format!("failed to read tracked documents: {}", e))?;
+        let mut sorted: Vec<String> = docs.iter().cloned().collect();
+        sorted.sort();
+        Ok(sorted
+            .into_iter()
+            .map(|doc_id| defra_http::router::P2pDocumentInfo {
+                collection: String::new(),
+                doc_id,
+            })
+            .collect())
     }
 
     async fn add_documents(
         &self,
-        _docs: Vec<defra_http::router::P2pDocumentRequest>,
+        docs: Vec<defra_http::router::P2pDocumentRequest>,
     ) -> Result<(), String> {
-        Err("document-level P2P replication not yet implemented".to_string())
+        let doc_ids: Vec<String> = docs.into_iter().map(|d| d.doc_id).collect();
+
+        // Validate all doc IDs atomically
+        for doc_id in &doc_ids {
+            if document::DocID::from_string(doc_id).is_err() {
+                return Err("malformed document ID, missing either version or cid".to_string());
+            }
+        }
+
+        for doc_id in &doc_ids {
+            let topic = DefraTopic::document(doc_id);
+            if let Err(e) = self.handle.subscribe(topic).await {
+                tracing::warn!(doc_id = %doc_id, error = %e, "Failed to subscribe to GossipSub topic for document");
+            }
+            if let Ok(mut tracked) = self.tracked_documents.write() {
+                tracked.insert(doc_id.clone());
+            }
+        }
+
+        // Persist all tracked documents (best-effort)
+        if let Some(ref pusher) = self.doc_pusher {
+            let all_docs: Vec<String> = self
+                .tracked_documents
+                .read()
+                .map(|docs| docs.iter().cloned().collect())
+                .unwrap_or_default();
+            if let Err(e) = pusher.persist_p2p_documents(&all_docs).await {
+                tracing::warn!(error = %e, "failed to persist P2P documents");
+            }
+        }
+
+        Ok(())
     }
 
     async fn remove_documents(
         &self,
-        _docs: Vec<defra_http::router::P2pDocumentRequest>,
+        docs: Vec<defra_http::router::P2pDocumentRequest>,
     ) -> Result<(), String> {
-        Err("document-level P2P replication not yet implemented".to_string())
+        let doc_ids: Vec<String> = docs.into_iter().map(|d| d.doc_id).collect();
+
+        // Validate all doc IDs atomically
+        for doc_id in &doc_ids {
+            if document::DocID::from_string(doc_id).is_err() {
+                return Err("malformed document ID, missing either version or cid".to_string());
+            }
+        }
+
+        for doc_id in &doc_ids {
+            let topic = DefraTopic::document(doc_id);
+            if let Err(e) = self.handle.unsubscribe(topic).await {
+                tracing::warn!(doc_id = %doc_id, error = %e, "Failed to unsubscribe from GossipSub topic for document");
+            }
+            if let Ok(mut tracked) = self.tracked_documents.write() {
+                tracked.remove(doc_id);
+            }
+        }
+
+        Ok(())
     }
 
     async fn sync_collections(&self) -> Result<(), String> {
