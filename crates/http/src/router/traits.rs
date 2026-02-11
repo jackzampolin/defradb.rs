@@ -334,6 +334,36 @@ pub trait CollectionManagementOperations: Send + Sync {
 
     /// Purge all data from all collections.
     async fn purge(&self) -> Result<(), String>;
+
+    /// Get a collection by name.
+    async fn get_collection_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<schema::CollectionVersion>, String>;
+
+    /// Check if a collection exists.
+    async fn has_collection(&self, name: &str) -> Result<bool, String>;
+
+    /// Find a collection by its collection ID.
+    async fn find_collection_by_id(
+        &self,
+        collection_id: &str,
+    ) -> Result<Option<schema::CollectionVersion>, String>;
+
+    /// Get a collection by version ID, searching both cache and storage.
+    async fn get_collection_by_version_id(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<schema::CollectionVersion>, String>;
+
+    /// Delete multiple collection versions in a batch.
+    async fn delete_collection_versions(&self, version_ids: Vec<String>) -> Result<(), String>;
+
+    /// Get all collection versions (active + inactive) from the system store.
+    async fn get_all_collections(&self) -> Result<Vec<schema::CollectionVersion>, String>;
+
+    /// Delete a collection by name.
+    async fn delete_collection(&self, name: &str) -> Result<(), String>;
 }
 
 /// Trait for lens migration operations.
@@ -429,4 +459,50 @@ pub trait BackupOperations: Send + Sync {
     /// Returns `ImportResult` with details about what was imported, skipped, and any errors.
     /// A fatal error (e.g., completely malformed data) returns `Err(message)`.
     async fn import(&self, data: &str) -> Result<ImportResult, String>;
+}
+
+/// Trait for transaction-scoped operations.
+///
+/// Provides access to operations that must execute within an existing transaction,
+/// such as setting migrations or reading collection versions including uncommitted writes.
+#[async_trait::async_trait]
+pub trait TransactionOperations: Send + Sync {
+    /// Set a migration within an existing transaction.
+    ///
+    /// Registers a lens migration configuration within the specified transaction.
+    /// The migration will only be visible after the transaction is committed.
+    /// Returns the transform ID.
+    async fn set_migration_in_txn(&self, txn_id: &str, config: &str) -> Result<String, String>;
+
+    /// Get all collection versions visible within a transaction.
+    ///
+    /// Reads from the transaction's systemstore, which includes both
+    /// committed data and any uncommitted writes made within this transaction.
+    async fn get_collections_in_txn(
+        &self,
+        txn_id: &str,
+    ) -> Result<Vec<schema::CollectionVersion>, String>;
+}
+
+/// Trait for view operations.
+///
+/// Views are virtual collections backed by a GQL query. Materialized views
+/// cache their results and must be refreshed after data changes.
+#[async_trait::async_trait]
+pub trait ViewOperations: Send + Sync {
+    /// Add a view from a GQL query and SDL schema.
+    ///
+    /// Returns the created collection versions for the view.
+    async fn add_view(
+        &self,
+        gql_query: &str,
+        sdl: &str,
+        transform: Option<&str>,
+    ) -> Result<Vec<schema::CollectionVersion>, String>;
+
+    /// Refresh materialized view caches.
+    ///
+    /// If `names` is provided, only those views are refreshed. Otherwise all
+    /// materialized views are refreshed.
+    async fn refresh_views(&self, names: Option<Vec<String>>) -> Result<(), String>;
 }

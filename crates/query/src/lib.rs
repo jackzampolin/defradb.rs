@@ -32,6 +32,7 @@ pub mod rest;
 pub mod runner;
 pub mod schema_gen;
 pub mod sdl_parse;
+pub mod select_convert;
 pub mod test_utils;
 pub mod txn;
 
@@ -51,6 +52,7 @@ pub use query_parse::{parse_mutations, parse_query, parse_request, ExplainType, 
 pub use rest::{RestError, RestOperations, RestOperationsImpl, RestResult};
 pub use runner::{DocFetcher, FetchByIdsResult, QueryRunner};
 pub use sdl_parse::{parse_sdl, parse_sdl_with_known_types};
+pub use select_convert::select_to_go_json;
 pub use txn::{
     GetTransactionResult, NoOpTransactionRegistry, TransactionContext, TransactionGuard,
     TransactionHandle, TransactionRegistry,

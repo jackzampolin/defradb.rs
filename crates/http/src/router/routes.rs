@@ -48,17 +48,38 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/", post(handlers::tx_begin))
         .route("/concurrent", post(handlers::tx_begin_concurrent))
         .route("/:id", post(handlers::tx_commit))
-        .route("/:id", delete(handlers::tx_discard));
+        .route("/:id", delete(handlers::tx_discard))
+        .route("/:id/lens", post(handlers::txn_ops::set_migration_in_txn))
+        .route(
+            "/:id/collections",
+            get(handlers::txn_ops::get_collections_in_txn),
+        );
 
     // Collection routes (REST API)
+    // Static routes must come before parametric `:name` routes
     let collection_routes = Router::new()
         .route("/", get(handlers::list_collections))
         .route("/", patch(handlers::patch_collection))
         .route("/set-active", post(handlers::set_active))
+        .route(
+            "/versions",
+            get(handlers::get_all_collections).delete(handlers::delete_collection_versions),
+        )
+        .route("/by-id/:id", get(handlers::find_collection_by_id))
+        .route(
+            "/by-version/:id",
+            get(handlers::get_collection_by_version_id),
+        )
         // Go-compatible list-all-indexes route (no path param)
         .route("/indexes", get(handlers::index::go_get_all_indexes))
-        .route("/:name", get(handlers::get_collection_doc_ids))
-        .route("/:name", post(handlers::create_document))
+        .route(
+            "/:name",
+            get(handlers::get_collection_doc_ids)
+                .post(handlers::create_document)
+                .delete(handlers::delete_collection),
+        )
+        .route("/:name/describe", get(handlers::describe_collection))
+        .route("/:name/exists", get(handlers::collection_exists))
         .route("/:name/truncate", delete(handlers::truncate_collection))
         .route("/:name/:docID", get(handlers::get_document))
         .route("/:name/:docID", patch(handlers::update_document))
@@ -161,6 +182,11 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/disable", post(handlers::nac::disable))
         .route("/re-enable", post(handlers::nac::re_enable));
 
+    // View routes
+    let view_routes = Router::new()
+        .route("/", post(handlers::views::add_view))
+        .route("/refresh", post(handlers::views::refresh_views));
+
     // API v0 routes
     let api_routes = Router::new()
         // GraphQL endpoints
@@ -187,6 +213,8 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .nest("/index", index_routes)
         // Backup endpoints
         .nest("/backup", backup_routes)
+        // View endpoints
+        .nest("/views", view_routes)
         // Lens migration endpoints
         .nest("/lens", lens_routes)
         // NAC endpoints (Rust-native routes)

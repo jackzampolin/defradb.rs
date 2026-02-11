@@ -184,6 +184,185 @@ pub async fn truncate_collection(
     Ok(Json(()))
 }
 
+/// Describe a collection by name.
+///
+/// GET /api/v0/collections/{name}/describe
+///
+/// Returns the CollectionVersion JSON for the named collection, or 404.
+///
+/// Requires `CollectionGet` permission when NAC is enabled.
+pub async fn describe_collection(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionGet).await?;
+
+    let collection_mgmt = state.require_collection_mgmt()?;
+
+    match collection_mgmt.get_collection_by_name(&name).await {
+        Ok(Some(cv)) => {
+            let val = serde_json::to_value(&cv)
+                .map_err(|e| HttpError::Internal(format!("serialization error: {}", e)))?;
+            Ok(Json(val))
+        }
+        Ok(None) => Err(HttpError::NotFound(format!(
+            "collection '{}' not found",
+            name
+        ))),
+        Err(e) => Err(HttpError::BadRequest(e)),
+    }
+}
+
+/// Check if a collection exists.
+///
+/// GET /api/v0/collections/{name}/exists
+///
+/// Returns `{"exists": true/false}`.
+///
+/// Requires `CollectionGet` permission when NAC is enabled.
+pub async fn collection_exists(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionGet).await?;
+
+    let collection_mgmt = state.require_collection_mgmt()?;
+
+    let exists = collection_mgmt
+        .has_collection(&name)
+        .await
+        .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(serde_json::json!({ "exists": exists })))
+}
+
+/// Find a collection by its collection ID.
+///
+/// GET /api/v0/collections/by-id/{id}
+///
+/// Returns the CollectionVersion JSON or null.
+///
+/// Requires `CollectionGet` permission when NAC is enabled.
+pub async fn find_collection_by_id(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionGet).await?;
+
+    let collection_mgmt = state.require_collection_mgmt()?;
+
+    match collection_mgmt.find_collection_by_id(&id).await {
+        Ok(Some(cv)) => {
+            let val = serde_json::to_value(&cv)
+                .map_err(|e| HttpError::Internal(format!("serialization error: {}", e)))?;
+            Ok(Json(val))
+        }
+        Ok(None) => Ok(Json(serde_json::Value::Null)),
+        Err(e) => Err(HttpError::BadRequest(e)),
+    }
+}
+
+/// Get a collection by version ID, searching both cache and storage.
+///
+/// GET /api/v0/collections/by-version/{id}
+///
+/// Returns the CollectionVersion JSON or null.
+///
+/// Requires `CollectionGet` permission when NAC is enabled.
+pub async fn get_collection_by_version_id(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionGet).await?;
+
+    let collection_mgmt = state.require_collection_mgmt()?;
+
+    match collection_mgmt.get_collection_by_version_id(&id).await {
+        Ok(Some(cv)) => {
+            let val = serde_json::to_value(&cv)
+                .map_err(|e| HttpError::Internal(format!("serialization error: {}", e)))?;
+            Ok(Json(val))
+        }
+        Ok(None) => Ok(Json(serde_json::Value::Null)),
+        Err(e) => Err(HttpError::BadRequest(e)),
+    }
+}
+
+/// Delete multiple collection versions.
+///
+/// DELETE /api/v0/collections/versions
+///
+/// Body: JSON array of version ID strings.
+///
+/// Requires `CollectionPatch` permission when NAC is enabled.
+pub async fn delete_collection_versions(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Json(version_ids): Json<Vec<String>>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
+
+    let collection_mgmt = state.require_collection_mgmt()?;
+
+    collection_mgmt
+        .delete_collection_versions(version_ids)
+        .await
+        .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(serde_json::json!({})))
+}
+
+/// Get all collection versions (active + inactive).
+///
+/// GET /api/v0/collections/versions
+///
+/// Returns a JSON array of all CollectionVersion objects from the system store.
+///
+/// Requires `CollectionGet` permission when NAC is enabled.
+pub async fn get_all_collections(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<Vec<schema::CollectionVersion>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionGet).await?;
+
+    let collection_mgmt = state.require_collection_mgmt()?;
+
+    let collections = collection_mgmt
+        .get_all_collections()
+        .await
+        .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(collections))
+}
+
+/// Delete a collection by name.
+///
+/// DELETE /api/v0/collections/{name}
+///
+/// Removes the collection and all its versions.
+///
+/// Requires `CollectionPatch` permission when NAC is enabled.
+pub async fn delete_collection(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
+
+    let collection_mgmt = state.require_collection_mgmt()?;
+
+    collection_mgmt
+        .delete_collection(&name)
+        .await
+        .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(serde_json::json!({})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

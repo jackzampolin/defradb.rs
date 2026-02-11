@@ -246,8 +246,8 @@ impl Node {
                     Arc::new(db::AutoCommitMutator::new(database.clone()))
                 };
 
-            // Create transaction registry for explicit transaction support
-            let registry = db::DbTransactionRegistry::new(database.clone());
+            // Create transaction registry for explicit transaction support (Arc-shared)
+            let registry = Arc::new(db::DbTransactionRegistry::new(database.clone()));
 
             // Create collection provider for on-demand schema resolution
             // This ensures newly added schemas are immediately available for queries
@@ -265,11 +265,11 @@ impl Node {
             info!("Document ACP configured");
 
             // Create query runner with transaction, mutation, and ACP support
-            // Use the collection provider for on-demand schema resolution
-            let mut query_runner = query::QueryRunner::with_registry_and_provider(
+            // Use Arc-shared registry so it can also be used by TxnRegistryAdapter
+            let mut query_runner = query::QueryRunner::with_arc_registry_and_provider(
                 fetcher,
                 collection_provider,
-                registry,
+                registry.clone(),
             )
             .with_mutator(mutator)
             .with_acp(document_acp)
@@ -317,16 +317,10 @@ impl Node {
             server = server.with_schema_arc(schema_adapter);
             info!("Schema HTTP endpoint enabled");
 
-            // Wire lens operations to HTTP server
-            match crate::lens_adapter::LensAdapter::new_arc() {
-                Ok(lens_adapter) => {
-                    server = server.with_lens_arc(lens_adapter);
-                    info!("Lens HTTP endpoint enabled");
-                }
-                Err(e) => {
-                    warn!("Failed to create lens adapter: {}", e);
-                }
-            }
+            // Wire lens operations to HTTP server (backed by persistent database lens store)
+            let lens_adapter = crate::lens_adapter::LensAdapter::new_arc(database.clone());
+            server = server.with_lens_arc(lens_adapter);
+            info!("Lens HTTP endpoint enabled");
 
             // Wire NAC (Node Access Control) to HTTP server only when enabled
             if config.acp.node_enable {
@@ -359,6 +353,11 @@ impl Node {
                 info!("Document ACP disabled (use --document-acp-type to enable)");
             }
 
+            // Wire view operations to HTTP server
+            let view_adapter = crate::view_adapter::ViewAdapter::new_arc(database.clone());
+            server = server.with_view_arc(view_adapter);
+            info!("View HTTP endpoints enabled");
+
             // Wire collection management operations to HTTP server
             let collection_mgmt_adapter =
                 crate::collection_mgmt_adapter::CollectionManagementAdapter::new_arc(
@@ -366,6 +365,11 @@ impl Node {
                 );
             server = server.with_collection_mgmt_arc(collection_mgmt_adapter);
             info!("Collection management HTTP endpoints enabled");
+
+            // Wire transaction-scoped operations to HTTP server
+            let txn_adapter = crate::txn_adapter::TxnRegistryAdapter::new_arc(registry);
+            server = server.with_txn_ops_arc(txn_adapter);
+            info!("Transaction-scoped HTTP endpoints enabled");
 
             // Wire index operations to HTTP server
             let index_adapter = crate::index_adapter::IndexAdapter::new_arc(database.clone());
