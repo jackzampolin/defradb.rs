@@ -1,90 +1,22 @@
-//! Lensed document fetcher that applies schema migrations.
-//!
-//! This fetcher wraps an inner fetcher and applies lens transforms to documents
-//! that are stored with older schema versions.
-//!
-//! # Migration Flow
-//!
-//! When a document is fetched:
-//! 1. The fetcher loads the document with its stored schema version
-//! 2. If the document's version differs from the target collection version
-//!    and migrations are registered, the document is transformed
-//! 3. Migrated values are cached in the datastore to avoid re-migration
-//!
-//! # Lazy Migration
-//!
-//! Documents are migrated on first read, not when schemas are updated.
-//! This allows schema updates without rewriting all existing documents.
-//! The migrated values and new version are cached in the datastore.
+//! Migration context loading and document migration logic.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use async_lock::Mutex as TokioMutex;
-use async_trait::async_trait;
 use datastore::NamespaceView;
 use document::Document;
 use lens::{
-    build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink,
-    TransformStore, DOC_ID_FIELD,
+    build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink, DOC_ID_FIELD,
 };
-use query::runner::{DocFetcher, FetchByIdsResult};
 use schema::CollectionVersion;
 use storage::corekv::Store;
 use tracing::{debug, trace, warn};
 
 use crate::collection::Collection;
-use crate::collection_loader::get_collection_with_lazy_load;
 use crate::schema_loader::get_collections_by_collection_id;
-use crate::txn::DbTxn;
 
-/// Document fetcher that applies lens migrations to documents.
-///
-/// When documents are fetched from older schema versions, they are
-/// transformed to the current (target) schema version using registered
-/// lens migrations.
-pub struct LensedDocFetcher<S: Store> {
-    txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
-    #[allow(dead_code)]
-    lens_store: Arc<dyn TransformStore>,
-    /// Cache of collection version histories keyed by collection name.
-    #[allow(dead_code)]
-    history_cache: async_lock::RwLock<HashMap<String, HashMap<String, TargetedHistoryLink>>>,
-}
+use super::LensedDocFetcher;
 
 impl<S: Store> LensedDocFetcher<S> {
-    /// Create a new lensed document fetcher.
-    ///
-    /// # Arguments
-    ///
-    /// * `txn` - The database transaction
-    /// * `lens_store` - The lens transform store for applying migrations
-    #[allow(dead_code)]
-    pub(crate) fn new(txn: DbTxn<S>, lens_store: Arc<dyn TransformStore>) -> Self {
-        Self {
-            txn: Arc::new(TokioMutex::new(Some(txn))),
-            lens_store,
-            history_cache: async_lock::RwLock::new(HashMap::new()),
-        }
-    }
-
-    /// Take the transaction out of the fetcher (for commit/rollback).
-    #[allow(dead_code)]
-    pub(crate) async fn take_txn(&self) -> Option<DbTxn<S>> {
-        self.txn.lock().await.take()
-    }
-
-    /// Check if the transaction has been consumed.
-    pub async fn is_consumed(&self) -> bool {
-        self.txn.lock().await.is_none()
-    }
-
-    /// Get the shared transaction reference.
-    #[allow(dead_code)]
-    pub(crate) fn shared_txn(&self) -> Arc<TokioMutex<Option<DbTxn<S>>>> {
-        self.txn.clone()
-    }
-
     /// Check if any version in a list of collection versions has migrations registered.
     ///
     /// A collection has migrations if any version in its history has a transform
@@ -156,7 +88,7 @@ impl<S: Store> LensedDocFetcher<S> {
     ///
     /// Returns the list of versions and a boolean indicating if any have transforms.
     /// This matches Go's behavior of checking the full history for migrations.
-    async fn load_versions_and_check_migrations(
+    pub(super) async fn load_versions_and_check_migrations(
         &self,
         collection: &Collection,
     ) -> query::error::Result<(Vec<CollectionVersion>, bool)> {
@@ -235,7 +167,7 @@ impl<S: Store> LensedDocFetcher<S> {
     }
 
     /// Convert a Document to a LensDoc.
-    fn doc_to_lens_doc(doc: &Document) -> Option<LensDoc> {
+    pub(super) fn doc_to_lens_doc(doc: &Document) -> Option<LensDoc> {
         // Use Document's to_map which handles all field conversions properly
         let map = doc.to_map().ok()?;
 
@@ -286,7 +218,11 @@ impl<S: Store> LensedDocFetcher<S> {
     }
 
     /// Check if a document needs migration to the target version.
-    fn doc_needs_migration(doc: &Document, target_version_id: &str, has_migrations: bool) -> bool {
+    pub(super) fn doc_needs_migration(
+        doc: &Document,
+        target_version_id: &str,
+        has_migrations: bool,
+    ) -> bool {
         if !has_migrations {
             return false;
         }
@@ -299,7 +235,7 @@ impl<S: Store> LensedDocFetcher<S> {
     ///
     /// If the document's schema version matches the target, returns it unchanged.
     /// Otherwise, transforms it through the lens pipeline and caches the result.
-    async fn process_document(
+    pub(super) async fn process_document(
         &self,
         doc: Document,
         collection: &Collection,
@@ -495,291 +431,5 @@ impl<S: Store> LensedDocFetcher<S> {
         );
 
         Ok(())
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
-    async fn get_all(&self, collection_name: &str) -> query::error::Result<Vec<Document>> {
-        let (collection, datastore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
-
-        // Check if collection has migrations by loading full version history (matching Go)
-        let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
-        let target_version_id = &collection.schema().version_id;
-
-        if has_migrations {
-            debug!(
-                collection = %collection_name,
-                version_id = %target_version_id,
-                "Collection has migrations registered (full history check)"
-            );
-        }
-
-        let docs = collection
-            .get_all_with_datastore(&datastore)
-            .await
-            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
-
-        // Count documents needing migration for logging
-        let needs_migration_count = docs
-            .iter()
-            .filter(|doc| Self::doc_needs_migration(doc, target_version_id, has_migrations))
-            .count();
-
-        trace!(
-            collection = %collection_name,
-            doc_count = docs.len(),
-            needs_migration = needs_migration_count,
-            has_migrations = has_migrations,
-            "Fetched documents"
-        );
-
-        // Process each document, applying migration if needed
-        let mut processed_docs = Vec::with_capacity(docs.len());
-        for doc in docs {
-            let processed = self
-                .process_document(doc, &collection, &datastore, has_migrations)
-                .await?;
-            processed_docs.push(processed);
-        }
-
-        if needs_migration_count > 0 {
-            debug!(
-                collection = %collection_name,
-                migrated = needs_migration_count,
-                total_docs = processed_docs.len(),
-                "Documents migrated"
-            );
-        }
-
-        Ok(processed_docs)
-    }
-
-    async fn get_all_with_deleted(
-        &self,
-        collection_name: &str,
-        show_deleted: bool,
-    ) -> query::error::Result<Vec<(Document, bool)>> {
-        let (collection, datastore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
-
-        // Check if collection has migrations by loading full version history (matching Go)
-        let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
-
-        let docs_with_status = collection
-            .get_all_with_datastore_include_deleted(&datastore, show_deleted)
-            .await
-            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
-
-        // Process each document, applying migration if needed
-        let mut processed_docs = Vec::with_capacity(docs_with_status.len());
-        for (doc, is_deleted) in docs_with_status {
-            let processed = self
-                .process_document(doc, &collection, &datastore, has_migrations)
-                .await?;
-            processed_docs.push((processed, is_deleted));
-        }
-
-        Ok(processed_docs)
-    }
-
-    async fn get_by_ids(
-        &self,
-        collection_name: &str,
-        doc_ids: &[String],
-    ) -> query::error::Result<FetchByIdsResult> {
-        let (collection, datastore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
-
-        // Check if collection has migrations by loading full version history (matching Go)
-        let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
-        let target_version_id = &collection.schema().version_id;
-
-        let mut docs = Vec::new();
-        let mut missing_ids = Vec::new();
-
-        for id_str in doc_ids {
-            // Go DefraDB treats invalid doc IDs as "not found" rather than errors.
-            // This matches behavior where querying for a non-existent ID returns empty results.
-            let doc_id = match document::DocID::from_string(id_str) {
-                Ok(id) => id,
-                Err(_) => {
-                    // Invalid doc ID format - treat as not found
-                    missing_ids.push(id_str.clone());
-                    continue;
-                }
-            };
-
-            match collection
-                .get_with_datastore(&datastore, &doc_id)
-                .await
-                .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?
-            {
-                Some(doc) => docs.push(doc),
-                None => {
-                    missing_ids.push(id_str.clone());
-                }
-            }
-        }
-
-        // Count documents needing migration for logging
-        let needs_migration_count = docs
-            .iter()
-            .filter(|doc| Self::doc_needs_migration(doc, target_version_id, has_migrations))
-            .count();
-
-        trace!(
-            collection = %collection_name,
-            requested = doc_ids.len(),
-            found = docs.len(),
-            missing = missing_ids.len(),
-            needs_migration = needs_migration_count,
-            has_migrations = has_migrations,
-            "Fetched documents by ID"
-        );
-
-        // Process each document, applying migration if needed
-        let mut processed_docs = Vec::with_capacity(docs.len());
-        for doc in docs {
-            let processed = self
-                .process_document(doc, &collection, &datastore, has_migrations)
-                .await?;
-            processed_docs.push(processed);
-        }
-
-        if needs_migration_count > 0 {
-            debug!(
-                collection = %collection_name,
-                migrated = needs_migration_count,
-                total_docs = processed_docs.len(),
-                "Documents migrated"
-            );
-        }
-
-        Ok(FetchByIdsResult::partial(processed_docs, missing_ids))
-    }
-
-    async fn get_by_field_value(
-        &self,
-        collection_name: &str,
-        field_name: &str,
-        value: &str,
-    ) -> query::error::Result<Vec<Document>> {
-        let (collection, datastore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
-
-        // Check if collection has migrations by loading full version history (matching Go)
-        let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
-        let target_version_id = &collection.schema().version_id;
-
-        let all_docs = collection
-            .get_all_with_datastore(&datastore)
-            .await
-            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
-
-        let matching_docs: Vec<Document> = all_docs
-            .into_iter()
-            .filter(|doc| {
-                doc.get(field_name)
-                    .and_then(|v| v.as_str())
-                    .map(|v| v == value)
-                    .unwrap_or(false)
-            })
-            .collect();
-
-        // Count documents needing migration for logging
-        let needs_migration_count = matching_docs
-            .iter()
-            .filter(|doc| Self::doc_needs_migration(doc, target_version_id, has_migrations))
-            .count();
-
-        trace!(
-            collection = %collection_name,
-            field = %field_name,
-            value = %value,
-            matches = matching_docs.len(),
-            needs_migration = needs_migration_count,
-            has_migrations = has_migrations,
-            "Fetched documents by field value"
-        );
-
-        // Process each document, applying migration if needed
-        let mut processed_docs = Vec::with_capacity(matching_docs.len());
-        for doc in matching_docs {
-            let processed = self
-                .process_document(doc, &collection, &datastore, has_migrations)
-                .await?;
-            processed_docs.push(processed);
-        }
-
-        if needs_migration_count > 0 {
-            debug!(
-                collection = %collection_name,
-                migrated = needs_migration_count,
-                total_docs = processed_docs.len(),
-                "Documents migrated"
-            );
-        }
-
-        Ok(processed_docs)
-    }
-
-    async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Vec<u8>>> {
-        use storage::corekv::IterOptions;
-        use storage::keys::datastore::ViewCacheKey;
-
-        let guard = self.txn.lock().await;
-        let txn = guard.as_ref().ok_or_else(|| {
-            query::error::QueryError::execution("transaction was already consumed")
-        })?;
-
-        let datastore = txn.datastore().map_err(|e| {
-            query::error::QueryError::execution(format!("failed to get datastore: {}", e))
-        })?;
-
-        let prefix = ViewCacheKey::collection_prefix(collection_id);
-        let opts = IterOptions::new().with_prefix(prefix);
-        let mut iter = datastore.iterator(opts).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to iterate view cache: {}", e))
-        })?;
-
-        let mut items = Vec::new();
-        while let Some(pair) = iter.next().await.map_err(|e| {
-            query::error::QueryError::execution(format!("view cache iteration error: {}", e))
-        })? {
-            items.push(pair.value);
-        }
-
-        iter.close().await.map_err(|e| {
-            query::error::QueryError::execution(format!(
-                "failed to close view cache iterator: {}",
-                e
-            ))
-        })?;
-
-        Ok(items)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::Value;
-
-    #[test]
-    fn test_doc_to_lens_doc_conversion() {
-        let mut doc = Document::new();
-        doc.set("name", Value::String("Alice".to_string()));
-        doc.set("age", Value::Number(30.into()));
-
-        let lens_doc = LensedDocFetcher::<storage::MemoryStore>::doc_to_lens_doc(&doc).unwrap();
-
-        assert_eq!(
-            lens_doc.get("name").unwrap(),
-            &Value::String("Alice".to_string())
-        );
-        assert_eq!(lens_doc.get("age").unwrap(), &Value::Number(30.into()));
     }
 }
