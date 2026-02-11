@@ -19,7 +19,7 @@ use query::subscription::{
     extract_doc_id_from_query, is_commits_subscription, response_has_data,
     subscription_to_commits_query_with_cid, subscription_to_query_with_doc_id,
 };
-use query::{parse_request, ParsedOperation};
+use query::{parse_request, MutationType, ParsedOperation};
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
@@ -34,7 +34,8 @@ use super::TX_HEADER_NAME;
 /// Determine the required NAC permission based on GraphQL operation type.
 ///
 /// - Query operations require `DocumentRead` permission
-/// - Mutation operations require `DocumentUpdate` permission
+/// - Delete mutations require `DocumentDelete` permission
+/// - Other mutations require `DocumentUpdate` permission
 /// - Parse failures default to `DocumentUpdate` (fail-secure)
 ///
 /// This matches Go DefraDB's per-operation permission model where different
@@ -44,10 +45,48 @@ pub(crate) fn permission_for_query(query: &str) -> NodePermission {
         Ok(ParsedOperation::Query { .. }) => NodePermission::DocumentRead,
         Ok(ParsedOperation::Subscription { .. }) => NodePermission::DocumentRead,
         Ok(ParsedOperation::Introspection { .. }) => NodePermission::DocumentRead,
-        Ok(ParsedOperation::Mutation { .. }) => NodePermission::DocumentUpdate,
+        Ok(ParsedOperation::Mutation { mutations, .. }) => {
+            if mutations
+                .iter()
+                .any(|m| m.mutation_type == MutationType::Delete)
+            {
+                NodePermission::DocumentDelete
+            } else {
+                NodePermission::DocumentUpdate
+            }
+        }
         // Parse failures default to the more restrictive permission
         Err(_) => NodePermission::DocumentUpdate,
     }
+}
+
+/// Check if a query references `encrypted_` fields and P2P is disabled.
+///
+/// Go DefraDB only generates `encrypted_<Collection>` GraphQL fields when P2P
+/// is enabled. Returns a schema validation error matching Go's format if the
+/// query references encrypted fields but P2P is not available.
+fn check_encrypted_fields(state: &AppState, query: &str) -> Result<(), HttpError> {
+    if !query.contains("encrypted_") {
+        return Ok(());
+    }
+    if state.p2p.is_some() {
+        return Ok(());
+    }
+    // Extract field name for Go-compatible error message
+    if let Some(start) = query.find("encrypted_") {
+        let rest = &query[start..];
+        let end = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(rest.len());
+        let field_name = &rest[..end];
+        return Err(HttpError::BadRequest(format!(
+            "Cannot query field \"{}\" on type \"Query\".",
+            field_name
+        )));
+    }
+    Err(HttpError::BadRequest(
+        "Cannot query encrypted fields when P2P is disabled.".to_string(),
+    ))
 }
 
 /// Check if a request has an `Accept: text/event-stream` header.
@@ -68,7 +107,8 @@ fn wants_sse(headers: &HeaderMap) -> bool {
 ///
 /// Permission is determined by parsing the query:
 /// - Query operations require `DocumentRead` permission
-/// - Mutation operations require `DocumentUpdate` permission
+/// - Delete mutations require `DocumentDelete` permission
+/// - Other mutations require `DocumentUpdate` permission
 ///
 /// This matches Go DefraDB's per-operation permission model where each
 /// operation type has its own permission requirement.
@@ -80,6 +120,9 @@ pub async fn graphql(
     // NAC check: Determine required permission based on operation type
     let required_permission = permission_for_query(&request.query);
     require_permission(&state, &identity, required_permission).await?;
+
+    // Validate encrypted field queries require P2P
+    check_encrypted_fields(&state, &request.query)?;
 
     // Wire identity from Authorization header into the request
     request.identity = identity.did().cloned();
@@ -112,6 +155,9 @@ pub async fn graphql_get(
 ) -> Result<Json<QueryResponse>, HttpError> {
     // NAC check: GET is read-only queries, so require DocumentRead permission
     require_permission(&state, &identity, NodePermission::DocumentRead).await?;
+
+    // Validate encrypted field queries require P2P
+    check_encrypted_fields(&state, &params.query)?;
 
     let variables: Option<JsonValue> = match params.variables {
         Some(v) => match serde_json::from_str(&v) {
@@ -172,7 +218,8 @@ pub struct TransactionalQueryRequest {
 ///
 /// Permission is determined by parsing the query:
 /// - Query operations require `DocumentRead` permission
-/// - Mutation operations require `DocumentUpdate` permission
+/// - Delete mutations require `DocumentDelete` permission
+/// - Other mutations require `DocumentUpdate` permission
 ///
 /// This matches Go DefraDB's per-operation permission model.
 pub async fn graphql_transactional(
@@ -184,6 +231,9 @@ pub async fn graphql_transactional(
     // NAC check: Determine required permission based on operation type
     let required_permission = permission_for_query(&request.query);
     require_permission(&state, &identity, required_permission).await?;
+
+    // Validate encrypted field queries require P2P
+    check_encrypted_fields(&state, &request.query)?;
 
     // Check if this is a subscription query
     if matches!(
