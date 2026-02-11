@@ -2,7 +2,7 @@ mod export;
 mod import;
 
 pub use export::export_database;
-pub use import::import_database;
+pub use import::{import_database, ImportStats};
 
 use std::collections::HashMap;
 

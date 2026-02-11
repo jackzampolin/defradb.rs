@@ -227,11 +227,13 @@ pub trait BlockOperations: Send + Sync {
     ///
     /// Loads a block by CID, checks its signature, and verifies using the
     /// provided public key. `key_type` defaults to "secp256k1" if `None`.
+    /// `caller_did` is the DID string of the caller for document-level ACP checks.
     async fn verify_signature(
         &self,
         cid: &str,
         public_key: &str,
         key_type: Option<&str>,
+        caller_did: Option<&str>,
     ) -> Result<(), String>;
 }
 

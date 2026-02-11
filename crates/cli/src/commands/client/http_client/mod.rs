@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 
 mod acp;
 mod backup;
+mod block;
 mod collection;
 mod encrypted_index;
 mod graphql;

@@ -30,8 +30,14 @@ pub async fn verify_signature(
     require_permission(&state, &identity, NodePermission::SignatureVerify).await?;
 
     let block = state.require_block()?;
+    let caller_did = identity.did().map(|d| d.to_string());
     block
-        .verify_signature(&params.cid, &params.public_key, params.key_type.as_deref())
+        .verify_signature(
+            &params.cid,
+            &params.public_key,
+            params.key_type.as_deref(),
+            caller_did.as_deref(),
+        )
         .await
         .map_err(HttpError::BadRequest)?;
     Ok(StatusCode::OK)

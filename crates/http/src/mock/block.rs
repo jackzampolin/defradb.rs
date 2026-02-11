@@ -19,6 +19,7 @@ impl BlockOperations for MockBlockOperations {
         _cid: &str,
         _public_key: &str,
         _key_type: Option<&str>,
+        _caller_did: Option<&str>,
     ) -> Result<(), String> {
         Ok(())
     }

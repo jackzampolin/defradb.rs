@@ -31,6 +31,7 @@ impl<S: Store + 'static> BlockOperations for BlockAdapter<S> {
         cid: &str,
         public_key: &str,
         key_type: Option<&str>,
+        caller_did: Option<&str>,
     ) -> Result<(), String> {
         let crypto_key_type = match key_type.unwrap_or("secp256k1") {
             "ed25519" => crypto::KeyType::Ed25519,
@@ -39,7 +40,9 @@ impl<S: Store + 'static> BlockOperations for BlockAdapter<S> {
             other => return Err(format!("unsupported key type: {}", other)),
         };
 
-        let caller_identity = acp::Identity::anonymous();
+        let caller_identity: acp::Identity = caller_did
+            .and_then(|d| identity::Did::try_from(d.to_string()).ok())
+            .into();
 
         db::block_verify::verify_block_signature(
             &self.database,

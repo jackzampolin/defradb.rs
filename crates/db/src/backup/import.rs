@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::Value as JsonValue;
@@ -6,6 +7,13 @@ use storage::corekv::Store;
 
 use super::{classify_schema_fields, json_to_graphql_input};
 use crate::database::DB;
+
+/// Statistics from a backup import operation.
+#[derive(Debug, Clone, Default)]
+pub struct ImportStats {
+    pub documents_imported: u64,
+    pub collections_affected: Vec<String>,
+}
 
 /// Import documents from a JSON string into the database.
 ///
@@ -23,7 +31,7 @@ pub async fn import_database<S: Store>(
     database: &Arc<DB<S>>,
     runner: &Arc<dyn query::QueryExecutor>,
     data: &str,
-) -> Result<(), String> {
+) -> Result<ImportStats, String> {
     let parsed: JsonValue =
         serde_json::from_str(data).map_err(|e| format!("failed to parse JSON: {}", e))?;
 
@@ -35,6 +43,9 @@ pub async fn import_database<S: Store>(
             )
         }
     };
+
+    let mut documents_imported: u64 = 0;
+    let mut collections_affected: HashSet<String> = HashSet::new();
 
     for (collection_name, docs_value) in root {
         let collection = database
@@ -137,6 +148,9 @@ pub async fn import_database<S: Store>(
                 ));
             }
 
+            documents_imported += 1;
+            collections_affected.insert(collection_name.clone());
+
             if !self_ref_values.is_empty() {
                 let response_json = serde_json::to_value(&response.data)
                     .map_err(|e| format!("failed to serialize response: {}", e))?;
@@ -182,5 +196,8 @@ pub async fn import_database<S: Store>(
         }
     }
 
-    Ok(())
+    Ok(ImportStats {
+        documents_imported,
+        collections_affected: collections_affected.into_iter().collect(),
+    })
 }

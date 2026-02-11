@@ -2,6 +2,7 @@
 
 use clap::{Args, Subcommand};
 
+use super::http_client::HttpClient;
 use super::ClientContext;
 use crate::error::Result;
 
@@ -36,17 +37,24 @@ pub struct BlockVerifySignatureArgs {
 }
 
 impl BlockArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            BlockCommand::VerifySignature(args) => args.execute().await,
+            BlockCommand::VerifySignature(args) => args.execute(ctx).await,
         }
     }
 }
 
 impl BlockVerifySignatureArgs {
-    pub async fn execute(&self) -> Result<()> {
-        Err(crate::error::Error::Server(
-            "block verify-signature requires crypto verification infrastructure (not yet implemented)".to_string(),
-        ))
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        client
+            .block_verify_signature(&self.cid, &self.public_key, self.key_type.as_deref())
+            .await?;
+
+        println!("Block's signature verified.");
+        Ok(())
     }
 }
