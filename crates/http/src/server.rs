@@ -17,7 +17,7 @@ use crate::error::Result;
 use crate::router::{
     create_router_with_state, AcpOperations, AppStateBuilder, CollectionManagementOperations,
     DocumentAcpOperations, EncryptedIndexOperations, IndexOperations, LensOperations,
-    NodeAcpOperations, P2POperations, SchemaOperations,
+    NodeAcpOperations, P2POperations, SchemaOperations, ViewOperations,
 };
 
 /// Server configuration options.
@@ -53,6 +53,7 @@ pub struct Server {
     nac: Option<Arc<dyn NodeAcpOperations>>,
     collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
     doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
+    view: Option<Arc<dyn ViewOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
 }
 
@@ -72,6 +73,7 @@ impl Server {
             nac: None,
             collection_mgmt: None,
             doc_acp: None,
+            view: None,
             event_bus: None,
         }
     }
@@ -91,6 +93,7 @@ impl Server {
             nac: None,
             collection_mgmt: None,
             doc_acp: None,
+            view: None,
             event_bus: None,
         }
     }
@@ -110,6 +113,7 @@ impl Server {
             nac: None,
             collection_mgmt: None,
             doc_acp: None,
+            view: None,
             event_bus: None,
         }
     }
@@ -129,6 +133,7 @@ impl Server {
             nac: None,
             collection_mgmt: None,
             doc_acp: None,
+            view: None,
             event_bus: None,
         }
     }
@@ -244,6 +249,12 @@ impl Server {
         self
     }
 
+    /// Set view operations from an Arc.
+    pub fn with_view_arc(mut self, view: Arc<dyn ViewOperations>) -> Self {
+        self.view = Some(view);
+        self
+    }
+
     /// Set event bus for GraphQL subscriptions.
     ///
     /// When an event bus is configured, the server enables WebSocket
@@ -296,6 +307,9 @@ impl Server {
         }
         if let Some(ref doc_acp) = self.doc_acp {
             builder = builder.with_doc_acp(Arc::clone(doc_acp));
+        }
+        if let Some(ref view) = self.view {
+            builder = builder.with_view(Arc::clone(view));
         }
         if let Some(ref event_bus) = self.event_bus {
             builder = builder.with_event_bus(Arc::clone(event_bus));

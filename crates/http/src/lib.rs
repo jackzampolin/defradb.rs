@@ -82,7 +82,7 @@ pub use router::{
     create_router, create_router_with_rest, create_router_with_state, AcpOperations, AppState,
     AppStateBuilder, BackupOperations, DocumentAcpOperations, IndexFieldInfo, IndexInfo,
     IndexOperations, NacStatus, NacStatusInfo, NodeAcpOperations, NodePermission, P2POperations,
-    PolicyInfo, ReplicatorInfo,
+    PolicyInfo, ReplicatorInfo, ViewOperations,
 };
 pub use server::{Server, ServerConfig};
 

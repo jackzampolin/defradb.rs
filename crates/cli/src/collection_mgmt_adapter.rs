@@ -69,4 +69,48 @@ impl<S: Store + 'static> CollectionManagementOperations for CollectionManagement
         }
         Ok(())
     }
+
+    async fn get_collection_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<schema::CollectionVersion>, String> {
+        self.database
+            .get_collection(name)
+            .map(|opt| opt.map(|c| c.schema().clone()))
+            .map_err(|e| format!("{}", e))
+    }
+
+    async fn has_collection(&self, name: &str) -> Result<bool, String> {
+        self.database
+            .has_collection(name)
+            .map_err(|e| format!("{}", e))
+    }
+
+    async fn find_collection_by_id(
+        &self,
+        collection_id: &str,
+    ) -> Result<Option<schema::CollectionVersion>, String> {
+        self.database
+            .find_collection_by_id(collection_id)
+            .map(|opt| opt.map(|c| c.schema().clone()))
+            .map_err(|e| format!("{}", e))
+    }
+
+    async fn get_collection_by_version_id(
+        &self,
+        version_id: &str,
+    ) -> Result<Option<schema::CollectionVersion>, String> {
+        self.database
+            .get_collection_by_version_id_full(version_id)
+            .await
+            .map(|opt| opt.map(|c| c.schema().clone()))
+            .map_err(|e| format!("{}", e))
+    }
+
+    async fn delete_collection_versions(&self, version_ids: Vec<String>) -> Result<(), String> {
+        self.database
+            .delete_collection_versions_batch(version_ids)
+            .await
+            .map_err(|e| format!("{}", e))
+    }
 }

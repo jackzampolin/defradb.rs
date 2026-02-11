@@ -17,3 +17,4 @@ pub mod logging;
 pub mod nac_adapter;
 pub mod p2p_adapter;
 pub mod schema_adapter;
+pub mod view_adapter;

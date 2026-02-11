@@ -2,11 +2,11 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
-use super::select_to_go_json;
 use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, try_ffi};
+use query::select_to_go_json;
 
 /// Add a view to the database.
 ///

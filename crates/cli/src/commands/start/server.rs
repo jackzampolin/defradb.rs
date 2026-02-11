@@ -353,6 +353,11 @@ impl Node {
                 info!("Document ACP disabled (use --document-acp-type to enable)");
             }
 
+            // Wire view operations to HTTP server
+            let view_adapter = crate::view_adapter::ViewAdapter::new_arc(database.clone());
+            server = server.with_view_arc(view_adapter);
+            info!("View HTTP endpoints enabled");
+
             // Wire collection management operations to HTTP server
             let collection_mgmt_adapter =
                 crate::collection_mgmt_adapter::CollectionManagementAdapter::new_arc(

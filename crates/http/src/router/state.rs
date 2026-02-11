@@ -8,7 +8,7 @@ use query::rest::RestOperations;
 use super::{
     AcpOperations, BackupOperations, CollectionManagementOperations, DocumentAcpOperations,
     EncryptedIndexOperations, IndexOperations, LensOperations, NodeAcpOperations, P2POperations,
-    SchemaOperations,
+    SchemaOperations, ViewOperations,
 };
 
 /// Application state shared across handlers.
@@ -26,6 +26,7 @@ pub struct AppState {
     pub nac: Option<Arc<dyn NodeAcpOperations>>,
     pub collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
     pub doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
+    pub view: Option<Arc<dyn ViewOperations>>,
     pub event_bus: Option<Arc<dyn events::Bus>>,
 }
 
@@ -65,6 +66,7 @@ impl std::fmt::Debug for AppState {
                 "doc_acp",
                 &self.doc_acp.as_ref().map(|_| "<DocumentAcpOperations>"),
             )
+            .field("view", &self.view.as_ref().map(|_| "<ViewOperations>"))
             .field("event_bus", &self.event_bus.as_ref().map(|_| "<EventBus>"))
             .finish()
     }
@@ -158,6 +160,13 @@ impl AppState {
         })
     }
 
+    /// Get view operations or return ServiceUnavailable error.
+    pub fn require_view(&self) -> Result<&Arc<dyn ViewOperations>, crate::error::HttpError> {
+        self.view.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable("View operations are not enabled.".into())
+        })
+    }
+
     /// Get NAC operations or return ServiceUnavailable error.
     pub fn require_nac(&self) -> Result<&Arc<dyn NodeAcpOperations>, crate::error::HttpError> {
         self.nac.as_ref().ok_or_else(|| {
@@ -182,6 +191,7 @@ pub struct AppStateBuilder {
     nac: Option<Arc<dyn NodeAcpOperations>>,
     collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
     doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
+    view: Option<Arc<dyn ViewOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
 }
 
@@ -201,6 +211,7 @@ impl AppStateBuilder {
             nac: None,
             collection_mgmt: None,
             doc_acp: None,
+            view: None,
             event_bus: None,
         }
     }
@@ -277,6 +288,12 @@ impl AppStateBuilder {
         self
     }
 
+    /// Set view operations.
+    pub fn with_view(mut self, view: Arc<dyn ViewOperations>) -> Self {
+        self.view = Some(view);
+        self
+    }
+
     /// Set event bus for subscriptions.
     pub fn with_event_bus(mut self, bus: Arc<dyn events::Bus>) -> Self {
         self.event_bus = Some(bus);
@@ -298,6 +315,7 @@ impl AppStateBuilder {
             nac: self.nac,
             collection_mgmt: self.collection_mgmt,
             doc_acp: self.doc_acp,
+            view: self.view,
             event_bus: self.event_bus,
         }
     }
