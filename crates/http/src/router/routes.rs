@@ -121,7 +121,14 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/collections", get(handlers::p2p::list_collections))
         .route("/collections", post(handlers::p2p::add_collections))
         .route("/collections", delete(handlers::p2p::remove_collections))
-        .route("/collections/sync", post(handlers::p2p::sync_collections)) // Go-compatible
+        .route(
+            "/collections/sync-branchable",
+            post(handlers::p2p::sync_branchable),
+        ) // Go-compatible
+        .route(
+            "/collections/sync-versions",
+            post(handlers::p2p::sync_versions),
+        ) // Go-compatible
         .route("/documents", get(handlers::p2p::list_documents)) // Go-compatible
         .route("/documents", post(handlers::p2p::add_documents))
         .route("/documents", delete(handlers::p2p::remove_documents))

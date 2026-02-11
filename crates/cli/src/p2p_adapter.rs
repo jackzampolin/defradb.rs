@@ -1,5 +1,7 @@
 //! Adapter to bridge P2PHostHandle to HTTP's P2POperations trait.
 
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -7,6 +9,7 @@ use blockstore::Blockstore;
 
 use defra_http::router::{P2POperations, ReplicatorInfo};
 use p2p::sync::SyncCoordinator;
+use p2p::topics::DefraTopic;
 use p2p::P2PHostHandle;
 
 /// Trait for looking up collection IDs by name.
@@ -14,10 +17,315 @@ use p2p::P2PHostHandle;
 /// This is used by the P2P adapter to resolve collection names to their
 /// CollectionIDs for topic subscription, matching Go DefraDB behavior.
 pub trait CollectionLookup: Send + Sync {
-    /// Get a collection's ID by its name.
-    ///
-    /// Returns `Some(collection_id)` if found, `None` if not found.
     fn get_collection_id(&self, name: &str) -> Option<String>;
+}
+
+/// Type-erased interface for push operations and collection lookup.
+///
+/// Subsumes `CollectionLookup` — implementations provide both capabilities.
+/// This avoids threading the store type parameter `S` through the HTTP layer.
+#[async_trait]
+pub trait DocPusher: Send + Sync {
+    async fn push_existing_docs(
+        &self,
+        handle: &P2PHostHandle,
+        peer_id: libp2p::PeerId,
+        collections: &[String],
+        se_key: Option<&[u8]>,
+    ) -> Result<(), String>;
+
+    fn get_collection_id(&self, name: &str) -> Option<String>;
+
+    fn list_collections(&self) -> Result<Vec<String>, String>;
+
+    async fn persist_replicator(&self, peer_id: &str, collections: &[String])
+        -> Result<(), String>;
+
+    async fn delete_persisted_replicator(&self, peer_id: &str) -> Result<(), String>;
+
+    async fn persist_p2p_documents(&self, doc_ids: &[String]) -> Result<(), String>;
+
+    async fn load_p2p_documents(&self) -> Result<Vec<String>, String>;
+
+    async fn persist_p2p_collections(&self, collections: &[String]) -> Result<(), String>;
+
+    /// Validate that a collection with the given name exists.
+    fn validate_collection_exists(&self, name: &str) -> Result<(), String>;
+
+    /// Validate that a collection with the given ID exists and is branchable.
+    fn validate_branchable_collection(&self, collection_id: &str) -> Result<(), String>;
+
+    /// Retry pushing a single document to a specific peer.
+    async fn retry_doc(
+        &self,
+        handle: &P2PHostHandle,
+        peer_id: libp2p::PeerId,
+        doc_id: &str,
+        collection_id: &str,
+    ) -> Result<(), String>;
+}
+
+/// Database-backed `DocPusher` implementation.
+///
+/// Wraps `db::DB<S>` and delegates to `db::push_existing_docs` for push
+/// operations and `db::DB::get_collection` / `list_collections` for lookups.
+pub struct DbDocPusher<S: storage::corekv::Store> {
+    db: Arc<db::DB<S>>,
+}
+
+impl<S: storage::corekv::Store + 'static> DbDocPusher<S> {
+    pub fn new(db: Arc<db::DB<S>>) -> Self {
+        Self { db }
+    }
+
+    pub fn new_arc(db: Arc<db::DB<S>>) -> Arc<dyn DocPusher> {
+        Arc::new(Self::new(db))
+    }
+}
+
+#[async_trait]
+impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
+    async fn push_existing_docs(
+        &self,
+        handle: &P2PHostHandle,
+        peer_id: libp2p::PeerId,
+        collections: &[String],
+        se_key: Option<&[u8]>,
+    ) -> Result<(), String> {
+        db::push_existing_docs(handle, &self.db, peer_id, collections, se_key).await
+    }
+
+    fn get_collection_id(&self, name: &str) -> Option<String> {
+        match self.db.get_collection(name) {
+            Ok(Some(collection)) => Some(collection.collection_id().to_string()),
+            Ok(None) => {
+                tracing::debug!(collection_name = %name, "Collection not found for P2P lookup");
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    collection_name = %name,
+                    error = %e,
+                    "Error looking up collection for P2P"
+                );
+                None
+            }
+        }
+    }
+
+    fn list_collections(&self) -> Result<Vec<String>, String> {
+        self.db
+            .list_collections()
+            .map_err(|e| format!("failed to list collections: {}", e))
+    }
+
+    async fn persist_replicator(
+        &self,
+        peer_id: &str,
+        collections: &[String],
+    ) -> Result<(), String> {
+        let pid: libp2p::PeerId = peer_id
+            .parse()
+            .map_err(|e| format!("invalid peer ID: {}", e))?;
+        let info = p2p::ReplicatorInfo::new(pid, collections.to_vec());
+        let bytes = info
+            .to_bytes()
+            .map_err(|e| format!("failed to serialize replicator info: {}", e))?;
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        peerstore
+            .set_replicator(peer_id, &bytes)
+            .await
+            .map_err(|e| format!("failed to persist replicator: {}", e))
+    }
+
+    async fn delete_persisted_replicator(&self, peer_id: &str) -> Result<(), String> {
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        peerstore
+            .delete_replicator(peer_id)
+            .await
+            .map_err(|e| format!("failed to delete persisted replicator: {}", e))
+    }
+
+    async fn persist_p2p_documents(&self, doc_ids: &[String]) -> Result<(), String> {
+        let data = serde_json::to_vec(doc_ids)
+            .map_err(|e| format!("failed to serialize P2P documents: {}", e))?;
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        peerstore
+            .set_p2p_documents(&data)
+            .await
+            .map_err(|e| format!("failed to persist P2P documents: {}", e))
+    }
+
+    async fn load_p2p_documents(&self) -> Result<Vec<String>, String> {
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        match peerstore
+            .get_p2p_documents()
+            .await
+            .map_err(|e| format!("failed to load P2P documents: {}", e))?
+        {
+            Some(data) => serde_json::from_slice(&data)
+                .map_err(|e| format!("failed to deserialize P2P documents: {}", e)),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    async fn persist_p2p_collections(&self, collections: &[String]) -> Result<(), String> {
+        let data = serde_json::to_vec(collections)
+            .map_err(|e| format!("failed to serialize P2P collections: {}", e))?;
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        peerstore
+            .set_p2p_collections(&data)
+            .await
+            .map_err(|e| format!("failed to persist P2P collections: {}", e))
+    }
+
+    fn validate_collection_exists(&self, name: &str) -> Result<(), String> {
+        match self.db.get_collection(name) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(format!("collection '{}' not found", name)),
+            Err(e) => Err(format!("failed to get collection: {}", e)),
+        }
+    }
+
+    fn validate_branchable_collection(&self, collection_id: &str) -> Result<(), String> {
+        match self.db.find_collection_by_id(collection_id) {
+            Ok(Some(collection)) => {
+                if !collection.schema().is_branchable {
+                    Err("collection is not branchable".to_string())
+                } else {
+                    Ok(())
+                }
+            }
+            Ok(None) => Err(format!("collection with ID '{}' not found", collection_id)),
+            Err(e) => Err(format!("failed to find collection: {}", e)),
+        }
+    }
+
+    async fn retry_doc(
+        &self,
+        handle: &P2PHostHandle,
+        peer_id: libp2p::PeerId,
+        doc_id: &str,
+        collection_id: &str,
+    ) -> Result<(), String> {
+        use storage::corekv::{IterOptions, Reader, Store};
+
+        let local_peer_id = handle
+            .local_peer_id()
+            .await
+            .map_err(|e| format!("failed to get local peer ID: {}", e))?;
+
+        let headstore = storage::stores::Headstore::new(self.db.store().clone());
+        let head_txn = headstore
+            .new_txn(true)
+            .await
+            .map_err(|e| format!("headstore txn: {}", e))?;
+
+        let blockstore_view = storage::stores::Blockstore::new(self.db.store().clone(), true);
+        let block_txn = blockstore_view
+            .new_txn(true)
+            .await
+            .map_err(|e| format!("blockstore txn: {}", e))?;
+
+        let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
+        let opts = IterOptions::new().with_prefix(prefix);
+        let mut iter = head_txn
+            .iterator(opts)
+            .await
+            .map_err(|e| format!("headstore iterator: {}", e))?;
+
+        let mut any_failed = false;
+        while let Some(pair) = iter
+            .next()
+            .await
+            .map_err(|e| format!("headstore iteration: {}", e))?
+        {
+            let key_str = String::from_utf8_lossy(&pair.key);
+            let parts: Vec<&str> = key_str.split('/').collect();
+            if parts.len() < 5 {
+                continue;
+            }
+            let head_cid = match cid::Cid::from_str(parts[4]) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let block_data = match block_txn.get(&head_cid.to_bytes()).await {
+                Ok(Some(data)) => data,
+                _ => continue,
+            };
+
+            if let Ok(parsed) = defra_core::Block::from_dag_cbor(&block_data) {
+                if let Some(ref links) = parsed.links {
+                    for link in links {
+                        if let Ok(Some(field_data)) = block_txn.get(&link.link.to_bytes()).await {
+                            let mut field_req = p2p::message::PushLogRequest::new(
+                                doc_id.to_string(),
+                                link.link.to_bytes(),
+                                collection_id.to_string(),
+                                local_peer_id.to_string(),
+                                field_data,
+                            );
+                            if p2p::signing::sign_message(handle.keypair(), &mut field_req).is_ok()
+                                && handle
+                                    .send_two_stream_request(peer_id, field_req)
+                                    .await
+                                    .is_err()
+                            {
+                                any_failed = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut request = p2p::message::PushLogRequest::new(
+                doc_id.to_string(),
+                head_cid.to_bytes(),
+                collection_id.to_string(),
+                local_peer_id.to_string(),
+                block_data,
+            );
+
+            if p2p::signing::sign_message(handle.keypair(), &mut request).is_err() {
+                any_failed = true;
+                continue;
+            }
+
+            if handle
+                .send_two_stream_request(peer_id, request)
+                .await
+                .is_err()
+            {
+                any_failed = true;
+            }
+        }
+
+        if any_failed {
+            Err("some pushes failed".to_string())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Also implement `CollectionLookup` so `DbDocPusher` can be used anywhere
+/// the older trait is expected.
+impl<S: storage::corekv::Store + 'static> CollectionLookup for DbDocPusher<S> {
+    fn get_collection_id(&self, name: &str) -> Option<String> {
+        DocPusher::get_collection_id(self, name)
+    }
+}
+
+/// Trait for syncing collection versions (schema definitions) via Bitswap.
+#[async_trait]
+pub trait VersionSyncer: Send + Sync {
+    async fn sync_versions(
+        &self,
+        handle: &P2PHostHandle,
+        version_ids: Vec<String>,
+        connected_peers: Vec<libp2p::PeerId>,
+    ) -> Result<(), String>;
 }
 
 /// Adapter that implements P2POperations using P2PHostHandle.
@@ -28,10 +336,12 @@ pub struct P2PAdapter<
     B: Blockstore + 'static = blockstore::DefraBlockstore<storage::backends::MemoryStore>,
 > {
     handle: P2PHostHandle,
-    /// Optional sync coordinator for replicator operations with auto-subscribe
     sync_coordinator: Option<Arc<SyncCoordinator<B>>>,
-    /// Optional collection lookup for resolving names to CollectionIDs
-    collection_lookup: Option<Arc<dyn CollectionLookup>>,
+    doc_pusher: Option<Arc<dyn DocPusher>>,
+    event_bus: Option<Arc<dyn events::Bus>>,
+    version_syncer: Option<Arc<dyn VersionSyncer>>,
+    peer_addresses: Arc<std::sync::RwLock<HashMap<String, String>>>,
+    tracked_documents: Arc<std::sync::RwLock<HashSet<String>>>,
 }
 
 impl<B: Blockstore + 'static> P2PAdapter<B> {
@@ -40,7 +350,11 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
         Self {
             handle,
             sync_coordinator: None,
-            collection_lookup: None,
+            doc_pusher: None,
+            event_bus: None,
+            version_syncer: None,
+            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
     }
 
@@ -52,23 +366,55 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
         Self {
             handle,
             sync_coordinator: Some(coordinator),
-            collection_lookup: None,
+            doc_pusher: None,
+            event_bus: None,
+            version_syncer: None,
+            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
     }
 
     /// Create a new adapter with sync coordinator and collection lookup.
-    ///
-    /// The collection lookup enables proper resolution of collection names to IDs
-    /// for P2P topic subscription, matching Go DefraDB behavior.
     pub fn with_sync_coordinator_and_lookup(
         handle: P2PHostHandle,
         coordinator: Arc<SyncCoordinator<B>>,
         lookup: Arc<dyn CollectionLookup>,
     ) -> Self {
+        let doc_pusher: Arc<dyn DocPusher> = Arc::new(LookupOnlyDocPusher(lookup));
         Self {
             handle,
             sync_coordinator: Some(coordinator),
-            collection_lookup: Some(lookup),
+            doc_pusher: Some(doc_pusher),
+            event_bus: None,
+            version_syncer: None,
+            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
+        }
+    }
+
+    /// Pre-populate tracked documents from persisted state without re-subscribing.
+    pub fn set_initial_tracked_documents(&self, docs: HashSet<String>) {
+        if let Ok(mut tracked) = self.tracked_documents.write() {
+            *tracked = docs;
+        }
+    }
+
+    /// Create a new adapter with full context for FFI-parity operations.
+    pub fn with_full_context(
+        handle: P2PHostHandle,
+        coordinator: Arc<SyncCoordinator<B>>,
+        doc_pusher: Arc<dyn DocPusher>,
+        event_bus: Arc<dyn events::Bus>,
+        version_syncer: Option<Arc<dyn VersionSyncer>>,
+    ) -> Self {
+        Self {
+            handle,
+            sync_coordinator: Some(coordinator),
+            doc_pusher: Some(doc_pusher),
+            event_bus: Some(event_bus),
+            version_syncer,
+            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
     }
 }
@@ -100,6 +446,90 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             coordinator,
             lookup,
         ))
+    }
+
+    /// Create an Arc-wrapped adapter with full context.
+    pub fn with_full_context_arc(
+        handle: P2PHostHandle,
+        coordinator: Arc<SyncCoordinator<B>>,
+        doc_pusher: Arc<dyn DocPusher>,
+        event_bus: Arc<dyn events::Bus>,
+        version_syncer: Option<Arc<dyn VersionSyncer>>,
+    ) -> Arc<dyn P2POperations> {
+        Arc::new(Self::with_full_context(
+            handle,
+            coordinator,
+            doc_pusher,
+            event_bus,
+            version_syncer,
+        ))
+    }
+}
+
+/// Adapter that wraps a `CollectionLookup` as a `DocPusher` for backward
+/// compatibility. Push operations return an error since no DB is available.
+struct LookupOnlyDocPusher(Arc<dyn CollectionLookup>);
+
+#[async_trait]
+impl DocPusher for LookupOnlyDocPusher {
+    async fn push_existing_docs(
+        &self,
+        _handle: &P2PHostHandle,
+        _peer_id: libp2p::PeerId,
+        _collections: &[String],
+        _se_key: Option<&[u8]>,
+    ) -> Result<(), String> {
+        Err("push_existing_docs not available (no database context)".to_string())
+    }
+
+    fn get_collection_id(&self, name: &str) -> Option<String> {
+        self.0.get_collection_id(name)
+    }
+
+    fn list_collections(&self) -> Result<Vec<String>, String> {
+        Err("list_collections not available (no database context)".to_string())
+    }
+
+    async fn persist_replicator(
+        &self,
+        _peer_id: &str,
+        _collections: &[String],
+    ) -> Result<(), String> {
+        Err("persist_replicator not available (no database context)".to_string())
+    }
+
+    async fn delete_persisted_replicator(&self, _peer_id: &str) -> Result<(), String> {
+        Err("delete_persisted_replicator not available (no database context)".to_string())
+    }
+
+    async fn persist_p2p_documents(&self, _doc_ids: &[String]) -> Result<(), String> {
+        Err("persist_p2p_documents not available (no database context)".to_string())
+    }
+
+    async fn load_p2p_documents(&self) -> Result<Vec<String>, String> {
+        Err("load_p2p_documents not available (no database context)".to_string())
+    }
+
+    async fn persist_p2p_collections(&self, _collections: &[String]) -> Result<(), String> {
+        Err("persist_p2p_collections not available (no database context)".to_string())
+    }
+
+    fn validate_collection_exists(&self, _name: &str) -> Result<(), String> {
+        Err("validate_collection_exists not available (no database context)".to_string())
+    }
+
+    fn validate_branchable_collection(&self, _collection_id: &str) -> Result<(), String> {
+        Err("validate_branchable_collection not available (no database context)".to_string())
+    }
+
+    async fn retry_doc(
+        &self,
+        _handle: &P2PHostHandle,
+        _peer_id: libp2p::PeerId,
+        _doc_id: &str,
+        _collection_id: &str,
+    ) -> Result<(), String> {
+        Err("retry_doc not available (no database context)".to_string())
     }
 }
 
@@ -139,30 +569,65 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn connected_peers(&self) -> Result<Vec<String>, String> {
-        self.handle
+        let connected = self
+            .handle
             .connected_peers()
             .await
-            .map(|peers| peers.into_iter().map(|p| p.to_string()).collect())
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+
+        let mut host_addrs = Vec::new();
+        let mut covered = HashSet::new();
+
+        // Retry peer_addresses() up to 5 times (matching FFI behavior)
+        for attempt in 0..5 {
+            host_addrs = self
+                .handle
+                .peer_addresses()
+                .await
+                .map_err(|e| format!("failed to get peer addresses: {}", e))?;
+
+            covered.clear();
+            for addr_str in &host_addrs {
+                if let Some(pid) = addr_str.rsplit("/p2p/").next() {
+                    covered.insert(pid.to_string());
+                }
+            }
+
+            let all_resolved = {
+                let cached = self.peer_addresses.read().ok();
+                connected.iter().all(|pid| {
+                    let pid_str = pid.to_string();
+                    covered.contains(&pid_str)
+                        || cached.as_ref().is_some_and(|c| c.contains_key(&pid_str))
+                })
+            };
+
+            if all_resolved || attempt == 4 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // Append cached addresses for any unresolved peers
+        let mut all_addrs = host_addrs;
+        if let Ok(cached) = self.peer_addresses.read() {
+            for pid in &connected {
+                let pid_str = pid.to_string();
+                if !covered.contains(&pid_str) {
+                    if let Some(cached_addr) = cached.get(&pid_str) {
+                        all_addrs.push(cached_addr.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(all_addrs)
     }
 
     async fn connect_peer(&self, addr: &str) -> Result<(), String> {
-        // Parse multiaddr and extract peer ID
-        let multiaddr: libp2p::Multiaddr = addr
-            .parse()
-            .map_err(|e| format!("invalid multiaddr: {}", e))?;
+        let (peer_id, full_multiaddr) = parse_peer_id_from_multiaddr(addr)?;
 
-        // Extract peer ID from multiaddr (should be in /p2p/<peer_id> component)
-        let peer_id = multiaddr
-            .iter()
-            .find_map(|proto| match proto {
-                libp2p::multiaddr::Protocol::P2p(peer_id) => Some(peer_id),
-                _ => None,
-            })
-            .ok_or_else(|| "multiaddr must contain /p2p/<peer_id> component".to_string())?;
-
-        // Remove the p2p component from the address for dialing
-        let dial_addr: libp2p::Multiaddr = multiaddr
+        let dial_addr: libp2p::Multiaddr = full_multiaddr
             .iter()
             .filter(|proto| !matches!(proto, libp2p::multiaddr::Protocol::P2p(_)))
             .collect();
@@ -170,7 +635,28 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         self.handle
             .dial(peer_id, vec![dial_addr])
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+
+        // Poll until connected (matching FFI: 50ms intervals, 10s timeout)
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(connected) = self.handle.connected_peers().await {
+                if connected.contains(&peer_id) {
+                    break;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("connection timed out waiting for peer".to_string());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // Cache the full multiaddr for connected_peers resolution
+        if let Ok(mut addrs) = self.peer_addresses.write() {
+            addrs.insert(peer_id.to_string(), addr.to_string());
+        }
+
+        Ok(())
     }
 
     async fn get_replicators(&self) -> Result<Vec<ReplicatorInfo>, String> {
@@ -201,22 +687,98 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         addr: Option<&str>,
     ) -> Result<(), String> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
-        let (peer_id, _) = parse_peer_id_from_multiaddr(addr_str)?;
+        let (peer_id, full_multiaddr) = parse_peer_id_from_multiaddr(addr_str)?;
 
-        // Use sync coordinator if available (enables auto-subscribe to topics)
+        // Strip /p2p/ component to get transport address for dialing
+        let dial_addr: libp2p::Multiaddr = full_multiaddr
+            .iter()
+            .filter(|proto| !matches!(proto, libp2p::multiaddr::Protocol::P2p(_)))
+            .collect();
+
+        // If collections empty, replicate all (matching Go behavior)
+        let effective_collections = if collections.is_empty() {
+            if let Some(ref pusher) = self.doc_pusher {
+                pusher.list_collections()?
+            } else {
+                return Err("no database context to list collections".to_string());
+            }
+        } else {
+            collections
+        };
+
+        // Resolve collection names → CIDs
+        let mut collection_cids = Vec::new();
+        if let Some(ref pusher) = self.doc_pusher {
+            for name in &effective_collections {
+                if let Some(cid) = pusher.get_collection_id(name) {
+                    collection_cids.push(cid);
+                } else {
+                    return Err(format!("collection '{}' not found", name));
+                }
+            }
+        } else {
+            collection_cids.clone_from(&effective_collections);
+        }
+
+        // Dial peer
+        self.handle
+            .dial(peer_id, vec![dial_addr])
+            .await
+            .map_err(|e| format!("failed to connect to replicator peer: {}", e))?;
+
+        // Cache peer address for connected_peers resolution
+        if let Ok(mut addrs) = self.peer_addresses.write() {
+            addrs.insert(peer_id.to_string(), addr_str.to_string());
+        }
+
+        // Register replicator (coordinator handles topic auto-subscribe)
         if let Some(ref coordinator) = self.sync_coordinator {
             coordinator
-                .set_replicator(peer_id, collections, true) // auto_subscribe = true
+                .set_replicator(peer_id, collection_cids.clone(), true)
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok(())
         } else {
-            // Fall back to direct handle
             self.handle
-                .set_replicator(peer_id, collections)
+                .set_replicator(peer_id, collection_cids.clone())
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
         }
+
+        // Persist to peerstore (best-effort, log warning on failure)
+        if let Some(ref pusher) = self.doc_pusher {
+            if let Err(e) = pusher
+                .persist_replicator(&peer_id.to_string(), &collection_cids)
+                .await
+            {
+                tracing::warn!(peer_id = %peer_id, error = %e, "failed to persist replicator");
+            }
+        }
+
+        // Spawn background task: push existing docs → emit ReplicatorCompleted
+        if let Some(ref pusher) = self.doc_pusher {
+            let push_handle = self.handle.clone();
+            let push_pusher = Arc::clone(pusher);
+            let push_event_bus = self.event_bus.clone();
+            let push_collections = effective_collections;
+
+            tokio::spawn(async move {
+                if let Err(e) = push_pusher
+                    .push_existing_docs(&push_handle, peer_id, &push_collections, None)
+                    .await
+                {
+                    tracing::error!(error = %e, "Failed to push existing docs to replicator");
+                }
+                if let Some(bus) = push_event_bus {
+                    tracing::debug!("publishing ReplicatorCompleted event");
+                    bus.publish(events::Message::replicator_completed());
+                    tracing::debug!("ReplicatorCompleted event published");
+                }
+            });
+        } else if let Some(ref bus) = self.event_bus {
+            bus.publish(events::Message::replicator_completed());
+        }
+
+        Ok(())
     }
 
     async fn remove_replicator(
@@ -227,17 +789,12 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
         let (peer_id, _) = parse_peer_id_from_multiaddr(addr_str)?;
 
-        // Go DefraDB behavior for replicator removal:
-        // - If collections is empty: delete the entire replicator (all collections)
-        // - If collections is non-empty: remove only those collections, keep replicator
-        //   if other collections remain
         if let Some(ref coordinator) = self.sync_coordinator {
             coordinator
                 .remove_replicator_collections(peer_id, collections)
                 .await
                 .map_err(|e| e.to_string())?;
         } else {
-            // Without coordinator, use direct handle (only supports full deletion)
             if !collections.is_empty() {
                 tracing::warn!(
                     peer_id = %peer_id,
@@ -249,6 +806,25 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 .delete_replicator(peer_id)
                 .await
                 .map_err(|e| e.to_string())?;
+        }
+
+        // Delete from peerstore (best-effort, log warning on failure)
+        if let Some(ref pusher) = self.doc_pusher {
+            if let Err(e) = pusher
+                .delete_persisted_replicator(&peer_id.to_string())
+                .await
+            {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    error = %e,
+                    "Failed to delete replicator from storage"
+                );
+            }
+        }
+
+        // Emit completion event
+        if let Some(ref bus) = self.event_bus {
+            bus.publish(events::Message::replicator_completed());
         }
 
         Ok(())
@@ -266,13 +842,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn add_collections(&self, collections: Vec<String>) -> Result<(), String> {
-        // Subscribe to collection topics for P2P sync
         if let Some(ref coordinator) = self.sync_coordinator {
             for collection_name in collections {
-                // Look up the collection to get its CollectionID (like Go does)
-                // The CollectionID is used as the GossipSub topic
-                let topic_id = if let Some(ref lookup) = self.collection_lookup {
-                    if let Some(collection_id) = lookup.get_collection_id(&collection_name) {
+                let topic_id = if let Some(ref pusher) = self.doc_pusher {
+                    if let Some(collection_id) = pusher.get_collection_id(&collection_name) {
                         tracing::debug!(
                             collection_name = %collection_name,
                             collection_id = %collection_id,
@@ -286,7 +859,6 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                         ));
                     }
                 } else {
-                    // Fallback: use name directly (for backwards compatibility)
                     tracing::warn!(
                         collection_name = %collection_name,
                         "No collection lookup available, using name as topic (may not match Go)"
@@ -299,6 +871,18 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                     .await
                     .map_err(|e| e.to_string())?;
             }
+
+            // Persist all subscribed collections (best-effort)
+            if let Some(ref pusher) = self.doc_pusher {
+                let all_cols = coordinator
+                    .get_subscribed_collections()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if let Err(e) = pusher.persist_p2p_collections(&all_cols).await {
+                    tracing::warn!(error = %e, "failed to persist P2P collections");
+                }
+            }
+
             Ok(())
         } else {
             Err("p2p collections functionality requires sync coordinator".to_string())
@@ -306,7 +890,6 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn remove_collections(&self, collections: Vec<String>) -> Result<(), String> {
-        // Unsubscribe from collection topics
         if let Some(ref coordinator) = self.sync_coordinator {
             for collection_id in collections {
                 coordinator
@@ -321,52 +904,249 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn get_documents(&self) -> Result<Vec<defra_http::router::P2pDocumentInfo>, String> {
-        // Document-level P2P replication not yet implemented
-        Ok(Vec::new())
+        let docs = self
+            .tracked_documents
+            .read()
+            .map_err(|e| format!("failed to read tracked documents: {}", e))?;
+        let mut sorted: Vec<String> = docs.iter().cloned().collect();
+        sorted.sort();
+        Ok(sorted
+            .into_iter()
+            .map(|doc_id| defra_http::router::P2pDocumentInfo {
+                collection: String::new(),
+                doc_id,
+            })
+            .collect())
     }
 
     async fn add_documents(
         &self,
-        _docs: Vec<defra_http::router::P2pDocumentRequest>,
+        docs: Vec<defra_http::router::P2pDocumentRequest>,
     ) -> Result<(), String> {
-        // Document-level P2P replication not yet implemented
-        Err("document-level P2P replication not yet implemented".to_string())
+        let doc_ids: Vec<String> = docs.into_iter().map(|d| d.doc_id).collect();
+
+        // Validate all doc IDs atomically
+        for doc_id in &doc_ids {
+            if document::DocID::from_string(doc_id).is_err() {
+                return Err("malformed document ID, missing either version or cid".to_string());
+            }
+        }
+
+        for doc_id in &doc_ids {
+            let topic = DefraTopic::document(doc_id);
+            if let Err(e) = self.handle.subscribe(topic).await {
+                tracing::warn!(doc_id = %doc_id, error = %e, "Failed to subscribe to GossipSub topic for document");
+            }
+            if let Ok(mut tracked) = self.tracked_documents.write() {
+                tracked.insert(doc_id.clone());
+            }
+        }
+
+        // Persist all tracked documents (best-effort)
+        if let Some(ref pusher) = self.doc_pusher {
+            let all_docs: Vec<String> = self
+                .tracked_documents
+                .read()
+                .map(|docs| docs.iter().cloned().collect())
+                .unwrap_or_default();
+            if let Err(e) = pusher.persist_p2p_documents(&all_docs).await {
+                tracing::warn!(error = %e, "failed to persist P2P documents");
+            }
+        }
+
+        Ok(())
     }
 
     async fn remove_documents(
         &self,
-        _docs: Vec<defra_http::router::P2pDocumentRequest>,
+        docs: Vec<defra_http::router::P2pDocumentRequest>,
     ) -> Result<(), String> {
-        // Document-level P2P replication not yet implemented
-        Err("document-level P2P replication not yet implemented".to_string())
+        let doc_ids: Vec<String> = docs.into_iter().map(|d| d.doc_id).collect();
+
+        // Validate all doc IDs atomically
+        for doc_id in &doc_ids {
+            if document::DocID::from_string(doc_id).is_err() {
+                return Err("malformed document ID, missing either version or cid".to_string());
+            }
+        }
+
+        for doc_id in &doc_ids {
+            let topic = DefraTopic::document(doc_id);
+            if let Err(e) = self.handle.unsubscribe(topic).await {
+                tracing::warn!(doc_id = %doc_id, error = %e, "Failed to unsubscribe from GossipSub topic for document");
+            }
+            if let Ok(mut tracked) = self.tracked_documents.write() {
+                tracked.remove(doc_id);
+            }
+        }
+
+        Ok(())
     }
 
-    async fn sync_collections(&self) -> Result<(), String> {
-        // Trigger immediate collection sync - not yet implemented
-        Err("sync_collections not yet implemented".to_string())
+    async fn sync_documents(
+        &self,
+        collection_name: &str,
+        doc_ids: Vec<String>,
+    ) -> Result<(), String> {
+        let pusher = self
+            .doc_pusher
+            .as_ref()
+            .ok_or_else(|| "no database context for sync".to_string())?;
+        pusher.validate_collection_exists(collection_name)?;
+
+        let event_bus = self
+            .event_bus
+            .as_ref()
+            .ok_or_else(|| "no event bus for sync".to_string())?;
+
+        let connected_peers = self
+            .handle
+            .connected_peers()
+            .await
+            .map_err(|e| format!("failed to get connected peers: {}", e))?;
+
+        if connected_peers.is_empty() {
+            return Ok(());
+        }
+
+        // Subscribe to MergeComplete events BEFORE sending requests
+        let mut sub = event_bus.subscribe(&[events::EventName::MergeComplete]);
+
+        let total_expected = connected_peers.len() * doc_ids.len();
+        let mut total_received = 0;
+        let overall_timeout = std::time::Duration::from_secs(30);
+        let idle_timeout = std::time::Duration::from_secs(3);
+        let start = std::time::Instant::now();
+        let doc_set: HashSet<String> = doc_ids.iter().cloned().collect();
+
+        for _attempt in 0..3 {
+            if total_received >= total_expected || start.elapsed() >= overall_timeout {
+                break;
+            }
+
+            let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
+            if let Err(e) = p2p::signing::sign_message(self.handle.keypair(), &mut request) {
+                event_bus.unsubscribe(sub.id());
+                return Err(format!("failed to sign DocSync request: {}", e));
+            }
+
+            for peer_id in &connected_peers {
+                match self
+                    .handle
+                    .send_doc_sync_request(*peer_id, request.clone())
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!(peer_id = %peer_id, error = %e, "failed to send DocSync request")
+                    }
+                }
+            }
+
+            // Wait for merges with idle timeout
+            let mut last_merge = std::time::Instant::now();
+            while total_received < total_expected && start.elapsed() < overall_timeout {
+                if total_received >= doc_ids.len() && last_merge.elapsed() > idle_timeout {
+                    break;
+                }
+
+                match tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv()).await
+                {
+                    Ok(Some(msg)) => {
+                        if let Some(data) = msg.as_merge_complete() {
+                            if doc_set.contains(&data.doc_id) {
+                                total_received += 1;
+                                last_merge = std::time::Instant::now();
+                            }
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => {}
+                }
+            }
+        }
+
+        event_bus.unsubscribe(sub.id());
+        Ok(())
     }
 
-    async fn sync_documents(&self) -> Result<(), String> {
-        // Trigger immediate document sync - not yet implemented
-        Err("sync_documents not yet implemented".to_string())
+    async fn sync_branchable_collection(&self, collection_id: &str) -> Result<(), String> {
+        let pusher = self
+            .doc_pusher
+            .as_ref()
+            .ok_or_else(|| "no database context for sync".to_string())?;
+        pusher.validate_branchable_collection(collection_id)?;
+
+        let connected_peers = self
+            .handle
+            .connected_peers()
+            .await
+            .map_err(|e| format!("failed to get connected peers: {}", e))?;
+
+        if connected_peers.is_empty() {
+            return Ok(());
+        }
+
+        let mut request = p2p::message::BranchableSyncRequest::new(collection_id.to_string());
+        p2p::signing::sign_message(self.handle.keypair(), &mut request)
+            .map_err(|e| format!("failed to sign BranchableSync request: {}", e))?;
+
+        for peer_id in &connected_peers {
+            let request_clone = request.clone();
+            let handle = self.handle.clone();
+            let peer_id = *peer_id;
+
+            tokio::spawn(async move {
+                if let Err(e) = handle
+                    .send_branchable_sync_request(peer_id, request_clone)
+                    .await
+                {
+                    tracing::warn!(peer_id = %peer_id, error = %e, "failed to send BranchableSyncRequest");
+                }
+            });
+        }
+
+        Ok(())
+    }
+
+    async fn sync_collection_versions(&self, version_ids: Vec<String>) -> Result<(), String> {
+        if version_ids.is_empty() {
+            return Ok(());
+        }
+
+        let connected_peers = self
+            .handle
+            .connected_peers()
+            .await
+            .map_err(|e| format!("failed to get connected peers: {}", e))?;
+
+        if connected_peers.is_empty() {
+            return Ok(());
+        }
+
+        let syncer = self
+            .version_syncer
+            .as_ref()
+            .ok_or_else(|| "version syncer required".to_string())?;
+
+        syncer
+            .sync_versions(&self.handle, version_ids, connected_peers)
+            .await
     }
 }
 
 /// Implementation of CollectionLookup for the database.
 ///
-/// This allows the P2P adapter to look up collection IDs by name,
-/// matching Go DefraDB's behavior for topic subscription.
+/// Retained for backward compatibility. Prefer `DbDocPusher` for new code.
 pub struct DbCollectionLookup<S: storage::corekv::Store> {
     db: Arc<db::DB<S>>,
 }
 
 impl<S: storage::corekv::Store + 'static> DbCollectionLookup<S> {
-    /// Create a new collection lookup wrapping the database.
     pub fn new(db: Arc<db::DB<S>>) -> Self {
         Self { db }
     }
 
-    /// Create an Arc-wrapped collection lookup.
     pub fn new_arc(db: Arc<db::DB<S>>) -> Arc<dyn CollectionLookup> {
         Arc::new(Self::new(db))
     }

@@ -152,11 +152,19 @@ impl P2POperations for MockP2POperations {
         Ok(())
     }
 
-    async fn sync_collections(&self) -> Result<(), String> {
+    async fn sync_documents(
+        &self,
+        _collection_name: &str,
+        _doc_ids: Vec<String>,
+    ) -> Result<(), String> {
         Ok(())
     }
 
-    async fn sync_documents(&self) -> Result<(), String> {
+    async fn sync_branchable_collection(&self, _collection_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn sync_collection_versions(&self, _version_ids: Vec<String>) -> Result<(), String> {
         Ok(())
     }
 }
@@ -238,11 +246,19 @@ impl P2POperations for FailingMockP2POperations {
         Err(self.error.clone())
     }
 
-    async fn sync_collections(&self) -> Result<(), String> {
+    async fn sync_documents(
+        &self,
+        _collection_name: &str,
+        _doc_ids: Vec<String>,
+    ) -> Result<(), String> {
         Err(self.error.clone())
     }
 
-    async fn sync_documents(&self) -> Result<(), String> {
+    async fn sync_branchable_collection(&self, _collection_id: &str) -> Result<(), String> {
+        Err(self.error.clone())
+    }
+
+    async fn sync_collection_versions(&self, _version_ids: Vec<String>) -> Result<(), String> {
         Err(self.error.clone())
     }
 }

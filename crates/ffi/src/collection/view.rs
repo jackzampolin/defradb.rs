@@ -203,7 +203,7 @@ mod tests {
         unsafe { crate::types::defra_free_string(result.value) };
 
         // Add a view
-        let gql_query = CString::new("{ User { name } }").unwrap();
+        let gql_query = CString::new("User { name }").unwrap();
         let view_sdl = CString::new("type UserView { name: String }").unwrap();
         let result = unsafe {
             add_view(

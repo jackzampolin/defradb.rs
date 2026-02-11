@@ -5,7 +5,7 @@ use axum::{extract::State, Json};
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
-use crate::router::{AppState, NodePermission, P2pDocumentRequest};
+use crate::router::{AppState, NodePermission, P2pDocumentRequest, SyncDocumentsRequest};
 use crate::validation::validate_doc_id;
 
 /// List P2P documents (Go-compatible).
@@ -120,20 +120,25 @@ pub async fn remove_documents(
     Ok(())
 }
 
-/// Sync documents with peers (trigger immediate sync).
+/// Sync specific documents from connected peers.
 ///
 /// POST /api/v0/p2p/documents/sync
+///
+/// Accepts JSON body: `{"collectionName": "...", "docIDs": ["..."]}`
 ///
 /// Requires `P2pDocumentCreate` permission when NAC is enabled (per Go behavior).
 pub async fn sync_documents(
     State(state): State<AppState>,
     identity: ExtractIdentity,
+    Json(body): Json<SyncDocumentsRequest>,
 ) -> Result<Json<()>, HttpError> {
     require_permission(&state, &identity, NodePermission::P2pDocumentCreate).await?;
 
     let p2p = state.require_p2p()?;
 
-    p2p.sync_documents().await.map_err(HttpError::Internal)?;
+    p2p.sync_documents(&body.collection_name, body.doc_ids)
+        .await
+        .map_err(HttpError::Internal)?;
 
     Ok(Json(()))
 }

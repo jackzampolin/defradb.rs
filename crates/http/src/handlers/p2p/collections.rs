@@ -5,7 +5,7 @@ use axum::{extract::State, Json};
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
-use crate::router::{AppState, NodePermission};
+use crate::router::{AppState, NodePermission, SyncBranchableRequest, SyncVersionsRequest};
 use crate::validation::validate_collection_name;
 
 /// List P2P collections.
@@ -96,20 +96,48 @@ pub async fn remove_collections(
     Ok(())
 }
 
-/// Sync collections with peers (trigger immediate sync).
+/// Sync a branchable collection from connected peers.
 ///
-/// POST /api/v0/p2p/collections/sync
+/// POST /api/v0/p2p/collections/sync-branchable
 ///
-/// Requires `P2pCollectionList` permission when NAC is enabled (per Go behavior).
-pub async fn sync_collections(
+/// Accepts JSON body: `{"collectionID": "..."}`
+///
+/// Requires `P2pCollectionCreate` permission when NAC is enabled (per Go behavior).
+pub async fn sync_branchable(
     State(state): State<AppState>,
     identity: ExtractIdentity,
+    Json(body): Json<SyncBranchableRequest>,
 ) -> Result<Json<()>, HttpError> {
-    require_permission(&state, &identity, NodePermission::P2pCollectionList).await?;
+    require_permission(&state, &identity, NodePermission::P2pCollectionCreate).await?;
 
     let p2p = state.require_p2p()?;
 
-    p2p.sync_collections().await.map_err(HttpError::Internal)?;
+    p2p.sync_branchable_collection(&body.collection_id)
+        .await
+        .map_err(HttpError::Internal)?;
+
+    Ok(Json(()))
+}
+
+/// Sync collection versions (schema definitions) from connected peers via Bitswap.
+///
+/// POST /api/v0/p2p/collections/sync-versions
+///
+/// Accepts JSON body: `{"versionIDs": ["bafyrei...", ...]}`
+///
+/// Requires `P2pCollectionCreate` permission when NAC is enabled (per Go behavior).
+pub async fn sync_versions(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Json(body): Json<SyncVersionsRequest>,
+) -> Result<Json<()>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pCollectionCreate).await?;
+
+    let p2p = state.require_p2p()?;
+
+    p2p.sync_collection_versions(body.version_ids)
+        .await
+        .map_err(HttpError::Internal)?;
 
     Ok(Json(()))
 }

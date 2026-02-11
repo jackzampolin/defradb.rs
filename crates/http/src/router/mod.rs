@@ -11,5 +11,6 @@ pub use traits::{
     DocumentAcpOperations, EncryptedIndexInfo, EncryptedIndexOperations, ImportResult,
     IndexFieldInfo, IndexInfo, IndexOperations, LensOperations, NacStatus, NacStatusInfo,
     NodeAcpOperations, NodePermission, P2POperations, P2pDocumentInfo, P2pDocumentRequest,
-    PolicyInfo, ReplicatorInfo, SchemaOperations, TransactionOperations, ViewOperations,
+    PolicyInfo, ReplicatorInfo, SchemaOperations, SyncBranchableRequest, SyncDocumentsRequest,
+    SyncVersionsRequest, TransactionOperations, ViewOperations,
 };
