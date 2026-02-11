@@ -55,6 +55,8 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/", get(handlers::list_collections))
         .route("/", patch(handlers::patch_collection))
         .route("/set-active", post(handlers::set_active))
+        // Go-compatible list-all-indexes route (no path param)
+        .route("/indexes", get(handlers::index::go_get_all_indexes))
         .route("/:name", get(handlers::get_collection_doc_ids))
         .route("/:name", post(handlers::create_document))
         .route("/:name/truncate", delete(handlers::truncate_collection))
@@ -189,6 +191,11 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .nest("/lens", lens_routes)
         // NAC endpoints (Rust-native routes)
         .nest("/nac", nac_routes)
+        // Go-compatible list-all encrypted indexes
+        .route(
+            "/encrypted-indexes",
+            get(handlers::encrypted_index::go_list_all_encrypted_indexes),
+        )
         // Utility endpoints (Go-compatible)
         .route("/purge", post(handlers::utility::purge))
         .route("/node/identity", get(handlers::utility::get_node_identity))

@@ -191,10 +191,10 @@ pub trait EncryptedIndexOperations: Send + Sync {
         field_name: &str,
     ) -> Result<EncryptedIndexInfo, String>;
 
-    /// List encrypted indexes for a collection.
+    /// List encrypted indexes. If `collection` is `None`, returns indexes from all collections.
     async fn list_encrypted_indexes(
         &self,
-        collection: &str,
+        collection: Option<&str>,
     ) -> Result<Vec<EncryptedIndexInfo>, String>;
 
     /// Delete an encrypted index from a collection field.
@@ -208,6 +208,9 @@ pub trait EncryptedIndexOperations: Send + Sync {
 /// Encrypted index information for HTTP responses.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EncryptedIndexInfo {
+    /// Collection name (used for grouping in list-all responses, not serialized in per-collection responses).
+    #[serde(skip)]
+    pub collection: String,
     #[serde(rename = "FieldName")]
     pub field_name: String,
     #[serde(rename = "Type")]

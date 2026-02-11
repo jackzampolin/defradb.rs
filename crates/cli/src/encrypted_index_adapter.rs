@@ -96,6 +96,7 @@ impl<S: Store + 'static> EncryptedIndexOperations for EncryptedIndexAdapter<S> {
             .map_err(|e| format!("{}", e))?;
 
         Ok(EncryptedIndexInfo {
+            collection: collection.to_string(),
             field_name: field_name.to_string(),
             index_type: "equality".to_string(),
         })
@@ -103,23 +104,44 @@ impl<S: Store + 'static> EncryptedIndexOperations for EncryptedIndexAdapter<S> {
 
     async fn list_encrypted_indexes(
         &self,
-        collection: &str,
+        collection: Option<&str>,
     ) -> Result<Vec<EncryptedIndexInfo>, String> {
-        let col = self
-            .database
-            .get_collection(collection)
-            .map_err(|e| format!("{}", e))?
-            .ok_or_else(|| format!("collection '{}' not found", collection))?;
+        let collections = if let Some(name) = collection {
+            let col = self
+                .database
+                .get_collection(name)
+                .map_err(|e| format!("{}", e))?
+                .ok_or_else(|| format!("collection '{}' not found", name))?;
+            vec![col]
+        } else {
+            let names = self
+                .database
+                .list_collections()
+                .map_err(|e| format!("{}", e))?;
+            let mut cols = Vec::new();
+            for name in &names {
+                if let Some(col) = self
+                    .database
+                    .get_collection(name)
+                    .map_err(|e| format!("{}", e))?
+                {
+                    cols.push(col);
+                }
+            }
+            cols
+        };
 
-        Ok(col
-            .schema()
-            .encrypted_indexes
-            .iter()
-            .map(|idx| EncryptedIndexInfo {
-                field_name: idx.field_name.clone(),
-                index_type: "equality".to_string(),
-            })
-            .collect())
+        let mut result = Vec::new();
+        for col in &collections {
+            for idx in &col.schema().encrypted_indexes {
+                result.push(EncryptedIndexInfo {
+                    collection: col.name().to_string(),
+                    field_name: idx.field_name.clone(),
+                    index_type: "equality".to_string(),
+                });
+            }
+        }
+        Ok(result)
     }
 
     async fn delete_encrypted_index(

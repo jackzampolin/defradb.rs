@@ -2,6 +2,8 @@
 //!
 //! Route pattern: /api/v0/collections/{name}/indexes (collection in path).
 
+use std::collections::HashMap;
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -216,6 +218,46 @@ pub async fn go_drop_index(
 
     // Return empty body to match Go DefraDB behavior
     Ok(StatusCode::OK)
+}
+
+/// List all indexes across all collections (Go-compatible route).
+///
+/// GET /api/v0/collections/indexes
+///
+/// Returns a map grouped by collection name to match Go DefraDB format.
+pub async fn go_get_all_indexes(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<HashMap<String, Vec<GoIndexDescription>>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::IndexList).await?;
+
+    let index_ops = state.require_index()?;
+
+    let indexes = index_ops
+        .list_indexes(None)
+        .await
+        .map_err(HttpError::Internal)?;
+
+    let mut grouped: HashMap<String, Vec<GoIndexDescription>> = HashMap::new();
+    for (i, idx) in indexes.into_iter().enumerate() {
+        let collection = idx.collection.clone();
+        let desc = GoIndexDescription {
+            name: idx.name,
+            id: i as u32,
+            fields: idx
+                .fields
+                .into_iter()
+                .map(|f| GoIndexedFieldDescription {
+                    name: f.name,
+                    descending: f.direction.as_deref() == Some("DESC"),
+                })
+                .collect(),
+            unique: idx.unique,
+        };
+        grouped.entry(collection).or_default().push(desc);
+    }
+
+    Ok(Json(grouped))
 }
 
 #[cfg(test)]

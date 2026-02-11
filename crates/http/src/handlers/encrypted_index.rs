@@ -2,6 +2,8 @@
 //!
 //! Route pattern: /api/v0/collections/{name}/encrypted-indexes
 
+use std::collections::HashMap;
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -83,7 +85,7 @@ pub async fn go_list_encrypted_indexes(
     })?;
 
     let indexes = ops
-        .list_encrypted_indexes(&collection)
+        .list_encrypted_indexes(Some(&collection))
         .await
         .map_err(HttpError::Internal)?;
 
@@ -123,6 +125,32 @@ pub async fn go_delete_encrypted_index(
         .map_err(HttpError::BadRequest)?;
 
     Ok(StatusCode::OK)
+}
+
+/// List all encrypted indexes across all collections (Go-compatible route).
+///
+/// GET /api/v0/encrypted-indexes
+///
+/// Returns a map grouped by collection name to match Go DefraDB format.
+pub async fn go_list_all_encrypted_indexes(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<HashMap<String, Vec<EncryptedIndexInfo>>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::IndexList).await?;
+
+    let ops = state.require_encrypted_index()?;
+
+    let indexes = ops
+        .list_encrypted_indexes(None)
+        .await
+        .map_err(HttpError::Internal)?;
+
+    let mut grouped: HashMap<String, Vec<EncryptedIndexInfo>> = HashMap::new();
+    for idx in indexes {
+        grouped.entry(idx.collection.clone()).or_default().push(idx);
+    }
+
+    Ok(Json(grouped))
 }
 
 #[cfg(test)]

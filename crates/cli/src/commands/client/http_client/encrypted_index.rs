@@ -1,5 +1,7 @@
 //! Encrypted index HTTP client methods
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use urlencoding::encode;
 
@@ -48,6 +50,13 @@ impl HttpClient {
             self.base_url(),
             encode(collection)
         );
+        self.request_json("GET", &url, None).await
+    }
+
+    pub async fn encrypted_index_list_all(
+        &self,
+    ) -> Result<HashMap<String, Vec<EncryptedIndexInfo>>> {
+        let url = format!("{}/api/v0/encrypted-indexes", self.base_url());
         self.request_json("GET", &url, None).await
     }
 

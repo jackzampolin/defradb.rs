@@ -53,6 +53,7 @@ impl EncryptedIndexOperations for MockEncryptedIndexOperations {
         }
 
         let info = EncryptedIndexInfo {
+            collection: collection.to_string(),
             field_name: field_name.to_string(),
             index_type: "equality".to_string(),
         };
@@ -62,13 +63,17 @@ impl EncryptedIndexOperations for MockEncryptedIndexOperations {
 
     async fn list_encrypted_indexes(
         &self,
-        collection: &str,
+        collection: Option<&str>,
     ) -> Result<Vec<EncryptedIndexInfo>, String> {
         let indexes = self.indexes.read().unwrap();
         Ok(indexes
             .iter()
-            .filter(|(col, _)| col == collection)
-            .map(|(_, idx)| idx.clone())
+            .filter(|(col, _)| collection.map_or(true, |name| col == name))
+            .map(|(col, idx)| {
+                let mut info = idx.clone();
+                info.collection = col.clone();
+                info
+            })
             .collect())
     }
 
