@@ -1,0 +1,250 @@
+//! IPLD block builder for document mutations.
+//!
+//! Creates proper Block structures with CRDT delta payloads for P2P synchronization.
+//! Matches Go DefraDB's block format for wire compatibility.
+//!
+//! This module provides two main functions:
+//! - `build_blocks_from_document`: For P2P broadcast (uses external blockstore)
+//! - `write_document_blocks`: For FFI/local storage (uses transaction stores)
+
+mod build;
+mod collection;
+mod read;
+#[cfg(test)]
+mod tests;
+mod write;
+
+#[allow(deprecated)]
+pub use build::build_block_from_document;
+pub use build::build_blocks_from_document;
+pub use collection::write_collection_block;
+pub use read::read_latest_composite_block;
+pub use write::{write_delete_block, write_document_blocks};
+
+use cid::Cid;
+use crypto::PrivateKey;
+use datastore::NamespaceView;
+use defra_core::block::{
+    Block, CollectionDeltaPayload, CompositeDeltaPayload, CounterDeltaPayload, CrdtDelta, DAGLink,
+    Encryption, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
+};
+use defra_core::encryption::EncryptionConfig;
+use defra_core::signing::SigningConfig;
+use document::{Document, NormalValue};
+use storage::corekv::Key;
+use storage::keys::headstore::{HeadstoreColKey, HeadstoreDocKey};
+
+pub(super) fn encrypt_delta(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
+    let (ciphertext, _nonce) = crypto::encryption::aes::encrypt_aes(plaintext, key, &[], true)
+        .map_err(|e| format!("encryption failed: {}", e))?;
+    Ok(ciphertext)
+}
+
+/// Sign a block and store the signature as a separate IPLD block.
+///
+/// Matches Go's `signBlock()` in `internal/core/block/signing.go`:
+/// 1. Only signs first field blocks (priority <= 1) and composite blocks
+/// 2. Marshals block WITHOUT signature to get bytes to sign
+/// 3. Signs the bytes with the private key
+/// 4. Creates a Signature block with header (type + public key) and value
+/// 5. Stores the signature block in blockstore
+/// 6. Returns the signature block's CID
+///
+/// The caller must then set `block.signature = Some(sig_cid)` and re-serialize.
+pub(super) async fn sign_block(
+    block: &Block,
+    signer: &SigningConfig,
+    blockstore: &NamespaceView,
+) -> Result<Option<Cid>, String> {
+    // Only sign first field blocks (priority <= 1) and composite blocks.
+    // Higher-priority field blocks are not signed — their integrity is
+    // guaranteed by the signature on the parent composite block.
+    let is_field = matches!(&block.delta, CrdtDelta::Lww(_) | CrdtDelta::Counter(_));
+    if is_field && block.delta.priority() > 1 {
+        return Ok(None);
+    }
+
+    // Serialize the block (without signature) to get the bytes to sign
+    let block_bytes = block
+        .to_dag_cbor()
+        .map_err(|e| format!("Failed to encode block for signing: {}", e))?;
+
+    // Determine signature type and sign
+    let (sig_type, sig_bytes) = match signer.key_type.as_str() {
+        "ed25519" => {
+            let private_key = crypto::Ed25519PrivateKey::from_bytes(&signer.private_key_bytes)
+                .map_err(|e| format!("Failed to load Ed25519 private key: {}", e))?;
+            let sig = private_key
+                .sign(&block_bytes)
+                .map_err(|e| format!("Failed to sign block: {}", e))?;
+            (SignatureType::EdDSA, sig)
+        }
+        "secp256k1" => {
+            let private_key = crypto::Secp256k1PrivateKey::from_bytes(&signer.private_key_bytes)
+                .map_err(|e| format!("Failed to load secp256k1 private key: {}", e))?;
+            let sig = private_key
+                .sign(&block_bytes)
+                .map_err(|e| format!("Failed to sign block: {}", e))?;
+            (SignatureType::ES256K, sig)
+        }
+        other => return Err(format!("Unsupported key type for signing: {}", other)),
+    };
+
+    // Create signature block.
+    // Go uses `[]byte(fullIdent.PublicKey().String())` for identity,
+    // which is the hex-encoded public key string as bytes.
+    let signature = Signature::new(
+        SignatureHeader::new(sig_type, signer.public_key_hex.as_bytes().to_vec()),
+        sig_bytes,
+    );
+
+    // Store signature block in blockstore and return its CID
+    let sig_cbor = signature
+        .to_dag_cbor()
+        .map_err(|e| format!("Failed to encode signature block: {}", e))?;
+    let sig_cid = signature
+        .generate_cid()
+        .map_err(|e| format!("Failed to generate signature CID: {}", e))?;
+
+    blockstore
+        .set(&sig_cid.to_bytes(), &sig_cbor)
+        .await
+        .map_err(|e| format!("Failed to store signature block: {}", e))?;
+
+    Ok(Some(sig_cid))
+}
+
+/// Result of building blocks from a document mutation.
+#[derive(Debug, Clone)]
+pub struct BlockResult {
+    /// The CID of the composite (root) block
+    pub cid: Cid,
+    /// The raw composite block bytes (DAG-CBOR encoded)
+    pub block: Vec<u8>,
+    /// The document ID
+    pub doc_id: String,
+    /// CIDs of all field blocks created
+    pub field_cids: Vec<Cid>,
+}
+
+/// Encode a NormalValue as CBOR bytes.
+pub(super) fn encode_value_as_cbor(value: &NormalValue) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)
+        .map_err(|e| format!("Failed to encode value as CBOR: {}", e))?;
+    Ok(bytes)
+}
+
+/// Encode a priority as a varint (matching Go's binary.PutUvarint).
+pub(super) fn encode_priority_varint(priority: u64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(10); // Max varint64 is 10 bytes
+    let mut n = priority;
+    while n >= 0x80 {
+        buf.push((n as u8) | 0x80);
+        n >>= 7;
+    }
+    buf.push(n as u8);
+    buf
+}
+
+/// Decode a varint to priority (matching Go's binary.Uvarint).
+pub(super) fn decode_priority_varint(buf: &[u8]) -> u64 {
+    let mut n: u64 = 0;
+    let mut shift: u32 = 0;
+    for &byte in buf {
+        if shift >= 64 {
+            return 0; // Overflow protection
+        }
+        n |= ((byte & 0x7f) as u64) << shift;
+        if byte < 0x80 {
+            return n;
+        }
+        shift += 7;
+    }
+    n
+}
+
+/// A single head entry for a document field.
+pub(super) struct FieldHeadEntry {
+    /// The CID of the head
+    pub(super) cid: Cid,
+    /// The full key (for deletion when replacing)
+    pub(super) key: Vec<u8>,
+}
+
+/// Get all existing heads for a specific field of a document.
+///
+/// During concurrent P2P updates, a field can have multiple heads (branches).
+/// Returns all current head CIDs for the field, sorted by CID string
+/// representation to match Go's deterministic head ordering.
+pub(super) async fn get_all_field_heads(
+    headstore: &NamespaceView,
+    doc_id: &str,
+    field_id: &str,
+) -> Result<Vec<FieldHeadEntry>, String> {
+    use storage::corekv::IterOptions;
+
+    let prefix = HeadstoreDocKey::field_prefix(doc_id, field_id);
+    let opts = IterOptions::new().with_prefix(prefix);
+
+    let mut iter = headstore
+        .iterator(opts)
+        .await
+        .map_err(|e| format!("Failed to create headstore iterator: {}", e))?;
+
+    let mut entries = Vec::new();
+    while let Some(kv_pair) = iter
+        .next()
+        .await
+        .map_err(|e| format!("Failed to iterate headstore: {}", e))?
+    {
+        // Parse CID from key: /d/{doc_id}/{field_id}/{cid}
+        let key_str = String::from_utf8_lossy(&kv_pair.key);
+        let parts: Vec<&str> = key_str.split('/').collect();
+        if let Some(cid_str) = parts.last() {
+            if let Ok(cid) = cid_str.parse::<Cid>() {
+                entries.push(FieldHeadEntry {
+                    cid,
+                    key: kv_pair.key.clone(),
+                });
+            }
+        }
+    }
+
+    // Sort by CID string representation to match Go's Block.New() sorting
+    entries.sort_by(|a, b| a.cid.to_string().cmp(&b.cid.to_string()));
+    Ok(entries)
+}
+
+/// Get the maximum priority from existing heads for a document.
+///
+/// Scans the headstore for all existing heads of the given document
+/// and returns the maximum priority found. Returns 0 if no heads exist.
+pub(super) async fn get_max_priority(
+    headstore: &NamespaceView,
+    doc_id: &str,
+) -> Result<u64, String> {
+    use storage::corekv::IterOptions;
+
+    let prefix = HeadstoreDocKey::document_prefix(doc_id);
+    let opts = IterOptions::new().with_prefix(prefix);
+
+    let mut iter = headstore
+        .iterator(opts)
+        .await
+        .map_err(|e| format!("Failed to create headstore iterator: {}", e))?;
+
+    let mut max_priority: u64 = 0;
+    while let Some(kv_pair) = iter
+        .next()
+        .await
+        .map_err(|e| format!("Failed to iterate headstore: {}", e))?
+    {
+        let priority = decode_priority_varint(&kv_pair.value);
+        if priority > max_priority {
+            max_priority = priority;
+        }
+    }
+
+    Ok(max_priority)
+}

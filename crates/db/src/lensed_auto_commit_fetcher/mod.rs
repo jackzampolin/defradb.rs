@@ -1,0 +1,108 @@
+//! Lensed auto-committing document fetcher.
+//!
+//! This fetcher combines auto-commit transaction management with lens migrations.
+//! Documents are automatically migrated during fetch when migrations are registered.
+
+mod fetcher;
+mod index_scan;
+mod migration;
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use document::Document;
+use query::fetcher::CommitsQueryOptions;
+use query::planner::index_selection::IndexScanParams;
+use query::runner::{DocFetcher, FetchByIdsResult};
+use storage::corekv::Store;
+
+use crate::database::DB;
+
+/// Document fetcher that auto-commits and applies lens migrations.
+///
+/// Combines the auto-commit behavior of AutoCommitFetcher with lens
+/// migration support from LensedDocFetcher.
+pub struct LensedAutoCommitFetcher<S: Store> {
+    db: Arc<DB<S>>,
+}
+
+impl<S: Store> LensedAutoCommitFetcher<S> {
+    /// Create a new lensed auto-committing fetcher.
+    pub fn new(db: Arc<DB<S>>) -> Self {
+        Self { db }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
+    async fn get_all(&self, collection_name: &str) -> query::error::Result<Vec<Document>> {
+        self.get_all_impl(collection_name).await
+    }
+
+    async fn get_all_with_deleted(
+        &self,
+        collection_name: &str,
+        show_deleted: bool,
+    ) -> query::error::Result<Vec<(Document, bool)>> {
+        self.get_all_with_deleted_impl(collection_name, show_deleted)
+            .await
+    }
+
+    async fn get_by_ids(
+        &self,
+        collection_name: &str,
+        doc_ids: &[String],
+    ) -> query::error::Result<FetchByIdsResult> {
+        self.get_by_ids_impl(collection_name, doc_ids).await
+    }
+
+    async fn get_by_field_value(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        value: &str,
+    ) -> query::error::Result<Vec<Document>> {
+        self.get_by_field_value_impl(collection_name, field_name, value)
+            .await
+    }
+
+    async fn get_commits(
+        &self,
+        options: &CommitsQueryOptions,
+    ) -> query::error::Result<Vec<Document>> {
+        self.get_commits_impl(options).await
+    }
+
+    async fn get_by_index_scan(
+        &self,
+        collection_name: &str,
+        params: &IndexScanParams,
+    ) -> query::error::Result<query::fetcher::IndexScanResult> {
+        self.get_by_index_scan_impl(collection_name, params).await
+    }
+
+    fn supports_index_queries(&self) -> bool {
+        true
+    }
+
+    async fn get_document_at_cid(
+        &self,
+        cid: &str,
+        expected_doc_id: Option<&str>,
+    ) -> query::error::Result<Document> {
+        self.get_document_at_cid_impl(cid, expected_doc_id).await
+    }
+
+    async fn get_documents_at_cid(
+        &self,
+        cid: &str,
+        expected_doc_id: Option<&str>,
+    ) -> query::error::Result<Vec<Document>> {
+        self.get_documents_at_cid_impl(cid, expected_doc_id).await
+    }
+
+    async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Vec<u8>>> {
+        self.get_view_cache_items_impl(collection_id).await
+    }
+}
