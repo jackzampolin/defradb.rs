@@ -317,6 +317,13 @@ impl Node {
             .with_acp(document_acp)
             .with_lens_store(database.lens_store().clone());
 
+            // Wire CRDT delta encryption key (matches FFI behavior)
+            if !config.datastore.no_encryption {
+                let encryption_key = b"examplekey1234567890examplekey12".to_vec();
+                query_runner = query_runner.with_encryption_key(encryption_key);
+                info!("CRDT delta encryption enabled");
+            }
+
             // Wire default identity for ACP permission checks (from --identity CLI flag)
             if let Some(did) = user_did {
                 info!("Query runner configured with default identity for ACP");
