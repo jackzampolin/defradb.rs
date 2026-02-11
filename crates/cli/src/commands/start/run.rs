@@ -126,6 +126,8 @@ impl Node {
             // Abort all tasks - they will stop when the channel closes
             tasks.replication_task.abort();
             tasks.host_task.abort();
+            tasks.failure_recorder_task.abort();
+            tasks.retry_loop_task.abort();
             if let Some(event_task) = tasks.event_handler_task {
                 event_task.abort();
             }

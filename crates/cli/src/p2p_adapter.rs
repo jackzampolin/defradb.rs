@@ -1,6 +1,7 @@
 //! Adapter to bridge P2PHostHandle to HTTP's P2POperations trait.
 
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -53,6 +54,15 @@ pub trait DocPusher: Send + Sync {
 
     /// Validate that a collection with the given ID exists and is branchable.
     fn validate_branchable_collection(&self, collection_id: &str) -> Result<(), String>;
+
+    /// Retry pushing a single document to a specific peer.
+    async fn retry_doc(
+        &self,
+        handle: &P2PHostHandle,
+        peer_id: libp2p::PeerId,
+        doc_id: &str,
+        collection_id: &str,
+    ) -> Result<(), String>;
 }
 
 /// Database-backed `DocPusher` implementation.
@@ -190,6 +200,113 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             Err(e) => Err(format!("failed to find collection: {}", e)),
         }
     }
+
+    async fn retry_doc(
+        &self,
+        handle: &P2PHostHandle,
+        peer_id: libp2p::PeerId,
+        doc_id: &str,
+        collection_id: &str,
+    ) -> Result<(), String> {
+        use storage::corekv::{IterOptions, Reader, Store};
+
+        let local_peer_id = handle
+            .local_peer_id()
+            .await
+            .map_err(|e| format!("failed to get local peer ID: {}", e))?;
+
+        let headstore = storage::stores::Headstore::new(self.db.store().clone());
+        let head_txn = headstore
+            .new_txn(true)
+            .await
+            .map_err(|e| format!("headstore txn: {}", e))?;
+
+        let blockstore_view = storage::stores::Blockstore::new(self.db.store().clone(), true);
+        let block_txn = blockstore_view
+            .new_txn(true)
+            .await
+            .map_err(|e| format!("blockstore txn: {}", e))?;
+
+        let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
+        let opts = IterOptions::new().with_prefix(prefix);
+        let mut iter = head_txn
+            .iterator(opts)
+            .await
+            .map_err(|e| format!("headstore iterator: {}", e))?;
+
+        let mut any_failed = false;
+        while let Some(pair) = iter
+            .next()
+            .await
+            .map_err(|e| format!("headstore iteration: {}", e))?
+        {
+            let key_str = String::from_utf8_lossy(&pair.key);
+            let parts: Vec<&str> = key_str.split('/').collect();
+            if parts.len() < 5 {
+                continue;
+            }
+            let head_cid = match cid::Cid::from_str(parts[4]) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let block_data = match block_txn.get(&head_cid.to_bytes()).await {
+                Ok(Some(data)) => data,
+                _ => continue,
+            };
+
+            if let Ok(parsed) = defra_core::Block::from_dag_cbor(&block_data) {
+                if let Some(ref links) = parsed.links {
+                    for link in links {
+                        if let Ok(Some(field_data)) = block_txn.get(&link.link.to_bytes()).await {
+                            let mut field_req = p2p::message::PushLogRequest::new(
+                                doc_id.to_string(),
+                                link.link.to_bytes(),
+                                collection_id.to_string(),
+                                local_peer_id.to_string(),
+                                field_data,
+                            );
+                            if p2p::signing::sign_message(handle.keypair(), &mut field_req).is_ok()
+                                && handle
+                                    .send_two_stream_request(peer_id, field_req)
+                                    .await
+                                    .is_err()
+                            {
+                                any_failed = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut request = p2p::message::PushLogRequest::new(
+                doc_id.to_string(),
+                head_cid.to_bytes(),
+                collection_id.to_string(),
+                local_peer_id.to_string(),
+                block_data,
+            );
+
+            if p2p::signing::sign_message(handle.keypair(), &mut request).is_err() {
+                any_failed = true;
+                continue;
+            }
+
+            if handle
+                .send_two_stream_request(peer_id, request)
+                .await
+                .is_err()
+            {
+                any_failed = true;
+            }
+        }
+
+        if any_failed {
+            Err("some pushes failed".to_string())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Also implement `CollectionLookup` so `DbDocPusher` can be used anywhere
@@ -272,6 +389,13 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             version_syncer: None,
             peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
             tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
+        }
+    }
+
+    /// Pre-populate tracked documents from persisted state without re-subscribing.
+    pub fn set_initial_tracked_documents(&self, docs: HashSet<String>) {
+        if let Ok(mut tracked) = self.tracked_documents.write() {
+            *tracked = docs;
         }
     }
 
@@ -396,6 +520,16 @@ impl DocPusher for LookupOnlyDocPusher {
 
     fn validate_branchable_collection(&self, _collection_id: &str) -> Result<(), String> {
         Err("validate_branchable_collection not available (no database context)".to_string())
+    }
+
+    async fn retry_doc(
+        &self,
+        _handle: &P2PHostHandle,
+        _peer_id: libp2p::PeerId,
+        _doc_id: &str,
+        _collection_id: &str,
+    ) -> Result<(), String> {
+        Err("retry_doc not available (no database context)".to_string())
     }
 }
 

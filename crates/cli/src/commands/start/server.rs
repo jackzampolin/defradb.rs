@@ -118,139 +118,300 @@ impl Node {
 
             // Create sync coordinator if P2P is enabled (shared between mutator and P2P adapter)
             // Also captures task handles for graceful shutdown
-            let (sync_coordinator, replication_task, event_handler_task, version_syncer) =
-                if let Some(ref p2p_handle) = p2p {
-                    let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(
-                        store_for_sync.clone(),
-                        false,
-                    ));
+            let (
+                sync_coordinator,
+                replication_task,
+                event_handler_task,
+                version_syncer,
+                doc_pusher,
+                failure_recorder_task,
+                retry_loop_task,
+                restored_doc_ids,
+            ) = if let Some(ref p2p_handle) = p2p {
+                let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(
+                    store_for_sync.clone(),
+                    false,
+                ));
 
-                    // Clone blockstore for merge handler (before moving into coordinator)
-                    let merge_blockstore = sync_blockstore.clone();
+                // Clone blockstore for merge handler (before moving into coordinator)
+                let merge_blockstore = sync_blockstore.clone();
 
-                    // Create persistent collection store for P2P subscriptions
-                    let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
-                        Arc::new(p2p::sync::P2PCollectionStore::new(store_for_sync));
+                // Clone store for background tasks before it's consumed
+                let store_for_background = store_for_sync.clone();
 
-                    let (coordinator, sync_events) =
-                        p2p::sync::SyncCoordinator::with_collection_store(
-                            p2p_handle.clone(),
-                            sync_blockstore,
-                            p2p::sync::SyncConfig::default(),
-                            collection_store,
-                        )
-                        .await
-                        .map_err(Error::P2P)?;
+                // Create persistent collection store for P2P subscriptions
+                let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
+                    Arc::new(p2p::sync::P2PCollectionStore::new(store_for_sync));
 
-                    let coordinator = Arc::new(coordinator);
+                let (mut coordinator, sync_events) =
+                    p2p::sync::SyncCoordinator::with_collection_store(
+                        p2p_handle.clone(),
+                        sync_blockstore,
+                        p2p::sync::SyncConfig::default(),
+                        collection_store,
+                    )
+                    .await
+                    .map_err(Error::P2P)?;
 
-                    // Load persisted P2P collection subscriptions
-                    match coordinator.load_p2p_collections().await {
-                        Ok(count) => {
-                            if count > 0 {
-                                info!("Loaded {} persisted P2P collection subscription(s)", count);
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to load persisted P2P collections: {}", e);
+                // Set up failure channel for push failure recording
+                let (failure_tx, failure_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<p2p::sync::PushFailure>();
+                coordinator.set_failure_channel(failure_tx);
+
+                let coordinator = Arc::new(coordinator);
+
+                // Load persisted P2P collection subscriptions
+                match coordinator.load_p2p_collections().await {
+                    Ok(count) => {
+                        if count > 0 {
+                            info!("Loaded {} persisted P2P collection subscription(s)", count);
                         }
                     }
+                    Err(e) => {
+                        warn!("Failed to load persisted P2P collections: {}", e);
+                    }
+                }
 
-                    // Create merge handler for CRDT merging
-                    let merge_blockstore_for_syncer = merge_blockstore.clone();
-                    let merge_handler =
-                        Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
+                // Create merge handler for CRDT merging
+                let merge_blockstore_for_syncer = merge_blockstore.clone();
+                let merge_handler =
+                    Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
 
-                    // Clone merge handler for VersionSyncer (before moving into replication loop)
-                    let merge_handler_for_syncer = merge_handler.clone();
+                // Clone merge handler for VersionSyncer (before moving into replication loop)
+                let merge_handler_for_syncer = merge_handler.clone();
 
-                    // Spawn replication loop to process incoming blocks
-                    // Track the task handle for graceful shutdown
-                    let coordinator_for_replication = coordinator.clone();
-                    let replication_config = p2p::sync::ReplicationConfig {
-                        continue_on_error: true,
-                        rebroadcast_on_merge: false, // Don't re-broadcast during initial sync
-                    };
-                    let replication_task = tokio::spawn(async move {
-                        info!("Starting replication loop for P2P sync");
-                        p2p::sync::ReplicationLoop::run(
-                            coordinator_for_replication,
-                            sync_events,
-                            merge_handler,
-                            replication_config,
-                        )
-                        .await;
-                        info!("Replication loop stopped");
-                    });
+                // Spawn replication loop to process incoming blocks
+                // Track the task handle for graceful shutdown
+                let coordinator_for_replication = coordinator.clone();
+                let replication_config = p2p::sync::ReplicationConfig {
+                    continue_on_error: true,
+                    rebroadcast_on_merge: false, // Don't re-broadcast during initial sync
+                };
+                let replication_task = tokio::spawn(async move {
+                    info!("Starting replication loop for P2P sync");
+                    p2p::sync::ReplicationLoop::run(
+                        coordinator_for_replication,
+                        sync_events,
+                        merge_handler,
+                        replication_config,
+                    )
+                    .await;
+                    info!("Replication loop stopped");
+                });
 
-                    // Spawn host event handler to process incoming P2P events through coordinator
-                    // Track the task handle for graceful shutdown
-                    let event_handler_task = if let Some(mut events) = p2p_events.take() {
-                        let coordinator_for_events = coordinator.clone();
-                        Some(tokio::spawn(async move {
-                            while let Some(event) = events.recv().await {
-                                // Log events for visibility
-                                match &event {
-                                    p2p::HostEvent::PeerConnected(peer) => {
-                                        info!("Peer connected: {}", peer);
-                                    }
-                                    p2p::HostEvent::PeerDisconnected(peer) => {
-                                        info!("Peer disconnected: {}", peer);
-                                    }
-                                    p2p::HostEvent::Listening(addr) => {
-                                        info!("Now listening on: {}", addr);
-                                    }
-                                    p2p::HostEvent::GossipMessage {
-                                        propagation_source,
-                                        topic,
-                                        ..
-                                    } => {
-                                        info!(
-                                            "Received gossip message on {} from {}",
-                                            topic, propagation_source
-                                        );
-                                    }
-                                    p2p::HostEvent::TwoStreamRequest { peer_id, request } => {
-                                        info!(
-                                            peer_id = %peer_id,
-                                            message_id = %request.metadata.message_id,
-                                            doc_id = %request.doc_id,
-                                            "Processing TwoStreamRequest through coordinator"
-                                        );
-                                    }
-                                    _ => {}
+                // Spawn host event handler to process incoming P2P events through coordinator
+                // Track the task handle for graceful shutdown
+                let event_handler_task = if let Some(mut events) = p2p_events.take() {
+                    let coordinator_for_events = coordinator.clone();
+                    Some(tokio::spawn(async move {
+                        while let Some(event) = events.recv().await {
+                            // Log events for visibility
+                            match &event {
+                                p2p::HostEvent::PeerConnected(peer) => {
+                                    info!("Peer connected: {}", peer);
                                 }
+                                p2p::HostEvent::PeerDisconnected(peer) => {
+                                    info!("Peer disconnected: {}", peer);
+                                }
+                                p2p::HostEvent::Listening(addr) => {
+                                    info!("Now listening on: {}", addr);
+                                }
+                                p2p::HostEvent::GossipMessage {
+                                    propagation_source,
+                                    topic,
+                                    ..
+                                } => {
+                                    info!(
+                                        "Received gossip message on {} from {}",
+                                        topic, propagation_source
+                                    );
+                                }
+                                p2p::HostEvent::TwoStreamRequest { peer_id, request } => {
+                                    info!(
+                                        peer_id = %peer_id,
+                                        message_id = %request.metadata.message_id,
+                                        doc_id = %request.doc_id,
+                                        "Processing TwoStreamRequest through coordinator"
+                                    );
+                                }
+                                _ => {}
+                            }
 
-                                // Process event through coordinator for response handling
-                                if let Err(e) =
-                                    coordinator_for_events.handle_host_event(event).await
+                            // Process event through coordinator for response handling
+                            if let Err(e) = coordinator_for_events.handle_host_event(event).await {
+                                error!("Failed to handle host event: {}", e);
+                            }
+                        }
+                    }))
+                } else {
+                    None
+                };
+
+                // Create version syncer for schema sync via Bitswap
+                let version_syncer: Option<Arc<dyn crate::p2p_adapter::VersionSyncer>> =
+                    Some(crate::version_syncer::DbVersionSyncer::new_arc(
+                        merge_blockstore_for_syncer,
+                        merge_handler_for_syncer,
+                        database.clone(),
+                    ));
+
+                // Create doc pusher for retry loop and P2PAdapter
+                let doc_pusher = crate::p2p_adapter::DbDocPusher::new_arc(database.clone());
+
+                // Spawn failure recorder task
+                let recorder_store = store_for_background.clone();
+                let failure_recorder_task = tokio::spawn(async move {
+                    let mut rx = failure_rx;
+                    while let Some(failure) = rx.recv().await {
+                        let peerstore = storage::stores::Peerstore::new(recorder_store.clone());
+                        let retry_info = storage::stores::RetryInfo::new_initial();
+                        let info_bytes = match retry_info.to_bytes() {
+                            Ok(b) => b,
+                            Err(e) => {
+                                warn!(error = %e, "Failed to serialize RetryInfo");
+                                continue;
+                            }
+                        };
+                        if let Err(e) = peerstore
+                            .record_push_failure(
+                                &failure.peer_id.to_string(),
+                                &failure.doc_id,
+                                &failure.collection_id,
+                                &info_bytes,
+                            )
+                            .await
+                        {
+                            warn!(error = %e, "Failed to record push failure");
+                        }
+                    }
+                });
+
+                // Spawn retry loop task
+                let retry_store = store_for_background.clone();
+                let retry_handle = p2p_handle.clone();
+                let retry_pusher = doc_pusher.clone();
+                let retry_loop_task = tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        let peerstore = storage::stores::Peerstore::new(retry_store.clone());
+                        let peers = match peerstore.get_all_retry_peers().await {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        };
+                        for (peer_id_str, info_bytes) in peers {
+                            let mut retry_info =
+                                match storage::stores::RetryInfo::from_bytes(&info_bytes) {
+                                    Ok(i) => i,
+                                    Err(_) => continue,
+                                };
+                            if !retry_info.is_due() {
+                                continue;
+                            }
+                            let peer_id = match peer_id_str.parse::<libp2p::PeerId>() {
+                                Ok(p) => p,
+                                Err(_) => continue,
+                            };
+                            let connected =
+                                retry_handle.connected_peers().await.unwrap_or_default();
+                            if !connected.contains(&peer_id) {
+                                continue;
+                            }
+                            let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+                                Ok(d) => d,
+                                Err(_) => continue,
+                            };
+                            if docs.is_empty() {
+                                let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                                continue;
+                            }
+                            let mut all_succeeded = true;
+                            for (doc_id, collection_id) in &docs {
+                                match retry_pusher
+                                    .retry_doc(&retry_handle, peer_id, doc_id, collection_id)
+                                    .await
                                 {
-                                    error!("Failed to handle host event: {}", e);
+                                    Ok(()) => {
+                                        let _ =
+                                            peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
+                                    }
+                                    Err(_) => {
+                                        all_succeeded = false;
+                                    }
                                 }
                             }
-                        }))
-                    } else {
-                        None
-                    };
+                            if all_succeeded {
+                                let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                            } else {
+                                retry_info.bump();
+                                if let Ok(bytes) = retry_info.to_bytes() {
+                                    let _ = peerstore.update_retry_info(&peer_id_str, &bytes).await;
+                                }
+                            }
+                        }
+                    }
+                });
 
-                    // Create version syncer for schema sync via Bitswap
-                    let version_syncer: Option<Arc<dyn crate::p2p_adapter::VersionSyncer>> =
-                        Some(crate::version_syncer::DbVersionSyncer::new_arc(
-                            merge_blockstore_for_syncer,
-                            merge_handler_for_syncer,
-                            database.clone(),
-                        ));
+                // Restore replicators from peerstore
+                let restore_peerstore =
+                    storage::stores::Peerstore::new(store_for_background.clone());
+                match restore_peerstore.get_all_replicators().await {
+                    Ok(entries) => {
+                        for (_peer_id_str, data) in entries {
+                            if let Ok(rep_info) = p2p::ReplicatorInfo::from_bytes(&data) {
+                                if let Some(pid) = rep_info.peer_id() {
+                                    let _ = p2p_handle
+                                        .set_replicator(pid, rep_info.collections.clone())
+                                        .await;
+                                    for cid in &rep_info.collections {
+                                        let _ = p2p_handle
+                                            .subscribe(p2p::topics::DefraTopic::collection(cid))
+                                            .await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to load replicators from storage");
+                    }
+                }
 
-                    info!("P2P sync coordinator initialized");
-                    (
-                        Some(coordinator),
-                        Some(replication_task),
-                        event_handler_task,
-                        version_syncer,
-                    )
-                } else {
-                    (None, None, None, None)
-                };
+                // Restore document subscriptions from peerstore
+                let mut restored_doc_ids = std::collections::HashSet::new();
+                if let Ok(Some(data)) = restore_peerstore.get_p2p_documents().await {
+                    if let Ok(doc_ids) = serde_json::from_slice::<Vec<String>>(&data) {
+                        for doc_id in &doc_ids {
+                            let _ = p2p_handle
+                                .subscribe(p2p::topics::DefraTopic::document(doc_id))
+                                .await;
+                            restored_doc_ids.insert(doc_id.clone());
+                        }
+                    }
+                }
+
+                info!("P2P sync coordinator initialized");
+                (
+                    Some(coordinator),
+                    Some(replication_task),
+                    event_handler_task,
+                    version_syncer,
+                    Some(doc_pusher),
+                    Some(failure_recorder_task),
+                    Some(retry_loop_task),
+                    restored_doc_ids,
+                )
+            } else {
+                (
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    std::collections::HashSet::new(),
+                )
+            };
 
             // Create mutator - use BroadcastMutator if P2P is enabled for network propagation
             let mutator: Arc<dyn query::mutator::DocMutator> =
@@ -363,18 +524,23 @@ impl Node {
 
             // Wire P2P to HTTP server if enabled
             if let Some(ref p2p_handle) = p2p {
-                let p2p_adapter = if let Some(ref coordinator) = sync_coordinator {
-                    let doc_pusher = crate::p2p_adapter::DbDocPusher::new_arc(database.clone());
-                    crate::p2p_adapter::P2PAdapter::with_full_context_arc(
-                        p2p_handle.clone(),
-                        coordinator.clone(),
-                        doc_pusher,
-                        event_bus.clone(),
-                        version_syncer,
-                    )
-                } else {
-                    crate::p2p_adapter::P2PAdapter::new_arc(p2p_handle.clone())
-                };
+                let p2p_adapter: Arc<dyn defra_http::router::P2POperations> =
+                    if let Some(ref coordinator) = sync_coordinator {
+                        let pusher = doc_pusher.clone().unwrap_or_else(|| {
+                            crate::p2p_adapter::DbDocPusher::new_arc(database.clone())
+                        });
+                        let adapter = crate::p2p_adapter::P2PAdapter::with_full_context(
+                            p2p_handle.clone(),
+                            coordinator.clone(),
+                            pusher,
+                            event_bus.clone(),
+                            version_syncer,
+                        );
+                        adapter.set_initial_tracked_documents(restored_doc_ids);
+                        Arc::new(adapter)
+                    } else {
+                        crate::p2p_adapter::P2PAdapter::new_arc(p2p_handle.clone())
+                    };
                 server = server.with_p2p_arc(p2p_adapter);
                 info!("P2P HTTP endpoints enabled");
             }
@@ -483,11 +649,23 @@ impl Node {
             );
 
             // Build P2PTasks if P2P is enabled with all required task handles
-            let p2p_tasks = match (p2p_host_task, replication_task) {
-                (Some(host_task), Some(replication_task)) => Some(P2PTasks {
+            let p2p_tasks = match (
+                p2p_host_task,
+                replication_task,
+                failure_recorder_task,
+                retry_loop_task,
+            ) {
+                (
+                    Some(host_task),
+                    Some(replication_task),
+                    Some(failure_recorder_task),
+                    Some(retry_loop_task),
+                ) => Some(P2PTasks {
                     host_task,
                     replication_task,
                     event_handler_task,
+                    failure_recorder_task,
+                    retry_loop_task,
                 }),
                 _ => None,
             };

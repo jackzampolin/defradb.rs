@@ -18,6 +18,10 @@ pub(super) struct P2PTasks {
     pub replication_task: JoinHandle<()>,
     /// Host event handler task (processes P2P events through coordinator)
     pub event_handler_task: Option<JoinHandle<()>>,
+    /// Records push failures for retry
+    pub failure_recorder_task: JoinHandle<()>,
+    /// Periodically retries failed doc pushes with exponential backoff
+    pub retry_loop_task: JoinHandle<()>,
 }
 
 /// DefraDB Node
