@@ -54,21 +54,36 @@ impl<S: Store + 'static> DocumentAcpAdapter<S> {
         Ok((policy.id.clone(), policy.resource_name.clone()))
     }
 
-    /// Compute which relations can manage (grant/revoke) the given relation.
-    async fn get_managing_relations(
+    /// Validate the relation exists in the policy and compute managing relations.
+    async fn validate_and_get_managing_relations(
         &self,
         policy_id: &str,
         resource_name: &str,
         relation: &str,
-    ) -> Vec<String> {
-        match self.store.get_policy(policy_id).await {
-            Ok(Some(policy)) => policy
-                .get_managers_for_relation(resource_name, relation)
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect(),
-            _ => vec![],
+    ) -> Result<Vec<String>, String> {
+        let policy = self
+            .store
+            .get_policy(policy_id)
+            .await
+            .map_err(|e| format!("failed to get policy: {}", e))?
+            .ok_or_else(|| format!("policy '{}' not found", policy_id))?;
+
+        let resource = policy
+            .get_resource(resource_name)
+            .ok_or_else(|| format!("resource '{}' not found in policy", resource_name))?;
+
+        if resource.get_relation(relation).is_none() {
+            return Err(format!(
+                "relation '{}' not found in policy resource '{}'",
+                relation, resource_name
+            ));
         }
+
+        Ok(policy
+            .get_managers_for_relation(resource_name, relation)
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect())
     }
 }
 
@@ -93,8 +108,8 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
             .map_err(|e| format!("invalid target actor DID: {}", e))?;
 
         let managing = self
-            .get_managing_relations(&policy_id, &resource_name, relation)
-            .await;
+            .validate_and_get_managing_relations(&policy_id, &resource_name, relation)
+            .await?;
 
         self.acp
             .add_actor_relationship(
@@ -129,8 +144,8 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
             .map_err(|e| format!("invalid target actor DID: {}", e))?;
 
         let managing = self
-            .get_managing_relations(&policy_id, &resource_name, relation)
-            .await;
+            .validate_and_get_managing_relations(&policy_id, &resource_name, relation)
+            .await?;
 
         self.acp
             .delete_actor_relationship(

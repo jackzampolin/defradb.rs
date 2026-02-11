@@ -43,6 +43,10 @@ pub async fn add_policy(
 ) -> Result<Json<AddPolicyResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::DacPolicyAdd).await?;
 
+    let _creator = identity
+        .did()
+        .ok_or_else(|| HttpError::BadRequest("policy creator can not be empty".into()))?;
+
     let acp = state.require_acp()?;
 
     if body.trim().is_empty() {
@@ -131,6 +135,17 @@ pub async fn add_doc_relationship(
         .did()
         .ok_or_else(|| HttpError::BadRequest("identity required for document ACP".into()))?;
 
+    if body.collection.is_empty() {
+        return Err(HttpError::BadRequest(
+            "collection name can't be empty".into(),
+        ));
+    }
+    if body.target_actor.is_empty() || body.doc_id.is_empty() || body.relation.is_empty() {
+        return Err(HttpError::BadRequest(
+            "missing a required argument needed to add doc actor relationship.".into(),
+        ));
+    }
+
     if body.relation == "owner" {
         return Err(HttpError::BadRequest(
             "OPERATION_FORBIDDEN: cannot add owner relation".into(),
@@ -170,6 +185,17 @@ pub async fn remove_doc_relationship(
     let requestor = identity
         .did()
         .ok_or_else(|| HttpError::BadRequest("identity required for document ACP".into()))?;
+
+    if body.collection.is_empty() {
+        return Err(HttpError::BadRequest(
+            "collection name can't be empty".into(),
+        ));
+    }
+    if body.target_actor.is_empty() || body.doc_id.is_empty() || body.relation.is_empty() {
+        return Err(HttpError::BadRequest(
+            "missing a required argument needed to delete doc actor relationship.".into(),
+        ));
+    }
 
     if body.relation == "owner" {
         return Err(HttpError::BadRequest(

@@ -226,6 +226,10 @@ pub async fn go_add_relationship(
         HttpError::Forbidden("authentication required to add relationship".into())
     })?;
 
+    if body.target_actor.is_empty() {
+        return Err(HttpError::BadRequest("actor must be a valid did".into()));
+    }
+
     // Parse target DID
     let target = identity::Did::new(&body.target_actor)
         .map_err(|e| HttpError::BadRequest(format!("invalid TargetActor DID: {}", e)))?;
@@ -269,6 +273,10 @@ pub async fn go_remove_relationship(
     let requestor = identity.did().cloned().ok_or_else(|| {
         HttpError::Forbidden("authentication required to remove relationship".into())
     })?;
+
+    if body.target_actor.is_empty() {
+        return Ok(axum::http::StatusCode::OK.into_response());
+    }
 
     // Parse target DID
     let target = identity::Did::new(&body.target_actor)
