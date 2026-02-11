@@ -50,7 +50,7 @@ pub async fn add_policy(
     let acp = state.require_acp()?;
 
     if body.trim().is_empty() {
-        return Err(HttpError::BadRequest("policy cannot be empty".into()));
+        return Err(HttpError::BadRequest("policy data can not be empty".into()));
     }
 
     let policy_id = acp.add_policy(&body).await.map_err(HttpError::BadRequest)?;

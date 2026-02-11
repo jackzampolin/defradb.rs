@@ -14,6 +14,12 @@ use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NacStatusInfo, NodePermission};
 
+const VALID_NAC_RELATIONS: &[&str] = &["owner", "admin"];
+
+fn is_valid_nac_relation(relation: &str) -> bool {
+    VALID_NAC_RELATIONS.contains(&relation) || NodePermission::parse(relation).is_some()
+}
+
 /// Request body for adding/removing admin (Rust format).
 #[derive(Debug, serde::Deserialize)]
 pub struct AdminRequest {
@@ -207,17 +213,17 @@ pub async fn go_add_relationship(
 
     let nac = state.require_nac()?;
 
-    // "owner" relation is immutable
-    if body.relation == "owner" {
-        return Err(HttpError::BadRequest(
-            "relation not in resource".to_string(),
-        ));
-    }
-
     // Require authenticated identity
     let requestor = identity.did().cloned().ok_or_else(|| {
         HttpError::Forbidden("authentication required to add relationship".into())
     })?;
+
+    // Validate relation name against NAC policy (matches FFI ordering: after auth, before target)
+    if !is_valid_nac_relation(&body.relation) || body.relation == "owner" {
+        return Err(HttpError::BadRequest(
+            "relation not in resource".to_string(),
+        ));
+    }
 
     if body.target_actor.is_empty() {
         return Err(HttpError::BadRequest("actor must be a valid did".into()));
@@ -254,17 +260,17 @@ pub async fn go_remove_relationship(
 
     let nac = state.require_nac()?;
 
-    // "owner" relation is immutable
-    if body.relation == "owner" {
-        return Err(HttpError::BadRequest(
-            "relation not in resource".to_string(),
-        ));
-    }
-
     // Require authenticated identity
     let requestor = identity.did().cloned().ok_or_else(|| {
         HttpError::Forbidden("authentication required to remove relationship".into())
     })?;
+
+    // Validate relation name against NAC policy (matches FFI ordering: after auth, before target)
+    if !is_valid_nac_relation(&body.relation) || body.relation == "owner" {
+        return Err(HttpError::BadRequest(
+            "relation not in resource".to_string(),
+        ));
+    }
 
     if body.target_actor.is_empty() {
         return Ok(Json(serde_json::json!({"deleted": false})).into_response());
