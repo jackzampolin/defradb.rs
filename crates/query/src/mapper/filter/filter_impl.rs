@@ -175,6 +175,16 @@ impl Filter {
                 .as_object()
                 .ok_or_else(|| QueryError::invalid_filter("field condition must be object"))?;
 
+            // Check for _similarity misuse in filter (it's a select field, not a filter operator)
+            if ops.contains_key("_similarity") {
+                return Err(QueryError::invalid_filter(format!(
+                    "_similarity cannot be used as a filter on '{}'. Use it as a select field with _alias filtering: \
+                     {{ Type(filter: {{_alias: {{sim: {{_gt: 0.8}}}}}}, order: {{_alias: {{sim: DESC}}}}, limit: K) \
+                     {{ sim: _similarity({}: {{vector: [...]}}) ... }} }}",
+                    key, key
+                )));
+            }
+
             // Check if this is a relation filter (nested field conditions) or operator conditions
             let is_relation_filter = ops.keys().any(|k| FilterOp::parse(k).is_none());
 

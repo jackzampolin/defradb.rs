@@ -50,6 +50,11 @@ impl Filter {
                 // _alias is a special filter directive, not a relation field
                 continue;
             } else if let JsonValue::Object(obj) = value {
+                // Skip fields where _similarity is used as a nested key —
+                // it's a select-field directive, not a relation indicator
+                if obj.contains_key("_similarity") {
+                    continue;
+                }
                 // This is a field condition - check if it contains operators or nested fields
                 // If any key in the object is NOT an operator, it's a relation filter
                 let is_relation = obj.keys().any(|k| FilterOp::parse(k).is_none());
