@@ -1,7 +1,6 @@
 //! P2P HTTP client methods
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 use urlencoding::encode;
 
 use super::HttpClient;
@@ -92,91 +91,33 @@ pub struct P2pDocumentSyncRequest {
 }
 
 impl HttpClient {
-    /// Get P2P node info
-    pub async fn p2p_info(&self) -> Result<P2pInfo> {
-        let url = format!("{}/api/v0/p2p/info", self.base_url);
-        let response = self.send_with_retry("GET", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let info: P2pInfo = response.json().await?;
-        Ok(info)
-    }
-
-    /// List connected peers
-    pub async fn p2p_peers_list(&self) -> Result<Vec<P2pPeerInfo>> {
-        let url = format!("{}/api/v0/p2p/peers", self.base_url);
-        let response = self.send_with_retry("GET", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let peers: Vec<P2pPeerInfo> = response.json().await?;
-        Ok(peers)
-    }
-
-    /// Connect to a peer
     pub async fn p2p_peers_add(&self, address: &str) -> Result<()> {
         let url = format!("{}/api/v0/p2p/peers", self.base_url);
-        let request = P2pPeerAddRequest {
+        let body = serde_json::to_string(&P2pPeerAddRequest {
             address: address.to_string(),
-        };
-        let body = serde_json::to_string(&request)?;
-        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        Ok(())
+        })?;
+        self.request_void("POST", &url, Some(&body)).await
     }
 
-    /// List replicators
-    pub async fn p2p_replicator_list(&self) -> Result<Vec<P2pReplicatorInfo>> {
-        let url = format!("{}/api/v0/p2p/replicator", self.base_url);
-        let response = self.send_with_retry("GET", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let replicators: Vec<P2pReplicatorInfo> = response.json().await?;
-        Ok(replicators)
-    }
-
-    /// Add a replicator
     pub async fn p2p_replicator_add(
         &self,
         collections: &[String],
         address: Option<&str>,
     ) -> Result<()> {
         let url = format!("{}/api/v0/p2p/replicator", self.base_url);
-        let request = P2pReplicatorRequest {
+        let body = serde_json::to_string(&P2pReplicatorRequest {
             collections: collections.to_vec(),
             address: address.map(|s| s.to_string()),
-        };
-        let body = serde_json::to_string(&request)?;
-        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        Ok(())
+        })?;
+        self.request_void("POST", &url, Some(&body)).await
     }
 
-    /// Delete a replicator
     pub async fn p2p_replicator_delete(
         &self,
         collections: &[String],
         address: Option<&str>,
     ) -> Result<()> {
         let mut url = format!("{}/api/v0/p2p/replicator", self.base_url);
-
-        // Build query parameters with URL encoding
         let mut params = Vec::new();
         for col in collections {
             params.push(format!("collections={}", encode(col)));
@@ -187,50 +128,19 @@ impl HttpClient {
         if !params.is_empty() {
             url = format!("{}?{}", url, params.join("&"));
         }
-
-        let response = self.send_with_retry("DELETE", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        Ok(())
+        self.request_void("DELETE", &url, None).await
     }
 
-    /// List P2P collections
-    pub async fn p2p_collection_list(&self) -> Result<Vec<String>> {
-        let url = format!("{}/api/v0/p2p/collections", self.base_url);
-        let response = self.send_with_retry("GET", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let collections: Vec<String> = response.json().await?;
-        Ok(collections)
-    }
-
-    /// Add collections to P2P
     pub async fn p2p_collection_add(&self, collections: &[String]) -> Result<()> {
         let url = format!("{}/api/v0/p2p/collections", self.base_url);
-        let request = P2pCollectionRequest {
+        let body = serde_json::to_string(&P2pCollectionRequest {
             collections: collections.to_vec(),
-        };
-        let body = serde_json::to_string(&request)?;
-        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        Ok(())
+        })?;
+        self.request_void("POST", &url, Some(&body)).await
     }
 
-    /// Remove collections from P2P
     pub async fn p2p_collection_remove(&self, collections: &[String]) -> Result<()> {
         let mut url = format!("{}/api/v0/p2p/collections", self.base_url);
-
-        // Build query parameters with URL encoding
         let params: Vec<String> = collections
             .iter()
             .map(|c| format!("collections={}", encode(c)))
@@ -238,126 +148,49 @@ impl HttpClient {
         if !params.is_empty() {
             url = format!("{}?{}", url, params.join("&"));
         }
-
-        let response = self.send_with_retry("DELETE", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        Ok(())
+        self.request_void("DELETE", &url, None).await
     }
 
-    /// Get active peers
-    pub async fn p2p_active_peers(&self) -> Result<JsonValue> {
-        let url = format!("{}/api/v0/p2p/active-peers", self.base_url);
-        let response = self.send_with_retry("GET", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let result: JsonValue = response.json().await?;
-        Ok(result)
-    }
-
-    /// Connect to peer addresses
     pub async fn p2p_connect(&self, addresses: &[String]) -> Result<()> {
         let url = format!("{}/api/v0/p2p/connect", self.base_url);
-        let request = P2pConnectRequest {
+        let body = serde_json::to_string(&P2pConnectRequest {
             addresses: addresses.to_vec(),
-        };
-        let body = serde_json::to_string(&request)?;
-        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        Ok(())
+        })?;
+        self.request_void("POST", &url, Some(&body)).await
     }
 
-    /// Add documents to P2P sync
     pub async fn p2p_document_add(&self, doc_ids: &[String], schema_ids: &[String]) -> Result<()> {
         let url = format!("{}/api/v0/p2p/documents", self.base_url);
-        let request = P2pDocumentRequest {
+        let body = serde_json::to_string(&P2pDocumentRequest {
             doc_ids: doc_ids.to_vec(),
             schema_ids: schema_ids.to_vec(),
-        };
-        let body = serde_json::to_string(&request)?;
-        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        Ok(())
+        })?;
+        self.request_void("POST", &url, Some(&body)).await
     }
 
-    /// Remove documents from P2P sync
     pub async fn p2p_document_remove(
         &self,
         doc_ids: &[String],
         schema_ids: &[String],
     ) -> Result<()> {
         let url = format!("{}/api/v0/p2p/documents", self.base_url);
-        let request = P2pDocumentRequest {
+        let body = serde_json::to_string(&P2pDocumentRequest {
             doc_ids: doc_ids.to_vec(),
             schema_ids: schema_ids.to_vec(),
-        };
-        let body = serde_json::to_string(&request)?;
-        let response = self.send_with_retry("DELETE", &url, Some(&body)).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        Ok(())
+        })?;
+        self.request_void("DELETE", &url, Some(&body)).await
     }
 
-    /// List P2P synced documents
-    pub async fn p2p_document_list(&self) -> Result<JsonValue> {
-        let url = format!("{}/api/v0/p2p/documents", self.base_url);
-        let response = self.send_with_retry("GET", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let result: JsonValue = response.json().await?;
-        Ok(result)
-    }
-
-    /// Sync a P2P document
     pub async fn p2p_document_sync(
         &self,
         doc_id: Option<&str>,
         schema_id: Option<&str>,
     ) -> Result<()> {
         let url = format!("{}/api/v0/p2p/documents/sync", self.base_url);
-        let request = P2pDocumentSyncRequest {
+        let body = serde_json::to_string(&P2pDocumentSyncRequest {
             doc_id: doc_id.map(|s| s.to_string()),
             schema_id: schema_id.map(|s| s.to_string()),
-        };
-        let body = serde_json::to_string(&request)?;
-        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        Ok(())
-    }
-
-    /// Sync P2P collection versions
-    pub async fn p2p_collection_sync(&self) -> Result<()> {
-        let url = format!("{}/api/v0/p2p/collections/sync", self.base_url);
-        let response = self.send_with_retry("POST", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        Ok(())
+        })?;
+        self.request_void("POST", &url, Some(&body)).await
     }
 }

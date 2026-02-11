@@ -33,17 +33,9 @@ impl HttpClient {
         Ok(result)
     }
 
-    /// Get the GraphQL schema
     pub async fn schema(&self) -> Result<String> {
         let url = format!("{}/api/v0/schema", self.base_url);
-        let response = self.send_with_retry("GET", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let schema = response.text().await?;
-        Ok(schema)
+        self.request_text("GET", &url, None).await
     }
 
     /// Add a schema definition (SDL text)

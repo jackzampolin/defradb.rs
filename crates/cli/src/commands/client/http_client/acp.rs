@@ -56,7 +56,6 @@ pub struct NacRelationshipRequest {
 }
 
 impl HttpClient {
-    /// Add a new ACP policy
     pub async fn acp_add_policy(&self, policy: &str) -> Result<AcpAddPolicyResponse> {
         let url = format!("{}/api/v0/acp/policy", self.base_url);
         let request = AcpAddPolicyRequest {
@@ -65,33 +64,11 @@ impl HttpClient {
         self.post_json(&url, &request).await
     }
 
-    /// List all ACP policies
-    pub async fn acp_list_policies(&self) -> Result<Vec<AcpPolicy>> {
-        let url = format!("{}/api/v0/acp/policy", self.base_url);
-        let response = self.send_with_retry("GET", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let policies: Vec<AcpPolicy> = response.json().await?;
-        Ok(policies)
-    }
-
-    /// Get a specific ACP policy by ID
     pub async fn acp_get_policy(&self, policy_id: &str) -> Result<AcpPolicy> {
         let url = format!("{}/api/v0/acp/policy/{}", self.base_url, encode(policy_id));
-        let response = self.send_with_retry("GET", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let policy: AcpPolicy = response.json().await?;
-        Ok(policy)
+        self.request_json("GET", &url, None).await
     }
 
-    /// Add a document ACP relationship
     pub async fn acp_doc_relationship_add(
         &self,
         collection: &str,
@@ -100,24 +77,15 @@ impl HttpClient {
         actor: &str,
     ) -> Result<JsonValue> {
         let url = format!("{}/api/v0/acp/document/relationship", self.base_url);
-        let body = serde_json::json!({
+        let body = serde_json::to_string(&serde_json::json!({
             "collection": collection,
             "docID": doc_id,
             "relation": relation,
             "actor": actor,
-        });
-        let body_str = serde_json::to_string(&body)?;
-        let response = self.send_with_retry("POST", &url, Some(&body_str)).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let result: JsonValue = response.json().await?;
-        Ok(result)
+        }))?;
+        self.request_json("POST", &url, Some(&body)).await
     }
 
-    /// Remove a document ACP relationship
     pub async fn acp_doc_relationship_delete(
         &self,
         collection: &str,
@@ -126,97 +94,30 @@ impl HttpClient {
         actor: &str,
     ) -> Result<JsonValue> {
         let url = format!("{}/api/v0/acp/document/relationship", self.base_url);
-        let body = serde_json::json!({
+        let body = serde_json::to_string(&serde_json::json!({
             "collection": collection,
             "docID": doc_id,
             "relation": relation,
             "actor": actor,
-        });
-        let body_str = serde_json::to_string(&body)?;
-        let response = self
-            .send_with_retry("DELETE", &url, Some(&body_str))
-            .await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let result: JsonValue = response.json().await?;
-        Ok(result)
+        }))?;
+        self.request_json("DELETE", &url, Some(&body)).await
     }
 
-    /// Add a NAC relationship
     pub async fn nac_add_relationship(&self, relation: &str, actor: &str) -> Result<JsonValue> {
         let url = format!("{}/api/v0/acp/node/relationship", self.base_url);
-        let request = NacRelationshipRequest {
+        let body = serde_json::to_string(&NacRelationshipRequest {
             relation: relation.to_string(),
             actor: actor.to_string(),
-        };
-        let body = serde_json::to_string(&request)?;
-        let response = self.send_with_retry("POST", &url, Some(&body)).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let result: JsonValue = response.json().await?;
-        Ok(result)
+        })?;
+        self.request_json("POST", &url, Some(&body)).await
     }
 
-    /// Remove a NAC relationship
     pub async fn nac_remove_relationship(&self, relation: &str, actor: &str) -> Result<JsonValue> {
         let url = format!("{}/api/v0/acp/node/relationship", self.base_url);
-        let request = NacRelationshipRequest {
+        let body = serde_json::to_string(&NacRelationshipRequest {
             relation: relation.to_string(),
             actor: actor.to_string(),
-        };
-        let body = serde_json::to_string(&request)?;
-        let response = self.send_with_retry("DELETE", &url, Some(&body)).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let result: JsonValue = response.json().await?;
-        Ok(result)
-    }
-
-    /// Get NAC status
-    pub async fn nac_status(&self) -> Result<JsonValue> {
-        let url = format!("{}/api/v0/acp/node/status", self.base_url);
-        let response = self.send_with_retry("GET", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let result: JsonValue = response.json().await?;
-        Ok(result)
-    }
-
-    /// Disable node ACP
-    pub async fn nac_disable(&self) -> Result<JsonValue> {
-        let url = format!("{}/api/v0/acp/node/disable", self.base_url);
-        let response = self.send_with_retry("POST", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let result: JsonValue = response.json().await?;
-        Ok(result)
-    }
-
-    /// Re-enable node ACP
-    pub async fn nac_re_enable(&self) -> Result<JsonValue> {
-        let url = format!("{}/api/v0/acp/node/re-enable", self.base_url);
-        let response = self.send_with_retry("POST", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let result: JsonValue = response.json().await?;
-        Ok(result)
+        })?;
+        self.request_json("DELETE", &url, Some(&body)).await
     }
 }

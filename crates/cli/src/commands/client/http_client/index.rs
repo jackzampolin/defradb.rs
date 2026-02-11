@@ -50,7 +50,6 @@ pub struct IndexFieldInfo {
 }
 
 impl HttpClient {
-    /// Create an index on a collection
     pub async fn index_create(
         &self,
         collection: &str,
@@ -68,23 +67,14 @@ impl HttpClient {
         self.post_json(&url, &request).await
     }
 
-    /// List indexes (optionally filtered by collection)
     pub async fn index_list(&self, collection: Option<&str>) -> Result<Vec<IndexInfo>> {
         let url = match collection {
             Some(col) => format!("{}/api/v0/index?collection={}", self.base_url, encode(col)),
             None => format!("{}/api/v0/index", self.base_url),
         };
-        let response = self.send_with_retry("GET", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let indexes: Vec<IndexInfo> = response.json().await?;
-        Ok(indexes)
+        self.request_json("GET", &url, None).await
     }
 
-    /// Drop an index by name
     pub async fn index_drop(&self, collection: &str, name: &str) -> Result<()> {
         let url = format!(
             "{}/api/v0/index?collection={}&name={}",
@@ -92,12 +82,6 @@ impl HttpClient {
             encode(collection),
             encode(name)
         );
-        let response = self.send_with_retry("DELETE", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        Ok(())
+        self.request_void("DELETE", &url, None).await
     }
 }

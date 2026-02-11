@@ -15,54 +15,13 @@ pub struct LensSetMigrationResponse {
 }
 
 impl HttpClient {
-    /// Set a lens migration
     pub async fn lens_set_migration(&self, config: &str) -> Result<LensSetMigrationResponse> {
         let url = format!("{}/api/v0/lens/set", self.base_url);
-        let response = self.send_with_retry("POST", &url, Some(config)).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let result: LensSetMigrationResponse = response.json().await?;
-        Ok(result)
+        self.request_json("POST", &url, Some(config)).await
     }
 
-    /// Reload all lens modules
-    pub async fn lens_reload(&self) -> Result<()> {
-        let url = format!("{}/api/v0/lens/reload", self.base_url);
-        let response = self.send_with_retry("POST", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        Ok(())
-    }
-
-    /// Add a lens migration
     pub async fn lens_add(&self, config: &str) -> Result<JsonValue> {
         let url = format!("{}/api/v0/lens", self.base_url);
-        let response = self.send_with_retry("POST", &url, Some(config)).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let result: JsonValue = response.json().await?;
-        Ok(result)
-    }
-
-    /// List lens migrations
-    pub async fn lens_list(&self) -> Result<JsonValue> {
-        let url = format!("{}/api/v0/lens", self.base_url);
-        let response = self.send_with_retry("GET", &url, None).await?;
-
-        if !response.status().is_success() {
-            return Err(Self::extract_error(response).await);
-        }
-
-        let result: JsonValue = response.json().await?;
-        Ok(result)
+        self.request_json("POST", &url, Some(config)).await
     }
 }

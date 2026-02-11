@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
+use serde_json::Value as JsonValue;
 use url::Url;
 
 use crate::error::{Error, Result};
@@ -15,7 +16,6 @@ mod collection;
 mod graphql;
 mod index;
 mod lens;
-mod node;
 mod p2p;
 mod transaction;
 mod types;
@@ -64,6 +64,28 @@ fn get_shared_client() -> Result<&'static Client> {
         Ok(client) => Ok(client),
         Err(msg) => Err(Error::HttpClientInit(msg.clone())),
     }
+}
+
+/// Declares a simple endpoint method with no parameters.
+macro_rules! endpoint {
+    ($name:ident, GET $path:expr => $ret:ty) => {
+        pub async fn $name(&self) -> Result<$ret> {
+            let url = format!("{}{}", self.base_url, $path);
+            self.request_json("GET", &url, None).await
+        }
+    };
+    ($name:ident, POST $path:expr => $ret:ty) => {
+        pub async fn $name(&self) -> Result<$ret> {
+            let url = format!("{}{}", self.base_url, $path);
+            self.request_json("POST", &url, None).await
+        }
+    };
+    ($name:ident, POST $path:expr) => {
+        pub async fn $name(&self) -> Result<()> {
+            let url = format!("{}{}", self.base_url, $path);
+            self.request_void("POST", &url, None).await
+        }
+    };
 }
 
 /// HTTP client for DefraDB server communication
@@ -303,4 +325,56 @@ impl HttpClient {
         let result: T = response.json().await?;
         Ok(result)
     }
+
+    async fn request_json<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        url: &str,
+        body: Option<&str>,
+    ) -> Result<T> {
+        let response = self.send_with_retry(method, url, body).await?;
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+        Ok(response.json().await?)
+    }
+
+    async fn request_void(&self, method: &str, url: &str, body: Option<&str>) -> Result<()> {
+        let response = self.send_with_retry(method, url, body).await?;
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+        Ok(())
+    }
+
+    async fn request_text(&self, method: &str, url: &str, body: Option<&str>) -> Result<String> {
+        let response = self.send_with_retry(method, url, body).await?;
+        if !response.status().is_success() {
+            return Err(Self::extract_error(response).await);
+        }
+        Ok(response.text().await?)
+    }
+
+    // P2P
+    endpoint!(p2p_info,            GET  "/api/v0/p2p/info"           => P2pInfo);
+    endpoint!(p2p_peers_list,      GET  "/api/v0/p2p/peers"          => Vec<P2pPeerInfo>);
+    endpoint!(p2p_replicator_list, GET  "/api/v0/p2p/replicator"     => Vec<P2pReplicatorInfo>);
+    endpoint!(p2p_collection_list, GET  "/api/v0/p2p/collections"    => Vec<String>);
+    endpoint!(p2p_active_peers,    GET  "/api/v0/p2p/active-peers"   => JsonValue);
+    endpoint!(p2p_document_list,   GET  "/api/v0/p2p/documents"      => JsonValue);
+    endpoint!(p2p_collection_sync, POST "/api/v0/p2p/collections/sync");
+
+    // ACP / NAC
+    endpoint!(acp_list_policies,   GET  "/api/v0/acp/policy"         => Vec<AcpPolicy>);
+    endpoint!(nac_status,          GET  "/api/v0/acp/node/status"    => JsonValue);
+    endpoint!(nac_disable,         POST "/api/v0/acp/node/disable"   => JsonValue);
+    endpoint!(nac_re_enable,       POST "/api/v0/acp/node/re-enable" => JsonValue);
+
+    // Lens
+    endpoint!(lens_list,           GET  "/api/v0/lens"               => JsonValue);
+    endpoint!(lens_reload,         POST "/api/v0/lens/reload");
+
+    // Node
+    endpoint!(node_identity,       GET  "/api/v0/node/identity"      => JsonValue);
+    endpoint!(purge,               POST "/api/v0/purge");
 }
