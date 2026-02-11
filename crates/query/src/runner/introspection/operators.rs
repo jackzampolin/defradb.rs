@@ -1,477 +1,260 @@
 use async_graphql::dynamic::*;
 
+/// Generates a `pub(super) fn build_*() -> InputObject` for scalar operator blocks.
+macro_rules! scalar_operator_block {
+    ($fn_name:ident, $type_name:literal, $scalar:literal, comparison) => {
+        pub(super) fn $fn_name() -> InputObject {
+            InputObject::new($type_name)
+                .field(InputValue::new("_eq", TypeRef::named($scalar)))
+                .field(InputValue::new("_geq", TypeRef::named($scalar)))
+                .field(InputValue::new("_gt", TypeRef::named($scalar)))
+                .field(InputValue::new("_in", TypeRef::named_list($scalar)))
+                .field(InputValue::new("_leq", TypeRef::named($scalar)))
+                .field(InputValue::new("_lt", TypeRef::named($scalar)))
+                .field(InputValue::new("_neq", TypeRef::named($scalar)))
+                .field(InputValue::new("_nin", TypeRef::named_list($scalar)))
+        }
+    };
+    ($fn_name:ident, $type_name:literal, $scalar:literal, equality) => {
+        pub(super) fn $fn_name() -> InputObject {
+            InputObject::new($type_name)
+                .field(InputValue::new("_eq", TypeRef::named($scalar)))
+                .field(InputValue::new("_in", TypeRef::named_list($scalar)))
+                .field(InputValue::new("_neq", TypeRef::named($scalar)))
+                .field(InputValue::new("_nin", TypeRef::named_list($scalar)))
+        }
+    };
+    ($fn_name:ident, $type_name:literal, $scalar:literal, string_ops) => {
+        pub(super) fn $fn_name() -> InputObject {
+            InputObject::new($type_name)
+                .field(InputValue::new("_eq", TypeRef::named($scalar)))
+                .field(InputValue::new("_ilike", TypeRef::named($scalar)))
+                .field(InputValue::new("_in", TypeRef::named_list($scalar)))
+                .field(InputValue::new("_like", TypeRef::named($scalar)))
+                .field(InputValue::new("_neq", TypeRef::named($scalar)))
+                .field(InputValue::new("_nilike", TypeRef::named($scalar)))
+                .field(InputValue::new("_nin", TypeRef::named_list($scalar)))
+                .field(InputValue::new("_nlike", TypeRef::named($scalar)))
+        }
+    };
+}
+
+/// Generates a `pub(super) fn build_*() -> InputObject` for filter arg types
+/// (same operators as scalar blocks, plus self-recursive `_and`/`_or`).
+macro_rules! filter_arg {
+    ($fn_name:ident, $type_name:literal, $scalar:literal, comparison) => {
+        pub(super) fn $fn_name() -> InputObject {
+            InputObject::new($type_name)
+                .field(InputValue::new("_and", TypeRef::named_nn_list($type_name)))
+                .field(InputValue::new("_eq", TypeRef::named($scalar)))
+                .field(InputValue::new("_geq", TypeRef::named($scalar)))
+                .field(InputValue::new("_gt", TypeRef::named($scalar)))
+                .field(InputValue::new("_in", TypeRef::named_list($scalar)))
+                .field(InputValue::new("_leq", TypeRef::named($scalar)))
+                .field(InputValue::new("_lt", TypeRef::named($scalar)))
+                .field(InputValue::new("_neq", TypeRef::named($scalar)))
+                .field(InputValue::new("_nin", TypeRef::named_list($scalar)))
+                .field(InputValue::new("_or", TypeRef::named_nn_list($type_name)))
+        }
+    };
+    ($fn_name:ident, $type_name:literal, $scalar:literal, equality) => {
+        pub(super) fn $fn_name() -> InputObject {
+            InputObject::new($type_name)
+                .field(InputValue::new("_and", TypeRef::named_nn_list($type_name)))
+                .field(InputValue::new("_eq", TypeRef::named($scalar)))
+                .field(InputValue::new("_in", TypeRef::named_list($scalar)))
+                .field(InputValue::new("_neq", TypeRef::named($scalar)))
+                .field(InputValue::new("_nin", TypeRef::named_list($scalar)))
+                .field(InputValue::new("_or", TypeRef::named_nn_list($type_name)))
+        }
+    };
+    ($fn_name:ident, $type_name:literal, $scalar:literal, string_ops) => {
+        pub(super) fn $fn_name() -> InputObject {
+            InputObject::new($type_name)
+                .field(InputValue::new("_and", TypeRef::named_nn_list($type_name)))
+                .field(InputValue::new("_eq", TypeRef::named($scalar)))
+                .field(InputValue::new("_ilike", TypeRef::named($scalar)))
+                .field(InputValue::new("_in", TypeRef::named_list($scalar)))
+                .field(InputValue::new("_like", TypeRef::named($scalar)))
+                .field(InputValue::new("_neq", TypeRef::named($scalar)))
+                .field(InputValue::new("_nilike", TypeRef::named($scalar)))
+                .field(InputValue::new("_nin", TypeRef::named_list($scalar)))
+                .field(InputValue::new("_nlike", TypeRef::named($scalar)))
+                .field(InputValue::new("_or", TypeRef::named_nn_list($type_name)))
+        }
+    };
+}
+
+/// Generates a `pub(super) fn build_*() -> InputObject` for list operator blocks
+/// (`_any`/`_all`/`_none` referencing the element block, `_count` always `IntOperatorBlock`).
+macro_rules! list_operator_block {
+    ($fn_name:ident, $type_name:literal, $element_block:literal) => {
+        pub(super) fn $fn_name() -> InputObject {
+            InputObject::new($type_name)
+                .field(InputValue::new("_any", TypeRef::named($element_block)))
+                .field(InputValue::new("_all", TypeRef::named($element_block)))
+                .field(InputValue::new("_none", TypeRef::named($element_block)))
+                .field(InputValue::new(
+                    "_count",
+                    TypeRef::named("IntOperatorBlock"),
+                ))
+        }
+    };
+}
+
 // --- Scalar operator blocks ---
 
-/// Build ID operator block input type.
-pub(super) fn build_id_operator_block() -> InputObject {
-    InputObject::new("IDOperatorBlock")
-        .field(InputValue::new("_eq", TypeRef::named("ID")))
-        .field(InputValue::new("_in", TypeRef::named_list("ID")))
-        .field(InputValue::new("_neq", TypeRef::named("ID")))
-        .field(InputValue::new("_nin", TypeRef::named_list("ID")))
-}
+scalar_operator_block!(build_id_operator_block, "IDOperatorBlock", "ID", equality);
+scalar_operator_block!(
+    build_string_operator_block,
+    "StringOperatorBlock",
+    "String",
+    string_ops
+);
+scalar_operator_block!(
+    build_int_operator_block,
+    "IntOperatorBlock",
+    "Int",
+    comparison
+);
+scalar_operator_block!(
+    build_float_operator_block,
+    "FloatOperatorBlock",
+    "Float",
+    comparison
+);
+scalar_operator_block!(
+    build_float32_operator_block,
+    "Float32OperatorBlock",
+    "Float32",
+    comparison
+);
+scalar_operator_block!(
+    build_float64_operator_block,
+    "Float64OperatorBlock",
+    "Float64",
+    comparison
+);
+scalar_operator_block!(
+    build_bool_operator_block,
+    "BooleanOperatorBlock",
+    "Boolean",
+    equality
+);
+scalar_operator_block!(
+    build_datetime_operator_block,
+    "DateTimeOperatorBlock",
+    "DateTime",
+    comparison
+);
 
-/// Build String operator block input type.
-pub(super) fn build_string_operator_block() -> InputObject {
-    InputObject::new("StringOperatorBlock")
-        .field(InputValue::new("_eq", TypeRef::named("String")))
-        .field(InputValue::new("_ilike", TypeRef::named("String")))
-        .field(InputValue::new("_in", TypeRef::named_list("String")))
-        .field(InputValue::new("_like", TypeRef::named("String")))
-        .field(InputValue::new("_neq", TypeRef::named("String")))
-        .field(InputValue::new("_nilike", TypeRef::named("String")))
-        .field(InputValue::new("_nin", TypeRef::named_list("String")))
-        .field(InputValue::new("_nlike", TypeRef::named("String")))
-}
+// --- Filter arg types ---
 
-/// Build Int operator block input type.
-pub(super) fn build_int_operator_block() -> InputObject {
-    InputObject::new("IntOperatorBlock")
-        .field(InputValue::new("_eq", TypeRef::named("Int")))
-        .field(InputValue::new("_geq", TypeRef::named("Int")))
-        .field(InputValue::new("_gt", TypeRef::named("Int")))
-        .field(InputValue::new("_in", TypeRef::named_list("Int")))
-        .field(InputValue::new("_leq", TypeRef::named("Int")))
-        .field(InputValue::new("_lt", TypeRef::named("Int")))
-        .field(InputValue::new("_neq", TypeRef::named("Int")))
-        .field(InputValue::new("_nin", TypeRef::named_list("Int")))
-}
-
-/// Build Float operator block input type.
-pub(super) fn build_float_operator_block() -> InputObject {
-    InputObject::new("FloatOperatorBlock")
-        .field(InputValue::new("_eq", TypeRef::named("Float")))
-        .field(InputValue::new("_geq", TypeRef::named("Float")))
-        .field(InputValue::new("_gt", TypeRef::named("Float")))
-        .field(InputValue::new("_in", TypeRef::named_list("Float")))
-        .field(InputValue::new("_leq", TypeRef::named("Float")))
-        .field(InputValue::new("_lt", TypeRef::named("Float")))
-        .field(InputValue::new("_neq", TypeRef::named("Float")))
-        .field(InputValue::new("_nin", TypeRef::named_list("Float")))
-}
-
-/// Build Boolean operator block input type.
-pub(super) fn build_bool_operator_block() -> InputObject {
-    InputObject::new("BooleanOperatorBlock")
-        .field(InputValue::new("_eq", TypeRef::named("Boolean")))
-        .field(InputValue::new("_in", TypeRef::named_list("Boolean")))
-        .field(InputValue::new("_neq", TypeRef::named("Boolean")))
-        .field(InputValue::new("_nin", TypeRef::named_list("Boolean")))
-}
-
-/// Build DateTime operator block input type.
-pub(super) fn build_datetime_operator_block() -> InputObject {
-    InputObject::new("DateTimeOperatorBlock")
-        .field(InputValue::new("_eq", TypeRef::named("DateTime")))
-        .field(InputValue::new("_geq", TypeRef::named("DateTime")))
-        .field(InputValue::new("_gt", TypeRef::named("DateTime")))
-        .field(InputValue::new("_in", TypeRef::named_list("DateTime")))
-        .field(InputValue::new("_leq", TypeRef::named("DateTime")))
-        .field(InputValue::new("_lt", TypeRef::named("DateTime")))
-        .field(InputValue::new("_neq", TypeRef::named("DateTime")))
-        .field(InputValue::new("_nin", TypeRef::named_list("DateTime")))
-}
-
-/// Build Float32 operator block input type.
-pub(super) fn build_float32_operator_block() -> InputObject {
-    InputObject::new("Float32OperatorBlock")
-        .field(InputValue::new("_eq", TypeRef::named("Float32")))
-        .field(InputValue::new("_geq", TypeRef::named("Float32")))
-        .field(InputValue::new("_gt", TypeRef::named("Float32")))
-        .field(InputValue::new("_in", TypeRef::named_list("Float32")))
-        .field(InputValue::new("_leq", TypeRef::named("Float32")))
-        .field(InputValue::new("_lt", TypeRef::named("Float32")))
-        .field(InputValue::new("_neq", TypeRef::named("Float32")))
-        .field(InputValue::new("_nin", TypeRef::named_list("Float32")))
-}
-
-/// Build Float64 operator block input type.
-pub(super) fn build_float64_operator_block() -> InputObject {
-    InputObject::new("Float64OperatorBlock")
-        .field(InputValue::new("_eq", TypeRef::named("Float64")))
-        .field(InputValue::new("_geq", TypeRef::named("Float64")))
-        .field(InputValue::new("_gt", TypeRef::named("Float64")))
-        .field(InputValue::new("_in", TypeRef::named_list("Float64")))
-        .field(InputValue::new("_leq", TypeRef::named("Float64")))
-        .field(InputValue::new("_lt", TypeRef::named("Float64")))
-        .field(InputValue::new("_neq", TypeRef::named("Float64")))
-        .field(InputValue::new("_nin", TypeRef::named_list("Float64")))
-}
-
-// --- Inline array filter arg types ---
-
-pub(super) fn build_not_null_int_filter_arg() -> InputObject {
-    InputObject::new("NotNullIntFilterArg")
-        .field(InputValue::new(
-            "_and",
-            TypeRef::named_nn_list("NotNullIntFilterArg"),
-        ))
-        .field(InputValue::new("_eq", TypeRef::named("Int")))
-        .field(InputValue::new("_geq", TypeRef::named("Int")))
-        .field(InputValue::new("_gt", TypeRef::named("Int")))
-        .field(InputValue::new("_in", TypeRef::named_list("Int")))
-        .field(InputValue::new("_leq", TypeRef::named("Int")))
-        .field(InputValue::new("_lt", TypeRef::named("Int")))
-        .field(InputValue::new("_neq", TypeRef::named("Int")))
-        .field(InputValue::new("_nin", TypeRef::named_list("Int")))
-        .field(InputValue::new(
-            "_or",
-            TypeRef::named_nn_list("NotNullIntFilterArg"),
-        ))
-}
-
-pub(super) fn build_int_filter_arg() -> InputObject {
-    InputObject::new("IntFilterArg")
-        .field(InputValue::new(
-            "_and",
-            TypeRef::named_nn_list("IntFilterArg"),
-        ))
-        .field(InputValue::new("_eq", TypeRef::named("Int")))
-        .field(InputValue::new("_geq", TypeRef::named("Int")))
-        .field(InputValue::new("_gt", TypeRef::named("Int")))
-        .field(InputValue::new("_in", TypeRef::named_list("Int")))
-        .field(InputValue::new("_leq", TypeRef::named("Int")))
-        .field(InputValue::new("_lt", TypeRef::named("Int")))
-        .field(InputValue::new("_neq", TypeRef::named("Int")))
-        .field(InputValue::new("_nin", TypeRef::named_list("Int")))
-        .field(InputValue::new(
-            "_or",
-            TypeRef::named_nn_list("IntFilterArg"),
-        ))
-}
-
-pub(super) fn build_not_null_float64_filter_arg() -> InputObject {
-    InputObject::new("NotNullFloat64FilterArg")
-        .field(InputValue::new(
-            "_and",
-            TypeRef::named_nn_list("NotNullFloat64FilterArg"),
-        ))
-        .field(InputValue::new("_eq", TypeRef::named("Float64")))
-        .field(InputValue::new("_geq", TypeRef::named("Float64")))
-        .field(InputValue::new("_gt", TypeRef::named("Float64")))
-        .field(InputValue::new("_in", TypeRef::named_list("Float64")))
-        .field(InputValue::new("_leq", TypeRef::named("Float64")))
-        .field(InputValue::new("_lt", TypeRef::named("Float64")))
-        .field(InputValue::new("_neq", TypeRef::named("Float64")))
-        .field(InputValue::new("_nin", TypeRef::named_list("Float64")))
-        .field(InputValue::new(
-            "_or",
-            TypeRef::named_nn_list("NotNullFloat64FilterArg"),
-        ))
-}
-
-pub(super) fn build_float64_filter_arg() -> InputObject {
-    InputObject::new("Float64FilterArg")
-        .field(InputValue::new(
-            "_and",
-            TypeRef::named_nn_list("Float64FilterArg"),
-        ))
-        .field(InputValue::new("_eq", TypeRef::named("Float64")))
-        .field(InputValue::new("_geq", TypeRef::named("Float64")))
-        .field(InputValue::new("_gt", TypeRef::named("Float64")))
-        .field(InputValue::new("_in", TypeRef::named_list("Float64")))
-        .field(InputValue::new("_leq", TypeRef::named("Float64")))
-        .field(InputValue::new("_lt", TypeRef::named("Float64")))
-        .field(InputValue::new("_neq", TypeRef::named("Float64")))
-        .field(InputValue::new("_nin", TypeRef::named_list("Float64")))
-        .field(InputValue::new(
-            "_or",
-            TypeRef::named_nn_list("Float64FilterArg"),
-        ))
-}
-
-pub(super) fn build_not_null_float32_filter_arg() -> InputObject {
-    InputObject::new("NotNullFloat32FilterArg")
-        .field(InputValue::new(
-            "_and",
-            TypeRef::named_nn_list("NotNullFloat32FilterArg"),
-        ))
-        .field(InputValue::new("_eq", TypeRef::named("Float32")))
-        .field(InputValue::new("_geq", TypeRef::named("Float32")))
-        .field(InputValue::new("_gt", TypeRef::named("Float32")))
-        .field(InputValue::new("_in", TypeRef::named_list("Float32")))
-        .field(InputValue::new("_leq", TypeRef::named("Float32")))
-        .field(InputValue::new("_lt", TypeRef::named("Float32")))
-        .field(InputValue::new("_neq", TypeRef::named("Float32")))
-        .field(InputValue::new("_nin", TypeRef::named_list("Float32")))
-        .field(InputValue::new(
-            "_or",
-            TypeRef::named_nn_list("NotNullFloat32FilterArg"),
-        ))
-}
-
-pub(super) fn build_float32_filter_arg() -> InputObject {
-    InputObject::new("Float32FilterArg")
-        .field(InputValue::new(
-            "_and",
-            TypeRef::named_nn_list("Float32FilterArg"),
-        ))
-        .field(InputValue::new("_eq", TypeRef::named("Float32")))
-        .field(InputValue::new("_geq", TypeRef::named("Float32")))
-        .field(InputValue::new("_gt", TypeRef::named("Float32")))
-        .field(InputValue::new("_in", TypeRef::named_list("Float32")))
-        .field(InputValue::new("_leq", TypeRef::named("Float32")))
-        .field(InputValue::new("_lt", TypeRef::named("Float32")))
-        .field(InputValue::new("_neq", TypeRef::named("Float32")))
-        .field(InputValue::new("_nin", TypeRef::named_list("Float32")))
-        .field(InputValue::new(
-            "_or",
-            TypeRef::named_nn_list("Float32FilterArg"),
-        ))
-}
-
-pub(super) fn build_not_null_bool_filter_arg() -> InputObject {
-    InputObject::new("NotNullBooleanFilterArg")
-        .field(InputValue::new(
-            "_and",
-            TypeRef::named_nn_list("NotNullBooleanFilterArg"),
-        ))
-        .field(InputValue::new("_eq", TypeRef::named("Boolean")))
-        .field(InputValue::new("_in", TypeRef::named_list("Boolean")))
-        .field(InputValue::new("_neq", TypeRef::named("Boolean")))
-        .field(InputValue::new("_nin", TypeRef::named_list("Boolean")))
-        .field(InputValue::new(
-            "_or",
-            TypeRef::named_nn_list("NotNullBooleanFilterArg"),
-        ))
-}
-
-pub(super) fn build_bool_filter_arg() -> InputObject {
-    InputObject::new("BooleanFilterArg")
-        .field(InputValue::new(
-            "_and",
-            TypeRef::named_nn_list("BooleanFilterArg"),
-        ))
-        .field(InputValue::new("_eq", TypeRef::named("Boolean")))
-        .field(InputValue::new("_in", TypeRef::named_list("Boolean")))
-        .field(InputValue::new("_neq", TypeRef::named("Boolean")))
-        .field(InputValue::new("_nin", TypeRef::named_list("Boolean")))
-        .field(InputValue::new(
-            "_or",
-            TypeRef::named_nn_list("BooleanFilterArg"),
-        ))
-}
-
-pub(super) fn build_not_null_string_filter_arg() -> InputObject {
-    InputObject::new("NotNullStringFilterArg")
-        .field(InputValue::new(
-            "_and",
-            TypeRef::named_nn_list("NotNullStringFilterArg"),
-        ))
-        .field(InputValue::new("_eq", TypeRef::named("String")))
-        .field(InputValue::new("_ilike", TypeRef::named("String")))
-        .field(InputValue::new("_in", TypeRef::named_list("String")))
-        .field(InputValue::new("_like", TypeRef::named("String")))
-        .field(InputValue::new("_neq", TypeRef::named("String")))
-        .field(InputValue::new("_nilike", TypeRef::named("String")))
-        .field(InputValue::new("_nin", TypeRef::named_list("String")))
-        .field(InputValue::new("_nlike", TypeRef::named("String")))
-        .field(InputValue::new(
-            "_or",
-            TypeRef::named_nn_list("NotNullStringFilterArg"),
-        ))
-}
-
-pub(super) fn build_string_filter_arg() -> InputObject {
-    InputObject::new("StringFilterArg")
-        .field(InputValue::new(
-            "_and",
-            TypeRef::named_nn_list("StringFilterArg"),
-        ))
-        .field(InputValue::new("_eq", TypeRef::named("String")))
-        .field(InputValue::new("_ilike", TypeRef::named("String")))
-        .field(InputValue::new("_in", TypeRef::named_list("String")))
-        .field(InputValue::new("_like", TypeRef::named("String")))
-        .field(InputValue::new("_neq", TypeRef::named("String")))
-        .field(InputValue::new("_nilike", TypeRef::named("String")))
-        .field(InputValue::new("_nin", TypeRef::named_list("String")))
-        .field(InputValue::new("_nlike", TypeRef::named("String")))
-        .field(InputValue::new(
-            "_or",
-            TypeRef::named_nn_list("StringFilterArg"),
-        ))
-}
+filter_arg!(
+    build_not_null_int_filter_arg,
+    "NotNullIntFilterArg",
+    "Int",
+    comparison
+);
+filter_arg!(build_int_filter_arg, "IntFilterArg", "Int", comparison);
+filter_arg!(
+    build_not_null_float64_filter_arg,
+    "NotNullFloat64FilterArg",
+    "Float64",
+    comparison
+);
+filter_arg!(
+    build_float64_filter_arg,
+    "Float64FilterArg",
+    "Float64",
+    comparison
+);
+filter_arg!(
+    build_not_null_float32_filter_arg,
+    "NotNullFloat32FilterArg",
+    "Float32",
+    comparison
+);
+filter_arg!(
+    build_float32_filter_arg,
+    "Float32FilterArg",
+    "Float32",
+    comparison
+);
+filter_arg!(
+    build_not_null_bool_filter_arg,
+    "NotNullBooleanFilterArg",
+    "Boolean",
+    equality
+);
+filter_arg!(
+    build_bool_filter_arg,
+    "BooleanFilterArg",
+    "Boolean",
+    equality
+);
+filter_arg!(
+    build_not_null_string_filter_arg,
+    "NotNullStringFilterArg",
+    "String",
+    string_ops
+);
+filter_arg!(
+    build_string_filter_arg,
+    "StringFilterArg",
+    "String",
+    string_ops
+);
 
 // --- List operator blocks ---
 
-pub(super) fn build_int_list_operator_block() -> InputObject {
-    InputObject::new("IntListOperatorBlock")
-        .field(InputValue::new("_any", TypeRef::named("IntOperatorBlock")))
-        .field(InputValue::new("_all", TypeRef::named("IntOperatorBlock")))
-        .field(InputValue::new("_none", TypeRef::named("IntOperatorBlock")))
-        .field(InputValue::new(
-            "_count",
-            TypeRef::named("IntOperatorBlock"),
-        ))
-}
-
-pub(super) fn build_not_null_int_list_operator_block() -> InputObject {
-    InputObject::new("NotNullIntListOperatorBlock")
-        .field(InputValue::new("_any", TypeRef::named("IntOperatorBlock")))
-        .field(InputValue::new("_all", TypeRef::named("IntOperatorBlock")))
-        .field(InputValue::new("_none", TypeRef::named("IntOperatorBlock")))
-        .field(InputValue::new(
-            "_count",
-            TypeRef::named("IntOperatorBlock"),
-        ))
-}
-
-pub(super) fn build_float64_list_operator_block() -> InputObject {
-    InputObject::new("Float64ListOperatorBlock")
-        .field(InputValue::new(
-            "_any",
-            TypeRef::named("Float64OperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_all",
-            TypeRef::named("Float64OperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_none",
-            TypeRef::named("Float64OperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_count",
-            TypeRef::named("IntOperatorBlock"),
-        ))
-}
-
-pub(super) fn build_not_null_float64_list_operator_block() -> InputObject {
-    InputObject::new("NotNullFloat64ListOperatorBlock")
-        .field(InputValue::new(
-            "_any",
-            TypeRef::named("Float64OperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_all",
-            TypeRef::named("Float64OperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_none",
-            TypeRef::named("Float64OperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_count",
-            TypeRef::named("IntOperatorBlock"),
-        ))
-}
-
-pub(super) fn build_float32_list_operator_block() -> InputObject {
-    InputObject::new("Float32ListOperatorBlock")
-        .field(InputValue::new(
-            "_any",
-            TypeRef::named("Float32OperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_all",
-            TypeRef::named("Float32OperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_none",
-            TypeRef::named("Float32OperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_count",
-            TypeRef::named("IntOperatorBlock"),
-        ))
-}
-
-pub(super) fn build_not_null_float32_list_operator_block() -> InputObject {
-    InputObject::new("NotNullFloat32ListOperatorBlock")
-        .field(InputValue::new(
-            "_any",
-            TypeRef::named("Float32OperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_all",
-            TypeRef::named("Float32OperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_none",
-            TypeRef::named("Float32OperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_count",
-            TypeRef::named("IntOperatorBlock"),
-        ))
-}
-
-pub(super) fn build_bool_list_operator_block() -> InputObject {
-    InputObject::new("BooleanListOperatorBlock")
-        .field(InputValue::new(
-            "_any",
-            TypeRef::named("BooleanOperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_all",
-            TypeRef::named("BooleanOperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_none",
-            TypeRef::named("BooleanOperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_count",
-            TypeRef::named("IntOperatorBlock"),
-        ))
-}
-
-pub(super) fn build_not_null_bool_list_operator_block() -> InputObject {
-    InputObject::new("NotNullBooleanListOperatorBlock")
-        .field(InputValue::new(
-            "_any",
-            TypeRef::named("BooleanOperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_all",
-            TypeRef::named("BooleanOperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_none",
-            TypeRef::named("BooleanOperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_count",
-            TypeRef::named("IntOperatorBlock"),
-        ))
-}
-
-pub(super) fn build_string_list_operator_block() -> InputObject {
-    InputObject::new("StringListOperatorBlock")
-        .field(InputValue::new(
-            "_any",
-            TypeRef::named("StringOperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_all",
-            TypeRef::named("StringOperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_none",
-            TypeRef::named("StringOperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_count",
-            TypeRef::named("IntOperatorBlock"),
-        ))
-}
-
-pub(super) fn build_not_null_string_list_operator_block() -> InputObject {
-    InputObject::new("NotNullStringListOperatorBlock")
-        .field(InputValue::new(
-            "_any",
-            TypeRef::named("StringOperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_all",
-            TypeRef::named("StringOperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_none",
-            TypeRef::named("StringOperatorBlock"),
-        ))
-        .field(InputValue::new(
-            "_count",
-            TypeRef::named("IntOperatorBlock"),
-        ))
-}
+list_operator_block!(
+    build_int_list_operator_block,
+    "IntListOperatorBlock",
+    "IntOperatorBlock"
+);
+list_operator_block!(
+    build_not_null_int_list_operator_block,
+    "NotNullIntListOperatorBlock",
+    "IntOperatorBlock"
+);
+list_operator_block!(
+    build_float64_list_operator_block,
+    "Float64ListOperatorBlock",
+    "Float64OperatorBlock"
+);
+list_operator_block!(
+    build_not_null_float64_list_operator_block,
+    "NotNullFloat64ListOperatorBlock",
+    "Float64OperatorBlock"
+);
+list_operator_block!(
+    build_float32_list_operator_block,
+    "Float32ListOperatorBlock",
+    "Float32OperatorBlock"
+);
+list_operator_block!(
+    build_not_null_float32_list_operator_block,
+    "NotNullFloat32ListOperatorBlock",
+    "Float32OperatorBlock"
+);
+list_operator_block!(
+    build_bool_list_operator_block,
+    "BooleanListOperatorBlock",
+    "BooleanOperatorBlock"
+);
+list_operator_block!(
+    build_not_null_bool_list_operator_block,
+    "NotNullBooleanListOperatorBlock",
+    "BooleanOperatorBlock"
+);
+list_operator_block!(
+    build_string_list_operator_block,
+    "StringListOperatorBlock",
+    "StringOperatorBlock"
+);
+list_operator_block!(
+    build_not_null_string_list_operator_block,
+    "NotNullStringListOperatorBlock",
+    "StringOperatorBlock"
+);
