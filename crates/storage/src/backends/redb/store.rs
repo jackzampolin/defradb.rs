@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use super::config::{DurabilityMode, RedbStoreOptions};
 use super::transaction::RedbTxn;
 use super::KV_TABLE;
-use crate::backends::shared::ConflictTracker;
+use crate::backends::shared::{CallbackManager, ConflictTracker};
 use crate::corekv::{Dropable, Error, Result, Store, Txn};
 
 /// Redb-backed key-value store.
@@ -304,12 +304,7 @@ impl Store for RedbStore {
             durability: self.durability,
             discarded: Mutex::new(false),
             committed: Mutex::new(false),
-            on_success: Mutex::new(Vec::new()),
-            on_success_async: Mutex::new(Vec::new()),
-            on_error: Mutex::new(Vec::new()),
-            on_error_async: Mutex::new(Vec::new()),
-            on_discard: Mutex::new(Vec::new()),
-            on_discard_async: Mutex::new(Vec::new()),
+            callbacks: CallbackManager::new(),
         }))
     }
 
@@ -389,35 +384,6 @@ impl Dropable for RedbStore {
         write_txn.commit()?;
 
         Ok(())
-    }
-}
-
-/// Callback counts for monitoring transaction callback accumulation.
-#[derive(Debug, Clone, Default)]
-pub struct CallbackCounts {
-    /// Number of synchronous on_success callbacks registered
-    pub on_success: usize,
-    /// Number of asynchronous on_success callbacks registered
-    pub on_success_async: usize,
-    /// Number of synchronous on_error callbacks registered
-    pub on_error: usize,
-    /// Number of asynchronous on_error callbacks registered
-    pub on_error_async: usize,
-    /// Number of synchronous on_discard callbacks registered
-    pub on_discard: usize,
-    /// Number of asynchronous on_discard callbacks registered
-    pub on_discard_async: usize,
-}
-
-impl CallbackCounts {
-    /// Total number of callbacks registered across all types.
-    pub fn total(&self) -> usize {
-        self.on_success
-            + self.on_success_async
-            + self.on_error
-            + self.on_error_async
-            + self.on_discard
-            + self.on_discard_async
     }
 }
 

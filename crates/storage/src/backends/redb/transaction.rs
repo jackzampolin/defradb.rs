@@ -9,12 +9,10 @@ use std::sync::Arc;
 use super::config::DurabilityMode;
 use super::iterator::MergingIterator;
 use super::{bound_as_ref, compute_range_bounds, KV_TABLE};
-use crate::backends::shared::ConflictTracker;
+use crate::backends::shared::{CallbackCounts, CallbackManager, ConflictTracker};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
-
-use super::store::CallbackCounts;
 
 /// Redb transaction with snapshot isolation and buffered writes.
 ///
@@ -60,17 +58,8 @@ pub(crate) struct RedbTxn {
     /// Whether the transaction has been committed
     pub(crate) committed: Mutex<bool>,
 
-    /// Callbacks for successful commit
-    pub(crate) on_success: Mutex<Vec<TxnCallback>>,
-    pub(crate) on_success_async: Mutex<Vec<AsyncTxnCallback>>,
-
-    /// Callbacks for failed commit
-    pub(crate) on_error: Mutex<Vec<TxnCallback>>,
-    pub(crate) on_error_async: Mutex<Vec<AsyncTxnCallback>>,
-
-    /// Callbacks for discard
-    pub(crate) on_discard: Mutex<Vec<TxnCallback>>,
-    pub(crate) on_discard_async: Mutex<Vec<AsyncTxnCallback>>,
+    /// Transaction lifecycle callbacks
+    pub(crate) callbacks: CallbackManager,
 }
 
 impl Drop for RedbTxn {
@@ -83,9 +72,8 @@ impl Drop for RedbTxn {
         let was_discarded = *self.discarded.lock();
         if !was_committed && !was_discarded {
             // Count skipped callbacks to include in warning
-            let skipped_discard = self.on_discard.lock().len();
-            let skipped_discard_async = self.on_discard_async.lock().len();
-            let total_skipped = skipped_discard + skipped_discard_async;
+            let total_skipped =
+                self.callbacks.counts().on_discard + self.callbacks.counts().on_discard_async;
 
             if total_skipped > 0 {
                 tracing::warn!(
@@ -107,30 +95,9 @@ impl Drop for RedbTxn {
 
 impl RedbTxn {
     /// Get the current count of registered callbacks.
-    ///
-    /// This is useful for monitoring callback accumulation in long-lived
-    /// transactions and detecting potential memory pressure.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let txn = store.new_txn(false).await?;
-    /// // ... register some callbacks ...
-    /// let counts = txn.callback_counts();
-    /// if counts.total() > 100 {
-    ///     tracing::warn!("Transaction has {} callbacks registered", counts.total());
-    /// }
-    /// ```
     #[allow(dead_code)] // Part of public API - used externally for monitoring
     pub fn callback_counts(&self) -> CallbackCounts {
-        CallbackCounts {
-            on_success: self.on_success.lock().len(),
-            on_success_async: self.on_success_async.lock().len(),
-            on_error: self.on_error.lock().len(),
-            on_error_async: self.on_error_async.lock().len(),
-            on_discard: self.on_discard.lock().len(),
-            on_discard_async: self.on_discard_async.lock().len(),
-        }
+        self.callbacks.counts()
     }
 
     /// Get a value, checking pending changes first, then the read transaction.
@@ -170,69 +137,6 @@ impl RedbTxn {
             Err(e) => return Err(e.into()),
         };
         Ok(table.get(key)?.is_some())
-    }
-
-    /// Execute sync callbacks with panic protection.
-    ///
-    /// Returns the number of callbacks that panicked.
-    fn execute_callbacks(callbacks: Vec<TxnCallback>) -> usize {
-        let total = callbacks.len();
-        let mut failed = 0;
-
-        for (i, callback) in callbacks.into_iter().enumerate() {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
-            if let Err(panic_info) = result {
-                failed += 1;
-                tracing::error!(
-                    callback_index = i,
-                    panic = ?panic_info,
-                    "Transaction callback panicked - continuing with remaining callbacks"
-                );
-            }
-        }
-
-        if failed > 0 {
-            tracing::warn!(
-                total_callbacks = total,
-                failed_callbacks = failed,
-                "Sync callback execution completed with failures"
-            );
-        }
-
-        failed
-    }
-
-    /// Execute async callbacks with panic protection.
-    ///
-    /// Returns the number of callbacks that panicked.
-    async fn execute_async_callbacks(callbacks: Vec<AsyncTxnCallback>) -> usize {
-        use futures::FutureExt;
-
-        let total = callbacks.len();
-        let mut failed = 0;
-
-        for (i, callback) in callbacks.into_iter().enumerate() {
-            let future = callback();
-            let result = std::panic::AssertUnwindSafe(future).catch_unwind().await;
-            if let Err(panic_info) = result {
-                failed += 1;
-                tracing::error!(
-                    callback_index = i,
-                    panic = ?panic_info,
-                    "Async callback panicked during execution - continuing with remaining callbacks"
-                );
-            }
-        }
-
-        if failed > 0 {
-            tracing::warn!(
-                total_callbacks = total,
-                failed_callbacks = failed,
-                "Async callback execution completed with failures"
-            );
-        }
-
-        failed
     }
 }
 
@@ -368,10 +272,8 @@ impl Txn for RedbTxn {
 
         if *self.discarded.lock() {
             tracing::warn!("Attempted to commit a discarded transaction");
-            let on_error = std::mem::take(&mut *self.on_error.lock());
-            let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
-            Self::execute_callbacks(on_error);
-            Self::execute_async_callbacks(on_error_async).await;
+            CallbackManager::execute_callbacks(self.callbacks.take_error());
+            CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
             return Err(Error::DiscardedTxn);
         }
 
@@ -390,10 +292,8 @@ impl Txn for RedbTxn {
                 .conflict_tracker
                 .check_and_record(self.read_version, write_set)
             {
-                let on_error = std::mem::take(&mut *self.on_error.lock());
-                let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
-                Self::execute_callbacks(on_error);
-                Self::execute_async_callbacks(on_error_async).await;
+                CallbackManager::execute_callbacks(self.callbacks.take_error());
+                CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
                 return Err(e);
             }
         }
@@ -408,10 +308,9 @@ impl Txn for RedbTxn {
                         pending_changes = pending.len(),
                         "Failed to begin write transaction during commit"
                     );
-                    let on_error = std::mem::take(&mut *self.on_error.lock());
-                    let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
-                    Self::execute_callbacks(on_error);
-                    Self::execute_async_callbacks(on_error_async).await;
+                    CallbackManager::execute_callbacks(self.callbacks.take_error());
+                    CallbackManager::execute_async_callbacks(self.callbacks.take_error_async())
+                        .await;
                     return Err(e.into());
                 }
             };
@@ -429,10 +328,9 @@ impl Txn for RedbTxn {
                             error = %e,
                             "Failed to open KV table during commit"
                         );
-                        let on_error = std::mem::take(&mut *self.on_error.lock());
-                        let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
-                        Self::execute_callbacks(on_error);
-                        Self::execute_async_callbacks(on_error_async).await;
+                        CallbackManager::execute_callbacks(self.callbacks.take_error());
+                        CallbackManager::execute_async_callbacks(self.callbacks.take_error_async())
+                            .await;
                         return Err(e.into());
                     }
                 };
@@ -452,11 +350,11 @@ impl Txn for RedbTxn {
                                     pending_changes = pending.len(),
                                     "Write transaction aborted - no partial writes persisted"
                                 );
-                                let on_error = std::mem::take(&mut *self.on_error.lock());
-                                let on_error_async =
-                                    std::mem::take(&mut *self.on_error_async.lock());
-                                Self::execute_callbacks(on_error);
-                                Self::execute_async_callbacks(on_error_async).await;
+                                CallbackManager::execute_callbacks(self.callbacks.take_error());
+                                CallbackManager::execute_async_callbacks(
+                                    self.callbacks.take_error_async(),
+                                )
+                                .await;
                                 return Err(e.into());
                             }
                         }
@@ -472,11 +370,11 @@ impl Txn for RedbTxn {
                                     pending_changes = pending.len(),
                                     "Write transaction aborted - no partial writes persisted"
                                 );
-                                let on_error = std::mem::take(&mut *self.on_error.lock());
-                                let on_error_async =
-                                    std::mem::take(&mut *self.on_error_async.lock());
-                                Self::execute_callbacks(on_error);
-                                Self::execute_async_callbacks(on_error_async).await;
+                                CallbackManager::execute_callbacks(self.callbacks.take_error());
+                                CallbackManager::execute_async_callbacks(
+                                    self.callbacks.take_error_async(),
+                                )
+                                .await;
                                 return Err(e.into());
                             }
                         }
@@ -492,10 +390,8 @@ impl Txn for RedbTxn {
                 );
                 // Note: redb guarantees atomicity - if commit fails, no changes are persisted
                 tracing::debug!("Commit failed at finalization stage - database state unchanged");
-                let on_error = std::mem::take(&mut *self.on_error.lock());
-                let on_error_async = std::mem::take(&mut *self.on_error_async.lock());
-                Self::execute_callbacks(on_error);
-                Self::execute_async_callbacks(on_error_async).await;
+                CallbackManager::execute_callbacks(self.callbacks.take_error());
+                CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
                 return Err(e.into());
             }
         }
@@ -505,10 +401,8 @@ impl Txn for RedbTxn {
         *self.committed.lock() = true;
 
         // Execute success callbacks
-        let on_success = std::mem::take(&mut *self.on_success.lock());
-        let on_success_async = std::mem::take(&mut *self.on_success_async.lock());
-        Self::execute_callbacks(on_success);
-        Self::execute_async_callbacks(on_success_async).await;
+        CallbackManager::execute_callbacks(self.callbacks.take_success());
+        CallbackManager::execute_async_callbacks(self.callbacks.take_success_async()).await;
 
         Ok(())
     }
@@ -520,11 +414,10 @@ impl Txn for RedbTxn {
         *self.discarded.lock() = true;
 
         // Execute sync discard callbacks
-        let on_discard = std::mem::take(&mut *self.on_discard.lock());
-        Self::execute_callbacks(on_discard);
+        CallbackManager::execute_callbacks(self.callbacks.take_discard());
 
         // Handle async callbacks: spawn them in background with warning
-        let on_discard_async = std::mem::take(&mut *self.on_discard_async.lock());
+        let on_discard_async = self.callbacks.take_discard_async();
         if !on_discard_async.is_empty() {
             let callback_count = on_discard_async.len();
             tracing::warn!(
@@ -533,34 +426,34 @@ impl Txn for RedbTxn {
             );
 
             tokio::spawn(async move {
-                Self::execute_async_callbacks(on_discard_async).await;
+                CallbackManager::execute_async_callbacks(on_discard_async).await;
                 tracing::debug!(count = callback_count, "Async discard callbacks completed");
             });
         }
     }
 
     fn on_success(&mut self, callback: TxnCallback) {
-        self.on_success.lock().push(callback);
+        self.callbacks.register_success(callback);
     }
 
     fn on_success_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_success_async.lock().push(callback);
+        self.callbacks.register_success_async(callback);
     }
 
     fn on_error(&mut self, callback: TxnCallback) {
-        self.on_error.lock().push(callback);
+        self.callbacks.register_error(callback);
     }
 
     fn on_error_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_error_async.lock().push(callback);
+        self.callbacks.register_error_async(callback);
     }
 
     fn on_discard(&mut self, callback: TxnCallback) {
-        self.on_discard.lock().push(callback);
+        self.callbacks.register_discard(callback);
     }
 
     fn on_discard_async(&mut self, callback: AsyncTxnCallback) {
-        self.on_discard_async.lock().push(callback);
+        self.callbacks.register_discard_async(callback);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -576,6 +469,6 @@ impl Txn for RedbTxn {
     }
 
     fn callback_count(&self) -> usize {
-        self.callback_counts().total()
+        self.callbacks.count()
     }
 }

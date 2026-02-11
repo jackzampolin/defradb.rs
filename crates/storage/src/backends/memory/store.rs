@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::transaction::MemoryTxn;
-use crate::backends::shared::ConflictTracker;
+use crate::backends::shared::{CallbackManager, ConflictTracker};
 use crate::corekv::{Dropable, Error, Result, Store, Txn};
 
 /// In-memory key-value store using BTreeMap.
@@ -64,12 +64,7 @@ impl Store for MemoryStore {
             readonly,
             discarded: Mutex::new(false),
             committed: Mutex::new(false),
-            on_success: Mutex::new(Vec::new()),
-            on_success_async: Mutex::new(Vec::new()),
-            on_error: Mutex::new(Vec::new()),
-            on_error_async: Mutex::new(Vec::new()),
-            on_discard: Mutex::new(Vec::new()),
-            on_discard_async: Mutex::new(Vec::new()),
+            callbacks: CallbackManager::new(),
         }))
     }
 

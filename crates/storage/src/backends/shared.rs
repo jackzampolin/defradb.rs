@@ -1,8 +1,168 @@
 use parking_lot::Mutex;
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::corekv::Error;
+use crate::corekv::{AsyncTxnCallback, TxnCallback};
+
+/// Manages transaction lifecycle callbacks (success, error, discard).
+///
+/// All three backends (memory, redb, leveldb) use identical callback storage,
+/// registration, execution, and counting logic. This struct centralizes that.
+pub(crate) struct CallbackManager {
+    on_success: Mutex<Vec<TxnCallback>>,
+    on_success_async: Mutex<Vec<AsyncTxnCallback>>,
+    on_error: Mutex<Vec<TxnCallback>>,
+    on_error_async: Mutex<Vec<AsyncTxnCallback>>,
+    on_discard: Mutex<Vec<TxnCallback>>,
+    on_discard_async: Mutex<Vec<AsyncTxnCallback>>,
+}
+
+impl CallbackManager {
+    pub(crate) fn new() -> Self {
+        Self {
+            on_success: Mutex::new(Vec::new()),
+            on_success_async: Mutex::new(Vec::new()),
+            on_error: Mutex::new(Vec::new()),
+            on_error_async: Mutex::new(Vec::new()),
+            on_discard: Mutex::new(Vec::new()),
+            on_discard_async: Mutex::new(Vec::new()),
+        }
+    }
+
+    // Registration methods
+
+    pub(crate) fn register_success(&self, cb: TxnCallback) {
+        self.on_success.lock().push(cb);
+    }
+
+    pub(crate) fn register_success_async(&self, cb: AsyncTxnCallback) {
+        self.on_success_async.lock().push(cb);
+    }
+
+    pub(crate) fn register_error(&self, cb: TxnCallback) {
+        self.on_error.lock().push(cb);
+    }
+
+    pub(crate) fn register_error_async(&self, cb: AsyncTxnCallback) {
+        self.on_error_async.lock().push(cb);
+    }
+
+    pub(crate) fn register_discard(&self, cb: TxnCallback) {
+        self.on_discard.lock().push(cb);
+    }
+
+    pub(crate) fn register_discard_async(&self, cb: AsyncTxnCallback) {
+        self.on_discard_async.lock().push(cb);
+    }
+
+    // Take methods (drain the vecs for execution)
+
+    pub(crate) fn take_success(&self) -> Vec<TxnCallback> {
+        std::mem::take(&mut *self.on_success.lock())
+    }
+
+    pub(crate) fn take_success_async(&self) -> Vec<AsyncTxnCallback> {
+        std::mem::take(&mut *self.on_success_async.lock())
+    }
+
+    pub(crate) fn take_error(&self) -> Vec<TxnCallback> {
+        std::mem::take(&mut *self.on_error.lock())
+    }
+
+    pub(crate) fn take_error_async(&self) -> Vec<AsyncTxnCallback> {
+        std::mem::take(&mut *self.on_error_async.lock())
+    }
+
+    pub(crate) fn take_discard(&self) -> Vec<TxnCallback> {
+        std::mem::take(&mut *self.on_discard.lock())
+    }
+
+    pub(crate) fn take_discard_async(&self) -> Vec<AsyncTxnCallback> {
+        std::mem::take(&mut *self.on_discard_async.lock())
+    }
+
+    // Counting
+
+    pub(crate) fn count(&self) -> usize {
+        self.on_success.lock().len()
+            + self.on_success_async.lock().len()
+            + self.on_error.lock().len()
+            + self.on_error_async.lock().len()
+            + self.on_discard.lock().len()
+            + self.on_discard_async.lock().len()
+    }
+
+    pub(crate) fn counts(&self) -> CallbackCounts {
+        CallbackCounts {
+            on_success: self.on_success.lock().len(),
+            on_success_async: self.on_success_async.lock().len(),
+            on_error: self.on_error.lock().len(),
+            on_error_async: self.on_error_async.lock().len(),
+            on_discard: self.on_discard.lock().len(),
+            on_discard_async: self.on_discard_async.lock().len(),
+        }
+    }
+
+    // Static execution methods
+
+    /// Execute sync callbacks with panic protection.
+    pub(crate) fn execute_callbacks(callbacks: Vec<TxnCallback>) {
+        for (i, callback) in callbacks.into_iter().enumerate() {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+            if let Err(panic_info) = result {
+                tracing::error!(
+                    callback_index = i,
+                    panic = ?panic_info,
+                    "Transaction callback panicked - continuing with remaining callbacks"
+                );
+            }
+        }
+    }
+
+    /// Execute async callbacks with panic protection.
+    pub(crate) async fn execute_async_callbacks(callbacks: Vec<AsyncTxnCallback>) {
+        use futures::FutureExt;
+
+        for (i, callback) in callbacks.into_iter().enumerate() {
+            let future = callback();
+            let result = std::panic::AssertUnwindSafe(future).catch_unwind().await;
+            if let Err(panic_info) = result {
+                tracing::error!(
+                    callback_index = i,
+                    panic = ?panic_info,
+                    "Async callback panicked during execution - continuing with remaining callbacks"
+                );
+            }
+        }
+    }
+}
+
+/// Callback counts for monitoring transaction callback accumulation.
+#[derive(Debug, Clone, Default)]
+pub struct CallbackCounts {
+    /// Number of synchronous on_success callbacks registered
+    pub on_success: usize,
+    /// Number of asynchronous on_success callbacks registered
+    pub on_success_async: usize,
+    /// Number of synchronous on_error callbacks registered
+    pub on_error: usize,
+    /// Number of asynchronous on_error callbacks registered
+    pub on_error_async: usize,
+    /// Number of synchronous on_discard callbacks registered
+    pub on_discard: usize,
+    /// Number of asynchronous on_discard callbacks registered
+    pub on_discard_async: usize,
+}
+
+impl CallbackCounts {
+    /// Total number of callbacks registered across all types.
+    pub fn total(&self) -> usize {
+        self.on_success
+            + self.on_success_async
+            + self.on_error
+            + self.on_error_async
+            + self.on_discard
+            + self.on_discard_async
+    }
+}
 
 /// Tracks committed write sets for optimistic conflict detection.
 ///
@@ -10,16 +170,19 @@ use crate::corekv::Error;
 /// at which it was committed. When a new transaction commits, it checks whether
 /// any of its written keys were also written by transactions that committed
 /// after this transaction's snapshot was taken.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct ConflictTracker {
     /// Monotonically increasing version counter.
-    version: AtomicU64,
+    version: std::sync::atomic::AtomicU64,
     /// Write sets from committed transactions: (commit_version, keys_written).
     /// Protected by a mutex since we only access it during commit (not hot path).
-    committed_writes: Mutex<Vec<(u64, HashSet<Vec<u8>>)>>,
+    committed_writes: Mutex<Vec<(u64, std::collections::HashSet<Vec<u8>>)>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ConflictTracker {
     pub(crate) fn new() -> Self {
+        use std::sync::atomic::AtomicU64;
         Self {
             version: AtomicU64::new(0),
             committed_writes: Mutex::new(Vec::new()),
@@ -28,6 +191,7 @@ impl ConflictTracker {
 
     /// Get the current version for a new transaction's snapshot.
     pub(crate) fn current_version(&self) -> u64 {
+        use std::sync::atomic::Ordering;
         self.version.load(Ordering::SeqCst)
     }
 
@@ -37,8 +201,10 @@ impl ConflictTracker {
     pub(crate) fn check_and_record(
         &self,
         read_version: u64,
-        write_set: HashSet<Vec<u8>>,
-    ) -> std::result::Result<(), Error> {
+        write_set: std::collections::HashSet<Vec<u8>>,
+    ) -> std::result::Result<(), crate::corekv::Error> {
+        use std::sync::atomic::Ordering;
+
         if write_set.is_empty() {
             return Ok(());
         }
@@ -51,7 +217,7 @@ impl ConflictTracker {
             if *commit_ver > read_version {
                 for key in &write_set {
                     if keys.contains(key) {
-                        return Err(Error::TxnConflict);
+                        return Err(crate::corekv::Error::TxnConflict);
                     }
                 }
             }

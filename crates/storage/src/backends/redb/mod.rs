@@ -69,7 +69,7 @@ use redb::TableDefinition;
 use crate::corekv::IterOptions;
 
 pub use config::{DurabilityMode, RedbStoreOptions};
-pub use store::{CallbackCounts, IntegrityReport, RedbStore};
+pub use store::{IntegrityReport, RedbStore};
 #[cfg(test)]
 pub(crate) use transaction::RedbTxn;
 

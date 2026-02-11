@@ -1,29 +1,22 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use rusty_leveldb::{WriteBatch, DB};
+use std::collections::BTreeMap;
+use std::rc::Rc;
 
-use super::iterator::MemoryIterator;
-use crate::backends::shared::{CallbackManager, ConflictTracker};
+use super::iterator::LevelDbIterator;
+use crate::backends::shared::CallbackManager;
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
 
-/// In-memory transaction with snapshot isolation and conflict detection.
+/// LevelDB transaction with snapshot isolation.
 ///
 /// Transactions maintain a snapshot of the store at creation time and track
-/// pending changes. On commit, write-write conflicts are detected using
-/// optimistic concurrency control.
-pub(crate) struct MemoryTxn {
-    /// Reference to the store's data
-    pub(crate) store: Arc<RwLock<BTreeMap<Vec<u8>, Vec<u8>>>>,
-
-    /// Conflict tracker for write-write conflict detection
-    pub(crate) conflict_tracker: Arc<ConflictTracker>,
-
-    /// Version at which this transaction's snapshot was taken
-    pub(crate) read_version: u64,
+/// pending changes. Changes are applied atomically on commit using WriteBatch.
+pub(crate) struct LevelDbTxn {
+    /// Reference to the store's DB
+    pub(crate) store: Rc<std::cell::RefCell<Option<DB>>>,
 
     /// Snapshot of store at transaction start (for reads)
     pub(crate) snapshot: BTreeMap<Vec<u8>, Vec<u8>>,
@@ -44,7 +37,7 @@ pub(crate) struct MemoryTxn {
     pub(crate) callbacks: CallbackManager,
 }
 
-impl MemoryTxn {
+impl LevelDbTxn {
     /// Get a value, checking pending changes first, then snapshot.
     fn get_internal(&self, key: &[u8]) -> Option<Vec<u8>> {
         // Check pending changes first
@@ -70,8 +63,8 @@ impl MemoryTxn {
     }
 }
 
-#[async_trait]
-impl Reader for MemoryTxn {
+#[async_trait(?Send)]
+impl Reader for LevelDbTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
@@ -127,12 +120,12 @@ impl Reader for MemoryTxn {
             }
         }
 
-        Ok(Box::new(MemoryIterator::new(merged, opts)?))
+        Ok(Box::new(LevelDbIterator::new(merged, opts)?))
     }
 }
 
-#[async_trait]
-impl Writer for MemoryTxn {
+#[async_trait(?Send)]
+impl Writer for LevelDbTxn {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         if *self.discarded.lock() {
             return Err(Error::DiscardedTxn);
@@ -170,10 +163,10 @@ impl Writer for MemoryTxn {
     }
 }
 
-#[async_trait]
-impl Txn for MemoryTxn {
+#[async_trait(?Send)]
+impl Txn for LevelDbTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
-        // Check discarded first (matches redb backend order)
+        // Check discarded first
         if *self.discarded.lock() {
             tracing::warn!("Attempted to commit a discarded transaction");
             CallbackManager::execute_callbacks(self.callbacks.take_error());
@@ -181,45 +174,33 @@ impl Txn for MemoryTxn {
             return Err(Error::DiscardedTxn);
         }
 
-        // Check if already committed (defensive - ownership prevents this in normal usage)
+        // Check if already committed
         if *self.committed.lock() {
             tracing::warn!("Attempted to commit an already committed transaction");
             return Err(Error::Other("Transaction already committed".into()));
         }
 
-        // Clone pending changes before awaiting (can't hold MutexGuard across await)
-        let pending = self.pending.lock().clone();
-
-        // Check for write-write conflicts before applying
-        if !pending.is_empty() {
-            let write_set: HashSet<Vec<u8>> = pending.keys().cloned().collect();
-            if let Err(e) = self
-                .conflict_tracker
-                .check_and_record(self.read_version, write_set)
-            {
-                CallbackManager::execute_callbacks(self.callbacks.take_error());
-                CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
-                return Err(e);
-            }
-        }
-
         // Mark as committed
         *self.committed.lock() = true;
 
-        // Apply pending changes to store
-        if !pending.is_empty() {
-            let mut store = self.store.write().await;
+        // Clone pending changes before accessing DB
+        let pending = self.pending.lock().clone();
 
+        // Apply pending changes to LevelDB using WriteBatch
+        if !pending.is_empty() {
+            let mut db_ref = self.store.borrow_mut();
+            let db = db_ref.as_mut().ok_or(Error::DBClosed)?;
+
+            let mut batch = WriteBatch::default();
             for (key, value) in pending.iter() {
                 match value {
-                    Some(v) => {
-                        store.insert(key.clone(), v.clone());
-                    }
-                    None => {
-                        store.remove(key);
-                    }
+                    Some(v) => batch.put(key, v),
+                    None => batch.delete(key),
                 }
             }
+
+            db.write(batch, true)
+                .map_err(|e| Error::Backend(e.to_string()))?;
         }
 
         // Execute success callbacks
@@ -235,20 +216,17 @@ impl Txn for MemoryTxn {
         // Execute sync discard callbacks
         CallbackManager::execute_callbacks(self.callbacks.take_discard());
 
-        // Handle async callbacks: spawn them in background with warning
+        // Handle async callbacks
         let on_discard_async = self.callbacks.take_discard_async();
         if !on_discard_async.is_empty() {
             let callback_count = on_discard_async.len();
             tracing::warn!(
                 count = callback_count,
-                "Transaction has async discard callbacks. Spawning in background - they may not complete if process exits. Consider using commit() instead of discard() when async callbacks are registered."
+                "Transaction has async discard callbacks. Spawning in background."
             );
 
-            // Spawn async callbacks in background with error tracking
-            // NOTE: These may not complete if the process exits before they finish
-            tokio::spawn(async move {
+            wasm_bindgen_futures::spawn_local(async move {
                 CallbackManager::execute_async_callbacks(on_discard_async).await;
-                tracing::debug!(count = callback_count, "Async discard callbacks completed");
             });
         }
     }
