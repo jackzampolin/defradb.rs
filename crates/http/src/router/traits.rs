@@ -358,6 +358,12 @@ pub trait CollectionManagementOperations: Send + Sync {
 
     /// Delete multiple collection versions in a batch.
     async fn delete_collection_versions(&self, version_ids: Vec<String>) -> Result<(), String>;
+
+    /// Get all collection versions (active + inactive) from the system store.
+    async fn get_all_collections(&self) -> Result<Vec<schema::CollectionVersion>, String>;
+
+    /// Delete a collection by name.
+    async fn delete_collection(&self, name: &str) -> Result<(), String>;
 }
 
 /// Trait for lens migration operations.

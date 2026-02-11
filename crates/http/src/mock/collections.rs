@@ -74,4 +74,12 @@ impl CollectionManagementOperations for MockCollectionManagementOperations {
     async fn delete_collection_versions(&self, _version_ids: Vec<String>) -> Result<(), String> {
         Ok(())
     }
+
+    async fn get_all_collections(&self) -> Result<Vec<schema::CollectionVersion>, String> {
+        Ok(vec![mock_collection_version("MockCollection")])
+    }
+
+    async fn delete_collection(&self, _name: &str) -> Result<(), String> {
+        Ok(())
+    }
 }

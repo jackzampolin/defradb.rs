@@ -316,6 +316,53 @@ pub async fn delete_collection_versions(
     Ok(Json(serde_json::json!({})))
 }
 
+/// Get all collection versions (active + inactive).
+///
+/// GET /api/v0/collections/versions
+///
+/// Returns a JSON array of all CollectionVersion objects from the system store.
+///
+/// Requires `CollectionGet` permission when NAC is enabled.
+pub async fn get_all_collections(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<Vec<schema::CollectionVersion>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionGet).await?;
+
+    let collection_mgmt = state.require_collection_mgmt()?;
+
+    let collections = collection_mgmt
+        .get_all_collections()
+        .await
+        .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(collections))
+}
+
+/// Delete a collection by name.
+///
+/// DELETE /api/v0/collections/{name}
+///
+/// Removes the collection and all its versions.
+///
+/// Requires `CollectionPatch` permission when NAC is enabled.
+pub async fn delete_collection(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
+
+    let collection_mgmt = state.require_collection_mgmt()?;
+
+    collection_mgmt
+        .delete_collection(&name)
+        .await
+        .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(serde_json::json!({})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -67,8 +67,12 @@ pub fn create_router_with_state(state: AppState) -> Router {
         )
         // Go-compatible list-all-indexes route (no path param)
         .route("/indexes", get(handlers::index::go_get_all_indexes))
-        .route("/:name", get(handlers::get_collection_doc_ids))
-        .route("/:name", post(handlers::create_document))
+        .route(
+            "/:name",
+            get(handlers::get_collection_doc_ids)
+                .post(handlers::create_document)
+                .delete(handlers::delete_collection),
+        )
         .route("/:name/describe", get(handlers::describe_collection))
         .route("/:name/exists", get(handlers::collection_exists))
         .route("/:name/truncate", delete(handlers::truncate_collection))

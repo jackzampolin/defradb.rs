@@ -113,4 +113,18 @@ impl<S: Store + 'static> CollectionManagementOperations for CollectionManagement
             .await
             .map_err(|e| format!("{}", e))
     }
+
+    async fn get_all_collections(&self) -> Result<Vec<schema::CollectionVersion>, String> {
+        self.database
+            .get_all_collection_versions()
+            .await
+            .map_err(|e| format!("{}", e))
+    }
+
+    async fn delete_collection(&self, name: &str) -> Result<(), String> {
+        self.database
+            .delete_collection(name)
+            .await
+            .map_err(|e| format!("{}", e))
+    }
 }
