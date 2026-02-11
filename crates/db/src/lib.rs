@@ -80,6 +80,8 @@ pub mod nac;
 pub mod patch;
 #[cfg(feature = "p2p")]
 pub mod peer_identity;
+#[cfg(feature = "p2p")]
+pub mod push_docs;
 pub mod schema_loader;
 pub mod se;
 pub mod txn;
@@ -125,6 +127,8 @@ pub use merge_handler::{DbMergeHandler, MergeError};
 pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
 };
+#[cfg(feature = "p2p")]
+pub use push_docs::push_existing_docs;
 pub use schema_loader::{
     get_collection_by_version_id, get_collection_version_ids, get_collections_by_collection_id,
     load_active_collections,

@@ -1,5 +1,6 @@
 //! Adapter to bridge P2PHostHandle to HTTP's P2POperations trait.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -14,10 +15,89 @@ use p2p::P2PHostHandle;
 /// This is used by the P2P adapter to resolve collection names to their
 /// CollectionIDs for topic subscription, matching Go DefraDB behavior.
 pub trait CollectionLookup: Send + Sync {
-    /// Get a collection's ID by its name.
-    ///
-    /// Returns `Some(collection_id)` if found, `None` if not found.
     fn get_collection_id(&self, name: &str) -> Option<String>;
+}
+
+/// Type-erased interface for push operations and collection lookup.
+///
+/// Subsumes `CollectionLookup` — implementations provide both capabilities.
+/// This avoids threading the store type parameter `S` through the HTTP layer.
+#[async_trait]
+pub trait DocPusher: Send + Sync {
+    async fn push_existing_docs(
+        &self,
+        handle: &P2PHostHandle,
+        peer_id: libp2p::PeerId,
+        collections: &[String],
+        se_key: Option<&[u8]>,
+    ) -> Result<(), String>;
+
+    fn get_collection_id(&self, name: &str) -> Option<String>;
+
+    fn list_collections(&self) -> Result<Vec<String>, String>;
+}
+
+/// Database-backed `DocPusher` implementation.
+///
+/// Wraps `db::DB<S>` and delegates to `db::push_existing_docs` for push
+/// operations and `db::DB::get_collection` / `list_collections` for lookups.
+pub struct DbDocPusher<S: storage::corekv::Store> {
+    db: Arc<db::DB<S>>,
+}
+
+impl<S: storage::corekv::Store + 'static> DbDocPusher<S> {
+    pub fn new(db: Arc<db::DB<S>>) -> Self {
+        Self { db }
+    }
+
+    pub fn new_arc(db: Arc<db::DB<S>>) -> Arc<dyn DocPusher> {
+        Arc::new(Self::new(db))
+    }
+}
+
+#[async_trait]
+impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
+    async fn push_existing_docs(
+        &self,
+        handle: &P2PHostHandle,
+        peer_id: libp2p::PeerId,
+        collections: &[String],
+        se_key: Option<&[u8]>,
+    ) -> Result<(), String> {
+        db::push_existing_docs(handle, &self.db, peer_id, collections, se_key).await
+    }
+
+    fn get_collection_id(&self, name: &str) -> Option<String> {
+        match self.db.get_collection(name) {
+            Ok(Some(collection)) => Some(collection.collection_id().to_string()),
+            Ok(None) => {
+                tracing::debug!(collection_name = %name, "Collection not found for P2P lookup");
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    collection_name = %name,
+                    error = %e,
+                    "Error looking up collection for P2P"
+                );
+                None
+            }
+        }
+    }
+
+    fn list_collections(&self) -> Result<Vec<String>, String> {
+        self.db
+            .list_collections()
+            .map_err(|e| format!("failed to list collections: {}", e))
+    }
+}
+
+/// Also implement `CollectionLookup` so `DbDocPusher` can be used anywhere
+/// the older trait is expected.
+impl<S: storage::corekv::Store + 'static> CollectionLookup for DbDocPusher<S> {
+    fn get_collection_id(&self, name: &str) -> Option<String> {
+        DocPusher::get_collection_id(self, name)
+    }
 }
 
 /// Adapter that implements P2POperations using P2PHostHandle.
@@ -28,10 +108,15 @@ pub struct P2PAdapter<
     B: Blockstore + 'static = blockstore::DefraBlockstore<storage::backends::MemoryStore>,
 > {
     handle: P2PHostHandle,
-    /// Optional sync coordinator for replicator operations with auto-subscribe
     sync_coordinator: Option<Arc<SyncCoordinator<B>>>,
-    /// Optional collection lookup for resolving names to CollectionIDs
-    collection_lookup: Option<Arc<dyn CollectionLookup>>,
+    doc_pusher: Option<Arc<dyn DocPusher>>,
+    // Used by Phases 2-6 (connect_peer, add_replicator, add_documents, etc.)
+    #[allow(dead_code)]
+    event_bus: Option<Arc<dyn events::Bus>>,
+    #[allow(dead_code)]
+    peer_addresses: Arc<std::sync::RwLock<HashMap<String, String>>>,
+    #[allow(dead_code)]
+    tracked_documents: Arc<std::sync::RwLock<HashSet<String>>>,
 }
 
 impl<B: Blockstore + 'static> P2PAdapter<B> {
@@ -40,7 +125,10 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
         Self {
             handle,
             sync_coordinator: None,
-            collection_lookup: None,
+            doc_pusher: None,
+            event_bus: None,
+            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
     }
 
@@ -52,23 +140,44 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
         Self {
             handle,
             sync_coordinator: Some(coordinator),
-            collection_lookup: None,
+            doc_pusher: None,
+            event_bus: None,
+            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
     }
 
     /// Create a new adapter with sync coordinator and collection lookup.
-    ///
-    /// The collection lookup enables proper resolution of collection names to IDs
-    /// for P2P topic subscription, matching Go DefraDB behavior.
     pub fn with_sync_coordinator_and_lookup(
         handle: P2PHostHandle,
         coordinator: Arc<SyncCoordinator<B>>,
         lookup: Arc<dyn CollectionLookup>,
     ) -> Self {
+        let doc_pusher: Arc<dyn DocPusher> = Arc::new(LookupOnlyDocPusher(lookup));
         Self {
             handle,
             sync_coordinator: Some(coordinator),
-            collection_lookup: Some(lookup),
+            doc_pusher: Some(doc_pusher),
+            event_bus: None,
+            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
+        }
+    }
+
+    /// Create a new adapter with full context for FFI-parity operations.
+    pub fn with_full_context(
+        handle: P2PHostHandle,
+        coordinator: Arc<SyncCoordinator<B>>,
+        doc_pusher: Arc<dyn DocPusher>,
+        event_bus: Arc<dyn events::Bus>,
+    ) -> Self {
+        Self {
+            handle,
+            sync_coordinator: Some(coordinator),
+            doc_pusher: Some(doc_pusher),
+            event_bus: Some(event_bus),
+            peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
     }
 }
@@ -100,6 +209,46 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             coordinator,
             lookup,
         ))
+    }
+
+    /// Create an Arc-wrapped adapter with full context.
+    pub fn with_full_context_arc(
+        handle: P2PHostHandle,
+        coordinator: Arc<SyncCoordinator<B>>,
+        doc_pusher: Arc<dyn DocPusher>,
+        event_bus: Arc<dyn events::Bus>,
+    ) -> Arc<dyn P2POperations> {
+        Arc::new(Self::with_full_context(
+            handle,
+            coordinator,
+            doc_pusher,
+            event_bus,
+        ))
+    }
+}
+
+/// Adapter that wraps a `CollectionLookup` as a `DocPusher` for backward
+/// compatibility. Push operations return an error since no DB is available.
+struct LookupOnlyDocPusher(Arc<dyn CollectionLookup>);
+
+#[async_trait]
+impl DocPusher for LookupOnlyDocPusher {
+    async fn push_existing_docs(
+        &self,
+        _handle: &P2PHostHandle,
+        _peer_id: libp2p::PeerId,
+        _collections: &[String],
+        _se_key: Option<&[u8]>,
+    ) -> Result<(), String> {
+        Err("push_existing_docs not available (no database context)".to_string())
+    }
+
+    fn get_collection_id(&self, name: &str) -> Option<String> {
+        self.0.get_collection_id(name)
+    }
+
+    fn list_collections(&self) -> Result<Vec<String>, String> {
+        Err("list_collections not available (no database context)".to_string())
     }
 }
 
@@ -147,12 +296,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn connect_peer(&self, addr: &str) -> Result<(), String> {
-        // Parse multiaddr and extract peer ID
         let multiaddr: libp2p::Multiaddr = addr
             .parse()
             .map_err(|e| format!("invalid multiaddr: {}", e))?;
 
-        // Extract peer ID from multiaddr (should be in /p2p/<peer_id> component)
         let peer_id = multiaddr
             .iter()
             .find_map(|proto| match proto {
@@ -161,7 +308,6 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             })
             .ok_or_else(|| "multiaddr must contain /p2p/<peer_id> component".to_string())?;
 
-        // Remove the p2p component from the address for dialing
         let dial_addr: libp2p::Multiaddr = multiaddr
             .iter()
             .filter(|proto| !matches!(proto, libp2p::multiaddr::Protocol::P2p(_)))
@@ -203,15 +349,13 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
         let (peer_id, _) = parse_peer_id_from_multiaddr(addr_str)?;
 
-        // Use sync coordinator if available (enables auto-subscribe to topics)
         if let Some(ref coordinator) = self.sync_coordinator {
             coordinator
-                .set_replicator(peer_id, collections, true) // auto_subscribe = true
+                .set_replicator(peer_id, collections, true)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(())
         } else {
-            // Fall back to direct handle
             self.handle
                 .set_replicator(peer_id, collections)
                 .await
@@ -227,17 +371,12 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
         let (peer_id, _) = parse_peer_id_from_multiaddr(addr_str)?;
 
-        // Go DefraDB behavior for replicator removal:
-        // - If collections is empty: delete the entire replicator (all collections)
-        // - If collections is non-empty: remove only those collections, keep replicator
-        //   if other collections remain
         if let Some(ref coordinator) = self.sync_coordinator {
             coordinator
                 .remove_replicator_collections(peer_id, collections)
                 .await
                 .map_err(|e| e.to_string())?;
         } else {
-            // Without coordinator, use direct handle (only supports full deletion)
             if !collections.is_empty() {
                 tracing::warn!(
                     peer_id = %peer_id,
@@ -266,13 +405,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn add_collections(&self, collections: Vec<String>) -> Result<(), String> {
-        // Subscribe to collection topics for P2P sync
         if let Some(ref coordinator) = self.sync_coordinator {
             for collection_name in collections {
-                // Look up the collection to get its CollectionID (like Go does)
-                // The CollectionID is used as the GossipSub topic
-                let topic_id = if let Some(ref lookup) = self.collection_lookup {
-                    if let Some(collection_id) = lookup.get_collection_id(&collection_name) {
+                let topic_id = if let Some(ref pusher) = self.doc_pusher {
+                    if let Some(collection_id) = pusher.get_collection_id(&collection_name) {
                         tracing::debug!(
                             collection_name = %collection_name,
                             collection_id = %collection_id,
@@ -286,7 +422,6 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                         ));
                     }
                 } else {
-                    // Fallback: use name directly (for backwards compatibility)
                     tracing::warn!(
                         collection_name = %collection_name,
                         "No collection lookup available, using name as topic (may not match Go)"
@@ -306,7 +441,6 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn remove_collections(&self, collections: Vec<String>) -> Result<(), String> {
-        // Unsubscribe from collection topics
         if let Some(ref coordinator) = self.sync_coordinator {
             for collection_id in collections {
                 coordinator
@@ -321,7 +455,6 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn get_documents(&self) -> Result<Vec<defra_http::router::P2pDocumentInfo>, String> {
-        // Document-level P2P replication not yet implemented
         Ok(Vec::new())
     }
 
@@ -329,7 +462,6 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         &self,
         _docs: Vec<defra_http::router::P2pDocumentRequest>,
     ) -> Result<(), String> {
-        // Document-level P2P replication not yet implemented
         Err("document-level P2P replication not yet implemented".to_string())
     }
 
@@ -337,36 +469,30 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         &self,
         _docs: Vec<defra_http::router::P2pDocumentRequest>,
     ) -> Result<(), String> {
-        // Document-level P2P replication not yet implemented
         Err("document-level P2P replication not yet implemented".to_string())
     }
 
     async fn sync_collections(&self) -> Result<(), String> {
-        // Trigger immediate collection sync - not yet implemented
         Err("sync_collections not yet implemented".to_string())
     }
 
     async fn sync_documents(&self) -> Result<(), String> {
-        // Trigger immediate document sync - not yet implemented
         Err("sync_documents not yet implemented".to_string())
     }
 }
 
 /// Implementation of CollectionLookup for the database.
 ///
-/// This allows the P2P adapter to look up collection IDs by name,
-/// matching Go DefraDB's behavior for topic subscription.
+/// Retained for backward compatibility. Prefer `DbDocPusher` for new code.
 pub struct DbCollectionLookup<S: storage::corekv::Store> {
     db: Arc<db::DB<S>>,
 }
 
 impl<S: storage::corekv::Store + 'static> DbCollectionLookup<S> {
-    /// Create a new collection lookup wrapping the database.
     pub fn new(db: Arc<db::DB<S>>) -> Self {
         Self { db }
     }
 
-    /// Create an Arc-wrapped collection lookup.
     pub fn new_arc(db: Arc<db::DB<S>>) -> Arc<dyn CollectionLookup> {
         Arc::new(Self::new(db))
     }

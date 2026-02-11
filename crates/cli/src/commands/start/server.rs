@@ -351,15 +351,12 @@ impl Node {
             // Wire P2P to HTTP server if enabled
             if let Some(ref p2p_handle) = p2p {
                 let p2p_adapter = if let Some(ref coordinator) = sync_coordinator {
-                    // Use sync coordinator for replicator operations (enables auto-subscribe)
-                    // Also provide collection lookup so we can resolve names to CollectionIDs
-                    // for topic subscription (matching Go DefraDB behavior)
-                    let collection_lookup =
-                        crate::p2p_adapter::DbCollectionLookup::new_arc(database.clone());
-                    crate::p2p_adapter::P2PAdapter::with_sync_coordinator_and_lookup_arc(
+                    let doc_pusher = crate::p2p_adapter::DbDocPusher::new_arc(database.clone());
+                    crate::p2p_adapter::P2PAdapter::with_full_context_arc(
                         p2p_handle.clone(),
                         coordinator.clone(),
-                        collection_lookup,
+                        doc_pusher,
+                        event_bus.clone(),
                     )
                 } else {
                     crate::p2p_adapter::P2PAdapter::new_arc(p2p_handle.clone())
