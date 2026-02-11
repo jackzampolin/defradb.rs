@@ -1,0 +1,199 @@
+//! Swarm event handling.
+
+use iroh_bitswap::Store;
+use libp2p::swarm::SwarmEvent;
+use tracing::{debug, error, info, warn};
+
+use crate::behaviour::DefraEvent;
+
+use super::P2PHost;
+use crate::host::event::HostEvent;
+
+impl<S: Store> P2PHost<S> {
+    /// Handle a swarm event.
+    pub(super) async fn handle_swarm_event(&mut self, event: SwarmEvent<DefraEvent>) {
+        match event {
+            SwarmEvent::NewListenAddr { address, .. } => {
+                info!("Listening on {}", address);
+                if self
+                    .event_tx
+                    .send(HostEvent::Listening(address.clone()))
+                    .await
+                    .is_err()
+                {
+                    warn!(address = %address, "Failed to send Listening event - receiver dropped");
+                }
+            }
+
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
+                info!("Connected to peer: {}", peer_id);
+                // Store the remote peer's address from the connection endpoint.
+                // For dialer: the address we dialed (peer's listen addr).
+                // For listener: the send_back_addr. With TCP port reuse enabled,
+                // this IS the peer's listen address (Go-compatible behavior).
+                let peer_addr = match &endpoint {
+                    libp2p::core::ConnectedPoint::Dialer { address, .. } => address.clone(),
+                    libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } => {
+                        send_back_addr.clone()
+                    }
+                };
+                self.peer_addrs.insert(peer_id, peer_addr.clone());
+
+                // Add peer to Kademlia BEFORE bootstrap. Kademlia's own
+                // ConnectionEstablished handler doesn't add peers to the
+                // routing table until protocol negotiation completes (async).
+                // We add the address now so bootstrap() has a peer to query.
+                self.swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&peer_id, peer_addr);
+
+                // Pre-announce bitswap protocols so the peer immediately transitions
+                // from Connected → Responsive in iroh-bitswap. Without this, there's
+                // a race between the Identify protocol completing and the first
+                // Bitswap fetch: after a node restart, GossipSub notifications can
+                // trigger Bitswap fetches before Identify finishes, leaving the peer
+                // in Connected state where peer_connected() is never called and the
+                // peer has no MessageQueue, so want messages are never sent.
+                // The actual protocol version is negotiated per-substream regardless.
+                eprintln!(
+                    "[BITSWAP-PREANNOUNCE] Pre-announcing bitswap protocols for peer={}",
+                    peer_id
+                );
+                self.swarm.behaviour().on_identify(
+                    &peer_id,
+                    &[
+                        "/ipfs/bitswap/1.2.0".to_string(),
+                        "/ipfs/bitswap/1.1.0".to_string(),
+                        "/ipfs/bitswap/1.0.0".to_string(),
+                    ],
+                );
+                eprintln!("[BITSWAP-PREANNOUNCE] Done for peer={}", peer_id);
+
+                // Trigger Kademlia bootstrap to discover peers through the DHT.
+                // When node2 connects to node0 (who already knows node1),
+                // this causes node2 to query node0, discover node1, and dial it.
+                let _ = self.swarm.behaviour_mut().kademlia.bootstrap();
+
+                if self
+                    .event_tx
+                    .send(HostEvent::PeerConnected(peer_id))
+                    .await
+                    .is_err()
+                {
+                    warn!(peer_id = %peer_id, "Failed to send PeerConnected event - receiver dropped");
+                }
+            }
+
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                num_established,
+                ..
+            } => {
+                info!("Disconnected from peer: {}", peer_id);
+                if num_established == 0 {
+                    self.peer_addrs.remove(&peer_id);
+                }
+                if self
+                    .event_tx
+                    .send(HostEvent::PeerDisconnected(peer_id))
+                    .await
+                    .is_err()
+                {
+                    warn!(peer_id = %peer_id, "Failed to send PeerDisconnected event - receiver dropped");
+                }
+            }
+
+            SwarmEvent::Behaviour(DefraEvent::Identify(identify_event)) => {
+                self.handle_identify_event(identify_event).await;
+            }
+
+            SwarmEvent::Behaviour(DefraEvent::PushLog(pushlog_event)) => {
+                self.handle_pushlog_event(pushlog_event).await;
+            }
+
+            SwarmEvent::Behaviour(DefraEvent::GossipSub(gossipsub_event)) => {
+                self.handle_gossipsub_event(gossipsub_event).await;
+            }
+
+            SwarmEvent::Behaviour(DefraEvent::Bitswap(bitswap_event)) => {
+                self.handle_bitswap_event(bitswap_event).await;
+            }
+
+            SwarmEvent::Behaviour(DefraEvent::Kademlia(kad_event)) => {
+                self.handle_kademlia_event(kad_event).await;
+            }
+
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                warn!(
+                    peer_id = ?peer_id,
+                    error = %error,
+                    "Outgoing connection failed"
+                );
+            }
+
+            SwarmEvent::IncomingConnectionError {
+                local_addr,
+                send_back_addr,
+                error,
+                ..
+            } => {
+                warn!(
+                    local_addr = %local_addr,
+                    remote_addr = %send_back_addr,
+                    error = %error,
+                    "Incoming connection failed"
+                );
+            }
+
+            SwarmEvent::ListenerError { listener_id, error } => {
+                error!(
+                    listener_id = ?listener_id,
+                    error = %error,
+                    "Listener error"
+                );
+            }
+
+            SwarmEvent::ListenerClosed {
+                listener_id,
+                reason,
+                ..
+            } => {
+                warn!(
+                    listener_id = ?listener_id,
+                    reason = ?reason,
+                    "Listener closed"
+                );
+            }
+
+            SwarmEvent::ExpiredListenAddr {
+                listener_id,
+                address,
+            } => {
+                debug!(
+                    listener_id = ?listener_id,
+                    address = %address,
+                    "Listen address expired"
+                );
+            }
+
+            SwarmEvent::Dialing {
+                peer_id: Some(peer_id),
+                ..
+            } => {
+                debug!(peer_id = %peer_id, "Dialing peer");
+            }
+
+            SwarmEvent::Dialing { peer_id: None, .. } => {
+                // Dialing without a specific peer ID (rare, usually has peer_id)
+            }
+
+            _ => {
+                // Other swarm events (e.g., Dialing, NewExternalAddrCandidate) are
+                // handled by libp2p internally and don't require explicit handling
+            }
+        }
+    }
+}

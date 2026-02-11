@@ -1,0 +1,101 @@
+//! Two-stream protocol handler.
+//!
+//! Go's DefraDB uses a two-stream pattern for request-response:
+//! 1. Sender opens stream on `/defradb/rep_req/0.0.1`, sends request, closes stream
+//! 2. Receiver processes request, opens NEW stream on `/defradb/rep_resp/0.0.1` to send response
+//!
+//! This is different from libp2p-rust's request-response which uses bidirectional streams.
+//! This module implements Go's pattern for interoperability using libp2p-stream.
+
+mod branchable_se;
+mod doc_sync;
+mod inbound;
+mod pushlog;
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use libp2p::StreamProtocol;
+use libp2p_stream as stream;
+use parking_lot::Mutex;
+use tokio::sync::oneshot;
+
+use crate::message::{PushLogReply, PushLogRequest};
+use crate::protocol::{
+    REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL, SE_REQUEST_PROTOCOL, SE_RESPONSE_PROTOCOL,
+};
+
+/// Timeout for waiting for a response.
+pub(super) const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// State for tracking pending responses.
+#[derive(Default)]
+pub(crate) struct PendingResponses {
+    /// Map of MessageID to response channel.
+    pub(crate) channels: HashMap<String, oneshot::Sender<PushLogReply>>,
+}
+
+/// Two-stream protocol handler.
+///
+/// Handles Go's two-stream request-response pattern where requests and responses
+/// flow on separate streams identified by different protocol IDs.
+///
+/// Uses `libp2p-stream` for stream management.
+pub struct TwoStreamHandler {
+    /// Control for the stream behaviour (for opening streams).
+    pub(super) control: stream::Control,
+    /// Pending response channels keyed by MessageID.
+    pub(super) pending: Arc<Mutex<PendingResponses>>,
+}
+
+impl TwoStreamHandler {
+    /// Create a new two-stream handler from a stream::Control.
+    pub fn new(control: stream::Control) -> Self {
+        Self {
+            control,
+            pending: Arc::new(Mutex::new(PendingResponses::default())),
+        }
+    }
+
+    /// Get a clone of the pending responses Arc for lock-free response processing.
+    pub(crate) fn pending_responses(&self) -> Arc<Mutex<PendingResponses>> {
+        self.pending.clone()
+    }
+
+    /// Get the request protocol.
+    pub fn request_protocol() -> StreamProtocol {
+        StreamProtocol::new(REP_REQUEST_PROTOCOL)
+    }
+
+    /// Get the response protocol.
+    pub fn response_protocol() -> StreamProtocol {
+        StreamProtocol::new(REP_RESPONSE_PROTOCOL)
+    }
+
+    /// Get the SE request protocol.
+    pub fn se_request_protocol() -> StreamProtocol {
+        StreamProtocol::new(SE_REQUEST_PROTOCOL)
+    }
+
+    /// Get the SE response protocol.
+    pub fn se_response_protocol() -> StreamProtocol {
+        StreamProtocol::new(SE_RESPONSE_PROTOCOL)
+    }
+
+    /// Clean up a pending response channel (used on timeout or cancellation).
+    pub fn cleanup_pending(&self, message_id: &str) {
+        let mut pending = self.pending.lock();
+        pending.channels.remove(message_id);
+    }
+
+    /// Create a success reply for a request.
+    pub fn success_reply(request: &PushLogRequest) -> PushLogReply {
+        PushLogReply::success(&request.metadata.message_id)
+    }
+
+    /// Create an error reply for a request.
+    pub fn error_reply(request: &PushLogRequest, error: &str) -> PushLogReply {
+        PushLogReply::error(&request.metadata.message_id, error)
+    }
+}

@@ -1,0 +1,256 @@
+//! PushLog, TwoStream, DocSync, BranchableSync, and SE messaging commands.
+
+use iroh_bitswap::Store;
+use libp2p::PeerId;
+use tracing::debug;
+
+use crate::error::{Error, Result};
+use crate::host::ResponseChannel;
+use crate::message::{
+    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogReply,
+    PushLogRequest, PushSEArtifactsRequest,
+};
+
+use super::super::p2p_host::P2PHost;
+
+impl<S: Store> P2PHost<S> {
+    pub(super) fn handle_send_pushlog(
+        &mut self,
+        peer_id: PeerId,
+        request: PushLogRequest,
+        response: tokio::sync::oneshot::Sender<Result<PushLogReply>>,
+    ) {
+        let request_id = self
+            .swarm
+            .behaviour_mut()
+            .send_pushlog_request(&peer_id, request);
+        self.pending_requests.insert(request_id, response);
+    }
+
+    pub(super) fn handle_send_pushlog_response(
+        &mut self,
+        channel: ResponseChannel,
+        reply: PushLogReply,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        let result = self
+            .swarm
+            .behaviour_mut()
+            .send_pushlog_response(channel.into_inner(), reply)
+            .map(|_| ())
+            .map_err(|resp| Error::ResponseSend(format!("message_id={}", resp.message_id)));
+        if response.send(result).is_err() {
+            debug!("SendPushLogResponse command response dropped - caller cancelled");
+        }
+    }
+
+    pub(super) fn handle_send_two_stream_response(
+        &mut self,
+        peer_id: PeerId,
+        reply: PushLogReply,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        let handler = self.two_stream_handler.clone();
+        self.spawned_tasks.spawn(async move {
+            let mut h = handler.lock().await;
+            let result = h.send_response(peer_id, reply).await;
+            if response.send(result).is_err() {
+                debug!(peer_id = %peer_id, "SendTwoStreamResponse command response dropped - caller cancelled");
+            }
+        });
+    }
+
+    pub(super) fn handle_send_two_stream_request(
+        &mut self,
+        peer_id: PeerId,
+        request: PushLogRequest,
+        response: tokio::sync::oneshot::Sender<Result<PushLogReply>>,
+    ) {
+        let handler = self.two_stream_handler.clone();
+        self.spawned_tasks.spawn(async move {
+            // Phase 1: Send the request (needs handler lock for stream control).
+            let (message_id, rx) = {
+                let mut h = handler.lock().await;
+                match h.start_request(peer_id, request).await {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        if response.send(Err(e)).is_err() {
+                            debug!(peer_id = %peer_id, "SendTwoStreamRequest command response dropped - caller cancelled");
+                        }
+                        return;
+                    }
+                }
+            }; // Handler lock released here — response handler can now route replies.
+
+            // Phase 2: Wait for response WITHOUT holding the handler lock.
+            let result = match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                rx,
+            )
+            .await
+            {
+                Ok(Ok(reply)) => Ok(reply),
+                Ok(Err(_)) => {
+                    handler.lock().await.cleanup_pending(&message_id);
+                    Err(crate::error::Error::Transport(
+                        "response channel closed".into(),
+                    ))
+                }
+                Err(_) => {
+                    handler.lock().await.cleanup_pending(&message_id);
+                    Err(crate::error::Error::Transport(
+                        "timeout waiting for response".into(),
+                    ))
+                }
+            };
+            if response.send(result).is_err() {
+                debug!(peer_id = %peer_id, "SendTwoStreamRequest command response dropped - caller cancelled");
+            }
+        });
+    }
+
+    pub(super) fn handle_send_doc_sync_response(
+        &mut self,
+        peer_id: PeerId,
+        reply: DocSyncReply,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        let handler = self.two_stream_handler.clone();
+        self.spawned_tasks.spawn(async move {
+            let mut h = handler.lock().await;
+            let result = h.send_doc_sync_response(peer_id, reply).await;
+            if response.send(result).is_err() {
+                debug!(peer_id = %peer_id, "SendDocSyncResponse command response dropped - caller cancelled");
+            }
+        });
+    }
+
+    pub(super) fn handle_send_doc_sync_request(
+        &mut self,
+        peer_id: PeerId,
+        request: DocSyncRequest,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        let handler = self.two_stream_handler.clone();
+        self.spawned_tasks.spawn(async move {
+            let mut h = handler.lock().await;
+            // Send the request - response will arrive asynchronously via TwoStreamEvent::DocSyncReply
+            let result = h.send_doc_sync_request_fire_and_forget(peer_id, request).await;
+            if response.send(result).is_err() {
+                debug!(peer_id = %peer_id, "SendDocSyncRequest command response dropped - caller cancelled");
+            }
+        });
+    }
+
+    pub(super) fn handle_send_branchable_sync_response(
+        &mut self,
+        peer_id: PeerId,
+        reply: BranchableSyncReply,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        let handler = self.two_stream_handler.clone();
+        self.spawned_tasks.spawn(async move {
+            let mut h = handler.lock().await;
+            let result = h.send_branchable_sync_response(peer_id, reply).await;
+            if response.send(result).is_err() {
+                debug!(peer_id = %peer_id, "SendBranchableSyncResponse command response dropped - caller cancelled");
+            }
+        });
+    }
+
+    pub(super) fn handle_send_branchable_sync_request(
+        &mut self,
+        peer_id: PeerId,
+        request: BranchableSyncRequest,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        let handler = self.two_stream_handler.clone();
+        self.spawned_tasks.spawn(async move {
+            let mut h = handler.lock().await;
+            let result = h
+                .send_branchable_sync_request_fire_and_forget(peer_id, request)
+                .await;
+            if response.send(result).is_err() {
+                debug!(peer_id = %peer_id, "SendBranchableSyncRequest command response dropped - caller cancelled");
+            }
+        });
+    }
+
+    pub(super) fn handle_send_se_artifacts(
+        &mut self,
+        peer_id: PeerId,
+        request: PushSEArtifactsRequest,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        let handler = self.two_stream_handler.clone();
+        self.spawned_tasks.spawn(async move {
+            let mut h = handler.lock().await;
+            let result = h.send_se_artifacts_fire_and_forget(peer_id, request).await;
+            if response.send(result).is_err() {
+                debug!(peer_id = %peer_id, "SendSEArtifacts command response dropped - caller cancelled");
+            }
+        });
+    }
+
+    pub(super) fn handle_set_replicator(
+        &mut self,
+        peer_id: PeerId,
+        collections: Vec<String>,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        debug!(peer_id = %peer_id, collections = ?collections, "Setting replicator");
+        // First remove peer from all existing collections
+        self.replicators.remove_peer(&peer_id);
+        // Then add to the new collections
+        for collection_id in &collections {
+            self.replicators.add_replicator(collection_id, peer_id);
+        }
+        if response.send(Ok(())).is_err() {
+            debug!(peer_id = %peer_id, "SetReplicator command response dropped - caller cancelled");
+        }
+    }
+
+    pub(super) fn handle_delete_replicator(
+        &mut self,
+        peer_id: PeerId,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        debug!(peer_id = %peer_id, "Deleting replicator");
+        self.replicators.remove_peer(&peer_id);
+        if response.send(Ok(())).is_err() {
+            debug!(peer_id = %peer_id, "DeleteReplicator command response dropped - caller cancelled");
+        }
+    }
+
+    pub(super) fn handle_remove_replicator_collections(
+        &mut self,
+        peer_id: PeerId,
+        collections: Vec<String>,
+        response: tokio::sync::oneshot::Sender<Result<bool>>,
+    ) {
+        debug!(
+            peer_id = %peer_id,
+            collections = ?collections,
+            "Removing collections from replicator"
+        );
+
+        // Remove specific collections from the replicator
+        for collection_id in &collections {
+            self.replicators.remove_replicator(collection_id, &peer_id);
+        }
+
+        // Check if the replicator still has any collections
+        let fully_deleted = !self.replicators.is_any_replicator(&peer_id);
+
+        if fully_deleted {
+            debug!(peer_id = %peer_id, "Replicator fully deleted (no collections remain)");
+        }
+
+        if response.send(Ok(fully_deleted)).is_err() {
+            debug!(
+                peer_id = %peer_id,
+                "RemoveReplicatorCollections command response dropped - caller cancelled"
+            );
+        }
+    }
+}
