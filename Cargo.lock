@@ -1160,6 +1160,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sourcehub",
  "storage",
  "tempfile",
  "thiserror 1.0.69",

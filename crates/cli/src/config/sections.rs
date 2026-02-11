@@ -197,6 +197,18 @@ pub struct AcpConfig {
     /// - `local`: Local Zanzibar-based access control
     /// - `source-hub`: Remote SourceHub access control
     pub document_type: AcpDocumentType,
+
+    /// SourceHub gRPC/LCD endpoint (e.g., "http://localhost:1317")
+    #[serde(default)]
+    pub sourcehub_address: String,
+
+    /// SourceHub CometBFT RPC endpoint (e.g., "http://localhost:26657")
+    #[serde(default)]
+    pub sourcehub_comet_address: String,
+
+    /// SourceHub chain ID (e.g., "sourcehub-test")
+    #[serde(default)]
+    pub sourcehub_chain_id: String,
 }
 
 impl Default for AcpConfig {
@@ -204,6 +216,9 @@ impl Default for AcpConfig {
         Self {
             node_enable: false,
             document_type: AcpDocumentType::None,
+            sourcehub_address: String::new(),
+            sourcehub_comet_address: String::new(),
+            sourcehub_chain_id: String::new(),
         }
     }
 }

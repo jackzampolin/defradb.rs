@@ -65,6 +65,7 @@
 //! }
 //! ```
 
+pub mod auth_error;
 pub mod error;
 pub mod handlers;
 pub mod identity_extractor;

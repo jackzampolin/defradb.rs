@@ -174,6 +174,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
     //   POST /acp/node/re-enable
     let acp_node_routes = Router::new()
         .route("/status", get(handlers::nac::get_status))
+        .route("/enable", post(handlers::nac::enable))
         .route("/relationship", post(handlers::nac::go_add_relationship))
         .route(
             "/relationship",

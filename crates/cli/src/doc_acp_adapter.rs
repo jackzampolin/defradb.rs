@@ -11,20 +11,30 @@ use storage::corekv::Store;
 pub struct DocumentAcpAdapter<S: Store> {
     database: Arc<db::DB<S>>,
     acp: Arc<dyn acp::DocumentACP>,
+    store: Arc<dyn acp::ZanzibarStore>,
 }
 
 impl<S: Store + 'static> DocumentAcpAdapter<S> {
     /// Create a new adapter.
-    pub fn new(database: Arc<db::DB<S>>, acp: Arc<dyn acp::DocumentACP>) -> Self {
-        Self { database, acp }
+    pub fn new(
+        database: Arc<db::DB<S>>,
+        acp: Arc<dyn acp::DocumentACP>,
+        store: Arc<dyn acp::ZanzibarStore>,
+    ) -> Self {
+        Self {
+            database,
+            acp,
+            store,
+        }
     }
 
     /// Create an Arc-wrapped adapter.
     pub fn new_arc(
         database: Arc<db::DB<S>>,
         acp: Arc<dyn acp::DocumentACP>,
+        store: Arc<dyn acp::ZanzibarStore>,
     ) -> Arc<dyn DocumentAcpOperations> {
-        Arc::new(Self::new(database, acp))
+        Arc::new(Self::new(database, acp, store))
     }
 
     /// Look up policy info for a collection by name.
@@ -43,6 +53,38 @@ impl<S: Store + 'static> DocumentAcpAdapter<S> {
 
         Ok((policy.id.clone(), policy.resource_name.clone()))
     }
+
+    /// Validate the relation exists in the policy and compute managing relations.
+    async fn validate_and_get_managing_relations(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        relation: &str,
+    ) -> Result<Vec<String>, String> {
+        let policy = self
+            .store
+            .get_policy(policy_id)
+            .await
+            .map_err(|e| format!("failed to get policy: {}", e))?
+            .ok_or_else(|| format!("policy '{}' not found", policy_id))?;
+
+        let resource = policy
+            .get_resource(resource_name)
+            .ok_or_else(|| format!("resource '{}' not found in policy", resource_name))?;
+
+        if resource.get_relation(relation).is_none() {
+            return Err(format!(
+                "relation '{}' not found in policy resource '{}'",
+                relation, resource_name
+            ));
+        }
+
+        Ok(policy
+            .get_managers_for_relation(resource_name, relation)
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect())
+    }
 }
 
 #[async_trait]
@@ -55,11 +97,19 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
         doc_id: &str,
         relation: &str,
     ) -> Result<bool, String> {
+        if relation == "owner" {
+            return Err("OPERATION_FORBIDDEN: cannot add owner relation".into());
+        }
+
         let (policy_id, resource_name) = self.get_policy_info(collection)?;
 
         let target: identity::Did = target_actor
             .parse()
             .map_err(|e| format!("invalid target actor DID: {}", e))?;
+
+        let managing = self
+            .validate_and_get_managing_relations(&policy_id, &resource_name, relation)
+            .await?;
 
         self.acp
             .add_actor_relationship(
@@ -69,7 +119,7 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
                 &resource_name,
                 doc_id,
                 relation,
-                &[],
+                &managing,
             )
             .await
             .map_err(|e| format!("{}", e))
@@ -83,11 +133,19 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
         doc_id: &str,
         relation: &str,
     ) -> Result<bool, String> {
+        if relation == "owner" {
+            return Err("OPERATION_FORBIDDEN: cannot delete owner relation".into());
+        }
+
         let (policy_id, resource_name) = self.get_policy_info(collection)?;
 
         let target: identity::Did = target_actor
             .parse()
             .map_err(|e| format!("invalid target actor DID: {}", e))?;
+
+        let managing = self
+            .validate_and_get_managing_relations(&policy_id, &resource_name, relation)
+            .await?;
 
         self.acp
             .delete_actor_relationship(
@@ -97,7 +155,7 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
                 &resource_name,
                 doc_id,
                 relation,
-                &[],
+                &managing,
             )
             .await
             .map_err(|e| format!("{}", e))

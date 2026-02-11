@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use identity::Did;
 use std::sync::{Arc, RwLock};
 
-use crate::router::{NacStatus, NodeAcpOperations, NodePermission};
+use crate::router::{NacStatus, NacStatusInfo, NodeAcpOperations, NodePermission};
 
 /// Mock NAC operations for testing NAC-protected handlers.
 ///
@@ -193,6 +193,78 @@ impl NodeAcpOperations for MockNodeAcpOperations {
         *status = NacStatus::Enabled;
         Ok(())
     }
+
+    async fn enable(&self, owner: &Did) -> Result<(), String> {
+        let status = *self.status.read().unwrap();
+        if status != NacStatus::NotConfigured {
+            return Err("NAC is already configured".into());
+        }
+        *self.status.write().unwrap() = NacStatus::Enabled;
+        *self.owner.write().unwrap() = Some(owner.clone());
+        Ok(())
+    }
+
+    async fn add_relationship(
+        &self,
+        requestor: &Did,
+        target: &Did,
+        relation: &str,
+    ) -> Result<bool, String> {
+        if relation == "owner" {
+            return Err("relation not in resource".into());
+        }
+        if relation == "admin" {
+            return self.add_admin(requestor, target).await;
+        }
+        if NodePermission::parse(relation).is_some() {
+            let status = *self.status.read().unwrap();
+            if status == NacStatus::DisabledTemporarily {
+                return Err(
+                    "cannot modify relationships while NAC is disabled - re-enable NAC first"
+                        .into(),
+                );
+            }
+            return Ok(true);
+        }
+        Err("relation not in resource".into())
+    }
+
+    async fn remove_relationship(
+        &self,
+        requestor: &Did,
+        target: &Did,
+        relation: &str,
+    ) -> Result<bool, String> {
+        if relation == "owner" {
+            return Err("relation not in resource".into());
+        }
+        if relation == "admin" {
+            return self.remove_admin(requestor, target).await;
+        }
+        if NodePermission::parse(relation).is_some() {
+            let status = *self.status.read().unwrap();
+            if status == NacStatus::DisabledTemporarily {
+                return Err(
+                    "cannot modify relationships while NAC is disabled - re-enable NAC first"
+                        .into(),
+                );
+            }
+            return Ok(true);
+        }
+        Err("relation not in resource".into())
+    }
+
+    async fn info(&self) -> NacStatusInfo {
+        let status = self.get_status().await;
+        let owner = self.owner().await;
+        NacStatusInfo {
+            status: status.to_string(),
+            configured_enabled: status == NacStatus::Enabled
+                || status == NacStatus::DisabledTemporarily,
+            dev_mode: false,
+            owner: owner.map(|d| d.to_string()),
+        }
+    }
 }
 
 /// Mock NAC operations that always fails with a configurable error.
@@ -249,5 +321,36 @@ impl NodeAcpOperations for FailingMockNodeAcpOperations {
 
     async fn re_enable(&self, _requestor: &Did) -> Result<(), String> {
         Err(self.error.clone())
+    }
+
+    async fn enable(&self, _owner: &Did) -> Result<(), String> {
+        Err(self.error.clone())
+    }
+
+    async fn add_relationship(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+        _relation: &str,
+    ) -> Result<bool, String> {
+        Err(self.error.clone())
+    }
+
+    async fn remove_relationship(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+        _relation: &str,
+    ) -> Result<bool, String> {
+        Err(self.error.clone())
+    }
+
+    async fn info(&self) -> NacStatusInfo {
+        NacStatusInfo {
+            status: "enabled".to_string(),
+            configured_enabled: true,
+            dev_mode: false,
+            owner: None,
+        }
     }
 }

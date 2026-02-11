@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use acp::nac::{NacStatus, NodePermission};
 use db::NacManagerApi;
-use defra_http::router::NodeAcpOperations;
+use defra_http::router::{NacStatusInfo, NodeAcpOperations};
 use identity::Did;
 
 /// Adapter that implements NodeAcpOperations using NacManagerApi.
@@ -80,5 +80,61 @@ impl NodeAcpOperations for NacAdapter {
             .re_enable(requestor)
             .await
             .map_err(|e| format!("{}", e))
+    }
+
+    async fn enable(&self, owner: &Did) -> Result<(), String> {
+        self.nac.enable(owner).await.map_err(|e| format!("{}", e))
+    }
+
+    async fn add_relationship(
+        &self,
+        requestor: &Did,
+        target: &Did,
+        relation: &str,
+    ) -> Result<bool, String> {
+        if relation == "admin" {
+            self.nac
+                .add_admin(requestor, target)
+                .await
+                .map_err(|e| format!("{}", e))
+        } else if let Some(perm) = NodePermission::parse(relation) {
+            self.nac
+                .add_permission_grant(requestor, target, perm)
+                .await
+                .map_err(|e| format!("{}", e))
+        } else {
+            Err("relation not in resource".to_string())
+        }
+    }
+
+    async fn remove_relationship(
+        &self,
+        requestor: &Did,
+        target: &Did,
+        relation: &str,
+    ) -> Result<bool, String> {
+        if relation == "admin" {
+            self.nac
+                .remove_admin(requestor, target)
+                .await
+                .map_err(|e| format!("{}", e))
+        } else if let Some(perm) = NodePermission::parse(relation) {
+            self.nac
+                .remove_permission_grant(requestor, target, perm)
+                .await
+                .map_err(|e| format!("{}", e))
+        } else {
+            Err("relation not in resource".to_string())
+        }
+    }
+
+    async fn info(&self) -> NacStatusInfo {
+        let info = self.nac.info().await;
+        NacStatusInfo {
+            status: info.status,
+            configured_enabled: info.configured_enabled,
+            dev_mode: info.dev_mode,
+            owner: info.owner,
+        }
     }
 }
