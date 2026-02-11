@@ -13,6 +13,7 @@ use crate::error::{Error, Result};
 mod acp;
 mod backup;
 mod collection;
+mod encrypted_index;
 mod graphql;
 mod index;
 mod lens;
@@ -21,6 +22,7 @@ mod transaction;
 mod types;
 
 pub use acp::{AcpAddPolicyRequest, AcpAddPolicyResponse, AcpPolicy, NacRelationshipRequest};
+pub use encrypted_index::EncryptedIndexInfo;
 pub use index::{IndexCreateRequest, IndexFieldInfo, IndexInfo};
 pub use lens::LensSetMigrationResponse;
 pub use p2p::{

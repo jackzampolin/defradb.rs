@@ -7,7 +7,8 @@ use query::rest::RestOperations;
 
 use super::{
     AcpOperations, BackupOperations, CollectionManagementOperations, DocumentAcpOperations,
-    IndexOperations, LensOperations, NodeAcpOperations, P2POperations, SchemaOperations,
+    EncryptedIndexOperations, IndexOperations, LensOperations, NodeAcpOperations, P2POperations,
+    SchemaOperations,
 };
 
 /// Application state shared across handlers.
@@ -18,6 +19,7 @@ pub struct AppState {
     pub p2p: Option<Arc<dyn P2POperations>>,
     pub acp: Option<Arc<dyn AcpOperations>>,
     pub index: Option<Arc<dyn IndexOperations>>,
+    pub encrypted_index: Option<Arc<dyn EncryptedIndexOperations>>,
     pub backup: Option<Arc<dyn BackupOperations>>,
     pub schema: Option<Arc<dyn SchemaOperations>>,
     pub lens: Option<Arc<dyn LensOperations>>,
@@ -35,6 +37,13 @@ impl std::fmt::Debug for AppState {
             .field("p2p", &self.p2p.as_ref().map(|_| "<P2POperations>"))
             .field("acp", &self.acp.as_ref().map(|_| "<AcpOperations>"))
             .field("index", &self.index.as_ref().map(|_| "<IndexOperations>"))
+            .field(
+                "encrypted_index",
+                &self
+                    .encrypted_index
+                    .as_ref()
+                    .map(|_| "<EncryptedIndexOperations>"),
+            )
             .field(
                 "backup",
                 &self.backup.as_ref().map(|_| "<BackupOperations>"),
@@ -85,6 +94,17 @@ impl AppState {
         self.index.as_ref().ok_or_else(|| {
             crate::error::HttpError::ServiceUnavailable(
                 "Index operations are not enabled. Start the server with indexing enabled to use this feature.".into()
+            )
+        })
+    }
+
+    /// Get encrypted index operations or return ServiceUnavailable error.
+    pub fn require_encrypted_index(
+        &self,
+    ) -> Result<&Arc<dyn EncryptedIndexOperations>, crate::error::HttpError> {
+        self.encrypted_index.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable(
+                "Encrypted index operations are not enabled.".into(),
             )
         })
     }
@@ -155,6 +175,7 @@ pub struct AppStateBuilder {
     p2p: Option<Arc<dyn P2POperations>>,
     acp: Option<Arc<dyn AcpOperations>>,
     index: Option<Arc<dyn IndexOperations>>,
+    encrypted_index: Option<Arc<dyn EncryptedIndexOperations>>,
     backup: Option<Arc<dyn BackupOperations>>,
     schema: Option<Arc<dyn SchemaOperations>>,
     lens: Option<Arc<dyn LensOperations>>,
@@ -173,6 +194,7 @@ impl AppStateBuilder {
             p2p: None,
             acp: None,
             index: None,
+            encrypted_index: None,
             backup: None,
             schema: None,
             lens: None,
@@ -204,6 +226,15 @@ impl AppStateBuilder {
     /// Set index operations.
     pub fn with_index(mut self, index: Arc<dyn IndexOperations>) -> Self {
         self.index = Some(index);
+        self
+    }
+
+    /// Set encrypted index operations.
+    pub fn with_encrypted_index(
+        mut self,
+        encrypted_index: Arc<dyn EncryptedIndexOperations>,
+    ) -> Self {
+        self.encrypted_index = Some(encrypted_index);
         self
     }
 
@@ -260,6 +291,7 @@ impl AppStateBuilder {
             p2p: self.p2p,
             acp: self.acp,
             index: self.index,
+            encrypted_index: self.encrypted_index,
             backup: self.backup,
             schema: self.schema,
             lens: self.lens,

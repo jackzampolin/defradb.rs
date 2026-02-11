@@ -13,6 +13,7 @@ pub mod acp;
 pub mod backup;
 pub mod collections;
 pub mod documents;
+pub mod encrypted_index;
 pub mod graphql;
 pub mod index;
 pub mod lens;

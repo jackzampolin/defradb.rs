@@ -372,6 +372,12 @@ impl Node {
             server = server.with_index_arc(index_adapter);
             info!("Index HTTP endpoints enabled");
 
+            // Wire encrypted index operations to HTTP server
+            let encrypted_index_adapter =
+                crate::encrypted_index_adapter::EncryptedIndexAdapter::new_arc(database.clone());
+            server = server.with_encrypted_index_arc(encrypted_index_adapter);
+            info!("Encrypted index HTTP endpoints enabled");
+
             // Wire event bus to HTTP server for GraphQL subscriptions
             server = server.with_event_bus_arc(event_bus);
             info!("Subscription event bus enabled");

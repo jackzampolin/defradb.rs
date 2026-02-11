@@ -9,6 +9,7 @@ pub mod collection_mgmt_adapter;
 pub mod commands;
 pub mod config;
 pub mod doc_acp_adapter;
+pub mod encrypted_index_adapter;
 pub mod error;
 pub mod index_adapter;
 pub mod lens_adapter;
