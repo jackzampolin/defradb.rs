@@ -113,7 +113,7 @@ impl Node {
             };
 
             // Create auto-committing fetcher for non-transactional queries
-            let fetcher = db::AutoCommitFetcher::new(database.clone());
+            let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
 
             // Create sync coordinator if P2P is enabled (shared between mutator and P2P adapter)
             // Also captures task handles for graceful shutdown
