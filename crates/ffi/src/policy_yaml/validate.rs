@@ -1,0 +1,179 @@
+use super::ParsedPolicy;
+
+/// Validate permission expressions in a parsed policy.
+///
+/// Checks:
+/// 1. Expressions cannot reference the reserved `owner` relation
+/// 2. Expression operators must be valid (`+` and `-` only)
+/// 3. Expressions can only reference relations declared in the same resource
+pub fn validate_policy_expressions(policy: &ParsedPolicy) -> Result<(), String> {
+    for resource in &policy.resources {
+        for permission in &resource.permissions {
+            if permission.expr.is_empty() {
+                continue;
+            }
+
+            let tokens = tokenize_expression(&permission.expr)?;
+
+            for token in &tokens {
+                match token {
+                    ExprToken::Identifier(name) => {
+                        // Check for owner reference
+                        if name == "owner" {
+                            return Err("permission cannot reference `owner` relation".to_string());
+                        }
+
+                        // Check that the relation exists in this resource
+                        if !resource.has_relation(name) {
+                            // Check if it exists in another resource (cross-resource error)
+                            let exists_elsewhere = policy
+                                .resources
+                                .iter()
+                                .any(|r| r.name != resource.name && r.has_relation(name));
+                            if exists_elsewhere {
+                                return Err("resource does not have relation".to_string());
+                            }
+                            return Err("BAD_INPUT".to_string());
+                        }
+                    }
+                    ExprToken::Operator | ExprToken::Paren => {}
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+enum ExprToken {
+    Identifier(String),
+    Operator,
+    Paren,
+}
+
+/// Tokenize a permission expression like "reader + writer - admin".
+/// Valid operators: +, -
+/// Valid tokens: identifiers (alphanumeric + underscore), operators, parentheses
+fn tokenize_expression(expr: &str) -> Result<Vec<ExprToken>, String> {
+    let mut tokens = Vec::new();
+    let mut chars = expr.chars().peekable();
+
+    while let Some(&ch) = chars.peek() {
+        match ch {
+            ' ' | '\t' | '\n' | '\r' => {
+                chars.next();
+            }
+            '+' | '-' => {
+                // Check for -> (TTU operator)
+                if ch == '-' {
+                    let mut lookahead = chars.clone();
+                    lookahead.next(); // skip '-'
+                    if lookahead.peek() == Some(&'>') {
+                        // This is a TTU operator "->", consume both
+                        chars.next();
+                        chars.next();
+                        tokens.push(ExprToken::Operator);
+                        continue;
+                    }
+                }
+                tokens.push(ExprToken::Operator);
+                chars.next();
+            }
+            '&' => {
+                tokens.push(ExprToken::Operator);
+                chars.next();
+            }
+            '(' | ')' => {
+                tokens.push(ExprToken::Paren);
+                chars.next();
+            }
+            'a'..='z' | 'A'..='Z' | '_' => {
+                let mut ident = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_alphanumeric() || c == '_' {
+                        ident.push(c);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                tokens.push(ExprToken::Identifier(ident));
+            }
+            _ => {
+                return Err("token recognition error".to_string());
+            }
+        }
+    }
+
+    Ok(tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy_yaml::parse_policy_yaml;
+
+    #[test]
+    fn test_owner_reference_error() {
+        let yaml = r#"
+name: test
+description: a policy
+resources:
+- name: users
+  permissions:
+  - expr: reader + owner
+    name: read
+  relations:
+  - name: reader
+    types:
+    - actor
+"#;
+        let policy = parse_policy_yaml(yaml).unwrap();
+        let result = validate_policy_expressions(&policy);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("permission cannot reference `owner`"));
+    }
+
+    #[test]
+    fn test_bad_token_error() {
+        let yaml = r#"
+name: test
+description: a policy
+resources:
+- name: users
+  permissions:
+  - name: read
+    expr: reader ^ asf
+  relations:
+  - name: reader
+    types:
+    - actor
+"#;
+        let policy = parse_policy_yaml(yaml).unwrap();
+        let result = validate_policy_expressions(&policy);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("token recognition error"));
+    }
+
+    #[test]
+    fn test_undeclared_relation_error() {
+        let yaml = r#"
+description: a policy
+name: a policy
+resources:
+- name: users
+  permissions:
+  - name: delete
+  - expr: reader
+    name: read
+  - name: update
+  relations:
+"#;
+        let policy = parse_policy_yaml(yaml).unwrap();
+        let result = validate_policy_expressions(&policy);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("BAD_INPUT"));
+    }
+}

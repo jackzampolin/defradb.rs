@@ -631,7 +631,7 @@ mod tests {
     fn test_json_to_graphql_number() {
         assert_eq!(json_to_graphql(&json!(42)), "42");
         assert_eq!(json_to_graphql(&json!(-17)), "-17");
-        assert_eq!(json_to_graphql(&json!(3.14)), "3.14");
+        assert_eq!(json_to_graphql(&json!(3.15)), "3.15");
     }
 
     #[test]

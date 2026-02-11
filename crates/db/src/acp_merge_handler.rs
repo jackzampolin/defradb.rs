@@ -253,6 +253,7 @@ mod tests {
             }
         }
 
+        #[allow(dead_code)]
         fn was_called(&self) -> bool {
             self.called.load(Ordering::SeqCst)
         }

@@ -6,8 +6,6 @@
 use crypto::encryption::aes::{decrypt_aes, encrypt_aes};
 use crypto::encryption::ecies::{decrypt_ecies, encrypt_ecies, EciesOptions};
 use crypto::encryption::nonce::USE_DETERMINISTIC_NONCE;
-use crypto::keys::ed25519::Ed25519PrivateKey;
-use crypto::keys::{Key, PrivateKey};
 use hkdf::Hkdf;
 use serial_test::serial;
 use sha2::Sha256;

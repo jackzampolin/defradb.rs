@@ -10,8 +10,3 @@ mod tracker;
 
 pub use stats::PeerStats;
 pub use tracker::PeerStateTracker;
-
-#[cfg(test)]
-pub mod tests {
-    pub use super::tracker::tests::*;
-}

@@ -105,8 +105,10 @@ fn test_config_defaults() {
 
 #[test]
 fn test_resolve_paths_relative_to_rootdir() {
-    let mut config = Config::default();
-    config.rootdir = PathBuf::from("/home/user/.defradb");
+    let mut config = Config {
+        rootdir: PathBuf::from("/home/user/.defradb"),
+        ..Default::default()
+    };
     config.datastore.path = "data".to_string();
     config.keyring.path = "keys".to_string();
     config.resolve_paths();
@@ -117,8 +119,10 @@ fn test_resolve_paths_relative_to_rootdir() {
 
 #[test]
 fn test_resolve_paths_absolute_unchanged() {
-    let mut config = Config::default();
-    config.rootdir = PathBuf::from("/home/user/.defradb");
+    let mut config = Config {
+        rootdir: PathBuf::from("/home/user/.defradb"),
+        ..Default::default()
+    };
     config.datastore.path = "/custom/data/path".to_string();
     config.keyring.path = "/custom/keys/path".to_string();
     config.resolve_paths();
@@ -129,8 +133,10 @@ fn test_resolve_paths_absolute_unchanged() {
 
 #[test]
 fn test_data_path_relative() {
-    let mut config = Config::default();
-    config.rootdir = PathBuf::from("/root");
+    let mut config = Config {
+        rootdir: PathBuf::from("/root"),
+        ..Default::default()
+    };
     config.datastore.path = "data".to_string();
 
     assert_eq!(config.data_path(), PathBuf::from("/root/data"));
@@ -138,8 +144,10 @@ fn test_data_path_relative() {
 
 #[test]
 fn test_data_path_absolute() {
-    let mut config = Config::default();
-    config.rootdir = PathBuf::from("/root");
+    let mut config = Config {
+        rootdir: PathBuf::from("/root"),
+        ..Default::default()
+    };
     config.datastore.path = "/custom/data".to_string();
 
     assert_eq!(config.data_path(), PathBuf::from("/custom/data"));
@@ -147,8 +155,10 @@ fn test_data_path_absolute() {
 
 #[test]
 fn test_keyring_path_relative() {
-    let mut config = Config::default();
-    config.rootdir = PathBuf::from("/root");
+    let mut config = Config {
+        rootdir: PathBuf::from("/root"),
+        ..Default::default()
+    };
     config.keyring.path = "keys".to_string();
 
     assert_eq!(config.keyring_path(), PathBuf::from("/root/keys"));

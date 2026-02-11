@@ -803,7 +803,7 @@ fn test_constraints_directive_negative_size_returns_error() {
 fn test_default_directive_float() {
     let sdl = r#"
         type Measurement {
-            value: Float @default(float: 3.14)
+            value: Float @default(float: 3.15)
         }
     "#;
     let collections = parse_sdl(sdl).unwrap();
@@ -811,7 +811,7 @@ fn test_default_directive_float() {
     let value = m.field_by_name("value").unwrap();
     assert!(value.default_value.is_some());
     if let Some(serde_json::Value::Number(n)) = &value.default_value {
-        assert!((n.as_f64().unwrap() - 3.14).abs() < 0.001);
+        assert!((n.as_f64().unwrap() - 3.15).abs() < 0.001);
     } else {
         panic!("expected number default value");
     }

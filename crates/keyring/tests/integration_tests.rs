@@ -320,7 +320,7 @@ fn test_file_keyring_non_jwe_content() {
 
     // Write raw binary (non-JWE) data directly to a key file
     let path = temp_dir.path().join("binary_garbage");
-    std::fs::write(&path, &[0xFF, 0xFE, 0x00, 0x01]).unwrap();
+    std::fs::write(&path, [0xFF, 0xFE, 0x00, 0x01]).unwrap();
 
     let result = keyring.get("binary_garbage");
     assert!(

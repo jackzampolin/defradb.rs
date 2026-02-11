@@ -15,8 +15,8 @@ fn test_json_number_i64() {
 
 #[test]
 fn test_json_number_f64() {
-    let doc = document::Document::from_json_str(r#"{"value": 3.14}"#).unwrap();
-    assert_eq!(doc.get("value").and_then(|v| v.as_float64()), Some(3.14));
+    let doc = document::Document::from_json_str(r#"{"value": 3.15}"#).unwrap();
+    assert_eq!(doc.get("value").and_then(|v| v.as_float64()), Some(3.15));
 }
 
 #[test]
@@ -167,7 +167,7 @@ fn test_to_map_float_array_nan_error() {
 fn test_to_map_finite_float_ok() {
     // Normal finite floats should work fine
     let mut doc = document::Document::new();
-    doc.set("value", 3.14);
+    doc.set("value", 3.15);
     let result = doc.to_map();
     assert!(result.is_ok());
 }

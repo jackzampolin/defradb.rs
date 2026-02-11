@@ -205,7 +205,7 @@ proptest! {
         name in arb_valid_collection_name(),
         field_name in arb_valid_field_name(),
     ) {
-        let coll = CollectionBuilder::new(&name, &format!("coll-{}", name.to_lowercase()))
+        let coll = CollectionBuilder::new(&name, format!("coll-{}", name.to_lowercase()))
             .scalar("1", "_docID", FieldKind::doc_id())
             .scalar("2", &field_name, FieldKind::string())
             .build();
@@ -222,7 +222,7 @@ proptest! {
         name in arb_valid_collection_name(),
         field_name in arb_valid_field_name(),
     ) {
-        let coll = CollectionBuilder::new(&name, &format!("coll-{}", name.to_lowercase()))
+        let coll = CollectionBuilder::new(&name, format!("coll-{}", name.to_lowercase()))
             .scalar("1", "_docID", FieldKind::doc_id())
             .scalar("2", &field_name, FieldKind::string())
             .scalar("3", &field_name, FieldKind::int()) // Duplicate!
@@ -574,9 +574,9 @@ proptest! {
         // Ensure different names
         prop_assume!(col1_name != col2_name);
 
-        let mut field1 = FieldDescription::new("1", "rel", FieldKind::relation(&col2_name.to_lowercase(), false))
+        let mut field1 = FieldDescription::new("1", "rel", FieldKind::relation(col2_name.to_lowercase(), false))
             .with_relation_name(&relation_name);
-        let mut field2 = FieldDescription::new("1", "rel", FieldKind::relation(&col1_name.to_lowercase(), false))
+        let mut field2 = FieldDescription::new("1", "rel", FieldKind::relation(col1_name.to_lowercase(), false))
             .with_relation_name(&relation_name);
 
         if primary_on_first {
@@ -612,10 +612,10 @@ proptest! {
         // Ensure different names
         prop_assume!(col1_name != col2_name);
 
-        let field1 = FieldDescription::new("1", "rel", FieldKind::relation(&col2_name.to_lowercase(), false))
+        let field1 = FieldDescription::new("1", "rel", FieldKind::relation(col2_name.to_lowercase(), false))
             .with_relation_name(&relation_name)
             .as_primary();
-        let field2 = FieldDescription::new("1", "rel", FieldKind::relation(&col1_name.to_lowercase(), false))
+        let field2 = FieldDescription::new("1", "rel", FieldKind::relation(col1_name.to_lowercase(), false))
             .with_relation_name(&relation_name)
             .as_primary(); // BOTH primary!
 

@@ -106,11 +106,11 @@ mod tests {
             EncodedType::Int
         );
         assert_eq!(
-            peek_type(&encode_float64_ascending(vec![], 3.14)),
+            peek_type(&encode_float64_ascending(vec![], 3.15)),
             EncodedType::Float64
         );
         assert_eq!(
-            peek_type(&encode_float32_ascending(vec![], 3.14)),
+            peek_type(&encode_float32_ascending(vec![], 3.15)),
             EncodedType::Float32
         );
         assert_eq!(

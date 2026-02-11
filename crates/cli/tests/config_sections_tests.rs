@@ -66,33 +66,41 @@ fn test_api_config_validate_valid_address() {
 
 #[test]
 fn test_api_config_validate_invalid_address() {
-    let mut config = ApiConfig::default();
-    config.address = "not-an-address".to_string();
+    let config = ApiConfig {
+        address: "not-an-address".to_string(),
+        ..Default::default()
+    };
     let result = config.validate();
     assert!(matches!(result, Err(Error::InvalidApiAddress(addr, _)) if addr == "not-an-address"));
 }
 
 #[test]
 fn test_api_config_validate_incomplete_tls_pubkey_only() {
-    let mut config = ApiConfig::default();
-    config.pubkey_path = "/path/to/pub.key".to_string();
+    let config = ApiConfig {
+        pubkey_path: "/path/to/pub.key".to_string(),
+        ..Default::default()
+    };
     let result = config.validate();
     assert!(matches!(result, Err(Error::IncompleteTlsConfig)));
 }
 
 #[test]
 fn test_api_config_validate_incomplete_tls_privkey_only() {
-    let mut config = ApiConfig::default();
-    config.privkey_path = "/path/to/priv.key".to_string();
+    let config = ApiConfig {
+        privkey_path: "/path/to/priv.key".to_string(),
+        ..Default::default()
+    };
     let result = config.validate();
     assert!(matches!(result, Err(Error::IncompleteTlsConfig)));
 }
 
 #[test]
 fn test_api_config_validate_complete_tls() {
-    let mut config = ApiConfig::default();
-    config.pubkey_path = "/path/to/pub.key".to_string();
-    config.privkey_path = "/path/to/priv.key".to_string();
+    let config = ApiConfig {
+        pubkey_path: "/path/to/pub.key".to_string(),
+        privkey_path: "/path/to/priv.key".to_string(),
+        ..Default::default()
+    };
     assert!(config.validate().is_ok());
 }
 
@@ -104,16 +112,20 @@ fn test_api_config_tls_enabled_false_by_default() {
 
 #[test]
 fn test_api_config_tls_enabled_true_when_configured() {
-    let mut config = ApiConfig::default();
-    config.pubkey_path = "/path/to/pub.key".to_string();
-    config.privkey_path = "/path/to/priv.key".to_string();
+    let config = ApiConfig {
+        pubkey_path: "/path/to/pub.key".to_string(),
+        privkey_path: "/path/to/priv.key".to_string(),
+        ..Default::default()
+    };
     assert!(config.tls_enabled());
 }
 
 #[test]
 fn test_api_config_tls_enabled_false_partial_config() {
-    let mut config = ApiConfig::default();
-    config.pubkey_path = "/path/to/pub.key".to_string();
+    let config = ApiConfig {
+        pubkey_path: "/path/to/pub.key".to_string(),
+        ..Default::default()
+    };
     assert!(!config.tls_enabled());
 }
 
@@ -125,16 +137,20 @@ fn test_net_config_validate_valid_multiaddr() {
 
 #[test]
 fn test_net_config_validate_invalid_multiaddr() {
-    let mut config = NetConfig::default();
-    config.p2p_addresses = vec!["not-a-multiaddr".to_string()];
+    let config = NetConfig {
+        p2p_addresses: vec!["not-a-multiaddr".to_string()],
+        ..Default::default()
+    };
     let result = config.validate();
     assert!(matches!(result, Err(Error::InvalidMultiaddr(_))));
 }
 
 #[test]
 fn test_net_config_validate_skipped_when_p2p_disabled() {
-    let mut config = NetConfig::default();
-    config.p2p_disabled = true;
-    config.p2p_addresses = vec!["not-a-multiaddr".to_string()];
+    let config = NetConfig {
+        p2p_disabled: true,
+        p2p_addresses: vec!["not-a-multiaddr".to_string()],
+        ..Default::default()
+    };
     assert!(config.validate().is_ok());
 }

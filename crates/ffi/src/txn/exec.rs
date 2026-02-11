@@ -1,148 +1,11 @@
-//! Transaction operations for FFI.
-//!
-//! This module exposes transaction management functions that allow
-//! explicit transaction control from Go/C callers.
-
 use std::ffi::c_char;
 
-use crate::get_runtime;
+use crate::helpers::{get_node_runner, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::query::nac_permission_for_query;
 use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult, NewTxnResult};
-use crate::ERR_INVALID_NODE_HANDLE;
-
-/// Begin a new transaction.
-///
-/// Returns a transaction ID that can be used with `exec_request_in_txn`,
-/// `commit_txn`, and `rollback_txn`.
-///
-/// # Arguments
-///
-/// * `node_ptr` - Handle to the node
-/// * `readonly` - If non-zero, creates a read-only transaction
-///
-/// # Returns
-///
-/// A `NewTxnResult` containing the transaction ID on success.
-#[no_mangle]
-pub extern "C" fn begin_txn(node_ptr: usize, readonly: i32) -> NewTxnResult {
-    let rt = get_runtime!(NewTxnResult);
-
-    // Validate node handle before entering async block
-    let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
-        Some(r) => r,
-        None => return NewTxnResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
-        let handle = runner
-            .begin_txn(readonly != 0)
-            .await
-            .map_err(|e| format!("failed to begin transaction: {}", e))?;
-
-        Ok::<String, String>(handle.to_string())
-    });
-
-    match result {
-        Ok(txn_id) => NewTxnResult::success(txn_id),
-        Err(e) => NewTxnResult::error(e),
-    }
-}
-
-/// Commit a transaction.
-///
-/// After commit, all operations performed within the transaction become permanent.
-/// The transaction ID is no longer valid after this call.
-///
-/// # Arguments
-///
-/// * `node_ptr` - Handle to the node
-/// * `txn_id` - Transaction ID from `begin_txn`
-///
-/// # Safety
-///
-/// `txn_id` must be a valid null-terminated UTF-8 string.
-#[no_mangle]
-pub unsafe extern "C" fn commit_txn(node_ptr: usize, txn_id: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    let txn_str = match c_str_to_string(txn_id) {
-        Some(s) => s,
-        None => return FfiResult::error("txn_id is null"),
-    };
-
-    // Validate node handle before entering async block
-    let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
-        Some(r) => r,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
-        let handle: query::txn::TransactionHandle = txn_str
-            .parse()
-            .map_err(|e| format!("invalid transaction ID: {}", e))?;
-
-        runner
-            .commit_txn(&handle)
-            .await
-            .map_err(|e| format!("failed to commit transaction: {}", e))?;
-
-        Ok::<(), String>(())
-    });
-
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(e),
-    }
-}
-
-/// Rollback (discard) a transaction.
-///
-/// After rollback, all operations performed within the transaction are discarded.
-/// The transaction ID is no longer valid after this call.
-///
-/// # Arguments
-///
-/// * `node_ptr` - Handle to the node
-/// * `txn_id` - Transaction ID from `begin_txn`
-///
-/// # Safety
-///
-/// `txn_id` must be a valid null-terminated UTF-8 string.
-#[no_mangle]
-pub unsafe extern "C" fn rollback_txn(node_ptr: usize, txn_id: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    let txn_str = match c_str_to_string(txn_id) {
-        Some(s) => s,
-        None => return FfiResult::error("txn_id is null"),
-    };
-
-    // Validate node handle before entering async block
-    let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
-        Some(r) => r,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
-        let handle: query::txn::TransactionHandle = txn_str
-            .parse()
-            .map_err(|e| format!("invalid transaction ID: {}", e))?;
-
-        runner
-            .rollback_txn(&handle)
-            .await
-            .map_err(|e| format!("failed to rollback transaction: {}", e))?;
-
-        Ok::<(), String>(())
-    });
-
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(e),
-    }
-}
+use crate::types::{c_str_to_string, FfiResult};
+use crate::{ffi_async, try_ffi};
 
 /// Execute a GraphQL query or mutation within a transaction.
 ///
@@ -170,22 +33,12 @@ pub unsafe extern "C" fn exec_request_in_txn(
     operation_name: *const c_char,
     variables: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    let txn_str = match c_str_to_string(txn_id) {
-        Some(s) => s,
-        None => return FfiResult::error("txn_id is null"),
-    };
-
-    let query_str = match c_str_to_string(request_query) {
-        Some(s) => s,
-        None => return FfiResult::error("request_query is null"),
-    };
+    let rt = try_ffi!(get_rt());
+    let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
+    let query_str = try_ffi!(require_c_str(request_query, "request_query"));
 
     let permission = nac_permission_for_query(&query_str);
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, permission) {
-        return e;
-    }
+    try_ffi!(check_nac_for_node(rt, node_ptr, identity_did, permission));
 
     let identity_str = c_str_to_string(identity_did);
     let op_name = c_str_to_string(operation_name);
@@ -235,13 +88,9 @@ pub unsafe extern "C" fn exec_request_in_txn(
     // Check if identity has DAC bypass (NAC admin/owner can read all documents)
     crate::query::check_and_set_dac_bypass(rt, node_ptr, identity_did);
 
-    // Validate node handle before entering async block
-    let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
-        Some(r) => r,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
+    let runner = try_ffi!(get_node_runner(node_ptr));
 
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         let handle: query::txn::TransactionHandle = txn_str
             .parse()
             .map_err(|e| format!("invalid transaction ID: {}", e))?;
@@ -267,13 +116,8 @@ pub unsafe extern "C" fn exec_request_in_txn(
         let json = serde_json::to_string(&response)
             .map_err(|e| format!("failed to serialize response: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 #[cfg(test)]
@@ -281,6 +125,7 @@ mod tests {
     use super::*;
     use crate::node::{new_node, node_close};
     use crate::schema::add_schema;
+    use crate::txn::{begin_txn, commit_txn, rollback_txn};
     use crate::types::NodeInitOptions;
     use std::ffi::CString;
 
@@ -370,23 +215,6 @@ mod tests {
         // Rollback transaction
         let result = unsafe { rollback_txn(node, txn_id_cstr.as_ptr()) };
         assert_eq!(result.status, 0, "rollback_txn should succeed");
-
-        node_close(node);
-    }
-
-    #[test]
-    fn test_invalid_txn_id() {
-        assert!(crate::runtime::init_runtime());
-
-        let options = NodeInitOptions::default();
-        let result = new_node(options);
-        assert_eq!(result.status, 0);
-        let node = result.node_ptr;
-
-        // Try to commit invalid transaction
-        let invalid_txn = CString::new("invalid-txn-id-12345").unwrap();
-        let result = unsafe { commit_txn(node, invalid_txn.as_ptr()) };
-        assert_eq!(result.status, 1, "commit with invalid txn should fail");
 
         node_close(node);
     }

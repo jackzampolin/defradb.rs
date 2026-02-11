@@ -98,8 +98,8 @@ mod tests {
             Some(JsonScalarValue::Number(42.0))
         );
         assert_eq!(
-            JsonScalarValue::from_json_value(&json!(3.14)),
-            Some(JsonScalarValue::Number(3.14))
+            JsonScalarValue::from_json_value(&json!(3.15)),
+            Some(JsonScalarValue::Number(3.15))
         );
         assert_eq!(
             JsonScalarValue::from_json_value(&json!(-100)),

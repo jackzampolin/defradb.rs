@@ -1269,7 +1269,7 @@ async fn test_stress_concurrent_operations() {
     let mut handles = Vec::new();
 
     // Spawn many concurrent readers
-    for cid in cids.iter().cloned() {
+    for &cid in &cids {
         let bs = blockstore.clone();
         let counter = success_count.clone();
         handles.push(tokio::spawn(async move {

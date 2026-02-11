@@ -176,7 +176,14 @@ impl Bus for ChannelBus {
             msg.name,
             EventName::MergeComplete | EventName::ReplicatorCompleted
         ) {
-            eprintln!("[EVENT-BUS] Published event={} sub_count={} delivered={} dropped={} buffer_full={}", msg.name, sub_count, delivered, dropped, buffer_full);
+            tracing::debug!(
+                event = %msg.name,
+                sub_count,
+                delivered,
+                dropped,
+                buffer_full,
+                "Published event"
+            );
         }
     }
 

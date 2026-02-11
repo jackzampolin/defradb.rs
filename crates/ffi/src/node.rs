@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use identity::Identity;
 
-use crate::get_runtime;
 use crate::state::{FfiStore, NodeState, PolicyStore, NODES};
+use crate::try_ffi;
 use crate::types::{c_str_to_string, FfiResult, NewNodeResult, NodeInitOptions};
 use crate::ERR_INVALID_NODE_HANDLE;
 
@@ -22,7 +22,10 @@ use crate::ERR_INVALID_NODE_HANDLE;
 /// The returned `node_ptr` must be freed by calling `node_close`.
 #[no_mangle]
 pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
-    let rt = get_runtime!(NewNodeResult);
+    let rt = match crate::runtime::RUNTIME.get() {
+        Some(rt) => rt,
+        None => return NewNodeResult::error("runtime not initialized - call defra_init() first"),
+    };
 
     let enable_signing = options.enable_signing != 0;
 
@@ -46,7 +49,7 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
 
         // Generate or load node identity BEFORE opening database so it can be passed via options.
         // This enables `get_node_identity()` to return the correct DID.
-        eprintln!("[SIGN-DEBUG] new_node: enable_signing={}", enable_signing);
+        tracing::debug!(enable_signing, "new_node: signing configuration");
         let (raw_identity_opt, node_identity_did) = if enable_signing {
             // Check if a signing key was provided by the caller
             let raw_identity = if !options.signing_private_key.is_null()
@@ -109,7 +112,7 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
                 },
             );
 
-            eprintln!("[SIGN-DEBUG] new_node: node identity DID={}", did_str);
+            tracing::debug!(did = %did_str, "node identity created");
             (Some(raw_identity), Some(did_str))
         } else {
             (None, None)
@@ -173,10 +176,7 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
             let sh_client = sourcehub::SourceHubClient::new(grpc_addr, comet_addr);
             let sh_signer = sourcehub::TxSigner::from_secp256k1_bytes(signer_key, &chain_id)
                 .map_err(|e| format!("failed to create SourceHub signer: {}", e))?;
-            eprintln!(
-                "[SH-DEBUG] new_node: SourceHub ACP configured, validator={}",
-                sh_signer.address()
-            );
+            tracing::debug!(validator = %sh_signer.address(), "SourceHub ACP configured");
             let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(sh_client, sh_signer));
             (sh_acp.clone() as Arc<dyn acp::DocumentACP>, Some(sh_acp))
         } else {
@@ -273,7 +273,7 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
 pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
     use crate::state::{GRAPHQL_SUBSCRIPTIONS, SUBSCRIPTIONS};
 
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(crate::helpers::get_rt());
 
     // Remove all raw subscriptions for this node
     let removed_subs = SUBSCRIPTIONS.remove_for_node(node_ptr);

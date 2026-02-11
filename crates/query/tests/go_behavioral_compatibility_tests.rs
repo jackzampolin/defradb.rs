@@ -497,5 +497,5 @@ fn test_p2_string_vs_int_comparison_returns_false() {
 
     // Matches Go behavior: type mismatch returns false (no match)
     let result = filter.matches(&fields, &mapping);
-    assert_eq!(result.unwrap(), false);
+    assert!(!result.unwrap());
 }

@@ -11,11 +11,11 @@ use blockstore::{Blockstore, DefraBlockstore};
 
 use acp::nac::NodePermission;
 
-use crate::get_runtime;
+use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{ffi_async, try_ffi, ERR_INVALID_NODE_HANDLE};
 
 use lens::{LensConfig, LensModule, TransformId};
 
@@ -71,12 +71,8 @@ fn extract_arguments(module: &LensModule) -> Vec<(String, String)> {
 /// `lens_json` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    let lens_str = match c_str_to_string(lens_json) {
-        Some(s) => s,
-        None => return FfiResult::error("lens_json is null"),
-    };
+    let rt = try_ffi!(get_rt());
+    let lens_str = try_ffi!(require_c_str(lens_json, "lens_json"));
 
     // If the JSON contains version IDs, this is a full migration config — delegate to
     // set_migration on the database so the transform gets linked to schema versions.
@@ -153,11 +149,7 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
 
             // Store all blocks in the blockstore for Bitswap availability
             for (cid, data) in &blocks {
-                eprintln!(
-                    "[FFI-LENS-ADD] Storing block cid={} ({} bytes)",
-                    cid,
-                    data.len()
-                );
+                tracing::debug!(cid = %cid, bytes = data.len(), "storing lens block");
                 blockstore
                     .put(cid, data)
                     .await
@@ -167,7 +159,7 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
                     .has(cid)
                     .await
                     .map_err(|e| format!("failed to check block: {}", e))?;
-                eprintln!("[FFI-LENS-ADD] Block {} stored: {}", cid, has);
+                tracing::debug!(cid = %cid, stored = has, "lens block storage verified");
             }
 
             // Register the transform under the real IPLD CID
@@ -200,35 +192,30 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn lens_list(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::LensList
+    ));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::LensList) {
-        return e;
-    }
-
-    // Validate node handle before entering async block
     let lens_store = match NODES.get(node_ptr, |state| state.database.lens_store().clone()) {
         Some(store) => store,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         let lenses = lens_store
             .list()
             .await
             .map_err(|e| format!("failed to list lenses: {}", e))?;
 
-        // Convert to JSON
         let json = serde_json::to_string(&lenses)
             .map_err(|e| format!("failed to serialize lenses: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 #[cfg(test)]

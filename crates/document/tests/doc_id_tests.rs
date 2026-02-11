@@ -27,7 +27,7 @@ fn test_sdn_namespace_matches_go() {
 #[test]
 fn test_new_v0() {
     let cid = test_cid();
-    let doc_id = DocID::new_v0(cid.clone());
+    let doc_id = DocID::new_v0(cid);
 
     assert_eq!(doc_id.version(), DOC_ID_V0);
     assert_eq!(doc_id.cid(), Some(&cid));
@@ -37,7 +37,7 @@ fn test_new_v0() {
 #[test]
 fn test_deterministic_uuid_from_cid() {
     let cid = test_cid();
-    let doc_id1 = DocID::new_v0(cid.clone());
+    let doc_id1 = DocID::new_v0(cid);
     let doc_id2 = DocID::new_v0(cid);
 
     // Same CID should produce same UUID

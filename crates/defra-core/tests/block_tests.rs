@@ -370,7 +370,7 @@ fn test_dag_link_ordering() {
     let link_b = DAGLink::new("b", test_cid2());
 
     // Ordering is by CID string, not by name
-    let mut links = vec![link_b.clone(), link_a.clone()];
+    let mut links = [link_b.clone(), link_a.clone()];
     links.sort();
 
     // bafkreig < bafybeig (k < y in ASCII)

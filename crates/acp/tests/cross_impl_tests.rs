@@ -125,9 +125,10 @@ impl TestFixture {
             let mut resource = Resource::new(&resource_def.name);
 
             for relation_def in &resource_def.relations {
-                let expression = RelationExpression::parse(&relation_def.expression).expect(
-                    &format!("Failed to parse expression: {}", relation_def.expression),
-                );
+                let expression = RelationExpression::parse(&relation_def.expression)
+                    .unwrap_or_else(|_| {
+                        panic!("Failed to parse expression: {}", relation_def.expression)
+                    });
 
                 let mut relation = Relation::computed(&relation_def.name, expression);
 
@@ -219,10 +220,12 @@ pub async fn run_fixture(fixture: &TestFixture) -> Vec<(PermissionCheck, bool, b
                 &did,
             )
             .await
-            .expect(&format!(
-                "Permission check failed for {}.{}#{}",
-                check.resource, check.object_id, check.relation
-            ));
+            .unwrap_or_else(|_| {
+                panic!(
+                    "Permission check failed for {}.{}#{}",
+                    check.resource, check.object_id, check.relation
+                )
+            });
 
         results.push((check.clone(), check.expected, result));
     }

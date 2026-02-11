@@ -156,7 +156,7 @@ mod tests {
         }
 
         // Verify sort order
-        let test_sorted = vec![b"".as_slice(), b"a", b"aa", b"ab", b"b", b"ba"];
+        let test_sorted = [b"".as_slice(), b"a", b"aa", b"ab", b"b", b"ba"];
         let encoded: Vec<Vec<u8>> = test_sorted
             .iter()
             .map(|v| encode_bytes_ascending(vec![], v))
