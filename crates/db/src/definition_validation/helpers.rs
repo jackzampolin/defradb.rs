@@ -1,0 +1,87 @@
+//! Helper functions for definition validation formatting and type checks.
+
+use schema::{CType, FieldKind, ScalarKind};
+
+/// Check if a CRDT type is supported as a user-specified field type.
+/// Matches Go's IsSupportedFieldCType: only None, LwwRegister, PnCounter, PCounter.
+/// Object and Composite are internal types, not user-assignable.
+pub(super) fn is_crdt_type_supported(crdt: CType) -> bool {
+    matches!(
+        crdt,
+        CType::None | CType::LwwRegister | CType::PnCounter | CType::PCounter
+    )
+}
+
+/// Check if a field kind is valid for vector embedding storage.
+pub(super) fn is_valid_embedding_kind(kind: &FieldKind) -> bool {
+    matches!(
+        kind,
+        FieldKind::ScalarArray(schema::ScalarArrayKind::Float32Array)
+            | FieldKind::ScalarArray(schema::ScalarArrayKind::Float64Array)
+    )
+}
+
+/// Check if a field kind is valid for embedding generation input (string-like).
+pub(super) fn is_valid_embedding_generation_kind(kind: &FieldKind) -> bool {
+    matches!(
+        kind,
+        FieldKind::Scalar(ScalarKind::String)
+            | FieldKind::Scalar(ScalarKind::Int)
+            | FieldKind::Scalar(ScalarKind::Float64)
+            | FieldKind::Scalar(ScalarKind::Float32)
+            | FieldKind::Scalar(ScalarKind::Bool)
+            | FieldKind::Scalar(ScalarKind::DateTime)
+            | FieldKind::Scalar(ScalarKind::Blob)
+    )
+}
+
+/// Known embedding providers (matches Go's supportedEmbeddingProviders).
+pub(super) fn is_known_embedding_provider(provider: &str) -> bool {
+    matches!(provider, "openai" | "ollama" | "custom")
+}
+
+/// Format a CType for error messages (matches Go's CType.String()).
+pub(super) fn format_crdt_type(crdt: CType) -> String {
+    match crdt {
+        CType::None => "none".to_string(),
+        CType::LwwRegister => "lww".to_string(),
+        CType::Object => "object".to_string(),
+        CType::Composite => "composite".to_string(),
+        CType::PnCounter => "pncounter".to_string(),
+        CType::PCounter => "pcounter".to_string(),
+        CType::Unknown(_) => "unknown".to_string(),
+    }
+}
+
+/// Format a FieldKind for error messages (matches Go's Kind.String()).
+pub(super) fn format_field_kind(kind: &FieldKind) -> String {
+    match kind {
+        FieldKind::Scalar(s) => match s {
+            ScalarKind::None => "None".to_string(),
+            ScalarKind::DocID => "ID".to_string(),
+            ScalarKind::Bool => "Boolean".to_string(),
+            ScalarKind::Int => "Int".to_string(),
+            ScalarKind::Float64 => "Float64".to_string(),
+            ScalarKind::Float32 => "Float32".to_string(),
+            ScalarKind::DateTime => "DateTime".to_string(),
+            ScalarKind::String => "String".to_string(),
+            ScalarKind::Blob => "Blob".to_string(),
+            ScalarKind::Json => "JSON".to_string(),
+        },
+        FieldKind::ScalarArray(a) => match a {
+            schema::ScalarArrayKind::BoolArray => "[Boolean!]".to_string(),
+            schema::ScalarArrayKind::IntArray => "[Int!]".to_string(),
+            schema::ScalarArrayKind::Float64Array => "[Float64!]".to_string(),
+            schema::ScalarArrayKind::Float32Array => "[Float32!]".to_string(),
+            schema::ScalarArrayKind::StringArray => "[String!]".to_string(),
+            schema::ScalarArrayKind::NillableBoolArray => "[Boolean]".to_string(),
+            schema::ScalarArrayKind::NillableIntArray => "[Int]".to_string(),
+            schema::ScalarArrayKind::NillableFloat64Array => "[Float64]".to_string(),
+            schema::ScalarArrayKind::NillableFloat32Array => "[Float32]".to_string(),
+            schema::ScalarArrayKind::NillableStringArray => "[String]".to_string(),
+        },
+        FieldKind::Relation { .. } | FieldKind::SelfRef { .. } | FieldKind::Named { .. } => {
+            "Object".to_string()
+        }
+    }
+}
