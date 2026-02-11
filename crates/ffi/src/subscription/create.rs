@@ -154,19 +154,4 @@ pub(crate) fn message_to_json(message: &events::Message) -> String {
     .to_string()
 }
 
-/// Check if a query response has any non-empty data.
-///
-/// Returns false if data is null/empty or all top-level collection arrays are empty
-/// (indicating the subscription's filter excluded the document).
-pub(crate) fn response_has_data(response: &query::QueryResponse) -> bool {
-    if let Some(serde_json::Value::Object(map)) = response.data.as_ref() {
-        for value in map.values() {
-            if let serde_json::Value::Array(arr) = value {
-                if !arr.is_empty() {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
+pub(crate) use query::subscription::response_has_data;

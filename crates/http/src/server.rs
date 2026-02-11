@@ -59,6 +59,7 @@ pub struct Server {
     view: Option<Arc<dyn ViewOperations>>,
     txn_ops: Option<Arc<dyn TransactionOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
+    node_identity_did: Option<String>,
 }
 
 impl Server {
@@ -82,6 +83,7 @@ impl Server {
             view: None,
             txn_ops: None,
             event_bus: None,
+            node_identity_did: None,
         }
     }
 
@@ -105,6 +107,7 @@ impl Server {
             view: None,
             txn_ops: None,
             event_bus: None,
+            node_identity_did: None,
         }
     }
 
@@ -128,6 +131,7 @@ impl Server {
             view: None,
             txn_ops: None,
             event_bus: None,
+            node_identity_did: None,
         }
     }
 
@@ -151,6 +155,7 @@ impl Server {
             view: None,
             txn_ops: None,
             event_bus: None,
+            node_identity_did: None,
         }
     }
 
@@ -299,6 +304,12 @@ impl Server {
         self
     }
 
+    /// Set the node identity DID for signing config fallback.
+    pub fn with_node_identity_did(mut self, did: String) -> Self {
+        self.node_identity_did = Some(did);
+        self
+    }
+
     /// Build the router with all routes and middleware.
     ///
     /// CORS configuration matches Go DefraDB behavior:
@@ -356,6 +367,9 @@ impl Server {
         }
         if let Some(ref event_bus) = self.event_bus {
             builder = builder.with_event_bus(Arc::clone(event_bus));
+        }
+        if let Some(ref did) = self.node_identity_did {
+            builder = builder.with_node_identity_did(did.clone());
         }
         let state = builder.build();
         let router = create_router_with_state(state);

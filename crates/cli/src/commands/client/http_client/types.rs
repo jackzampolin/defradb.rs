@@ -29,28 +29,10 @@ pub struct GraphQLError {
     pub message: String,
 }
 
-/// Transaction begin request
-#[derive(Debug, Serialize)]
-pub struct TxBeginRequest {
-    pub readonly: bool,
-}
-
-/// Transaction begin response
+/// Transaction begin response (matches Go's `CreateTxResponse`).
 #[derive(Debug, Deserialize)]
 pub struct TxBeginResponse {
-    pub txn_id: String,
-}
-
-/// Transaction commit/discard request
-#[derive(Debug, Serialize)]
-pub struct TxRequest {
-    pub txn_id: String,
-}
-
-/// Transaction success response
-#[derive(Debug, Deserialize)]
-pub struct TxSuccessResponse {
-    pub status: String,
+    pub id: u64,
 }
 
 /// Server error response

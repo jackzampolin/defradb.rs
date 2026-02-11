@@ -1,20 +1,32 @@
 //! GraphQL query handlers.
 
+use std::convert::Infallible;
+
 use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{
+        sse::{Event, Sse},
+        IntoResponse,
+    },
     Json,
 };
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
 use query::executor::{QueryRequest, QueryResponse};
-use query::{parse_request, ParsedOperation};
+use query::subscription::{
+    extract_doc_id_from_query, is_commits_subscription, response_has_data,
+    subscription_to_commits_query_with_cid, subscription_to_query_with_doc_id,
+};
+use query::{parse_request, MutationType, ParsedOperation};
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::query_context::{
+    execute_in_txn_with_context, execute_with_context, execute_with_resolved_context,
+};
 use crate::router::{AppState, NodePermission};
 
 use super::TX_HEADER_NAME;
@@ -22,7 +34,8 @@ use super::TX_HEADER_NAME;
 /// Determine the required NAC permission based on GraphQL operation type.
 ///
 /// - Query operations require `DocumentRead` permission
-/// - Mutation operations require `DocumentUpdate` permission
+/// - Delete mutations require `DocumentDelete` permission
+/// - Other mutations require `DocumentUpdate` permission
 /// - Parse failures default to `DocumentUpdate` (fail-secure)
 ///
 /// This matches Go DefraDB's per-operation permission model where different
@@ -32,10 +45,57 @@ pub(crate) fn permission_for_query(query: &str) -> NodePermission {
         Ok(ParsedOperation::Query { .. }) => NodePermission::DocumentRead,
         Ok(ParsedOperation::Subscription { .. }) => NodePermission::DocumentRead,
         Ok(ParsedOperation::Introspection { .. }) => NodePermission::DocumentRead,
-        Ok(ParsedOperation::Mutation { .. }) => NodePermission::DocumentUpdate,
+        Ok(ParsedOperation::Mutation { mutations, .. }) => {
+            if mutations
+                .iter()
+                .any(|m| m.mutation_type == MutationType::Delete)
+            {
+                NodePermission::DocumentDelete
+            } else {
+                NodePermission::DocumentUpdate
+            }
+        }
         // Parse failures default to the more restrictive permission
         Err(_) => NodePermission::DocumentUpdate,
     }
+}
+
+/// Check if a query references `encrypted_` fields and P2P is disabled.
+///
+/// Go DefraDB only generates `encrypted_<Collection>` GraphQL fields when P2P
+/// is enabled. Returns a schema validation error matching Go's format if the
+/// query references encrypted fields but P2P is not available.
+fn check_encrypted_fields(state: &AppState, query: &str) -> Result<(), HttpError> {
+    if !query.contains("encrypted_") {
+        return Ok(());
+    }
+    if state.p2p.is_some() {
+        return Ok(());
+    }
+    // Extract field name for Go-compatible error message
+    if let Some(start) = query.find("encrypted_") {
+        let rest = &query[start..];
+        let end = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(rest.len());
+        let field_name = &rest[..end];
+        return Err(HttpError::BadRequest(format!(
+            "Cannot query field \"{}\" on type \"Query\".",
+            field_name
+        )));
+    }
+    Err(HttpError::BadRequest(
+        "Cannot query encrypted fields when P2P is disabled.".to_string(),
+    ))
+}
+
+/// Check if a request has an `Accept: text/event-stream` header.
+fn wants_sse(headers: &HeaderMap) -> bool {
+    headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/event-stream"))
+        .unwrap_or(false)
 }
 
 /// GraphQL POST request handler.
@@ -47,7 +107,8 @@ pub(crate) fn permission_for_query(query: &str) -> NodePermission {
 ///
 /// Permission is determined by parsing the query:
 /// - Query operations require `DocumentRead` permission
-/// - Mutation operations require `DocumentUpdate` permission
+/// - Delete mutations require `DocumentDelete` permission
+/// - Other mutations require `DocumentUpdate` permission
 ///
 /// This matches Go DefraDB's per-operation permission model where each
 /// operation type has its own permission requirement.
@@ -60,9 +121,12 @@ pub async fn graphql(
     let required_permission = permission_for_query(&request.query);
     require_permission(&state, &identity, required_permission).await?;
 
+    // Validate encrypted field queries require P2P
+    check_encrypted_fields(&state, &request.query)?;
+
     // Wire identity from Authorization header into the request
-    request.identity = identity.into_did();
-    let response = state.executor.execute(request).await;
+    request.identity = identity.did().cloned();
+    let response = execute_with_context(&state, &identity, request).await;
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL POST query returned errors");
     }
@@ -92,6 +156,9 @@ pub async fn graphql_get(
     // NAC check: GET is read-only queries, so require DocumentRead permission
     require_permission(&state, &identity, NodePermission::DocumentRead).await?;
 
+    // Validate encrypted field queries require P2P
+    check_encrypted_fields(&state, &params.query)?;
+
     let variables: Option<JsonValue> = match params.variables {
         Some(v) => match serde_json::from_str(&v) {
             Ok(parsed) => Some(parsed),
@@ -110,10 +177,10 @@ pub async fn graphql_get(
         query: params.query,
         operation_name: params.operation_name,
         variables,
-        identity: identity.into_did(),
+        identity: identity.did().cloned(),
     };
 
-    let response = state.executor.execute(request).await;
+    let response = execute_with_context(&state, &identity, request).await;
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL GET query returned errors");
     }
@@ -130,8 +197,14 @@ pub struct TransactionalQueryRequest {
     pub txn_id: Option<String>,
 }
 
-/// GraphQL POST request handler with optional transaction support.
+/// GraphQL POST request handler with optional transaction and SSE subscription support.
 /// Identity is extracted from the Authorization header and used for ACP checks.
+///
+/// # Subscription Support (Go-compatible)
+///
+/// If the query is a subscription and the request has `Accept: text/event-stream`,
+/// the handler streams results as SSE events (matching Go DefraDB's `/graphql` handler).
+/// If the query is a subscription without SSE Accept header, returns 406 Not Acceptable.
 ///
 /// # Transaction ID
 ///
@@ -145,7 +218,8 @@ pub struct TransactionalQueryRequest {
 ///
 /// Permission is determined by parsing the query:
 /// - Query operations require `DocumentRead` permission
-/// - Mutation operations require `DocumentUpdate` permission
+/// - Delete mutations require `DocumentDelete` permission
+/// - Other mutations require `DocumentUpdate` permission
 ///
 /// This matches Go DefraDB's per-operation permission model.
 pub async fn graphql_transactional(
@@ -153,16 +227,34 @@ pub async fn graphql_transactional(
     identity: ExtractIdentity,
     headers: HeaderMap,
     Json(request): Json<TransactionalQueryRequest>,
-) -> Result<Json<QueryResponse>, HttpError> {
+) -> Result<axum::response::Response, HttpError> {
     // NAC check: Determine required permission based on operation type
     let required_permission = permission_for_query(&request.query);
     require_permission(&state, &identity, required_permission).await?;
+
+    // Validate encrypted field queries require P2P
+    check_encrypted_fields(&state, &request.query)?;
+
+    // Check if this is a subscription query
+    if matches!(
+        parse_request(&request.query),
+        Ok(ParsedOperation::Subscription { .. })
+    ) {
+        if !wants_sse(&headers) {
+            return Err(HttpError::NotAcceptable(
+                "invalid subscription transport".to_string(),
+            ));
+        }
+        return graphql_sse(state, identity, request)
+            .await
+            .map(|sse| sse.into_response());
+    }
 
     let query_request = QueryRequest {
         query: request.query,
         operation_name: request.operation_name,
         variables: request.variables,
-        identity: identity.into_did(),
+        identity: identity.did().cloned(),
     };
 
     // Check for transaction ID in header first (Go-compatible), then body
@@ -180,18 +272,99 @@ pub async fn graphql_transactional(
                     return Ok(Json(QueryResponse::error(format!(
                         "Invalid transaction ID: {}",
                         txn_id_str
-                    ))));
+                    )))
+                    .into_response());
                 }
             };
-            state.executor.execute_in_txn(query_request, &handle).await
+            execute_in_txn_with_context(&state, &identity, query_request, handle).await
         }
-        None => state.executor.execute(query_request).await,
+        None => execute_with_context(&state, &identity, query_request).await,
     };
 
     if response.has_errors() {
         tracing::warn!(errors = ?response.errors, "GraphQL query returned errors");
     }
-    Ok(Json(response))
+    Ok(Json(response).into_response())
+}
+
+/// SSE subscription handler.
+///
+/// Streams subscription results as Server-Sent Events, matching Go DefraDB's
+/// `/graphql` SSE behavior. Each update event triggers the subscription query
+/// to be re-executed against the current database state.
+///
+/// SSE event format:
+/// - `event: next` + `data: {json}` for each result
+/// - `event: complete` + `data: {}` when the stream ends
+async fn graphql_sse(
+    state: AppState,
+    identity: ExtractIdentity,
+    request: TransactionalQueryRequest,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, HttpError> {
+    let event_bus = state.event_bus.as_ref().ok_or_else(|| {
+        HttpError::ServiceUnavailable("event bus is not available for subscriptions".to_string())
+    })?;
+
+    let mut subscription = event_bus.subscribe(&[events::EventName::Update]);
+    let query_str = request.query;
+    let did = identity.did().cloned();
+
+    // Resolve signing config and DAC bypass once at subscription setup time
+    let signing_config = crate::query_context::resolve_signing_config(&state, &identity);
+    let dac_bypass = crate::query_context::resolve_dac_bypass(&state, &identity).await;
+
+    let subscription_doc_id = extract_doc_id_from_query(&query_str);
+    let is_commits = is_commits_subscription(&query_str);
+
+    let executor = state.executor.clone();
+
+    let stream = async_stream::stream! {
+        while let Some(message) = subscription.recv().await {
+            if let Some(update) = message.as_update() {
+                let event_doc_id = update.doc_id.clone();
+
+                // Check subscription docID filter
+                if let Some(ref sub_doc) = subscription_doc_id {
+                    if event_doc_id != *sub_doc {
+                        continue;
+                    }
+                }
+
+                // Convert subscription to a scoped query
+                let query_text = if is_commits {
+                    let cid_str = update.cid.to_string();
+                    subscription_to_commits_query_with_cid(&query_str, &cid_str)
+                } else {
+                    subscription_to_query_with_doc_id(&query_str, &event_doc_id)
+                };
+
+                let mut req = QueryRequest::new(query_text);
+                if did.is_some() {
+                    req = req.with_identity(did.clone());
+                }
+                let response = execute_with_resolved_context(
+                    executor.clone(),
+                    req,
+                    signing_config.clone(),
+                    dac_bypass,
+                ).await;
+
+                // Skip empty results (filter excluded the document)
+                if !response_has_data(&response) {
+                    continue;
+                }
+
+                if let Ok(json) = serde_json::to_string(&response) {
+                    yield Ok(Event::default().event("next").data(json));
+                }
+            }
+        }
+
+        // Stream ended — send complete event
+        yield Ok(Event::default().event("complete").data("{}"));
+    };
+
+    Ok(Sse::new(stream))
 }
 
 /// GraphQL WebSocket handler for subscriptions.

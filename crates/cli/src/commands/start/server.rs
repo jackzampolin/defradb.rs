@@ -25,6 +25,7 @@ impl Node {
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
         acp_store: Arc<dyn acp::AcpStore>,
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
+        node_identity_did: Option<String>,
     ) -> Result<(
         Option<p2p::P2PHostHandle>,
         Option<P2PTasks>,
@@ -341,6 +342,11 @@ impl Node {
             let executor: Arc<dyn query::executor::QueryExecutor> = runner;
             let mut server = defra_http::Server::from_arc_with_config(executor, server_config)
                 .with_rest(rest_ops);
+
+            // Wire node identity DID for signing config fallback in HTTP handlers
+            if let Some(did) = node_identity_did {
+                server = server.with_node_identity_did(did);
+            }
 
             // Wire P2P to HTTP server if enabled
             if let Some(ref p2p_handle) = p2p {

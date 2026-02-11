@@ -1916,9 +1916,11 @@ name = "defra-http"
 version = "0.1.0"
 dependencies = [
  "acp",
+ "async-stream",
  "async-trait",
  "axum 0.7.9",
  "crypto",
+ "defra-core",
  "defra-http",
  "events",
  "futures",

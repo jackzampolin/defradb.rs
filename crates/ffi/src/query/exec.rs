@@ -144,6 +144,12 @@ pub unsafe extern "C" fn exec_request(
         // Detect if this is a _commits subscription (uses CID-based queries)
         let is_commits = is_commits_subscription(&query_str);
 
+        // Capture signing config and DAC bypass before spawning.
+        // The thread-locals were set on this thread (lines 63-116) but the
+        // spawned task runs on a different tokio thread.
+        let sub_signing_config = defra_core::signing::get_signing_config();
+        let sub_dac_bypass = defra_core::dac_bypass::get_dac_bypass();
+
         // Spawn background task that processes events and executes queries at event time.
         // This ensures the DB state at query execution matches the event's state.
         let task = rt.spawn(async move {
@@ -168,12 +174,27 @@ pub unsafe extern "C" fn exec_request(
                         subscription_to_query_with_doc_id(&sub_query, &event_doc_id)
                     };
 
-                    // Execute the query
                     let mut request = query::QueryRequest::new(query_text);
                     if sub_identity.is_some() {
                         request = request.with_identity(sub_identity.clone());
                     }
-                    let response = query_runner.execute(request).await;
+
+                    // Execute inside spawn_blocking to pin thread-locals, matching
+                    // HTTP's execute_with_resolved_context pattern.
+                    let runner = query_runner.clone();
+                    let config = sub_signing_config.clone();
+                    let bypass = sub_dac_bypass;
+                    let handle = tokio::runtime::Handle::current();
+                    let response = match tokio::task::spawn_blocking(move || {
+                        defra_core::signing::set_signing_config(config);
+                        defra_core::dac_bypass::set_dac_bypass(bypass);
+                        handle.block_on(async { runner.execute(request).await })
+                    })
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
 
                     // Skip empty results (filter excluded the document)
                     if !crate::subscription::response_has_data(&response) {
