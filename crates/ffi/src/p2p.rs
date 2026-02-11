@@ -1688,8 +1688,7 @@ async fn retry_doc(
                             field_data,
                         );
                         if p2p::signing::sign_message(handle.keypair(), &mut field_req).is_ok() {
-                            if let Err(e) =
-                                handle.send_two_stream_request(peer_id, field_req).await
+                            if let Err(e) = handle.send_two_stream_request(peer_id, field_req).await
                             {
                                 eprintln!(
                                     "[RETRY-DOC] Field block send failed: cid={} error={}",

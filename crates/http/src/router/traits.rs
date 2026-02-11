@@ -1,0 +1,396 @@
+//! Operation traits and supporting types for the HTTP router.
+
+/// Trait for P2P operations that can be accessed via HTTP.
+///
+/// Abstracts P2P host functionality to decouple HTTP handlers from the
+/// actual P2P implementation, enabling both dependency injection and testing.
+///
+/// All methods return `Result<T, String>` where the error string should be
+/// a user-friendly message. For validation failures, use descriptive messages
+/// like "invalid address format". For internal errors, use messages like
+/// "failed to connect: <reason>".
+#[async_trait::async_trait]
+pub trait P2POperations: Send + Sync {
+    /// Get the local peer ID.
+    async fn local_peer_id(&self) -> Result<String, String>;
+
+    /// Get listening addresses.
+    async fn listen_addresses(&self) -> Result<Vec<String>, String>;
+
+    /// Get connected peers.
+    async fn connected_peers(&self) -> Result<Vec<String>, String>;
+
+    /// Connect to a peer at the given address.
+    async fn connect_peer(&self, addr: &str) -> Result<(), String>;
+
+    /// Get all replicators.
+    async fn get_replicators(&self) -> Result<Vec<ReplicatorInfo>, String>;
+
+    /// Add a replicator for collections.
+    async fn add_replicator(
+        &self,
+        collections: Vec<String>,
+        addr: Option<&str>,
+    ) -> Result<(), String>;
+
+    /// Remove a replicator for collections.
+    async fn remove_replicator(
+        &self,
+        collections: Vec<String>,
+        addr: Option<&str>,
+    ) -> Result<(), String>;
+
+    /// Get P2P collections.
+    async fn get_collections(&self) -> Result<Vec<String>, String>;
+
+    /// Add collections to P2P.
+    async fn add_collections(&self, collections: Vec<String>) -> Result<(), String>;
+
+    /// Remove collections from P2P.
+    async fn remove_collections(&self, collections: Vec<String>) -> Result<(), String>;
+
+    /// Get P2P documents (for document-level replication).
+    async fn get_documents(&self) -> Result<Vec<P2pDocumentInfo>, String>;
+
+    /// Add documents to P2P replication.
+    async fn add_documents(&self, docs: Vec<P2pDocumentRequest>) -> Result<(), String>;
+
+    /// Remove documents from P2P replication.
+    async fn remove_documents(&self, docs: Vec<P2pDocumentRequest>) -> Result<(), String>;
+
+    /// Sync collections with peers (trigger immediate sync).
+    async fn sync_collections(&self) -> Result<(), String>;
+
+    /// Sync documents with peers (trigger immediate sync).
+    async fn sync_documents(&self) -> Result<(), String>;
+}
+
+/// Replicator information for HTTP responses.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReplicatorInfo {
+    pub id: Option<String>,
+    pub collections: Vec<String>,
+    pub address: Option<String>,
+}
+
+/// P2P document information for HTTP responses.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct P2pDocumentInfo {
+    /// Collection name the document belongs to.
+    #[serde(rename = "Collection")]
+    pub collection: String,
+    /// Document ID.
+    #[serde(rename = "DocID")]
+    pub doc_id: String,
+}
+
+/// Request to add/remove P2P documents (Go-compatible format).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct P2pDocumentRequest {
+    /// Collection name the document belongs to.
+    #[serde(rename = "Collection")]
+    pub collection: String,
+    /// Document ID.
+    #[serde(rename = "DocID")]
+    pub doc_id: String,
+}
+
+/// Trait for ACP (Access Control Policy) operations.
+///
+/// ACP policies define access permissions for collections and documents,
+/// determining which identities can read, write, or manage data.
+///
+/// Policies should be provided in YAML or JSON format following the ACP
+/// policy specification.
+#[async_trait::async_trait]
+pub trait AcpOperations: Send + Sync {
+    /// Add a new policy. Returns the policy ID on success.
+    ///
+    /// The policy should be valid YAML or JSON. Returns an error string
+    /// if the policy is malformed or cannot be added.
+    async fn add_policy(&self, policy: &str) -> Result<String, String>;
+
+    /// List all policies.
+    async fn list_policies(&self) -> Result<Vec<PolicyInfo>, String>;
+
+    /// Get a policy by ID.
+    ///
+    /// Returns `Ok(None)` if the policy doesn't exist, `Ok(Some(info))` if found,
+    /// or `Err(message)` on internal errors.
+    async fn get_policy(&self, id: &str) -> Result<Option<PolicyInfo>, String>;
+}
+
+/// Policy information for HTTP responses.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PolicyInfo {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creation_time: Option<String>,
+}
+
+/// Trait for index operations.
+///
+/// Indexes improve query performance for specific fields. Creating unique
+/// indexes also enforces uniqueness constraints on the indexed fields.
+#[async_trait::async_trait]
+pub trait IndexOperations: Send + Sync {
+    /// Create an index on a collection. Returns the created index info.
+    ///
+    /// If `name` is `None`, an index name will be auto-generated.
+    /// The `unique` flag enforces uniqueness constraints on the indexed fields.
+    async fn create_index(
+        &self,
+        collection: &str,
+        fields: Vec<String>,
+        name: Option<&str>,
+        unique: bool,
+    ) -> Result<IndexInfo, String>;
+
+    /// List indexes, optionally filtered by collection.
+    ///
+    /// If `collection` is `None`, returns indexes from all collections.
+    async fn list_indexes(&self, collection: Option<&str>) -> Result<Vec<IndexInfo>, String>;
+
+    /// Drop an index by collection and name.
+    async fn drop_index(&self, collection: &str, name: &str) -> Result<(), String>;
+}
+
+/// Index information for HTTP responses.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IndexInfo {
+    pub name: String,
+    pub collection: String,
+    pub fields: Vec<IndexFieldInfo>,
+    #[serde(default)]
+    pub unique: bool,
+}
+
+/// Index field information.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IndexFieldInfo {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+}
+
+/// Result of a backup import operation.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ImportResult {
+    /// Number of documents successfully imported.
+    pub documents_imported: u64,
+    /// Number of documents skipped (e.g., duplicates).
+    pub documents_skipped: u64,
+    /// Collections that were affected by the import.
+    pub collections_affected: Vec<String>,
+    /// Errors encountered during import (non-fatal).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+/// Re-export NAC types from the acp crate for convenience.
+pub use acp::nac::{NacStatus, NodePermission};
+
+/// Trait for Node Access Control (NAC) operations.
+///
+/// NAC provides node-level access control using the Zanzibar permission model.
+/// When enabled, node operations require authentication and authorization.
+#[async_trait::async_trait]
+pub trait NodeAcpOperations: Send + Sync {
+    /// Check if an identity has a specific node permission.
+    ///
+    /// Returns `true` if:
+    /// - NAC is not enabled (all operations allowed)
+    /// - The identity has the required permission
+    async fn check_permission(
+        &self,
+        identity: &identity::Did,
+        permission: NodePermission,
+    ) -> Result<bool, String>;
+
+    /// Get the current NAC status.
+    async fn get_status(&self) -> NacStatus;
+
+    /// Get the owner identity.
+    async fn owner(&self) -> Option<identity::Did>;
+
+    /// Check if an identity is an admin.
+    async fn is_admin(&self, identity: &identity::Did) -> Result<bool, String>;
+
+    /// Add an admin relationship.
+    async fn add_admin(
+        &self,
+        requestor: &identity::Did,
+        target: &identity::Did,
+    ) -> Result<bool, String>;
+
+    /// Remove an admin relationship.
+    async fn remove_admin(
+        &self,
+        requestor: &identity::Did,
+        target: &identity::Did,
+    ) -> Result<bool, String>;
+
+    /// Temporarily disable NAC on this node.
+    ///
+    /// The requestor must be an admin.
+    async fn disable(&self, requestor: &identity::Did) -> Result<(), String>;
+
+    /// Re-enable NAC after it was temporarily disabled.
+    ///
+    /// The requestor must be an admin (uses persisted check).
+    async fn re_enable(&self, requestor: &identity::Did) -> Result<(), String>;
+}
+
+/// NAC status information for HTTP responses.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct NacStatusInfo {
+    /// Current NAC status (not configured, enabled, disabled temporarily)
+    pub status: String,
+    /// Owner DID if NAC is enabled
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+}
+
+/// Trait for schema operations.
+///
+/// Enables adding and managing collection schemas via SDL.
+#[async_trait::async_trait]
+pub trait SchemaOperations: Send + Sync {
+    /// Add a schema from SDL string.
+    ///
+    /// Parses the SDL and creates collections for each type defined.
+    /// Returns the created collection versions.
+    async fn add_schema(&self, sdl: &str) -> Result<Vec<schema::CollectionVersion>, String>;
+}
+
+/// Trait for collection management operations beyond basic CRUD.
+///
+/// Provides schema patching, version activation, and truncation operations
+/// that operate at the collection level rather than the document level.
+#[async_trait::async_trait]
+pub trait CollectionManagementOperations: Send + Sync {
+    /// Apply a JSON Patch (RFC 6902) to a collection schema.
+    ///
+    /// Creates a new schema version with the patched fields.
+    /// The `patch` should be a JSON array of patch operations.
+    async fn patch_collection(
+        &self,
+        collection_name: &str,
+        patch: &str,
+    ) -> Result<serde_json::Value, String>;
+
+    /// Set the active collection version.
+    ///
+    /// Activates the specified version and deactivates other versions
+    /// of the same collection.
+    async fn set_active_version(&self, version_id: &str) -> Result<(), String>;
+
+    /// Truncate a collection, deleting all documents while preserving the schema.
+    async fn truncate_collection(&self, name: &str) -> Result<(), String>;
+
+    /// Purge all data from all collections.
+    async fn purge(&self) -> Result<(), String>;
+}
+
+/// Trait for lens migration operations.
+///
+/// Enables setting up migrations between schema versions using WASM transforms.
+#[async_trait::async_trait]
+pub trait LensOperations: Send + Sync {
+    /// Set a migration between schema versions.
+    ///
+    /// The config should be a JSON string containing:
+    /// - SourceSchemaVersionID: The source version CID
+    /// - DestinationSchemaVersionID: The destination version CID
+    /// - Lens: The lens configuration with path to WASM module
+    ///
+    /// Returns the transform ID assigned to this migration.
+    async fn set_migration(&self, config: &str) -> Result<String, String>;
+
+    /// Reload all lens modules from disk.
+    async fn reload(&self) -> Result<(), String>;
+
+    /// Add a lens configuration directly.
+    ///
+    /// The config should be a JSON string containing the full lens configuration.
+    /// Returns the transform ID assigned to this lens.
+    async fn add(&self, config: &str) -> Result<String, String>;
+
+    /// List all registered lens modules.
+    ///
+    /// Returns a JSON value representing all registered transforms.
+    async fn list(&self) -> Result<serde_json::Value, String>;
+}
+
+/// Trait for document-level ACP operations.
+///
+/// Manages per-document access control relationships (e.g., granting a user
+/// read or write access to a specific document).
+#[async_trait::async_trait]
+pub trait DocumentAcpOperations: Send + Sync {
+    /// Add an actor relationship to a document.
+    ///
+    /// Grants the `target_actor` the specified `relation` on the document
+    /// identified by `collection` and `doc_id`.
+    ///
+    /// Returns `true` if a new relationship was created, `false` if it already existed.
+    async fn add_doc_relationship(
+        &self,
+        requestor: &identity::Did,
+        target_actor: &str,
+        collection: &str,
+        doc_id: &str,
+        relation: &str,
+    ) -> Result<bool, String>;
+
+    /// Delete an actor relationship from a document.
+    ///
+    /// Revokes the `target_actor`'s `relation` on the document
+    /// identified by `collection` and `doc_id`.
+    ///
+    /// Returns `true` if the relationship was removed, `false` if it didn't exist.
+    async fn delete_doc_relationship(
+        &self,
+        requestor: &identity::Did,
+        target_actor: &str,
+        collection: &str,
+        doc_id: &str,
+        relation: &str,
+    ) -> Result<bool, String>;
+}
+
+/// Trait for backup operations.
+///
+/// Enables exporting and importing database state as JSON. Export produces
+/// a JSON representation of documents that can be reimported to restore state.
+///
+/// For export, the JSON includes document metadata and relationships.
+/// For import, the JSON must match the expected structure with valid document
+/// IDs and collection references.
+#[async_trait::async_trait]
+pub trait BackupOperations: Send + Sync {
+    /// Export database to JSON.
+    ///
+    /// If `collections` is `None`, exports all collections.
+    /// If `pretty` is true, the JSON output is formatted with indentation.
+    async fn export(
+        &self,
+        collections: Option<Vec<String>>,
+        pretty: bool,
+    ) -> Result<String, String>;
+
+    /// Import database from JSON.
+    ///
+    /// The `data` parameter should be valid JSON matching the export format.
+    /// Returns `ImportResult` with details about what was imported, skipped, and any errors.
+    /// A fatal error (e.g., completely malformed data) returns `Err(message)`.
+    async fn import(&self, data: &str) -> Result<ImportResult, String>;
+}
