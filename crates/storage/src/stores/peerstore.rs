@@ -3,7 +3,7 @@
 /// The Peerstore handles storage of replicator configuration, replication
 /// retry tracking, and search engine retry tracking for P2P operations.
 use crate::corekv::{IterOptions, Key, Reader, Result, Store, Txn, Writer};
-use crate::keys::peerstore::ReplicatorKey;
+use crate::keys::peerstore::{ReplicatorKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey};
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -108,6 +108,103 @@ impl<S: Store> Peerstore<S> {
     pub async fn get_p2p_documents(&self) -> Result<Option<Vec<u8>>> {
         let txn = self.store.new_txn(true).await?;
         txn.get(b"/p2p/documents").await
+    }
+
+    /// Record a push failure for a specific peer/doc pair.
+    ///
+    /// Writes the retry info at `/rep/retry/id/{peer}` and the collection_id
+    /// at `/rep/retry/doc/{peer}/{doc}`.
+    pub async fn record_push_failure(
+        &self,
+        peer_id: &str,
+        doc_id: &str,
+        collection_id: &str,
+        retry_info_bytes: &[u8],
+    ) -> Result<()> {
+        let mut txn = self.store.new_txn(false).await?;
+        let id_key = ReplicatorRetryIDKey::new(peer_id);
+        // Only write retry info if not already present (preserve existing backoff state).
+        if !txn.has(&id_key.bytes()).await? {
+            txn.set(&id_key.bytes(), retry_info_bytes).await?;
+        }
+        let doc_key = ReplicatorRetryDocIDKey::new(peer_id, doc_id);
+        txn.set(&doc_key.bytes(), collection_id.as_bytes()).await?;
+        txn.commit().await
+    }
+
+    /// Get retry info bytes for a peer.
+    pub async fn get_retry_info(&self, peer_id: &str) -> Result<Option<Vec<u8>>> {
+        let txn = self.store.new_txn(true).await?;
+        let key = ReplicatorRetryIDKey::new(peer_id);
+        txn.get(&key.bytes()).await
+    }
+
+    /// Get all peers that have pending retries.
+    ///
+    /// Returns `(peer_id, retry_info_bytes)` pairs.
+    pub async fn get_all_retry_peers(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let prefix = ReplicatorRetryIDKey::retry_prefix();
+        let txn = self.store.new_txn(true).await?;
+        let opts = IterOptions::new().with_prefix(prefix);
+        let mut iter = txn.iterator(opts).await?;
+
+        let mut results = Vec::new();
+        while let Some(pair) = iter.next().await? {
+            let key_str = String::from_utf8_lossy(&pair.key);
+            if let Some(peer_id) = key_str.strip_prefix("/rep/retry/id/") {
+                if !peer_id.is_empty() {
+                    results.push((peer_id.to_string(), pair.value));
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// Get all doc IDs pending retry for a specific peer.
+    ///
+    /// Returns `(doc_id, collection_id)` pairs.
+    pub async fn get_retry_doc_ids(&self, peer_id: &str) -> Result<Vec<(String, String)>> {
+        let prefix = ReplicatorRetryDocIDKey::peer_prefix(peer_id);
+        let txn = self.store.new_txn(true).await?;
+        let opts = IterOptions::new().with_prefix(prefix);
+        let mut iter = txn.iterator(opts).await?;
+
+        let expected_prefix = format!("/rep/retry/doc/{}/", peer_id);
+        let mut results = Vec::new();
+        while let Some(pair) = iter.next().await? {
+            let key_str = String::from_utf8_lossy(&pair.key);
+            if let Some(doc_id) = key_str.strip_prefix(&expected_prefix) {
+                if !doc_id.is_empty() {
+                    let collection_id = String::from_utf8_lossy(&pair.value).to_string();
+                    results.push((doc_id.to_string(), collection_id));
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// Remove a single doc retry entry for a peer.
+    pub async fn remove_retry_doc(&self, peer_id: &str, doc_id: &str) -> Result<()> {
+        let key = ReplicatorRetryDocIDKey::new(peer_id, doc_id);
+        let mut txn = self.store.new_txn(false).await?;
+        txn.delete(&key.bytes()).await?;
+        txn.commit().await
+    }
+
+    /// Clear retry info for a peer (called when all docs succeed).
+    pub async fn clear_retry_peer(&self, peer_id: &str) -> Result<()> {
+        let key = ReplicatorRetryIDKey::new(peer_id);
+        let mut txn = self.store.new_txn(false).await?;
+        txn.delete(&key.bytes()).await?;
+        txn.commit().await
+    }
+
+    /// Update the retry info for a peer (after a failed retry attempt).
+    pub async fn update_retry_info(&self, peer_id: &str, bytes: &[u8]) -> Result<()> {
+        let key = ReplicatorRetryIDKey::new(peer_id);
+        let mut txn = self.store.new_txn(false).await?;
+        txn.set(&key.bytes(), bytes).await?;
+        txn.commit().await
     }
 }
 

@@ -121,8 +121,20 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
 
             // Fire-and-forget: spawn a task per peer that sends blocks in order.
             let host = self.host.clone();
+            let failure_tx = self.failure_tx.clone();
+            let doc_id_owned = doc_id.to_string();
+            let collection_id_owned = collection_id.to_string();
             tokio::spawn(async move {
-                Self::send_ordered_pushlogs(host, peer_id, requests).await;
+                let any_failed = Self::send_ordered_pushlogs(host, peer_id, requests).await;
+                if any_failed {
+                    if let Some(tx) = failure_tx {
+                        let _ = tx.send(super::PushFailure {
+                            peer_id,
+                            doc_id: doc_id_owned,
+                            collection_id: collection_id_owned,
+                        });
+                    }
+                }
             });
         }
     }
@@ -172,6 +184,9 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
 
             let host = self.host.clone();
             let cid_clone = *cid;
+            let failure_tx = self.failure_tx.clone();
+            let doc_id_owned = doc_id.to_string();
+            let collection_id_owned = collection_id.to_string();
             tokio::spawn(async move {
                 if let Err(e) = host.send_two_stream_request(peer_id, request).await {
                     tracing::debug!(
@@ -180,6 +195,13 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                         error = %e,
                         "PushLog to replicator failed"
                     );
+                    if let Some(tx) = failure_tx {
+                        let _ = tx.send(super::PushFailure {
+                            peer_id,
+                            doc_id: doc_id_owned,
+                            collection_id: collection_id_owned,
+                        });
+                    }
                 }
             });
         }
@@ -213,11 +235,14 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     }
 
     /// Send PushLog requests to a peer in order, waiting for each to complete.
+    ///
+    /// Returns `true` if any request failed.
     async fn send_ordered_pushlogs(
         host: crate::host::P2PHostHandle,
         peer_id: PeerId,
         requests: Vec<(Cid, PushLogRequest)>,
-    ) {
+    ) -> bool {
+        let mut any_failed = false;
         for (cid, request) in requests {
             if let Err(e) = host.send_two_stream_request(peer_id, request).await {
                 tracing::debug!(
@@ -226,7 +251,9 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     error = %e,
                     "PushLog to replicator failed"
                 );
+                any_failed = true;
             }
         }
+        any_failed
     }
 }

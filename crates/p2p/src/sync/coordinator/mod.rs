@@ -56,6 +56,16 @@ pub use result_types::{LoadReplicatorsResult, SetReplicatorResult};
 
 use std::sync::Arc;
 
+/// A push failure notification sent when a PushLog to a replicator peer fails.
+///
+/// The FFI layer consumes these to record failures in the Peerstore for retry.
+#[derive(Debug, Clone)]
+pub struct PushFailure {
+    pub peer_id: libp2p::PeerId,
+    pub doc_id: String,
+    pub collection_id: String,
+}
+
 use blockstore::Blockstore;
 
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
@@ -100,6 +110,9 @@ pub struct SyncCoordinator<B: Blockstore> {
 
     /// Document head provider for DocSync responses
     pub(super) head_provider: Arc<dyn DocumentHeadProvider>,
+
+    /// Channel for reporting push failures to the FFI layer for retry tracking.
+    pub(super) failure_tx: Option<tokio::sync::mpsc::UnboundedSender<PushFailure>>,
 }
 
 #[cfg(test)]

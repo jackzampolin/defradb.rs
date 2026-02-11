@@ -23,7 +23,7 @@ use defra_core::Block;
 use p2p::bitswap::BitswapStoreAdapter;
 use p2p::message::PushLogRequest;
 use p2p::sync::{
-    ReplicationConfig, ReplicationLoop, ReplicationResult, SyncConfig, SyncCoordinator,
+    PushFailure, ReplicationConfig, ReplicationLoop, ReplicationResult, SyncConfig, SyncCoordinator,
 };
 use p2p::topics::DefraTopic;
 use p2p::P2PHost;
@@ -297,7 +297,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
             Arc::new(db::DbHeadProvider::new(database.clone()));
 
         // Create SyncCoordinator for processing incoming P2P sync messages
-        let (coordinator, sync_events_rx) = SyncCoordinator::with_head_provider(
+        let (mut coordinator, sync_events_rx) = SyncCoordinator::with_head_provider(
             handle.clone(),
             blockstore.clone(),
             SyncConfig::default(),
@@ -308,6 +308,10 @@ pub unsafe extern "C" fn new_node_with_p2p(
         )
         .await
         .map_err(|e| format!("failed to create sync coordinator: {}", e))?;
+
+        // Create push failure channel and set it on the coordinator before wrapping in Arc.
+        let (failure_tx, failure_rx) = tokio::sync::mpsc::unbounded_channel::<PushFailure>();
+        coordinator.set_failure_channel(failure_tx);
         let coordinator = Arc::new(coordinator);
 
         // Create DbMergeHandler for merging CRDT blocks into the database
@@ -442,13 +446,167 @@ pub unsafe extern "C" fn new_node_with_p2p(
         // Create P2P state with sync pipeline components and abort handles
         // Note: Local update broadcast is now handled by BroadcastMutator directly
         // when mutations are executed, so no separate broadcast task is needed.
-        let p2p_state = Arc::new(P2PState::new(
+        let mut p2p_state = P2PState::new(
             handle.clone(),
             blockstore.clone(),
             merge_handler.clone(),
             host_event_task.abort_handle(),
             replication_task.abort_handle(),
-        ));
+        );
+
+        // Task 3: Failure Recorder — reads push failures from the channel and
+        // persists them to the Peerstore for later retry.
+        let recorder_store = store.clone();
+        let failure_recorder_task = tokio::spawn(async move {
+            let mut rx = failure_rx;
+            while let Some(failure) = rx.recv().await {
+                eprintln!(
+                    "[RETRY-RECORDER] Push failure: peer={} doc={} col={}",
+                    failure.peer_id, failure.doc_id, failure.collection_id
+                );
+                let peerstore = Peerstore::new(recorder_store.clone());
+                let retry_info = storage::stores::RetryInfo::new_initial();
+                let info_bytes = match retry_info.to_bytes() {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to serialize RetryInfo");
+                        continue;
+                    }
+                };
+                if let Err(e) = peerstore
+                    .record_push_failure(
+                        &failure.peer_id.to_string(),
+                        &failure.doc_id,
+                        &failure.collection_id,
+                        &info_bytes,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        peer_id = %failure.peer_id,
+                        doc_id = %failure.doc_id,
+                        error = %e,
+                        "Failed to record push failure"
+                    );
+                } else {
+                    eprintln!(
+                        "[RETRY-RECORDER] Recorded failure for peer={} doc={}",
+                        failure.peer_id, failure.doc_id
+                    );
+                }
+            }
+        });
+        p2p_state.failure_recorder_handle = Some(failure_recorder_task.abort_handle());
+
+        // Task 4: Retry Loop — every 2 seconds, check for due retries and
+        // re-push failed documents to their replicator peers.
+        let retry_store = store.clone();
+        let retry_handle = handle.clone();
+        let retry_loop_task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                let peerstore = Peerstore::new(retry_store.clone());
+                let peers = match peerstore.get_all_retry_peers().await {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+
+                if !peers.is_empty() {
+                    eprintln!("[RETRY-LOOP] Found {} retry peers", peers.len());
+                }
+
+                for (peer_id_str, info_bytes) in peers {
+                    let mut retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            eprintln!("[RETRY-LOOP] Failed to parse RetryInfo for peer={}: {}", peer_id_str, e);
+                            continue;
+                        }
+                    };
+
+                    if !retry_info.is_due() {
+                        continue;
+                    }
+
+                    let peer_id = match libp2p::PeerId::from_str(&peer_id_str) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("[RETRY-LOOP] Invalid peer ID {}: {}", peer_id_str, e);
+                            continue;
+                        }
+                    };
+
+                    // Only attempt retry when the peer is connected. If the peer
+                    // restarted on a new port, we can't reach it at the old address.
+                    // The test framework (or mDNS/DHT) will re-connect the peers,
+                    // at which point we retry immediately.
+                    let connected = retry_handle
+                        .connected_peers()
+                        .await
+                        .unwrap_or_default();
+                    if !connected.contains(&peer_id) {
+                        continue;
+                    }
+
+                    let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+
+                    if docs.is_empty() {
+                        let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                        continue;
+                    }
+
+                    eprintln!(
+                        "[RETRY-LOOP] Retrying {} docs for peer={}",
+                        docs.len(), peer_id_str
+                    );
+
+                    let mut all_succeeded = true;
+                    for (doc_id, collection_id) in &docs {
+                        match retry_doc(
+                            &retry_handle,
+                            &retry_store,
+                            peer_id,
+                            doc_id,
+                            collection_id,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                eprintln!(
+                                    "[RETRY-LOOP] SUCCESS doc={} peer={}",
+                                    doc_id, peer_id_str
+                                );
+                                let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[RETRY-LOOP] FAILED doc={} peer={}: {}",
+                                    doc_id, peer_id_str, e
+                                );
+                                all_succeeded = false;
+                            }
+                        }
+                    }
+
+                    if all_succeeded {
+                        eprintln!("[RETRY-LOOP] All docs succeeded for peer={}", peer_id_str);
+                        let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                    } else {
+                        retry_info.bump();
+                        if let Ok(bytes) = retry_info.to_bytes() {
+                            let _ = peerstore.update_retry_info(&peer_id_str, &bytes).await;
+                        }
+                    }
+                }
+            }
+        });
+        p2p_state.retry_loop_handle = Some(retry_loop_task.abort_handle());
+
+        let p2p_state = Arc::new(p2p_state);
 
         // Load persisted replicators from the Peerstore (Go's loadAndPublishReplicators).
         // On restart, this restores the in-memory replicator registry and GossipSub
@@ -1434,6 +1592,155 @@ pub unsafe extern "C" fn p2p_retry_replicators(node_ptr: usize) -> FfiResult {
     match result {
         Ok(()) => FfiResult::ok(),
         Err(e) => FfiResult::error(e),
+    }
+}
+
+/// Retry pushing a single document's composite heads to a replicator peer.
+///
+/// Reads composite head CIDs from the headstore, loads block data from the
+/// blockstore, builds signed PushLogRequests, and sends them.
+async fn retry_doc(
+    handle: &p2p::P2PHostHandle,
+    store: &Arc<crate::state::FfiStore>,
+    peer_id: libp2p::PeerId,
+    doc_id: &str,
+    collection_id: &str,
+) -> Result<(), String> {
+    use storage::corekv::{Reader, Store};
+
+    let local_peer_id = handle
+        .local_peer_id()
+        .await
+        .map_err(|e| format!("failed to get local peer ID: {}", e))?;
+
+    let headstore = storage::stores::Headstore::new(store.clone());
+    let head_txn = headstore
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("headstore txn: {}", e))?;
+
+    let blockstore_view = storage::stores::Blockstore::new(store.clone(), true);
+    let block_txn = blockstore_view
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("blockstore txn: {}", e))?;
+
+    let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
+    eprintln!(
+        "[RETRY-DOC] Looking for heads with prefix={} for doc={}",
+        String::from_utf8_lossy(&prefix),
+        doc_id
+    );
+    let opts = IterOptions::new().with_prefix(prefix);
+    let mut iter = head_txn
+        .iterator(opts)
+        .await
+        .map_err(|e| format!("headstore iterator: {}", e))?;
+
+    let mut any_failed = false;
+    let mut head_count = 0u32;
+    while let Some(pair) = iter
+        .next()
+        .await
+        .map_err(|e| format!("headstore iteration: {}", e))?
+    {
+        // Parse CID from key: /d/{doc_id}/C/{cid}
+        let key_str = String::from_utf8_lossy(&pair.key);
+        let parts: Vec<&str> = key_str.split('/').collect();
+        if parts.len() < 5 {
+            eprintln!("[RETRY-DOC] Skipping key with <5 parts: {}", key_str);
+            continue;
+        }
+        let head_cid = match cid::Cid::from_str(parts[4]) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[RETRY-DOC] Failed to parse CID from {}: {}", parts[4], e);
+                continue;
+            }
+        };
+        head_count += 1;
+
+        // Read composite block data from blockstore
+        let block_data = match block_txn.get(&head_cid.to_bytes()).await {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                eprintln!("[RETRY-DOC] Block not found for CID={}", head_cid);
+                continue;
+            }
+            Err(e) => {
+                eprintln!("[RETRY-DOC] Block read error for CID={}: {}", head_cid, e);
+                continue;
+            }
+        };
+
+        // Send the full DAG: field blocks first, then composite last.
+        // This matches push_dag_to_replicators() so the receiver has all
+        // blocks when the composite arrives and doesn't need Bitswap.
+        if let Ok(parsed) = Block::from_dag_cbor(&block_data) {
+            if let Some(ref links) = parsed.links {
+                for link in links {
+                    if let Ok(Some(field_data)) = block_txn.get(&link.link.to_bytes()).await {
+                        let mut field_req = PushLogRequest::new(
+                            doc_id.to_string(),
+                            link.link.to_bytes(),
+                            collection_id.to_string(),
+                            local_peer_id.to_string(),
+                            field_data,
+                        );
+                        if p2p::signing::sign_message(handle.keypair(), &mut field_req).is_ok() {
+                            if let Err(e) =
+                                handle.send_two_stream_request(peer_id, field_req).await
+                            {
+                                eprintln!(
+                                    "[RETRY-DOC] Field block send failed: cid={} error={}",
+                                    link.link, e
+                                );
+                                any_failed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Send composite block last
+        let mut request = PushLogRequest::new(
+            doc_id.to_string(),
+            head_cid.to_bytes(),
+            collection_id.to_string(),
+            local_peer_id.to_string(),
+            block_data,
+        );
+
+        if let Err(e) = p2p::signing::sign_message(handle.keypair(), &mut request) {
+            tracing::warn!(error = %e, "Failed to sign retry PushLog request");
+            any_failed = true;
+            continue;
+        }
+
+        if let Err(e) = handle.send_two_stream_request(peer_id, request).await {
+            eprintln!(
+                "[RETRY-DOC] PushLog send failed: peer={} doc={} cid={} error={}",
+                peer_id, doc_id, head_cid, e
+            );
+            any_failed = true;
+        } else {
+            eprintln!(
+                "[RETRY-DOC] PushLog sent OK: peer={} doc={} cid={}",
+                peer_id, doc_id, head_cid
+            );
+        }
+    }
+
+    eprintln!(
+        "[RETRY-DOC] Done: doc={} heads_found={} any_failed={}",
+        doc_id, head_count, any_failed
+    );
+
+    if any_failed {
+        Err("some pushes failed".to_string())
+    } else {
+        Ok(())
     }
 }
 
