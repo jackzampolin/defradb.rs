@@ -27,8 +27,9 @@ use p2p::sync::{
 };
 use p2p::topics::DefraTopic;
 use p2p::P2PHost;
+use p2p::ReplicatorInfo;
 use storage::corekv::IterOptions;
-use storage::Store as _;
+use storage::stores::Peerstore;
 
 /// Parsed multiaddr containing peer ID and transport address.
 struct ParsedMultiaddr {
@@ -225,61 +226,39 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
         let bitswap_store = BitswapStoreAdapter::new(blockstore.clone());
 
-        // Try to load persisted P2P keypair from the store.
-        // Key uses systemstore prefix 's' + '/p2p/host_key'.
-        const P2P_HOST_KEY: &[u8] = b"s/p2p/host_key";
-
-        let stored_keypair = {
-            let txn = store
-                .new_txn(true)
-                .await
-                .map_err(|e| format!("failed to create txn for P2P key load: {}", e))?;
-            match txn.get(P2P_HOST_KEY).await {
+        // Load or generate P2P identity key. Go persists the libp2p identity so
+        // PeerIds are stable across restarts; we do the same using the Peerstore.
+        let p2p_keypair = {
+            let ps = Peerstore::new(store.clone());
+            let key_id = "__local_p2p_identity__";
+            match ps.get_replicator(key_id).await {
                 Ok(Some(bytes)) => {
+                    // Restore persisted keypair
                     match libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {
-                        Ok(kp) => Some(kp),
-                        Err(e) => {
-                            eprintln!(
-                                "[P2P] Warning: failed to decode stored keypair: {}, generating new one",
-                                e
-                            );
-                            None
+                        Ok(kp) => kp,
+                        Err(_) => {
+                            let kp = libp2p::identity::Keypair::generate_ed25519();
+                            let _ = ps.set_replicator(key_id, &kp.to_protobuf_encoding().unwrap_or_default()).await;
+                            kp
                         }
                     }
                 }
-                _ => None,
+                _ => {
+                    // First run: generate and persist
+                    let kp = libp2p::identity::Keypair::generate_ed25519();
+                    if let Ok(encoded) = kp.to_protobuf_encoding() {
+                        let _ = ps.set_replicator(key_id, &encoded).await;
+                    }
+                    kp
+                }
             }
         };
 
+        // Create P2P host with the persisted identity
         let (host, handle, event_rx, _replicator_registry) =
-            if let Some(kp) = stored_keypair {
-                P2PHost::with_keypair(kp, bitswap_store.clone())
-                    .await
-                    .map_err(|e| format!("failed to create P2P host with stored keypair: {}", e))?
-            } else {
-                let result = P2PHost::new(bitswap_store.clone())
-                    .await
-                    .map_err(|e| format!("failed to create P2P host: {}", e))?;
-
-                // Persist the newly generated keypair
-                let key_bytes = result
-                    .1
-                    .keypair()
-                    .to_protobuf_encoding()
-                    .map_err(|e| format!("failed to encode P2P keypair: {}", e))?;
-                let mut txn = store
-                    .new_txn(false)
-                    .await
-                    .map_err(|e| format!("failed to create txn for P2P key store: {}", e))?;
-                txn.set(P2P_HOST_KEY, &key_bytes)
-                    .await
-                    .map_err(|e| format!("failed to store P2P keypair: {}", e))?;
-                txn.commit()
-                    .await
-                    .map_err(|e| format!("failed to commit P2P keypair: {}", e))?;
-
-                result
-            };
+            P2PHost::with_keypair(p2p_keypair, bitswap_store.clone())
+                .await
+                .map_err(|e| format!("failed to create P2P host: {}", e))?;
 
         // Spawn the P2P host event loop BEFORE sending any commands.
         // The host must be running to process commands like Listen/Dial.
@@ -293,6 +272,9 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let addr: libp2p::Multiaddr = listen_addr_str
             .parse()
             .map_err(|e| format!("invalid multiaddr '{}': {}", listen_addr_str, e))?;
+
+        let rust_peer_id = handle.local_peer_id().await.map_err(|e| format!("peer id: {}", e))?;
+        eprintln!("[RUST-P2P] Created Rust P2P host PeerId={} ListenAddr={}", rust_peer_id, listen_addr_str);
 
         handle
             .listen(addr)
@@ -467,6 +449,79 @@ pub unsafe extern "C" fn new_node_with_p2p(
             host_event_task.abort_handle(),
             replication_task.abort_handle(),
         ));
+
+        // Load persisted replicators from the Peerstore (Go's loadAndPublishReplicators).
+        // On restart, this restores the in-memory replicator registry and GossipSub
+        // subscriptions so that syncing resumes without the caller re-creating replicators.
+        let peerstore = Peerstore::new(store.clone());
+        match peerstore.get_all_replicators().await {
+            Ok(entries) => {
+                eprintln!("[LOAD-REPLICATORS] Found {} stored replicators", entries.len());
+                for (peer_id_str, data) in entries {
+                    match ReplicatorInfo::from_bytes(&data) {
+                        Ok(info) => {
+                            if let Some(peer_id) = info.peer_id() {
+                                eprintln!("[LOAD-REPLICATORS] Restoring replicator peer={} collections={:?}", peer_id, info.collections);
+                                if let Err(e) = handle
+                                    .set_replicator(peer_id, info.collections.clone())
+                                    .await
+                                {
+                                    eprintln!("[LOAD-REPLICATORS] Failed to set_replicator: {}", e);
+                                    continue;
+                                }
+                                for collection_id in &info.collections {
+                                    let topic = DefraTopic::collection(collection_id);
+                                    if let Err(e) = handle.subscribe(topic).await {
+                                        eprintln!("[LOAD-REPLICATORS] Failed to subscribe topic {}: {}", collection_id, e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[LOAD-REPLICATORS] Failed to deserialize peer={}: {}", peer_id_str, e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[LOAD-REPLICATORS] Failed to load from storage: {}", e);
+            }
+        }
+
+        // Load persisted P2P collection subscriptions (Go's loadAndPublishP2PCollections).
+        {
+            let peerstore = Peerstore::new(store.clone());
+            if let Ok(Some(data)) = peerstore.get_p2p_collections().await {
+                if let Ok(collections) = serde_json::from_slice::<Vec<String>>(&data) {
+                    eprintln!("[LOAD-P2P-SUBS] Restoring {} collection subscriptions", collections.len());
+                    for name in &collections {
+                        if let Ok(Some(col)) = database.get_collection(name) {
+                            let collection_id = col.collection_id().to_string();
+                            let topic = DefraTopic::collection(&collection_id);
+                            if let Err(e) = handle.subscribe(topic).await {
+                                eprintln!("[LOAD-P2P-SUBS] Failed to subscribe collection {}: {}", name, e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Load persisted P2P document subscriptions (Go's loadAndPublishPeerDocuments).
+        {
+            let peerstore = Peerstore::new(store.clone());
+            if let Ok(Some(data)) = peerstore.get_p2p_documents().await {
+                if let Ok(doc_ids) = serde_json::from_slice::<Vec<String>>(&data) {
+                    eprintln!("[LOAD-P2P-SUBS] Restoring {} document subscriptions", doc_ids.len());
+                    for doc_id in &doc_ids {
+                        let topic = DefraTopic::document(doc_id);
+                        if let Err(e) = handle.subscribe(topic).await {
+                            eprintln!("[LOAD-P2P-SUBS] Failed to subscribe document {}: {}", doc_id, e);
+                        }
+                    }
+                }
+            }
+        }
 
         // Create lensed auto-committing fetcher
         let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
@@ -923,9 +978,26 @@ pub unsafe extern "C" fn p2p_create_replicator(
 
                 // Set the replicator with collection CIDs (not names)
                 p2p.handle
-                    .set_replicator(parsed.peer_id, collection_cids)
+                    .set_replicator(parsed.peer_id, collection_cids.clone())
                     .await
                     .map_err(|e| format!("failed to set replicator: {}", e))?;
+
+                // Persist to Peerstore so the replicator survives node restarts.
+                let info = ReplicatorInfo::new(parsed.peer_id, collection_cids);
+                if let Ok(bytes) = info.to_bytes() {
+                    let peerstore = Peerstore::new(db.store().clone());
+                    match peerstore
+                        .set_replicator(&parsed.peer_id.to_string(), &bytes)
+                        .await
+                    {
+                        Ok(()) => {
+                            eprintln!("[PERSIST-REPLICATOR] Saved replicator peer={} ({} bytes)", parsed.peer_id, bytes.len());
+                        }
+                        Err(e) => {
+                            eprintln!("[PERSIST-REPLICATOR] Failed: {}", e);
+                        }
+                    }
+                }
 
                 // Auto-subscribe to collection topics using schema root CIDs
                 // (Go does this implicitly via SetReplicator → subscribe_collection)
@@ -1414,16 +1486,58 @@ pub unsafe extern "C" fn p2p_delete_replicator(
                 Some(p2p) => p2p,
                 None => return Err("no p2p system configured".to_string()),
             };
+            let db = &state.database;
 
             rt.block_on(async {
                 let peer_id: libp2p::PeerId = peer_str
                     .parse()
                     .map_err(|e| format!("invalid peer ID '{}': {}", peer_str, e))?;
 
-                p2p.handle
-                    .remove_replicator_collections(peer_id, collections)
+                // Get the replicator's collections BEFORE deleting so we can
+                // unsubscribe from orphaned collection topics afterward.
+                let removed_collections = p2p
+                    .handle
+                    .get_replicator(peer_id)
                     .await
-                    .map_err(|e| format!("failed to delete replicator: {}", e))?;
+                    .ok()
+                    .flatten()
+                    .map(|info| info.collections)
+                    .unwrap_or_default();
+
+                // Empty collections = delete entire replicator (Go behavior).
+                // Must use delete_replicator (which calls remove_peer) rather
+                // than remove_replicator_collections (which loops over empty vec).
+                if collections.is_empty() {
+                    p2p.handle
+                        .delete_replicator(peer_id)
+                        .await
+                        .map_err(|e| format!("failed to delete replicator: {}", e))?;
+                } else {
+                    p2p.handle
+                        .remove_replicator_collections(peer_id, collections)
+                        .await
+                        .map_err(|e| format!("failed to delete replicator: {}", e))?;
+                }
+
+                // Remove from Peerstore so deleted replicators don't reload on restart.
+                let peerstore = Peerstore::new(db.store().clone());
+                if let Err(e) = peerstore.delete_replicator(&peer_id.to_string()).await {
+                    tracing::warn!(peer_id = %peer_id, error = %e, "Failed to delete replicator from storage");
+                }
+
+                // Unsubscribe from collection topics that no longer have replicators.
+                // This prevents GossipSub from delivering updates after deletion.
+                let remaining_replicators =
+                    p2p.handle.get_all_replicators().await.unwrap_or_default();
+                for collection_id in &removed_collections {
+                    let still_needed = remaining_replicators
+                        .iter()
+                        .any(|r| r.collections.contains(collection_id));
+                    if !still_needed {
+                        let topic = DefraTopic::collection(collection_id);
+                        let _ = p2p.handle.unsubscribe(topic).await;
+                    }
+                }
 
                 // Signal that the replicator deletion is complete.
                 // The Go test framework waits for this event before proceeding.
@@ -1586,6 +1700,11 @@ pub unsafe extern "C" fn p2p_create_collections(
                     }
                     p2p.add_collection(name);
                 }
+
+                // Persist collection subscriptions so they survive restarts.
+                let all_cols = p2p.get_collections();
+                persist_p2p_collections(db, &all_cols).await;
+
                 Ok(())
             })
         })
@@ -1760,6 +1879,7 @@ pub unsafe extern "C" fn p2p_create_documents(
                 Some(p2p) => p2p,
                 None => return Err("no p2p system configured".to_string()),
             };
+            let db = &state.database;
 
             rt.block_on(async {
                 // Validate all document IDs have valid format (atomic: all or nothing)
@@ -1778,6 +1898,11 @@ pub unsafe extern "C" fn p2p_create_documents(
                     }
                     p2p.add_document(doc_id);
                 }
+
+                // Persist document subscriptions so they survive restarts.
+                let all_docs = p2p.get_documents();
+                persist_p2p_documents(db, &all_docs).await;
+
                 Ok(())
             })
         })
@@ -2750,4 +2875,34 @@ async fn sync_lens(
         transform_cid
     );
     Ok(())
+}
+
+/// Persist the current P2P collection subscription list to the Peerstore.
+async fn persist_p2p_collections(db: &crate::state::FfiDatabase, collections: &[String]) {
+    let data = match serde_json::to_vec(collections) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[PERSIST-P2P] Failed to serialize collections: {}", e);
+            return;
+        }
+    };
+    let peerstore = Peerstore::new(db.store().clone());
+    if let Err(e) = peerstore.set_p2p_collections(&data).await {
+        eprintln!("[PERSIST-P2P] Failed to persist collections: {}", e);
+    }
+}
+
+/// Persist the current P2P document subscription list to the Peerstore.
+async fn persist_p2p_documents(db: &crate::state::FfiDatabase, documents: &[String]) {
+    let data = match serde_json::to_vec(documents) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[PERSIST-P2P] Failed to serialize documents: {}", e);
+            return;
+        }
+    };
+    let peerstore = Peerstore::new(db.store().clone());
+    if let Err(e) = peerstore.set_p2p_documents(&data).await {
+        eprintln!("[PERSIST-P2P] Failed to persist documents: {}", e);
+    }
 }

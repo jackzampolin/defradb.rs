@@ -456,6 +456,12 @@ impl<S: Store> P2PHost<S> {
             query_id = query_id.0,
             "Starting Bitswap block fetch via Client API"
         );
+        eprintln!(
+            "[BITSWAP-SYNC] Starting fetch cid={} providers={:?} missing={}",
+            cid,
+            providers,
+            missing.len()
+        );
 
         // Clone the client for use in the spawned task
         let client = self.swarm.behaviour().bitswap.client().clone();
@@ -475,8 +481,13 @@ impl<S: Store> P2PHost<S> {
                 }
             }
 
+            eprintln!(
+                "[BITSWAP-SYNC] Session created, providers added, calling get_blocks for {} CIDs",
+                missing_cids.len()
+            );
             match session.get_blocks(&missing_cids).await {
                 Ok(receiver) => {
+                    eprintln!("[BITSWAP-SYNC] get_blocks returned receiver, waiting for blocks...");
                     // Use into_parts() to get the underlying channel
                     // BlockReceiver only implements Deref (not DerefMut), so we can't call recv() through it
                     let (chan, _guard) = receiver.into_parts();
@@ -516,10 +527,16 @@ impl<S: Store> P2PHost<S> {
                             }
                             Ok(Err(_)) => {
                                 // Channel closed — no more blocks coming
+                                eprintln!("[BITSWAP-SYNC] Channel closed, no more blocks");
                                 break;
                             }
                             Err(_) => {
                                 // Timeout — no block arrived within the window
+                                eprintln!(
+                                    "[BITSWAP-SYNC] TIMEOUT waiting for block ({} fetched of {})",
+                                    fetched,
+                                    missing_cids.len()
+                                );
                                 break;
                             }
                         }

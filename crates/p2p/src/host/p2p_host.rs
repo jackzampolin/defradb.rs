@@ -445,6 +445,28 @@ impl<S: Store> P2PHost<S> {
                     .kademlia
                     .add_address(&peer_id, peer_addr);
 
+                // Pre-announce bitswap protocols so the peer immediately transitions
+                // from Connected → Responsive in iroh-bitswap. Without this, there's
+                // a race between the Identify protocol completing and the first
+                // Bitswap fetch: after a node restart, GossipSub notifications can
+                // trigger Bitswap fetches before Identify finishes, leaving the peer
+                // in Connected state where peer_connected() is never called and the
+                // peer has no MessageQueue, so want messages are never sent.
+                // The actual protocol version is negotiated per-substream regardless.
+                eprintln!(
+                    "[BITSWAP-PREANNOUNCE] Pre-announcing bitswap protocols for peer={}",
+                    peer_id
+                );
+                self.swarm.behaviour().on_identify(
+                    &peer_id,
+                    &[
+                        "/ipfs/bitswap/1.2.0".to_string(),
+                        "/ipfs/bitswap/1.1.0".to_string(),
+                        "/ipfs/bitswap/1.0.0".to_string(),
+                    ],
+                );
+                eprintln!("[BITSWAP-PREANNOUNCE] Done for peer={}", peer_id);
+
                 // Trigger Kademlia bootstrap to discover peers through the DHT.
                 // When node2 connects to node0 (who already knows node1),
                 // this causes node2 to query node0, discover node1, and dial it.
@@ -791,9 +813,18 @@ impl<S: Store> P2PHost<S> {
                 limit,
             } => {
                 debug!(cid = %key, limit = limit, "Bitswap requests to find providers");
-                // Could query Kademlia DHT to find providers
-                // For now, send empty set (peer discovery via manual dial)
-                let _ = response.send(Ok(std::collections::HashSet::new())).await;
+                // Return all connected peers as potential providers. In a small
+                // DefraDB network, any connected peer may have the requested block.
+                // This complements session.add_provider() which may not take effect
+                // if processed before get_blocks() adds CIDs to the want list.
+                let providers: std::collections::HashSet<PeerId> =
+                    self.peer_addrs.keys().copied().collect();
+                eprintln!(
+                    "[BITSWAP-FIND-PROVIDERS] cid={} returning {} connected peers",
+                    key,
+                    providers.len()
+                );
+                let _ = response.send(Ok(providers)).await;
             }
             BitswapEvent::Ping { peer, response } => {
                 debug!(peer_id = %peer, "Bitswap ping request");

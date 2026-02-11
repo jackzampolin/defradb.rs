@@ -83,6 +83,32 @@ impl<S: Store> Peerstore<S> {
         let txn = self.store.new_txn(true).await?;
         txn.has(&key.bytes()).await
     }
+
+    /// Store P2P collection subscriptions (persists across restarts).
+    pub async fn set_p2p_collections(&self, data: &[u8]) -> Result<()> {
+        let mut txn = self.store.new_txn(false).await?;
+        txn.set(b"/p2p/collections", data).await?;
+        txn.commit().await
+    }
+
+    /// Load stored P2P collection subscriptions.
+    pub async fn get_p2p_collections(&self) -> Result<Option<Vec<u8>>> {
+        let txn = self.store.new_txn(true).await?;
+        txn.get(b"/p2p/collections").await
+    }
+
+    /// Store P2P document subscriptions (persists across restarts).
+    pub async fn set_p2p_documents(&self, data: &[u8]) -> Result<()> {
+        let mut txn = self.store.new_txn(false).await?;
+        txn.set(b"/p2p/documents", data).await?;
+        txn.commit().await
+    }
+
+    /// Load stored P2P document subscriptions.
+    pub async fn get_p2p_documents(&self) -> Result<Option<Vec<u8>>> {
+        let txn = self.store.new_txn(true).await?;
+        txn.get(b"/p2p/documents").await
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
