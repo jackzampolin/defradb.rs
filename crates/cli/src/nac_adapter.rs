@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use acp::nac::{NacStatus, NodePermission};
 use db::NacManagerApi;
-use defra_http::router::NodeAcpOperations;
+use defra_http::router::{NacStatusInfo, NodeAcpOperations};
 use identity::Did;
 
 /// Adapter that implements NodeAcpOperations using NacManagerApi.
@@ -125,6 +125,16 @@ impl NodeAcpOperations for NacAdapter {
                 .map_err(|e| format!("{}", e))
         } else {
             Err("relation not in resource".to_string())
+        }
+    }
+
+    async fn info(&self) -> NacStatusInfo {
+        let info = self.nac.info().await;
+        NacStatusInfo {
+            status: info.status,
+            configured_enabled: info.configured_enabled,
+            dev_mode: info.dev_mode,
+            owner: info.owner,
         }
     }
 }

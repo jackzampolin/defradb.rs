@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use identity::Did;
 use std::sync::{Arc, RwLock};
 
-use crate::router::{NacStatus, NodeAcpOperations, NodePermission};
+use crate::router::{NacStatus, NacStatusInfo, NodeAcpOperations, NodePermission};
 
 /// Mock NAC operations for testing NAC-protected handlers.
 ///
@@ -253,6 +253,18 @@ impl NodeAcpOperations for MockNodeAcpOperations {
         }
         Err("relation not in resource".into())
     }
+
+    async fn info(&self) -> NacStatusInfo {
+        let status = self.get_status().await;
+        let owner = self.owner().await;
+        NacStatusInfo {
+            status: status.to_string(),
+            configured_enabled: status == NacStatus::Enabled
+                || status == NacStatus::DisabledTemporarily,
+            dev_mode: false,
+            owner: owner.map(|d| d.to_string()),
+        }
+    }
 }
 
 /// Mock NAC operations that always fails with a configurable error.
@@ -331,5 +343,14 @@ impl NodeAcpOperations for FailingMockNodeAcpOperations {
         _relation: &str,
     ) -> Result<bool, String> {
         Err(self.error.clone())
+    }
+
+    async fn info(&self) -> NacStatusInfo {
+        NacStatusInfo {
+            status: "enabled".to_string(),
+            configured_enabled: true,
+            dev_mode: false,
+            owner: None,
+        }
     }
 }

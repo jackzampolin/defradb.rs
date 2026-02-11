@@ -315,14 +315,17 @@ pub trait NodeAcpOperations: Send + Sync {
         target: &identity::Did,
         relation: &str,
     ) -> Result<bool, String>;
+
+    /// Get full NAC status info including all FFI-compatible fields.
+    async fn info(&self) -> NacStatusInfo;
 }
 
 /// NAC status information for HTTP responses.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NacStatusInfo {
-    /// Current NAC status (not configured, enabled, disabled temporarily)
     pub status: String,
-    /// Owner DID if NAC is enabled
+    pub configured_enabled: bool,
+    pub dev_mode: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
 }

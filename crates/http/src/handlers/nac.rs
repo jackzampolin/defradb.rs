@@ -82,23 +82,16 @@ pub async fn get_status(
 ) -> Result<impl IntoResponse, HttpError> {
     require_permission(&state, &identity, NodePermission::NacStatus).await?;
 
-    // NAC status is available even if NAC is not configured
     match &state.nac {
         Some(nac) => {
-            let status = nac.get_status().await;
-            let owner = nac.owner().await;
-
-            let info = NacStatusInfo {
-                status: status.to_string(),
-                owner: owner.map(|d| d.to_string()),
-            };
-
+            let info = nac.info().await;
             Ok(Json(info).into_response())
         }
         None => {
-            // NAC not configured
             let info = NacStatusInfo {
                 status: "not configured".to_string(),
+                configured_enabled: false,
+                dev_mode: false,
                 owner: None,
             };
             Ok(Json(info).into_response())
@@ -243,8 +236,7 @@ pub async fn go_add_relationship(
             HttpError::Forbidden(normalized)
         })?;
 
-    let _ = added;
-    Ok(axum::http::StatusCode::OK.into_response())
+    Ok(Json(serde_json::json!({"added": added})).into_response())
 }
 
 /// DELETE /api/v0/acp/node/relationship (Go-compatible)
@@ -275,14 +267,14 @@ pub async fn go_remove_relationship(
     })?;
 
     if body.target_actor.is_empty() {
-        return Ok(axum::http::StatusCode::OK.into_response());
+        return Ok(Json(serde_json::json!({"deleted": false})).into_response());
     }
 
     // Parse target DID
     let target = identity::Did::new(&body.target_actor)
         .map_err(|e| HttpError::BadRequest(format!("invalid TargetActor DID: {}", e)))?;
 
-    let _removed = nac
+    let removed = nac
         .remove_relationship(&requestor, &target, &body.relation)
         .await
         .map_err(|e| {
@@ -291,7 +283,7 @@ pub async fn go_remove_relationship(
             HttpError::Forbidden(normalized)
         })?;
 
-    Ok(axum::http::StatusCode::OK.into_response())
+    Ok(Json(serde_json::json!({"deleted": removed})).into_response())
 }
 
 /// POST /api/v0/acp/node/disable
