@@ -118,7 +118,7 @@ impl Node {
 
             // Create sync coordinator if P2P is enabled (shared between mutator and P2P adapter)
             // Also captures task handles for graceful shutdown
-            let (sync_coordinator, replication_task, event_handler_task) =
+            let (sync_coordinator, replication_task, event_handler_task, version_syncer) =
                 if let Some(ref p2p_handle) = p2p {
                     let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(
                         store_for_sync.clone(),
@@ -157,8 +157,12 @@ impl Node {
                     }
 
                     // Create merge handler for CRDT merging
+                    let merge_blockstore_for_syncer = merge_blockstore.clone();
                     let merge_handler =
                         Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
+
+                    // Clone merge handler for VersionSyncer (before moving into replication loop)
+                    let merge_handler_for_syncer = merge_handler.clone();
 
                     // Spawn replication loop to process incoming blocks
                     // Track the task handle for graceful shutdown
@@ -229,14 +233,23 @@ impl Node {
                         None
                     };
 
+                    // Create version syncer for schema sync via Bitswap
+                    let version_syncer: Option<Arc<dyn crate::p2p_adapter::VersionSyncer>> =
+                        Some(crate::version_syncer::DbVersionSyncer::new_arc(
+                            merge_blockstore_for_syncer,
+                            merge_handler_for_syncer,
+                            database.clone(),
+                        ));
+
                     info!("P2P sync coordinator initialized");
                     (
                         Some(coordinator),
                         Some(replication_task),
                         event_handler_task,
+                        version_syncer,
                     )
                 } else {
-                    (None, None, None)
+                    (None, None, None, None)
                 };
 
             // Create mutator - use BroadcastMutator if P2P is enabled for network propagation
@@ -357,6 +370,7 @@ impl Node {
                         coordinator.clone(),
                         doc_pusher,
                         event_bus.clone(),
+                        version_syncer,
                     )
                 } else {
                     crate::p2p_adapter::P2PAdapter::new_arc(p2p_handle.clone())

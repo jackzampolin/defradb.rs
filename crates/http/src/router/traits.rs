@@ -58,11 +58,18 @@ pub trait P2POperations: Send + Sync {
     /// Remove documents from P2P replication.
     async fn remove_documents(&self, docs: Vec<P2pDocumentRequest>) -> Result<(), String>;
 
-    /// Sync collections with peers (trigger immediate sync).
-    async fn sync_collections(&self) -> Result<(), String>;
+    /// Sync specific documents from connected peers.
+    async fn sync_documents(
+        &self,
+        collection_name: &str,
+        doc_ids: Vec<String>,
+    ) -> Result<(), String>;
 
-    /// Sync documents with peers (trigger immediate sync).
-    async fn sync_documents(&self) -> Result<(), String>;
+    /// Sync a branchable collection from connected peers.
+    async fn sync_branchable_collection(&self, collection_id: &str) -> Result<(), String>;
+
+    /// Sync collection versions (schema definitions) from connected peers via Bitswap.
+    async fn sync_collection_versions(&self, version_ids: Vec<String>) -> Result<(), String>;
 }
 
 /// Replicator information for HTTP responses.
@@ -93,6 +100,29 @@ pub struct P2pDocumentRequest {
     /// Document ID.
     #[serde(rename = "DocID")]
     pub doc_id: String,
+}
+
+/// Request body for document sync (Go-compatible).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SyncDocumentsRequest {
+    #[serde(rename = "collectionName")]
+    pub collection_name: String,
+    #[serde(rename = "docIDs")]
+    pub doc_ids: Vec<String>,
+}
+
+/// Request body for branchable collection sync (Go-compatible).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SyncBranchableRequest {
+    #[serde(rename = "collectionID")]
+    pub collection_id: String,
+}
+
+/// Request body for collection version sync (Go-compatible).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SyncVersionsRequest {
+    #[serde(rename = "versionIDs")]
+    pub version_ids: Vec<String>,
 }
 
 /// Trait for ACP (Access Control Policy) operations.

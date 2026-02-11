@@ -47,6 +47,12 @@ pub trait DocPusher: Send + Sync {
     async fn load_p2p_documents(&self) -> Result<Vec<String>, String>;
 
     async fn persist_p2p_collections(&self, collections: &[String]) -> Result<(), String>;
+
+    /// Validate that a collection with the given name exists.
+    fn validate_collection_exists(&self, name: &str) -> Result<(), String>;
+
+    /// Validate that a collection with the given ID exists and is branchable.
+    fn validate_branchable_collection(&self, collection_id: &str) -> Result<(), String>;
 }
 
 /// Database-backed `DocPusher` implementation.
@@ -162,6 +168,28 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             .await
             .map_err(|e| format!("failed to persist P2P collections: {}", e))
     }
+
+    fn validate_collection_exists(&self, name: &str) -> Result<(), String> {
+        match self.db.get_collection(name) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(format!("collection '{}' not found", name)),
+            Err(e) => Err(format!("failed to get collection: {}", e)),
+        }
+    }
+
+    fn validate_branchable_collection(&self, collection_id: &str) -> Result<(), String> {
+        match self.db.find_collection_by_id(collection_id) {
+            Ok(Some(collection)) => {
+                if !collection.schema().is_branchable {
+                    Err("collection is not branchable".to_string())
+                } else {
+                    Ok(())
+                }
+            }
+            Ok(None) => Err(format!("collection with ID '{}' not found", collection_id)),
+            Err(e) => Err(format!("failed to find collection: {}", e)),
+        }
+    }
 }
 
 /// Also implement `CollectionLookup` so `DbDocPusher` can be used anywhere
@@ -170,6 +198,17 @@ impl<S: storage::corekv::Store + 'static> CollectionLookup for DbDocPusher<S> {
     fn get_collection_id(&self, name: &str) -> Option<String> {
         DocPusher::get_collection_id(self, name)
     }
+}
+
+/// Trait for syncing collection versions (schema definitions) via Bitswap.
+#[async_trait]
+pub trait VersionSyncer: Send + Sync {
+    async fn sync_versions(
+        &self,
+        handle: &P2PHostHandle,
+        version_ids: Vec<String>,
+        connected_peers: Vec<libp2p::PeerId>,
+    ) -> Result<(), String>;
 }
 
 /// Adapter that implements P2POperations using P2PHostHandle.
@@ -183,6 +222,7 @@ pub struct P2PAdapter<
     sync_coordinator: Option<Arc<SyncCoordinator<B>>>,
     doc_pusher: Option<Arc<dyn DocPusher>>,
     event_bus: Option<Arc<dyn events::Bus>>,
+    version_syncer: Option<Arc<dyn VersionSyncer>>,
     peer_addresses: Arc<std::sync::RwLock<HashMap<String, String>>>,
     tracked_documents: Arc<std::sync::RwLock<HashSet<String>>>,
 }
@@ -195,6 +235,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             sync_coordinator: None,
             doc_pusher: None,
             event_bus: None,
+            version_syncer: None,
             peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
             tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
@@ -210,6 +251,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             sync_coordinator: Some(coordinator),
             doc_pusher: None,
             event_bus: None,
+            version_syncer: None,
             peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
             tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
@@ -227,6 +269,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             sync_coordinator: Some(coordinator),
             doc_pusher: Some(doc_pusher),
             event_bus: None,
+            version_syncer: None,
             peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
             tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
@@ -238,12 +281,14 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
         coordinator: Arc<SyncCoordinator<B>>,
         doc_pusher: Arc<dyn DocPusher>,
         event_bus: Arc<dyn events::Bus>,
+        version_syncer: Option<Arc<dyn VersionSyncer>>,
     ) -> Self {
         Self {
             handle,
             sync_coordinator: Some(coordinator),
             doc_pusher: Some(doc_pusher),
             event_bus: Some(event_bus),
+            version_syncer,
             peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
             tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
@@ -285,12 +330,14 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
         coordinator: Arc<SyncCoordinator<B>>,
         doc_pusher: Arc<dyn DocPusher>,
         event_bus: Arc<dyn events::Bus>,
+        version_syncer: Option<Arc<dyn VersionSyncer>>,
     ) -> Arc<dyn P2POperations> {
         Arc::new(Self::with_full_context(
             handle,
             coordinator,
             doc_pusher,
             event_bus,
+            version_syncer,
         ))
     }
 }
@@ -341,6 +388,14 @@ impl DocPusher for LookupOnlyDocPusher {
 
     async fn persist_p2p_collections(&self, _collections: &[String]) -> Result<(), String> {
         Err("persist_p2p_collections not available (no database context)".to_string())
+    }
+
+    fn validate_collection_exists(&self, _name: &str) -> Result<(), String> {
+        Err("validate_collection_exists not available (no database context)".to_string())
+    }
+
+    fn validate_branchable_collection(&self, _collection_id: &str) -> Result<(), String> {
+        Err("validate_branchable_collection not available (no database context)".to_string())
     }
 }
 
@@ -794,12 +849,155 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         Ok(())
     }
 
-    async fn sync_collections(&self) -> Result<(), String> {
-        Err("sync_collections not yet implemented".to_string())
+    async fn sync_documents(
+        &self,
+        collection_name: &str,
+        doc_ids: Vec<String>,
+    ) -> Result<(), String> {
+        let pusher = self
+            .doc_pusher
+            .as_ref()
+            .ok_or_else(|| "no database context for sync".to_string())?;
+        pusher.validate_collection_exists(collection_name)?;
+
+        let event_bus = self
+            .event_bus
+            .as_ref()
+            .ok_or_else(|| "no event bus for sync".to_string())?;
+
+        let connected_peers = self
+            .handle
+            .connected_peers()
+            .await
+            .map_err(|e| format!("failed to get connected peers: {}", e))?;
+
+        if connected_peers.is_empty() {
+            return Ok(());
+        }
+
+        // Subscribe to MergeComplete events BEFORE sending requests
+        let mut sub = event_bus.subscribe(&[events::EventName::MergeComplete]);
+
+        let total_expected = connected_peers.len() * doc_ids.len();
+        let mut total_received = 0;
+        let overall_timeout = std::time::Duration::from_secs(30);
+        let idle_timeout = std::time::Duration::from_secs(3);
+        let start = std::time::Instant::now();
+        let doc_set: HashSet<String> = doc_ids.iter().cloned().collect();
+
+        for _attempt in 0..3 {
+            if total_received >= total_expected || start.elapsed() >= overall_timeout {
+                break;
+            }
+
+            let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
+            if let Err(e) = p2p::signing::sign_message(self.handle.keypair(), &mut request) {
+                event_bus.unsubscribe(sub.id());
+                return Err(format!("failed to sign DocSync request: {}", e));
+            }
+
+            for peer_id in &connected_peers {
+                match self
+                    .handle
+                    .send_doc_sync_request(*peer_id, request.clone())
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!(peer_id = %peer_id, error = %e, "failed to send DocSync request")
+                    }
+                }
+            }
+
+            // Wait for merges with idle timeout
+            let mut last_merge = std::time::Instant::now();
+            while total_received < total_expected && start.elapsed() < overall_timeout {
+                if total_received >= doc_ids.len() && last_merge.elapsed() > idle_timeout {
+                    break;
+                }
+
+                match tokio::time::timeout(std::time::Duration::from_millis(100), sub.recv()).await
+                {
+                    Ok(Some(msg)) => {
+                        if let Some(data) = msg.as_merge_complete() {
+                            if doc_set.contains(&data.doc_id) {
+                                total_received += 1;
+                                last_merge = std::time::Instant::now();
+                            }
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => {}
+                }
+            }
+        }
+
+        event_bus.unsubscribe(sub.id());
+        Ok(())
     }
 
-    async fn sync_documents(&self) -> Result<(), String> {
-        Err("sync_documents not yet implemented".to_string())
+    async fn sync_branchable_collection(&self, collection_id: &str) -> Result<(), String> {
+        let pusher = self
+            .doc_pusher
+            .as_ref()
+            .ok_or_else(|| "no database context for sync".to_string())?;
+        pusher.validate_branchable_collection(collection_id)?;
+
+        let connected_peers = self
+            .handle
+            .connected_peers()
+            .await
+            .map_err(|e| format!("failed to get connected peers: {}", e))?;
+
+        if connected_peers.is_empty() {
+            return Ok(());
+        }
+
+        let mut request = p2p::message::BranchableSyncRequest::new(collection_id.to_string());
+        p2p::signing::sign_message(self.handle.keypair(), &mut request)
+            .map_err(|e| format!("failed to sign BranchableSync request: {}", e))?;
+
+        for peer_id in &connected_peers {
+            let request_clone = request.clone();
+            let handle = self.handle.clone();
+            let peer_id = *peer_id;
+
+            tokio::spawn(async move {
+                if let Err(e) = handle
+                    .send_branchable_sync_request(peer_id, request_clone)
+                    .await
+                {
+                    tracing::warn!(peer_id = %peer_id, error = %e, "failed to send BranchableSyncRequest");
+                }
+            });
+        }
+
+        Ok(())
+    }
+
+    async fn sync_collection_versions(&self, version_ids: Vec<String>) -> Result<(), String> {
+        if version_ids.is_empty() {
+            return Ok(());
+        }
+
+        let connected_peers = self
+            .handle
+            .connected_peers()
+            .await
+            .map_err(|e| format!("failed to get connected peers: {}", e))?;
+
+        if connected_peers.is_empty() {
+            return Ok(());
+        }
+
+        let syncer = self
+            .version_syncer
+            .as_ref()
+            .ok_or_else(|| "version syncer required".to_string())?;
+
+        syncer
+            .sync_versions(&self.handle, version_ids, connected_peers)
+            .await
     }
 }
 

@@ -66,6 +66,9 @@ hex = "0.4"
 
 # IPLD (for Bitswap type parameters)
 libipld = { workspace = true }
+cid = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
+serde_bytes = { workspace = true }
 
 # libp2p (for P2P keypair types)
 libp2p = { workspace = true }
