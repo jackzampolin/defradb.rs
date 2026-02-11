@@ -1,0 +1,382 @@
+//! Migration registration methods on DB.
+
+use lens::{LensConfig, TransformId};
+use schema::CollectionSource;
+use storage::corekv::{Key, Store};
+use storage::keys::systemstore::{CollectionKey, CollectionVersionKey, LensConfigKey};
+use tracing::instrument;
+
+use super::helpers::{create_orphan_placeholder, create_placeholder_with_source};
+use crate::collection::Collection;
+use crate::error::{Error, Result};
+use crate::txn::DbTxn;
+use crate::DB;
+
+impl<S: Store> DB<S> {
+    /// Set a migration between two schema versions.
+    ///
+    /// This registers a lens transform that will be applied to documents
+    /// when migrating from the source schema version to the destination.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The lens configuration containing source/destination versions and transform
+    ///
+    /// # Returns
+    ///
+    /// The transform ID that was registered.
+    #[instrument(skip(self, config), fields(
+        source = %config.source_schema_version_id,
+        dest = %config.destination_schema_version_id
+    ))]
+    pub async fn set_migration(&self, config: LensConfig) -> Result<TransformId> {
+        let dest_version_id = config.destination_schema_version_id.clone();
+        let source_version_id = config.source_schema_version_id.clone();
+        let config_for_persistence = config.clone();
+
+        let txn = self.new_txn(false).await?;
+
+        let (source_col, mut dst_col) = {
+            let systemstore = txn.systemstore()?;
+
+            let src_key = CollectionKey::new(&source_version_id);
+            let src_data = systemstore
+                .get(&src_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+            let source_col: schema::CollectionVersion = match src_data {
+                Some(data) => serde_json::from_slice(&data).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to deserialize source schema '{}': {}",
+                        source_version_id, e
+                    ))
+                })?,
+                None => {
+                    let placeholder = create_orphan_placeholder(&source_version_id, "", "");
+                    let data = serde_json::to_vec(&placeholder).map_err(|e| {
+                        Error::Serialization(format!(
+                            "failed to serialize source placeholder '{}': {}",
+                            source_version_id, e
+                        ))
+                    })?;
+                    systemstore
+                        .set(&src_key.bytes(), &data)
+                        .await
+                        .map_err(Error::Storage)?;
+                    placeholder
+                }
+            };
+
+            let dst_key = CollectionKey::new(&dest_version_id);
+            let dst_data = systemstore
+                .get(&dst_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+            let dst_col: schema::CollectionVersion = match dst_data {
+                Some(data) => serde_json::from_slice(&data).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to deserialize destination schema '{}': {}",
+                        dest_version_id, e
+                    ))
+                })?,
+                None => {
+                    let placeholder = create_placeholder_with_source(
+                        &dest_version_id,
+                        &source_col.name,
+                        &source_col.collection_id,
+                    );
+                    let data = serde_json::to_vec(&placeholder).map_err(|e| {
+                        Error::Serialization(format!(
+                            "failed to serialize destination placeholder '{}': {}",
+                            dest_version_id, e
+                        ))
+                    })?;
+                    systemstore
+                        .set(&dst_key.bytes(), &data)
+                        .await
+                        .map_err(Error::Storage)?;
+                    placeholder
+                }
+            };
+
+            (source_col, dst_col)
+        };
+
+        if let Some(ref prev) = dst_col.previous_version {
+            if prev.source_collection_id != source_col.version_id {
+                return Err(Error::InvalidPatch(format!(
+                    "cannot migrate between non-adjacent collection versions. \
+                     Destination '{}' already has previous version '{}', but migration source is '{}'",
+                    dest_version_id, prev.source_collection_id, source_version_id
+                )));
+            }
+        }
+
+        let transform_id = self
+            .lens_store
+            .add(config)
+            .await
+            .map_err(|e| Error::Lens(e.to_string()))?;
+
+        dst_col.previous_version = Some(CollectionSource {
+            source_collection_id: source_col.version_id.clone(),
+            transform: Some(transform_id.to_string()),
+        });
+
+        tracing::debug!(
+            dest_version_id = %dest_version_id,
+            source_version_id = %source_version_id,
+            is_placeholder = dst_col.is_placeholder,
+            transform_id = %transform_id,
+            "set_migration: storing destination version with transform"
+        );
+
+        let collection_name = dst_col.name.clone();
+        let dst_key = CollectionKey::new(&dest_version_id);
+        let dst_data = serde_json::to_vec(&dst_col).map_err(|e| {
+            Error::Serialization(format!(
+                "failed to serialize destination schema '{}': {}",
+                dest_version_id, e
+            ))
+        })?;
+
+        {
+            let systemstore = txn.systemstore()?;
+            systemstore
+                .set(&dst_key.bytes(), &dst_data)
+                .await
+                .map_err(Error::Storage)?;
+
+            if !source_col.collection_id.is_empty() {
+                let src_version_key =
+                    CollectionVersionKey::new(&source_col.collection_id, &source_version_id);
+                systemstore
+                    .set(&src_version_key.bytes(), b"1")
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+            if !dst_col.collection_id.is_empty() {
+                let dst_version_key =
+                    CollectionVersionKey::new(&dst_col.collection_id, &dest_version_id);
+                systemstore
+                    .set(&dst_version_key.bytes(), b"1")
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+
+            let lens_key = LensConfigKey::new(transform_id.to_string());
+            let lens_data = serde_json::to_vec(&config_for_persistence).map_err(|e| {
+                Error::Serialization(format!("failed to serialize lens config: {}", e))
+            })?;
+            systemstore
+                .set(&lens_key.bytes(), &lens_data)
+                .await
+                .map_err(Error::Storage)?;
+        }
+        txn.commit().await?;
+
+        if !collection_name.is_empty() {
+            let mut cache = self.collections.write().map_err(|e| {
+                tracing::error!(error = ?e, "Collection cache lock poisoned during set_migration");
+                Error::LockPoisoned("collection cache lock poisoned during set_migration".into())
+            })?;
+
+            if let Some(cached) = cache.get(&collection_name) {
+                if cached.schema().version_id == dest_version_id {
+                    cache.insert(collection_name.clone(), Collection::new(dst_col));
+                }
+            }
+        }
+
+        if !collection_name.is_empty() {
+            if let Err(e) = self
+                .maybe_reindex_after_migration(&collection_name, &dest_version_id)
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    collection = %collection_name,
+                    "Failed to reindex after migration"
+                );
+            }
+        }
+
+        Ok(transform_id)
+    }
+
+    /// Set a migration within an existing transaction context.
+    ///
+    /// This performs the same operations as `set_migration` but uses the provided
+    /// transaction instead of creating a new one. The caller is responsible for
+    /// committing or rolling back the transaction.
+    ///
+    /// This is used for transaction-aware migration configuration via the FFI.
+    #[instrument(skip(self, txn, config), fields(
+        source = %config.source_schema_version_id,
+        dest = %config.destination_schema_version_id
+    ))]
+    pub async fn set_migration_in_txn(
+        &self,
+        txn: &DbTxn<S>,
+        config: LensConfig,
+    ) -> Result<TransformId> {
+        let dest_version_id = config.destination_schema_version_id.clone();
+        let source_version_id = config.source_schema_version_id.clone();
+        let config_for_persistence = config.clone();
+
+        let (source_col, mut dst_col) = {
+            let systemstore = txn.systemstore()?;
+
+            let src_key = CollectionKey::new(&source_version_id);
+            let src_data = systemstore
+                .get(&src_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+            let source_col: schema::CollectionVersion = match src_data {
+                Some(data) => serde_json::from_slice(&data).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to deserialize source schema '{}': {}",
+                        source_version_id, e
+                    ))
+                })?,
+                None => {
+                    let placeholder = create_orphan_placeholder(&source_version_id, "", "");
+                    let data = serde_json::to_vec(&placeholder).map_err(|e| {
+                        Error::Serialization(format!(
+                            "failed to serialize source placeholder '{}': {}",
+                            source_version_id, e
+                        ))
+                    })?;
+                    systemstore
+                        .set(&src_key.bytes(), &data)
+                        .await
+                        .map_err(Error::Storage)?;
+                    placeholder
+                }
+            };
+
+            let dst_key = CollectionKey::new(&dest_version_id);
+            let dst_data = systemstore
+                .get(&dst_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+            let dst_col: schema::CollectionVersion = match dst_data {
+                Some(data) => serde_json::from_slice(&data).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to deserialize destination schema '{}': {}",
+                        dest_version_id, e
+                    ))
+                })?,
+                None => {
+                    let placeholder = create_placeholder_with_source(
+                        &dest_version_id,
+                        &source_col.name,
+                        &source_col.collection_id,
+                    );
+                    let data = serde_json::to_vec(&placeholder).map_err(|e| {
+                        Error::Serialization(format!(
+                            "failed to serialize destination placeholder '{}': {}",
+                            dest_version_id, e
+                        ))
+                    })?;
+                    systemstore
+                        .set(&dst_key.bytes(), &data)
+                        .await
+                        .map_err(Error::Storage)?;
+                    placeholder
+                }
+            };
+
+            (source_col, dst_col)
+        };
+
+        if let Some(ref prev) = dst_col.previous_version {
+            if prev.source_collection_id != source_col.version_id {
+                return Err(Error::InvalidPatch(format!(
+                    "cannot migrate between non-adjacent collection versions. \
+                     Destination '{}' already has previous version '{}', but migration source is '{}'",
+                    dest_version_id, prev.source_collection_id, source_version_id
+                )));
+            }
+        }
+
+        let transform_id = self
+            .lens_store
+            .add(config)
+            .await
+            .map_err(|e| Error::Lens(e.to_string()))?;
+
+        dst_col.previous_version = Some(CollectionSource {
+            source_collection_id: source_col.version_id.clone(),
+            transform: Some(transform_id.to_string()),
+        });
+
+        tracing::debug!(
+            dest_version_id = %dest_version_id,
+            source_version_id = %source_version_id,
+            is_placeholder = dst_col.is_placeholder,
+            transform_id = %transform_id,
+            "set_migration_in_txn: storing destination version with transform"
+        );
+
+        let collection_name = dst_col.name.clone();
+        let dst_key = CollectionKey::new(&dest_version_id);
+        let dst_data = serde_json::to_vec(&dst_col).map_err(|e| {
+            Error::Serialization(format!(
+                "failed to serialize destination schema '{}': {}",
+                dest_version_id, e
+            ))
+        })?;
+
+        {
+            let systemstore = txn.systemstore()?;
+            systemstore
+                .set(&dst_key.bytes(), &dst_data)
+                .await
+                .map_err(Error::Storage)?;
+
+            if !source_col.collection_id.is_empty() {
+                let src_version_key =
+                    CollectionVersionKey::new(&source_col.collection_id, &source_version_id);
+                systemstore
+                    .set(&src_version_key.bytes(), b"1")
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+            if !dst_col.collection_id.is_empty() {
+                let dst_version_key =
+                    CollectionVersionKey::new(&dst_col.collection_id, &dest_version_id);
+                systemstore
+                    .set(&dst_version_key.bytes(), b"1")
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+
+            let lens_key = LensConfigKey::new(transform_id.to_string());
+            let lens_data = serde_json::to_vec(&config_for_persistence).map_err(|e| {
+                Error::Serialization(format!("failed to serialize lens config: {}", e))
+            })?;
+            systemstore
+                .set(&lens_key.bytes(), &lens_data)
+                .await
+                .map_err(Error::Storage)?;
+        }
+
+        if !collection_name.is_empty() {
+            let mut cache = self.collections.write().map_err(|e| {
+                tracing::error!(error = ?e, "Collection cache lock poisoned during set_migration_in_txn");
+                Error::LockPoisoned(
+                    "collection cache lock poisoned during set_migration_in_txn".into(),
+                )
+            })?;
+
+            if let Some(cached) = cache.get(&collection_name) {
+                if cached.schema().version_id == dest_version_id {
+                    cache.insert(collection_name.clone(), Collection::new(dst_col));
+                }
+            }
+        }
+
+        Ok(transform_id)
+    }
+}
