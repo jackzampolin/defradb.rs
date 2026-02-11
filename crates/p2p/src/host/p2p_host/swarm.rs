@@ -58,10 +58,7 @@ impl<S: Store> P2PHost<S> {
                 // in Connected state where peer_connected() is never called and the
                 // peer has no MessageQueue, so want messages are never sent.
                 // The actual protocol version is negotiated per-substream regardless.
-                eprintln!(
-                    "[BITSWAP-PREANNOUNCE] Pre-announcing bitswap protocols for peer={}",
-                    peer_id
-                );
+                debug!(peer_id = %peer_id, "Pre-announcing Bitswap protocols");
                 self.swarm.behaviour().on_identify(
                     &peer_id,
                     &[
@@ -70,7 +67,7 @@ impl<S: Store> P2PHost<S> {
                         "/ipfs/bitswap/1.0.0".to_string(),
                     ],
                 );
-                eprintln!("[BITSWAP-PREANNOUNCE] Done for peer={}", peer_id);
+                debug!(peer_id = %peer_id, "Bitswap protocol pre-announce complete");
 
                 // Trigger Kademlia bootstrap to discover peers through the DHT.
                 // When node2 connects to node0 (who already knows node1),

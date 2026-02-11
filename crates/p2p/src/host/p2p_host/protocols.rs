@@ -239,11 +239,7 @@ impl<S: Store> P2PHost<S> {
                 // if processed before get_blocks() adds CIDs to the want list.
                 let providers: std::collections::HashSet<PeerId> =
                     self.peer_addrs.keys().copied().collect();
-                eprintln!(
-                    "[BITSWAP-FIND-PROVIDERS] cid={} returning {} connected peers",
-                    key,
-                    providers.len()
-                );
+                debug!(cid = %key, count = providers.len(), "Returning connected peers as Bitswap providers");
                 let _ = response.send(Ok(providers)).await;
             }
             BitswapEvent::Ping { peer, response } => {
