@@ -467,8 +467,8 @@ mod tests {
         let result = unsafe { enable_nac(node, owner_did.as_ptr()) };
         assert_eq!(result.status, 0, "enable_nac should succeed");
 
-        // Verify NAC is now enabled
-        let result = unsafe { get_nac_status(node, std::ptr::null()) };
+        // Verify NAC is now enabled (pass owner DID since NAC is active)
+        let result = unsafe { get_nac_status(node, owner_did.as_ptr()) };
         assert_eq!(result.status, 0);
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("enabled"), "NAC should be enabled");
@@ -496,12 +496,17 @@ mod tests {
         let result = unsafe { disable_nac(node, owner_did.as_ptr()) };
         assert_eq!(result.status, 0, "disable_nac should succeed");
 
-        // Verify NAC is disabled
+        // Verify NAC is disabled (null identity OK since NAC is disabled)
         let result = unsafe { get_nac_status(node, std::ptr::null()) };
+        assert_eq!(
+            result.status, 0,
+            "get_nac_status should succeed when disabled"
+        );
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(
-            value.contains("disabled_temporarily"),
-            "NAC should be disabled"
+            value.contains("disabled temporarily"),
+            "NAC should be disabled, got: {}",
+            value
         );
         unsafe { crate::types::defra_free_string(result.value) };
 
@@ -509,8 +514,8 @@ mod tests {
         let result = unsafe { re_enable_nac(node, owner_did.as_ptr()) };
         assert_eq!(result.status, 0, "re_enable_nac should succeed");
 
-        // Verify NAC is enabled again
-        let result = unsafe { get_nac_status(node, std::ptr::null()) };
+        // Verify NAC is enabled again (pass owner DID since NAC is active)
+        let result = unsafe { get_nac_status(node, owner_did.as_ptr()) };
         let value = unsafe { CStr::from_ptr(result.value).to_string_lossy() };
         assert!(
             value.contains("\"status\":\"enabled\""),

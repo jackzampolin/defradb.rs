@@ -539,5 +539,5 @@ async fn test_composite_unique_enforced_on_non_null() {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("constraint violation"));
+        .contains("violates unique index"));
 }
