@@ -164,7 +164,7 @@ pub async fn tx_commit(
             Ok((
                 StatusCode::BAD_REQUEST,
                 Json(crate::error::ErrorResponse {
-                    error: "invalid transaction id".to_string(),
+                    error: e.to_string(),
                 }),
             )
                 .into_response())
@@ -210,7 +210,7 @@ pub async fn tx_discard(
             Ok((
                 StatusCode::BAD_REQUEST,
                 Json(crate::error::ErrorResponse {
-                    error: "invalid transaction id".to_string(),
+                    error: e.to_string(),
                 }),
             )
                 .into_response())
