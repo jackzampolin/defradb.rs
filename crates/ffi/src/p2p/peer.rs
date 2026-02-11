@@ -2,11 +2,11 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
-use crate::get_runtime;
+use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
 use super::parse_multiaddr_with_peer_id;
 
@@ -20,11 +20,13 @@ use super::parse_multiaddr_with_peer_id;
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pPeerInfo) {
-        return e;
-    }
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::P2pPeerInfo
+    ));
 
     let result = NODES
         .get(node_ptr, |state| {
@@ -70,7 +72,7 @@ pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_c
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
 pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
 
     let result = NODES
         .get(node_ptr, |state| {
@@ -173,16 +175,15 @@ pub unsafe extern "C" fn p2p_connect(
     identity_did: *const c_char,
     addr: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::P2pPeerConnect
+    ));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pPeerConnect) {
-        return e;
-    }
-
-    let addr_str = match c_str_to_string(addr) {
-        Some(s) => s,
-        None => return FfiResult::error("addr is null"),
-    };
+    let addr_str = try_ffi!(require_c_str(addr, "addr"));
 
     let result = NODES
         .get(node_ptr, |state| {

@@ -4,11 +4,10 @@ use acp::nac::NodePermission;
 use db::collection_short_id;
 use storage::corekv::Key;
 
-use crate::get_runtime;
+use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
-use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{ffi_async, try_ffi};
 
 use super::IndexCreateInput;
 
@@ -47,21 +46,15 @@ pub unsafe extern "C" fn create_index(
     collection_name: *const c_char,
     index_json: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::IndexCreate) {
-        return e;
-    }
-
-    let collection_name_str = match c_str_to_string(collection_name) {
-        Some(s) => s,
-        None => return FfiResult::error("collection_name is null"),
-    };
-
-    let index_json_str = match c_str_to_string(index_json) {
-        Some(s) => s,
-        None => return FfiResult::error("index_json is null"),
-    };
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::IndexCreate
+    ));
+    let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+    let index_json_str = try_ffi!(require_c_str(index_json, "index_json"));
 
     // Parse the index JSON
     let index_input: IndexCreateInput = match serde_json::from_str(&index_json_str) {
@@ -69,13 +62,9 @@ pub unsafe extern "C" fn create_index(
         Err(e) => return FfiResult::error(format!("failed to parse index JSON: {}", e)),
     };
 
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         // Get the collection
         let collection = database
             .get_collection(&collection_name_str)
@@ -194,13 +183,8 @@ pub unsafe extern "C" fn create_index(
         let json = serde_json::to_string(&index_desc)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 #[cfg(test)]

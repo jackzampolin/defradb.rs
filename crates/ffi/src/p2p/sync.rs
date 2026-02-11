@@ -2,11 +2,11 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
-use crate::get_runtime;
+use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
 use super::parse_doc_ids_json;
 
@@ -33,26 +33,16 @@ pub unsafe extern "C" fn p2p_sync_documents(
     collection_name: *const c_char,
     doc_ids_json: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pDocumentCreate,
-    ) {
-        return e;
-    }
+        NodePermission::P2pDocumentCreate
+    ));
 
-    let collection_name_str = match c_str_to_string(collection_name) {
-        Some(s) => s,
-        None => return FfiResult::error("collection_name is null"),
-    };
-
-    let doc_ids_str = match c_str_to_string(doc_ids_json) {
-        Some(s) => s,
-        None => return FfiResult::error("doc_ids_json is null"),
-    };
+    let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+    let doc_ids_str = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
 
     let doc_ids = match parse_doc_ids_json(&doc_ids_str) {
         Ok(d) => d,
@@ -213,21 +203,15 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
     identity_did: *const c_char,
     collection_id: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pCollectionCreate,
-    ) {
-        return e;
-    }
+        NodePermission::P2pCollectionCreate
+    ));
 
-    let collection_id_str = match c_str_to_string(collection_id) {
-        Some(s) => s,
-        None => return FfiResult::error("collection_id is null"),
-    };
+    let collection_id_str = try_ffi!(require_c_str(collection_id, "collection_id"));
 
     eprintln!(
         "[FFI-BRANCHABLE] p2p_sync_branchable_collection called with collection_id={}",

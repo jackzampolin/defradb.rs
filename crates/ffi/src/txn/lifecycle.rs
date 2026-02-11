@@ -1,9 +1,10 @@
 use std::ffi::c_char;
 
 use crate::get_runtime;
+use crate::helpers::{get_node_runner, get_rt, require_c_str};
 use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult, NewTxnResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::{FfiResult, NewTxnResult};
+use crate::{ffi_async_ok, try_ffi, ERR_INVALID_NODE_HANDLE};
 
 /// Begin a new transaction.
 ///
@@ -58,20 +59,11 @@ pub extern "C" fn begin_txn(node_ptr: usize, readonly: i32) -> NewTxnResult {
 /// `txn_id` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn commit_txn(node_ptr: usize, txn_id: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
+    let runner = try_ffi!(get_node_runner(node_ptr));
 
-    let txn_str = match c_str_to_string(txn_id) {
-        Some(s) => s,
-        None => return FfiResult::error("txn_id is null"),
-    };
-
-    // Validate node handle before entering async block
-    let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
-        Some(r) => r,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async_ok!(rt, {
         let handle: query::txn::TransactionHandle = txn_str
             .parse()
             .map_err(|e| format!("invalid transaction ID: {}", e))?;
@@ -81,13 +73,8 @@ pub unsafe extern "C" fn commit_txn(node_ptr: usize, txn_id: *const c_char) -> F
             .await
             .map_err(|e| format!("failed to commit transaction: {}", e))?;
 
-        Ok::<(), String>(())
-    });
-
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(())
+    })
 }
 
 /// Rollback (discard) a transaction.
@@ -105,20 +92,11 @@ pub unsafe extern "C" fn commit_txn(node_ptr: usize, txn_id: *const c_char) -> F
 /// `txn_id` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn rollback_txn(node_ptr: usize, txn_id: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
+    let runner = try_ffi!(get_node_runner(node_ptr));
 
-    let txn_str = match c_str_to_string(txn_id) {
-        Some(s) => s,
-        None => return FfiResult::error("txn_id is null"),
-    };
-
-    // Validate node handle before entering async block
-    let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
-        Some(r) => r,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async_ok!(rt, {
         let handle: query::txn::TransactionHandle = txn_str
             .parse()
             .map_err(|e| format!("invalid transaction ID: {}", e))?;
@@ -128,13 +106,8 @@ pub unsafe extern "C" fn rollback_txn(node_ptr: usize, txn_id: *const c_char) ->
             .await
             .map_err(|e| format!("failed to rollback transaction: {}", e))?;
 
-        Ok::<(), String>(())
-    });
-
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(())
+    })
 }
 
 #[cfg(test)]

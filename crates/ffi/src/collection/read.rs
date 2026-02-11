@@ -2,11 +2,10 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
-use crate::get_runtime;
+use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
-use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{ffi_async, try_ffi};
 
 /// Get a collection by name.
 ///
@@ -32,24 +31,17 @@ pub unsafe extern "C" fn get_collection_by_name(
     identity_did: *const c_char,
     name: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionGet
+    ));
+    let name_str = try_ffi!(require_c_str(name, "name"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionGet) {
-        return e;
-    }
-
-    let name_str = match c_str_to_string(name) {
-        Some(s) => s,
-        None => return FfiResult::error("name is null"),
-    };
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         let collection = database
             .get_collection(&name_str)
             .map_err(|e| format!("failed to get collection: {}", e))?
@@ -58,13 +50,8 @@ pub unsafe extern "C" fn get_collection_by_name(
         let json = serde_json::to_string(collection.schema())
             .map_err(|e| format!("failed to serialize collection: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 /// Check if a collection exists by name.
@@ -90,35 +77,23 @@ pub unsafe extern "C" fn has_collection(
     identity_did: *const c_char,
     name: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionGet
+    ));
+    let name_str = try_ffi!(require_c_str(name, "name"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionGet) {
-        return e;
-    }
-
-    let name_str = match c_str_to_string(name) {
-        Some(s) => s,
-        None => return FfiResult::error("name is null"),
-    };
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         let exists = database
             .has_collection(&name_str)
             .map_err(|e| format!("failed to check collection: {}", e))?;
 
-        Ok::<String, String>(exists.to_string())
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(exists.to_string())
+    })
 }
 
 /// Find a collection by its collection ID (schema version ID).
@@ -145,24 +120,17 @@ pub unsafe extern "C" fn find_collection_by_id(
     identity_did: *const c_char,
     collection_id: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionGet
+    ));
+    let id_str = try_ffi!(require_c_str(collection_id, "collection_id"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionGet) {
-        return e;
-    }
-
-    let id_str = match c_str_to_string(collection_id) {
-        Some(s) => s,
-        None => return FfiResult::error("collection_id is null"),
-    };
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         let collection = database
             .find_collection_by_id(&id_str)
             .map_err(|e| format!("failed to find collection: {}", e))?;
@@ -173,13 +141,8 @@ pub unsafe extern "C" fn find_collection_by_id(
             None => "null".to_string(),
         };
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 /// Get a collection by its version ID.
@@ -205,24 +168,17 @@ pub unsafe extern "C" fn get_collection_by_version_id(
     identity_did: *const c_char,
     version_id: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionGet
+    ));
+    let version_str = try_ffi!(require_c_str(version_id, "version_id"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionGet) {
-        return e;
-    }
-
-    let version_str = match c_str_to_string(version_id) {
-        Some(s) => s,
-        None => return FfiResult::error("version_id is null"),
-    };
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         let collection = database
             .get_collection_by_version_id_full(&version_str)
             .await
@@ -234,13 +190,8 @@ pub unsafe extern "C" fn get_collection_by_version_id(
             None => "null".to_string(),
         };
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 #[cfg(test)]

@@ -6,10 +6,10 @@ use serde_json::{Map, Value as JsonValue};
 
 use schema::CollectionVersion;
 
-use crate::get_runtime;
+use crate::helpers::{get_rt, require_c_str};
 use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{ffi_async_ok, try_ffi, ERR_INVALID_NODE_HANDLE};
 
 use super::{classify_schema_fields, compute_doc_id_new, BackupConfig};
 
@@ -31,12 +31,8 @@ use super::{classify_schema_fields, compute_doc_id_new, BackupConfig};
 /// `config_json` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn basic_export(node_ptr: usize, config_json: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    let config_str = match c_str_to_string(config_json) {
-        Some(s) => s,
-        None => return FfiResult::error("config_json is null"),
-    };
+    let rt = try_ffi!(get_rt());
+    let config_str = try_ffi!(require_c_str(config_json, "config_json"));
 
     let config: BackupConfig = match serde_json::from_str(&config_str) {
         Ok(c) => c,
@@ -50,7 +46,7 @@ pub unsafe extern "C" fn basic_export(node_ptr: usize, config_json: *const c_cha
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
-    let result = rt.block_on(async {
+    ffi_async_ok!(rt, {
         // Get all collection names
         let all_names = database
             .list_collections()
@@ -312,13 +308,8 @@ pub unsafe extern "C" fn basic_export(node_ptr: usize, config_json: *const c_cha
             format!("failed to rename temp file: {}", e)
         })?;
 
-        Ok::<(), String>(())
-    });
-
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(())
+    })
 }
 
 #[cfg(test)]

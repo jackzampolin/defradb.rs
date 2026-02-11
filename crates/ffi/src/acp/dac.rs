@@ -2,14 +2,14 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
-use crate::get_runtime;
+use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::policy_yaml::{
     check_duplicate_yaml_keys, parse_policy_yaml, validate_policy_expressions,
 };
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
 /// Add a DAC policy.
 ///
@@ -29,16 +29,14 @@ pub unsafe extern "C" fn add_dac_policy(
     _identity_did: *const c_char,
     policy: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(rt, node_ptr, _identity_did, NodePermission::DacPolicyAdd) {
-        return e;
-    }
-
-    let policy_str = match c_str_to_string(policy) {
-        Some(s) => s,
-        None => return FfiResult::error("policy is null"),
-    };
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        _identity_did,
+        NodePermission::DacPolicyAdd
+    ));
+    let policy_str = try_ffi!(require_c_str(policy, "policy"));
 
     let identity_str = c_str_to_string(_identity_did).unwrap_or_default();
 
@@ -125,10 +123,7 @@ pub unsafe extern "C" fn add_dac_policy(
 /// `policy_id` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn get_dac_policy(node_ptr: usize, policy_id: *const c_char) -> FfiResult {
-    let policy_id_str = match c_str_to_string(policy_id) {
-        Some(s) => s,
-        None => return FfiResult::error("policy_id is null"),
-    };
+    let policy_id_str = try_ffi!(require_c_str(policy_id, "policy_id"));
 
     let result = NODES
         .get(node_ptr, |state| {
@@ -195,37 +190,18 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
     doc_id: *const c_char,
     relation: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(rt, node_ptr, requestor_did, NodePermission::DacRelationAdd)
-    {
-        return e;
-    }
-
-    let requestor_str = match c_str_to_string(requestor_did) {
-        Some(s) => s,
-        None => return FfiResult::error("requestor_did is null"),
-    };
-
-    let target_str = match c_str_to_string(target_did) {
-        Some(s) => s,
-        None => return FfiResult::error("target_did is null"),
-    };
-
-    let collection_id_str = match c_str_to_string(collection_id) {
-        Some(s) => s,
-        None => return FfiResult::error("collection_id is null"),
-    };
-
-    let doc_id_str = match c_str_to_string(doc_id) {
-        Some(s) => s,
-        None => return FfiResult::error("doc_id is null"),
-    };
-
-    let relation_str = match c_str_to_string(relation) {
-        Some(s) => s,
-        None => return FfiResult::error("relation is null"),
-    };
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        requestor_did,
+        NodePermission::DacRelationAdd
+    ));
+    let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
+    let target_str = try_ffi!(require_c_str(target_did, "target_did"));
+    let collection_id_str = try_ffi!(require_c_str(collection_id, "collection_id"));
+    let doc_id_str = try_ffi!(require_c_str(doc_id, "doc_id"));
+    let relation_str = try_ffi!(require_c_str(relation, "relation"));
 
     // Go checks collection name first (via GetCollectionByName)
     if collection_id_str.is_empty() {
@@ -353,41 +329,18 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
     doc_id: *const c_char,
     relation: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
         rt,
         node_ptr,
         requestor_did,
-        NodePermission::DacRelationDelete,
-    ) {
-        return e;
-    }
-
-    let requestor_str = match c_str_to_string(requestor_did) {
-        Some(s) => s,
-        None => return FfiResult::error("requestor_did is null"),
-    };
-
-    let target_str = match c_str_to_string(target_did) {
-        Some(s) => s,
-        None => return FfiResult::error("target_did is null"),
-    };
-
-    let collection_id_str = match c_str_to_string(collection_id) {
-        Some(s) => s,
-        None => return FfiResult::error("collection_id is null"),
-    };
-
-    let doc_id_str = match c_str_to_string(doc_id) {
-        Some(s) => s,
-        None => return FfiResult::error("doc_id is null"),
-    };
-
-    let relation_str = match c_str_to_string(relation) {
-        Some(s) => s,
-        None => return FfiResult::error("relation is null"),
-    };
+        NodePermission::DacRelationDelete
+    ));
+    let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
+    let target_str = try_ffi!(require_c_str(target_did, "target_did"));
+    let collection_id_str = try_ffi!(require_c_str(collection_id, "collection_id"));
+    let doc_id_str = try_ffi!(require_c_str(doc_id, "doc_id"));
+    let relation_str = try_ffi!(require_c_str(relation, "relation"));
 
     // Go checks collection name first (via GetCollectionByName)
     if collection_id_str.is_empty() {

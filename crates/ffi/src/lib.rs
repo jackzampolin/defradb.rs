@@ -39,6 +39,7 @@ pub mod block;
 pub mod collection;
 pub mod document;
 pub mod encrypted_index;
+pub mod helpers;
 pub mod index;
 pub mod lens;
 pub mod nac_check;
@@ -53,6 +54,8 @@ pub mod state;
 pub mod subscription;
 pub mod txn;
 pub mod types;
+
+pub use helpers::{get_node_database, get_node_runner, get_rt, require_c_str};
 
 use std::ffi::{c_char, CString};
 
@@ -74,6 +77,41 @@ macro_rules! get_runtime {
             }
         }
     };
+}
+
+/// Early-return on `Result<T, FfiResult>::Err`.
+#[macro_export]
+macro_rules! try_ffi {
+    ($expr:expr) => {
+        match $expr {
+            Ok(val) => val,
+            Err(e) => return e,
+        }
+    };
+}
+
+/// Run an async block, convert `Result<String, String>` to `FfiResult`.
+#[macro_export]
+macro_rules! ffi_async {
+    ($rt:expr, $body:block) => {{
+        let result: Result<String, String> = $rt.block_on(async $body);
+        match result {
+            Ok(json) => $crate::types::FfiResult::success(json),
+            Err(e) => $crate::types::FfiResult::error(e),
+        }
+    }};
+}
+
+/// Run an async block for void operations, convert `Result<(), String>` to `FfiResult`.
+#[macro_export]
+macro_rules! ffi_async_ok {
+    ($rt:expr, $body:block) => {{
+        let result: Result<(), String> = $rt.block_on(async $body);
+        match result {
+            Ok(()) => $crate::types::FfiResult::ok(),
+            Err(e) => $crate::types::FfiResult::error(e),
+        }
+    }};
 }
 
 // Re-export FFI functions at crate root

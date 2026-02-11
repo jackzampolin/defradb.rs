@@ -8,12 +8,12 @@ use std::sync::Arc;
 
 use acp::nac::NodePermission;
 
-use crate::get_runtime;
+use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::policy_yaml;
 use crate::state::{PolicyStore, NODES};
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{ffi_async, try_ffi, ERR_INVALID_NODE_HANDLE};
 
 /// Add a schema to the database.
 ///
@@ -39,17 +39,14 @@ pub unsafe extern "C" fn add_schema(
     identity_did: *const c_char,
     schema_sdl: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
-    {
-        return e;
-    }
-
-    let schema_str = match c_str_to_string(schema_sdl) {
-        Some(s) => s,
-        None => return FfiResult::error("schema_sdl is null"),
-    };
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionPatch
+    ));
+    let schema_str = try_ffi!(require_c_str(schema_sdl, "schema_sdl"));
 
     // Validate node handle and get both database and policy store
     let (database, policy_store) = match NODES.get(node_ptr, |state| {
@@ -59,7 +56,7 @@ pub unsafe extern "C" fn add_schema(
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         // Get existing collection names so the SDL parser can resolve external type references
         // (e.g., relations to already-created collections)
         let known_types: std::collections::HashSet<String> = database
@@ -98,13 +95,8 @@ pub unsafe extern "C" fn add_schema(
         let json = serde_json::to_string(&created_versions)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 /// Get all collections from the database.
@@ -119,19 +111,16 @@ pub unsafe extern "C" fn get_collections(
     node_ptr: usize,
     identity_did: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionGet
+    ));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionGet) {
-        return e;
-    }
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         // Return all collection versions from the system store (active + inactive + placeholders).
         // The Go wrapper handles IncludeInactive filtering on its side.
         let collections = database
@@ -143,13 +132,8 @@ pub unsafe extern "C" fn get_collections(
         let json = serde_json::to_string(&collections)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 /// Get all collection versions visible within a specific transaction.
@@ -166,23 +150,21 @@ pub unsafe extern "C" fn get_collections_in_txn(
     txn_id: *const c_char,
     identity_did: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionGet) {
-        return e;
-    }
-
-    let txn_str = match c_str_to_string(txn_id) {
-        Some(s) => s,
-        None => return FfiResult::error("txn_id is null"),
-    };
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionGet
+    ));
+    let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
 
     let registry = match NODES.get(node_ptr, |state| state.txn_registry.clone()) {
         Some(r) => r,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         let collections = registry
             .get_collections_in_txn(&txn_str)
             .await
@@ -191,13 +173,8 @@ pub unsafe extern "C" fn get_collections_in_txn(
         let json = serde_json::to_string(&collections)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 /// Validate that a collection's policy references a valid, well-formed policy.

@@ -6,11 +6,11 @@ use blockstore::{Blockstore, DefraBlockstore};
 use defra_core::Block;
 use p2p::sync::MergeHandler;
 
-use crate::get_runtime;
+use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::{P2PState, NODES};
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
 /// Sync collection versions (schema definitions) from connected peers via Bitswap.
 ///
@@ -31,21 +31,15 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
     identity_did: *const c_char,
     version_ids_json: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pCollectionCreate,
-    ) {
-        return e;
-    }
+        NodePermission::P2pCollectionCreate
+    ));
 
-    let version_ids_str = match c_str_to_string(version_ids_json) {
-        Some(s) => s,
-        None => return FfiResult::error("version_ids_json is null"),
-    };
+    let version_ids_str = try_ffi!(require_c_str(version_ids_json, "version_ids_json"));
 
     eprintln!(
         "[FFI-COLLECTION-VERSION] p2p_sync_collection_versions called with version_ids={}",

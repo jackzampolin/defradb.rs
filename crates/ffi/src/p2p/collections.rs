@@ -3,11 +3,11 @@ use std::ffi::c_char;
 use acp::nac::NodePermission;
 use p2p::topics::DefraTopic;
 
-use crate::get_runtime;
+use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
 use super::{parse_collections_json, persist_p2p_collections};
 
@@ -27,21 +27,15 @@ pub unsafe extern "C" fn p2p_create_collections(
     identity_did: *const c_char,
     collections_json: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pCollectionCreate,
-    ) {
-        return e;
-    }
+        NodePermission::P2pCollectionCreate
+    ));
 
-    let collections_str = match c_str_to_string(collections_json) {
-        Some(s) => s,
-        None => return FfiResult::error("collections_json is null"),
-    };
+    let collections_str = try_ffi!(require_c_str(collections_json, "collections_json"));
 
     let collections = match parse_collections_json(&collections_str) {
         Ok(c) => c,
@@ -109,21 +103,15 @@ pub unsafe extern "C" fn p2p_delete_collections(
     identity_did: *const c_char,
     collections_json: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pCollectionDelete,
-    ) {
-        return e;
-    }
+        NodePermission::P2pCollectionDelete
+    ));
 
-    let collections_str = match c_str_to_string(collections_json) {
-        Some(s) => s,
-        None => return FfiResult::error("collections_json is null"),
-    };
+    let collections_str = try_ffi!(require_c_str(collections_json, "collections_json"));
 
     let collections = match parse_collections_json(&collections_str) {
         Ok(c) => c,
@@ -181,16 +169,13 @@ pub unsafe extern "C" fn p2p_list_collections(
     node_ptr: usize,
     identity_did: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pCollectionList,
-    ) {
-        return e;
-    }
+        NodePermission::P2pCollectionList
+    ));
 
     let result = NODES
         .get(node_ptr, |state| {

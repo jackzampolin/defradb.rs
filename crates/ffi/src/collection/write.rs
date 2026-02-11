@@ -2,11 +2,10 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
-use crate::get_runtime;
+use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
-use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{ffi_async, try_ffi};
 
 /// Delete a collection by name.
 ///
@@ -31,37 +30,24 @@ pub unsafe extern "C" fn delete_collection(
     identity_did: *const c_char,
     name: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionPatch
+    ));
+    let name_str = try_ffi!(require_c_str(name, "name"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
-    {
-        return e;
-    }
-
-    let name_str = match c_str_to_string(name) {
-        Some(s) => s,
-        None => return FfiResult::error("name is null"),
-    };
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         database
             .delete_collection(&name_str)
             .await
             .map_err(|e| format!("failed to delete collection: {}", e))?;
 
-        Ok::<String, String>("{}".to_string())
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok("{}".to_string())
+    })
 }
 
 /// Set the active collection version.
@@ -88,37 +74,24 @@ pub unsafe extern "C" fn set_active_collection_version(
     identity_did: *const c_char,
     version_id: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionPatch
+    ));
+    let version_str = try_ffi!(require_c_str(version_id, "version_id"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
-    {
-        return e;
-    }
-
-    let version_str = match c_str_to_string(version_id) {
-        Some(s) => s,
-        None => return FfiResult::error("version_id is null"),
-    };
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         database
             .set_active_collection_version(&version_str)
             .await
             .map_err(|e| format!("failed to set active collection version: {}", e))?;
 
-        Ok::<String, String>("{}".to_string())
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok("{}".to_string())
+    })
 }
 
 /// Patch a collection's schema using JSON patch operations.
@@ -147,30 +120,18 @@ pub unsafe extern "C" fn patch_collection(
     collection_name: *const c_char,
     patch: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionPatch
+    ));
+    let name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+    let patch_str = try_ffi!(require_c_str(patch, "patch"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
-    {
-        return e;
-    }
-
-    let name_str = match c_str_to_string(collection_name) {
-        Some(s) => s,
-        None => return FfiResult::error("collection_name is null"),
-    };
-
-    let patch_str = match c_str_to_string(patch) {
-        Some(s) => s,
-        None => return FfiResult::error("patch is null"),
-    };
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         let updated_schema = database
             .patch_collection(&name_str, &patch_str)
             .await
@@ -179,13 +140,8 @@ pub unsafe extern "C" fn patch_collection(
         let json = serde_json::to_string(&updated_schema)
             .map_err(|e| format!("failed to serialize updated schema: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 /// Truncate a collection: delete all documents while preserving the schema.
@@ -212,40 +168,24 @@ pub unsafe extern "C" fn truncate_collection(
     identity_did: *const c_char,
     name: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::CollectionTruncate,
-    ) {
-        return e;
-    }
+        NodePermission::CollectionTruncate
+    ));
+    let name_str = try_ffi!(require_c_str(name, "name"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    let name_str = match c_str_to_string(name) {
-        Some(s) => s,
-        None => return FfiResult::error("name is null"),
-    };
-
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         database
             .truncate_collection(&name_str)
             .await
             .map_err(|e| format!("failed to truncate collection: {}", e))?;
 
-        Ok::<String, String>("{}".to_string())
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok("{}".to_string())
+    })
 }
 
 #[cfg(test)]

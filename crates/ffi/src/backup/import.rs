@@ -4,10 +4,10 @@ use std::fs;
 use serde_json::Value as JsonValue;
 
 use crate::document::json_to_graphql_input;
-use crate::get_runtime;
+use crate::helpers::{get_rt, require_c_str};
 use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{ffi_async_ok, try_ffi, ERR_INVALID_NODE_HANDLE};
 
 use super::classify_schema_fields;
 
@@ -29,12 +29,8 @@ use super::classify_schema_fields;
 /// `filepath` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn basic_import(node_ptr: usize, filepath: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    let path_str = match c_str_to_string(filepath) {
-        Some(s) => s,
-        None => return FfiResult::error("filepath is null"),
-    };
+    let rt = try_ffi!(get_rt());
+    let path_str = try_ffi!(require_c_str(filepath, "filepath"));
 
     let (database, runner) = match NODES.get(node_ptr, |state| {
         (state.database.clone(), state.query_runner.clone())
@@ -43,7 +39,7 @@ pub unsafe extern "C" fn basic_import(node_ptr: usize, filepath: *const c_char) 
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
-    let result = rt.block_on(async {
+    ffi_async_ok!(rt, {
         // Read file
         let content = fs::read_to_string(&path_str).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -54,8 +50,8 @@ pub unsafe extern "C" fn basic_import(node_ptr: usize, filepath: *const c_char) 
         })?;
 
         // Parse JSON
-        let parsed: JsonValue = serde_json::from_str(&content)
-            .map_err(|e| format!("failed to parse JSON: {}", e))?;
+        let parsed: JsonValue =
+            serde_json::from_str(&content).map_err(|e| format!("failed to parse JSON: {}", e))?;
 
         // Must be an object at root level
         let root = match parsed.as_object() {
@@ -178,9 +174,7 @@ pub unsafe extern "C" fn basic_import(node_ptr: usize, filepath: *const c_char) 
                     let err_msg = errs.join("; ");
                     // Match Go's error format for duplicate documents
                     if err_msg.contains("already exists") {
-                        return Err(
-                            "a document with the given ID already exists".to_string()
-                        );
+                        return Err("a document with the given ID already exists".to_string());
                     }
                     return Err(format!(
                         "failed to create document in '{}': {}",
@@ -201,9 +195,7 @@ pub unsafe extern "C" fn basic_import(node_ptr: usize, filepath: *const c_char) 
                         .and_then(|arr| arr.first())
                         .and_then(|v| v.get("_docID"))
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            "failed to get _docID from create response".to_string()
-                        })?;
+                        .ok_or_else(|| "failed to get _docID from create response".to_string())?;
 
                     // Build update mutation with self-ref FK fields
                     let mut update_parts = Vec::new();
@@ -238,13 +230,8 @@ pub unsafe extern "C" fn basic_import(node_ptr: usize, filepath: *const c_char) 
             }
         }
 
-        Ok::<(), String>(())
-    });
-
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(())
+    })
 }
 
 #[cfg(test)]

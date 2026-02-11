@@ -3,11 +3,11 @@ use std::ffi::c_char;
 use acp::nac::NodePermission;
 use p2p::topics::DefraTopic;
 
-use crate::get_runtime;
+use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
 use super::{parse_doc_ids_json, persist_p2p_documents};
 
@@ -27,21 +27,15 @@ pub unsafe extern "C" fn p2p_create_documents(
     identity_did: *const c_char,
     doc_ids_json: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pDocumentCreate,
-    ) {
-        return e;
-    }
+        NodePermission::P2pDocumentCreate
+    ));
 
-    let doc_ids_str = match c_str_to_string(doc_ids_json) {
-        Some(s) => s,
-        None => return FfiResult::error("doc_ids_json is null"),
-    };
+    let doc_ids_str = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
 
     let doc_ids = match parse_doc_ids_json(&doc_ids_str) {
         Ok(d) => d,
@@ -106,21 +100,15 @@ pub unsafe extern "C" fn p2p_delete_documents(
     identity_did: *const c_char,
     doc_ids_json: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pDocumentDelete,
-    ) {
-        return e;
-    }
+        NodePermission::P2pDocumentDelete
+    ));
 
-    let doc_ids_str = match c_str_to_string(doc_ids_json) {
-        Some(s) => s,
-        None => return FfiResult::error("doc_ids_json is null"),
-    };
+    let doc_ids_str = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
 
     let doc_ids = match parse_doc_ids_json(&doc_ids_str) {
         Ok(d) => d,
@@ -175,12 +163,13 @@ pub unsafe extern "C" fn p2p_list_documents(
     node_ptr: usize,
     identity_did: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::P2pDocumentList)
-    {
-        return e;
-    }
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::P2pDocumentList
+    ));
 
     let result = NODES
         .get(node_ptr, |state| {

@@ -3,11 +3,10 @@ use std::ffi::c_char;
 use acp::nac::NodePermission;
 
 use super::select_to_go_json;
-use crate::get_runtime;
+use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
-use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::{ffi_async, try_ffi};
 
 /// Add a view to the database.
 ///
@@ -36,32 +35,19 @@ pub unsafe extern "C" fn add_view(
     sdl: *const c_char,
     transform: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
-    {
-        return e;
-    }
-
-    let query_str = match c_str_to_string(gql_query) {
-        Some(s) => s,
-        None => return FfiResult::error("gql_query is null"),
-    };
-
-    let sdl_str = match c_str_to_string(sdl) {
-        Some(s) => s,
-        None => return FfiResult::error("sdl is null"),
-    };
-
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionPatch
+    ));
+    let query_str = try_ffi!(require_c_str(gql_query, "gql_query"));
+    let sdl_str = try_ffi!(require_c_str(sdl, "sdl"));
     let transform_opt = c_str_to_string(transform);
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         // Get existing collection names so the SDL parser can resolve external type references
         let known_types: std::collections::HashSet<String> = database
             .list_collections()
@@ -139,13 +125,8 @@ pub unsafe extern "C" fn add_view(
         let json = serde_json::to_string(&created_versions)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 /// Refresh view caches.
@@ -167,12 +148,8 @@ pub unsafe extern "C" fn add_view(
 /// `options` must be null or a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn refresh_views(node_ptr: usize, options: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
+    let rt = try_ffi!(get_rt());
+    let database = try_ffi!(get_node_database(node_ptr));
 
     // Parse options if provided
     let refresh_options = if let Some(opts_str) = c_str_to_string(options) {
@@ -192,19 +169,14 @@ pub unsafe extern "C" fn refresh_views(node_ptr: usize, options: *const c_char) 
         None
     };
 
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         database
             .refresh_views(refresh_options)
             .await
             .map_err(|e| format!("failed to refresh views: {}", e))?;
 
-        Ok::<String, String>("{}".to_string())
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok("{}".to_string())
+    })
 }
 
 #[cfg(test)]

@@ -3,11 +3,11 @@ use std::ffi::c_char;
 use acp::nac::NodePermission;
 
 use super::normalize_auth_error;
-use crate::get_runtime;
+use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::{ffi_async, ffi_async_ok, try_ffi, ERR_INVALID_NODE_HANDLE};
 
 /// Get the current NAC status.
 ///
@@ -28,30 +28,26 @@ use crate::ERR_INVALID_NODE_HANDLE;
 /// Caller must ensure all pointer arguments are valid, non-null, and point to valid C strings.
 #[no_mangle]
 pub unsafe extern "C" fn get_nac_status(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::NacStatus
+    ));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::NacStatus) {
-        return e;
-    }
-
-    // Validate node handle before entering async block
     let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
         Some(m) => m,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         let info = nac_manager.info().await;
         let json = serde_json::to_string(&info)
             .map_err(|e| format!("failed to serialize NAC info: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 /// Temporarily disable NAC.
@@ -63,20 +59,15 @@ pub unsafe extern "C" fn get_nac_status(node_ptr: usize, identity_did: *const c_
 /// `requestor_did` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
 
-    let requestor_str = match c_str_to_string(requestor_did) {
-        Some(s) => s,
-        None => return FfiResult::error("requestor_did is null"),
-    };
-
-    // Validate node handle before entering async block
     let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
         Some(m) => m,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
-    let result = rt.block_on(async {
+    ffi_async_ok!(rt, {
         // Check NAC state before validating DID (Go checks state first)
         let status = nac_manager.status().await;
         if status == acp::nac::NacStatus::NotConfigured {
@@ -99,13 +90,8 @@ pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_ch
             .await
             .map_err(|e| normalize_auth_error(e.to_string(), "nac-disable"))?;
 
-        Ok::<(), String>(())
-    });
-
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(())
+    })
 }
 
 /// Re-enable NAC after temporary disable.
@@ -117,20 +103,15 @@ pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_ch
 /// `requestor_did` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
 
-    let requestor_str = match c_str_to_string(requestor_did) {
-        Some(s) => s,
-        None => return FfiResult::error("requestor_did is null"),
-    };
-
-    // Validate node handle before entering async block
     let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
         Some(m) => m,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
-    let result = rt.block_on(async {
+    ffi_async_ok!(rt, {
         // Check NAC state before validating DID (Go checks state first)
         let status = nac_manager.status().await;
         if status == acp::nac::NacStatus::NotConfigured {
@@ -167,13 +148,8 @@ pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_
             .await
             .map_err(|e| normalize_auth_error(e.to_string(), "nac-re-enable"))?;
 
-        Ok::<(), String>(())
-    });
-
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(())
+    })
 }
 
 /// Enable NAC with the given owner identity.
@@ -186,20 +162,15 @@ pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_
 /// `owner_did` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn enable_nac(node_ptr: usize, owner_did: *const c_char) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    let owner_str = try_ffi!(require_c_str(owner_did, "owner_did"));
 
-    let owner_str = match c_str_to_string(owner_did) {
-        Some(s) => s,
-        None => return FfiResult::error("owner_did is null"),
-    };
-
-    // Validate node handle before entering async block
     let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
         Some(m) => m,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
-    let result = rt.block_on(async {
+    ffi_async_ok!(rt, {
         let owner = identity::Did::new(&owner_str)
             .map_err(|e| format!("invalid DID '{}': {}", owner_str, e))?;
 
@@ -208,13 +179,8 @@ pub unsafe extern "C" fn enable_nac(node_ptr: usize, owner_did: *const c_char) -
             .await
             .map_err(|e| format!("failed to enable NAC: {}", e))?;
 
-        Ok::<(), String>(())
-    });
-
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(())
+    })
 }
 
 /// Valid NAC relation names (from the NAC policy).
@@ -245,30 +211,22 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
     relation: *const c_char,
     target_did: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    let requestor_str = match c_str_to_string(requestor_did) {
-        Some(s) => s,
-        None => return FfiResult::error("requestor_did is null"),
-    };
+    let rt = try_ffi!(get_rt());
+    let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
 
     let relation_str = match c_str_to_string(relation) {
         Some(s) if !s.is_empty() => s,
-        _ => "admin".to_string(), // default to admin for backward compat
+        _ => "admin".to_string(),
     };
 
-    let target_str = match c_str_to_string(target_did) {
-        Some(s) => s,
-        None => return FfiResult::error("target_did is null"),
-    };
+    let target_str = try_ffi!(require_c_str(target_did, "target_did"));
 
-    // Validate node handle before entering async block
     let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
         Some(m) => m,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         // Check NAC state before validating DID (Go checks state first)
         let status = nac_manager.status().await;
         if status == acp::nac::NacStatus::NotConfigured {
@@ -341,13 +299,8 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
         };
 
         let json = serde_json::json!({ "added": added }).to_string();
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 /// Delete a NAC actor relationship.
@@ -369,30 +322,22 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
     relation: *const c_char,
     target_did: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    let requestor_str = match c_str_to_string(requestor_did) {
-        Some(s) => s,
-        None => return FfiResult::error("requestor_did is null"),
-    };
+    let rt = try_ffi!(get_rt());
+    let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
 
     let relation_str = match c_str_to_string(relation) {
         Some(s) if !s.is_empty() => s,
-        _ => "admin".to_string(), // default to admin for backward compat
+        _ => "admin".to_string(),
     };
 
-    let target_str = match c_str_to_string(target_did) {
-        Some(s) => s,
-        None => return FfiResult::error("target_did is null"),
-    };
+    let target_str = try_ffi!(require_c_str(target_did, "target_did"));
 
-    // Validate node handle before entering async block
     let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
         Some(m) => m,
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         // Check NAC state before validating DID (Go checks state first)
         let status = nac_manager.status().await;
         if status == acp::nac::NacStatus::NotConfigured {
@@ -465,13 +410,8 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
         };
 
         let json = serde_json::json!({ "deleted": deleted }).to_string();
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 #[cfg(test)]

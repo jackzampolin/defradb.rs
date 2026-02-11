@@ -1,9 +1,8 @@
 use std::ffi::c_char;
 
-use crate::get_runtime;
-use crate::state::NODES;
+use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::{ffi_async, try_ffi};
 
 /// List encrypted indexes for a collection.
 ///
@@ -16,42 +15,24 @@ pub unsafe extern "C" fn list_encrypted_indexes(
     identity_did: *const c_char,
     collection_name: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
+    let rt = try_ffi!(get_rt());
     let _identity = c_str_to_string(identity_did);
+    let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    let collection_name_str = match c_str_to_string(collection_name) {
-        Some(s) => s,
-        None => return FfiResult::error("collection_name is null"),
-    };
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
-        // Get the collection
+    ffi_async!(rt, {
         let collection = database
             .get_collection(&collection_name_str)
             .map_err(|e| format!("failed to get collection: {}", e))?
             .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
 
-        // Get encrypted indexes from the collection schema
         let encrypted_indexes = &collection.schema().encrypted_indexes;
 
-        // Return JSON array
         let json = serde_json::to_string(encrypted_indexes)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 /// List all encrypted indexes across all collections.
@@ -64,23 +45,15 @@ pub unsafe extern "C" fn list_all_encrypted_indexes(
     node_ptr: usize,
     identity_did: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
+    let rt = try_ffi!(get_rt());
     let _identity = c_str_to_string(identity_did);
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
-        // Get all collection names
+    ffi_async!(rt, {
         let names = database
             .list_collections()
             .map_err(|e| format!("failed to list collections: {}", e))?;
 
-        // Build a map of collection name -> encrypted indexes
         let mut all_encrypted_indexes: std::collections::HashMap<
             String,
             Vec<schema::EncryptedIndexDescription>,
@@ -101,17 +74,11 @@ pub unsafe extern "C" fn list_all_encrypted_indexes(
             }
         }
 
-        // Return JSON object
         let json = serde_json::to_string(&all_encrypted_indexes)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 #[cfg(test)]

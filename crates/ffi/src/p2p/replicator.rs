@@ -6,11 +6,11 @@ use p2p::topics::DefraTopic;
 use p2p::ReplicatorInfo;
 use storage::stores::Peerstore;
 
-use crate::get_runtime;
+use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
 use super::{parse_collections_json, parse_multiaddr_with_peer_id};
 
@@ -32,25 +32,16 @@ pub unsafe extern "C" fn p2p_create_replicator(
     peer_addr: *const c_char,
     collections_json: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pReplicatorCreate,
-    ) {
-        return e;
-    }
+        NodePermission::P2pReplicatorCreate
+    ));
 
-    let addr_str = match c_str_to_string(peer_addr) {
-        Some(s) => s,
-        None => return FfiResult::error("peer_addr is null"),
-    };
-    let collections_str = match c_str_to_string(collections_json) {
-        Some(s) => s,
-        None => return FfiResult::error("collections_json is null"),
-    };
+    let addr_str = try_ffi!(require_c_str(peer_addr, "peer_addr"));
+    let collections_str = try_ffi!(require_c_str(collections_json, "collections_json"));
     let collections = match parse_collections_json(&collections_str) {
         Ok(c) => c,
         Err(e) => return FfiResult::error(e),
@@ -143,21 +134,15 @@ pub unsafe extern "C" fn p2p_delete_replicator(
     peer_id_str: *const c_char,
     collections_json: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pReplicatorDelete,
-    ) {
-        return e;
-    }
+        NodePermission::P2pReplicatorDelete
+    ));
 
-    let peer_str = match c_str_to_string(peer_id_str) {
-        Some(s) => s,
-        None => return FfiResult::error("peer_id_str is null"),
-    };
+    let peer_str = try_ffi!(require_c_str(peer_id_str, "peer_id_str"));
     let collections: Vec<String> = if !collections_json.is_null() {
         match c_str_to_string(collections_json) {
             Some(s) if !s.is_empty() && s != "[]" => serde_json::from_str(&s).unwrap_or_default(),
@@ -226,16 +211,13 @@ pub unsafe extern "C" fn p2p_list_replicators(
     node_ptr: usize,
     identity_did: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pReplicatorList,
-    ) {
-        return e;
-    }
+        NodePermission::P2pReplicatorList
+    ));
 
     let result = NODES
         .get(node_ptr, |state| {

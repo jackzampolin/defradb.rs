@@ -5,10 +5,10 @@ use defra_core::Block;
 use p2p::message::PushLogRequest;
 use storage::corekv::IterOptions;
 
-use crate::get_runtime;
+use crate::helpers::get_rt;
 use crate::state::NODES;
 use crate::types::FfiResult;
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
 /// Push existing documents to a replicator peer.
 ///
@@ -306,7 +306,7 @@ pub(crate) async fn push_existing_docs(
 /// `node_ptr` must be a valid node handle.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_retry_replicators(node_ptr: usize) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
 
     let result = NODES
         .get(node_ptr, |state| {

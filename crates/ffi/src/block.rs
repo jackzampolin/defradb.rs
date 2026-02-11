@@ -7,11 +7,11 @@ use std::ffi::c_char;
 use acp::nac::NodePermission;
 use acp::{DocumentPermission, Identity};
 
-use crate::get_runtime;
+use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
 /// Verify the signature of a block.
 ///
@@ -38,28 +38,21 @@ pub unsafe extern "C" fn block_verify_signature(
     block_cid: *const c_char,
     identity_did: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    // Check NAC permission for signature verification
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::SignatureVerify)
-    {
-        return e;
-    }
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::SignatureVerify
+    ));
 
     let key_type_str = match c_str_to_string(key_type) {
         Some(s) if !s.is_empty() => s,
         _ => "secp256k1".to_string(),
     };
 
-    let pub_key_str = match c_str_to_string(public_key) {
-        Some(s) => s,
-        None => return FfiResult::error("public_key is null"),
-    };
-
-    let cid_str = match c_str_to_string(block_cid) {
-        Some(s) => s,
-        None => return FfiResult::error("block_cid is null"),
-    };
+    let pub_key_str = try_ffi!(require_c_str(public_key, "public_key"));
+    let cid_str = try_ffi!(require_c_str(block_cid, "block_cid"));
 
     // Get database and document_acp from node state
     let (database, document_acp) = match NODES.get(node_ptr, |state| {

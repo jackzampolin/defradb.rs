@@ -2,10 +2,9 @@ use std::ffi::c_char;
 
 use storage::corekv::Key;
 
-use crate::get_runtime;
-use crate::state::NODES;
+use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::{ffi_async, try_ffi};
 
 /// Create a new encrypted index on a collection field.
 ///
@@ -19,27 +18,13 @@ pub unsafe extern "C" fn create_encrypted_index(
     collection_name: *const c_char,
     field_name: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
+    let rt = try_ffi!(get_rt());
     let _identity = c_str_to_string(identity_did);
+    let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+    let field_name_str = try_ffi!(require_c_str(field_name, "field_name"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    let collection_name_str = match c_str_to_string(collection_name) {
-        Some(s) => s,
-        None => return FfiResult::error("collection_name is null"),
-    };
-
-    let field_name_str = match c_str_to_string(field_name) {
-        Some(s) => s,
-        None => return FfiResult::error("field_name is null"),
-    };
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         // Get the collection
         let collection = database
             .get_collection(&collection_name_str)
@@ -121,13 +106,8 @@ pub unsafe extern "C" fn create_encrypted_index(
         let json = serde_json::to_string(&enc_idx)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 /// Delete an encrypted index from a collection.
@@ -142,27 +122,13 @@ pub unsafe extern "C" fn delete_encrypted_index(
     collection_name: *const c_char,
     field_name: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
+    let rt = try_ffi!(get_rt());
     let _identity = c_str_to_string(identity_did);
+    let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+    let field_name_str = try_ffi!(require_c_str(field_name, "field_name"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    let collection_name_str = match c_str_to_string(collection_name) {
-        Some(s) => s,
-        None => return FfiResult::error("collection_name is null"),
-    };
-
-    let field_name_str = match c_str_to_string(field_name) {
-        Some(s) => s,
-        None => return FfiResult::error("field_name is null"),
-    };
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         // Get the collection
         let collection = database
             .get_collection(&collection_name_str)
@@ -230,13 +196,8 @@ pub unsafe extern "C" fn delete_encrypted_index(
             .await
             .map_err(|e| format!("failed to reload cache: {}", e))?;
 
-        Ok::<String, String>("{}".to_string())
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok("{}".to_string())
+    })
 }
 
 #[cfg(test)]
@@ -377,7 +338,8 @@ mod tests {
         let error = unsafe { std::ffi::CStr::from_ptr(result.error).to_string_lossy() };
         assert!(
             error.contains("non-existent field"),
-            "should contain error message, got: {}", error
+            "should contain error message, got: {}",
+            error
         );
         unsafe { crate::types::defra_free_string(result.error) };
 

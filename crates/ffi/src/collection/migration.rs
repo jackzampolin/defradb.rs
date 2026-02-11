@@ -2,11 +2,11 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
-use crate::get_runtime;
+use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{ffi_async, try_ffi, ERR_INVALID_NODE_HANDLE};
 
 /// Set migration for collection versions.
 ///
@@ -35,25 +35,17 @@ pub unsafe extern "C" fn set_migration(
     identity_did: *const c_char,
     config: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionPatch
+    ));
+    let config_str = try_ffi!(require_c_str(config, "config"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
-    {
-        return e;
-    }
-
-    let config_str = match c_str_to_string(config) {
-        Some(s) => s,
-        None => return FfiResult::error("config is null"),
-    };
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         // Parse the LensConfig from JSON
         let lens_config: lens::LensConfig = serde_json::from_str(&config_str)
             .map_err(|e| format!("failed to parse lens config: {}", e))?;
@@ -64,13 +56,8 @@ pub unsafe extern "C" fn set_migration(
             .await
             .map_err(|e| format!("failed to set migration: {}", e))?;
 
-        Ok::<String, String>(transform_id.to_string())
-    });
-
-    match result {
-        Ok(transform_id) => FfiResult::success(&transform_id),
-        Err(e) => FfiResult::error(&e),
-    }
+        Ok(transform_id.to_string())
+    })
 }
 
 /// Set a migration within an existing transaction.
@@ -100,22 +87,15 @@ pub unsafe extern "C" fn set_migration_in_txn(
     identity_did: *const c_char,
     config: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
-    {
-        return e;
-    }
-
-    let txn_str = match c_str_to_string(txn_id) {
-        Some(s) => s,
-        None => return FfiResult::error("txn_id is null"),
-    };
-
-    let config_str = match c_str_to_string(config) {
-        Some(s) => s,
-        None => return FfiResult::error("config is null"),
-    };
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionPatch
+    ));
+    let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
+    let config_str = try_ffi!(require_c_str(config, "config"));
 
     // Get the transaction registry
     let registry = match NODES.get(node_ptr, |state| state.txn_registry.clone()) {
@@ -123,7 +103,7 @@ pub unsafe extern "C" fn set_migration_in_txn(
         None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
     };
 
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         // Parse the LensConfig from JSON
         let lens_config: lens::LensConfig = serde_json::from_str(&config_str)
             .map_err(|e| format!("failed to parse lens config: {}", e))?;
@@ -134,13 +114,8 @@ pub unsafe extern "C" fn set_migration_in_txn(
             .await
             .map_err(|e| format!("failed to set migration in txn: {}", e))?;
 
-        Ok::<String, String>(transform_id.to_string())
-    });
-
-    match result {
-        Ok(transform_id) => FfiResult::success(&transform_id),
-        Err(e) => FfiResult::error(&e),
-    }
+        Ok(transform_id.to_string())
+    })
 }
 
 /// Delete multiple collection versions by their version IDs.
@@ -167,24 +142,17 @@ pub unsafe extern "C" fn delete_collection_versions(
     identity_did: *const c_char,
     version_ids_json: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::CollectionPatch
+    ));
+    let ids_str = try_ffi!(require_c_str(version_ids_json, "version_ids_json"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::CollectionPatch)
-    {
-        return e;
-    }
-
-    let ids_str = match c_str_to_string(version_ids_json) {
-        Some(s) => s,
-        None => return FfiResult::error("version_ids_json is null"),
-    };
-
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         let version_ids: Vec<String> = serde_json::from_str(&ids_str)
             .map_err(|e| format!("failed to parse version IDs JSON: {}", e))?;
 
@@ -193,11 +161,6 @@ pub unsafe extern "C" fn delete_collection_versions(
             .await
             .map_err(|e| format!("failed to delete collection versions: {}", e))?;
 
-        Ok::<String, String>("{}".to_string())
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok("{}".to_string())
+    })
 }

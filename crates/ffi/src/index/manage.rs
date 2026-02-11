@@ -4,11 +4,10 @@ use acp::nac::NodePermission;
 use db::collection_short_id;
 use storage::corekv::Key;
 
-use crate::get_runtime;
+use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
-use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{ffi_async, try_ffi};
 
 /// Drop an index from a collection.
 ///
@@ -32,29 +31,18 @@ pub unsafe extern "C" fn drop_index(
     collection_name: *const c_char,
     index_name: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::IndexDrop
+    ));
+    let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+    let index_name_str = try_ffi!(require_c_str(index_name, "index_name"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::IndexDrop) {
-        return e;
-    }
-
-    let collection_name_str = match c_str_to_string(collection_name) {
-        Some(s) => s,
-        None => return FfiResult::error("collection_name is null"),
-    };
-
-    let index_name_str = match c_str_to_string(index_name) {
-        Some(s) => s,
-        None => return FfiResult::error("index_name is null"),
-    };
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         // Get the collection
         let collection = database
             .get_collection(&collection_name_str)
@@ -133,13 +121,8 @@ pub unsafe extern "C" fn drop_index(
             .await
             .map_err(|e| format!("failed to reload cache: {}", e))?;
 
-        Ok::<String, String>("{}".to_string())
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok("{}".to_string())
+    })
 }
 
 /// Get all indexes for a collection.
@@ -162,24 +145,17 @@ pub unsafe extern "C" fn get_indexes(
     identity_did: *const c_char,
     collection_name: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::IndexList
+    ));
+    let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::IndexList) {
-        return e;
-    }
-
-    let collection_name_str = match c_str_to_string(collection_name) {
-        Some(s) => s,
-        None => return FfiResult::error("collection_name is null"),
-    };
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         // Get the collection
         let collection = database
             .get_collection(&collection_name_str)
@@ -193,13 +169,8 @@ pub unsafe extern "C" fn get_indexes(
         let json = serde_json::to_string(&indexes)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 /// Get all indexes across all collections.
@@ -220,19 +191,16 @@ pub unsafe extern "C" fn get_all_indexes(
     node_ptr: usize,
     identity_did: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::IndexList
+    ));
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::IndexList) {
-        return e;
-    }
-
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         // Get all collection names
         let names = database
             .list_collections()
@@ -261,13 +229,8 @@ pub unsafe extern "C" fn get_all_indexes(
         let json = serde_json::to_string(&all_indexes)
             .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 #[cfg(test)]

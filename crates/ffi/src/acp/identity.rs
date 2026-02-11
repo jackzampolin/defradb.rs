@@ -2,10 +2,9 @@ use std::ffi::c_char;
 
 use identity::Identity;
 
-use crate::get_runtime;
-use crate::state::NODES;
+use crate::helpers::{get_node_database, get_rt};
 use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::{ffi_async, try_ffi};
 
 /// Get the node's identity (DID).
 ///
@@ -17,15 +16,10 @@ use crate::ERR_INVALID_NODE_HANDLE;
 /// Returns an error if no node identity is configured.
 #[no_mangle]
 pub extern "C" fn get_node_identity(node_ptr: usize) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
+    let rt = try_ffi!(get_rt());
+    let database = try_ffi!(get_node_database(node_ptr));
 
-    // Validate node handle before entering async block
-    let database = match NODES.get(node_ptr, |state| state.database.clone()) {
-        Some(db) => db,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
-
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         let identity = database
             .node_identity()
             .ok_or_else(|| "node identity not configured".to_string())?;
@@ -35,13 +29,8 @@ pub extern "C" fn get_node_identity(node_ptr: usize) -> FfiResult {
             .map_err(|e| format!("failed to get DID: {}", e))?;
 
         let json = serde_json::json!({ "did": did.to_string() }).to_string();
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
 
 /// Register an existing identity for block signing.

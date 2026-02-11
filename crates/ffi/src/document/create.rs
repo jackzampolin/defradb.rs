@@ -3,11 +3,10 @@ use std::ffi::c_char;
 use acp::nac::NodePermission;
 use serde_json::Value as JsonValue;
 
-use crate::get_runtime;
+use crate::helpers::{get_node_runner, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
-use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::types::FfiResult;
+use crate::{ffi_async, try_ffi};
 
 /// Convert a JSON value to GraphQL input syntax.
 ///
@@ -75,21 +74,15 @@ pub unsafe extern "C" fn collection_create(
     collection_name: *const c_char,
     json_data: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, NodePermission::DocumentUpdate) {
-        return e;
-    }
-
-    let collection = match c_str_to_string(collection_name) {
-        Some(s) => s,
-        None => return FfiResult::error("collection_name is null"),
-    };
-
-    let json_str = match c_str_to_string(json_data) {
-        Some(s) => s,
-        None => return FfiResult::error("json_data is null"),
-    };
+    let rt = try_ffi!(get_rt());
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::DocumentUpdate
+    ));
+    let collection = try_ffi!(require_c_str(collection_name, "collection_name"));
+    let json_str = try_ffi!(require_c_str(json_data, "json_data"));
 
     // Parse JSON to detect array vs object
     let parsed: JsonValue = match serde_json::from_str(&json_str) {
@@ -113,18 +106,12 @@ pub unsafe extern "C" fn collection_create(
         return FfiResult::error("json_data must be an object or array of objects");
     };
 
-    // Get the query runner from the node
-    let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
-        Some(r) => r,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
+    let runner = try_ffi!(get_node_runner(node_ptr));
 
-    // Execute the mutation
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         let request = query::QueryRequest::new(mutation);
         let response = runner.execute(request).await;
 
-        // Check for errors in the response
         if !response.errors.is_empty() {
             let error_msg = response
                 .errors
@@ -132,18 +119,12 @@ pub unsafe extern "C" fn collection_create(
                 .map(|e| e.message.clone())
                 .collect::<Vec<_>>()
                 .join("; ");
-            return Err(error_msg);
+            return Err(format!("mutation failed: {}", error_msg));
         }
 
-        // Serialize the data
         serde_json::to_string(&response.data)
             .map_err(|e| format!("failed to serialize response: {}", e))
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(format!("mutation failed: {}", e)),
-    }
+    })
 }
 
 #[cfg(test)]

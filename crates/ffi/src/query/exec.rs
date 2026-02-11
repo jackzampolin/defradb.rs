@@ -1,10 +1,10 @@
 use std::ffi::c_char;
 
-use crate::get_runtime;
+use crate::helpers::{get_node_runner, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::{GraphQLSubscriptionState, GRAPHQL_SUBSCRIPTIONS, NODES};
 use crate::types::{c_str_to_string, FfiResult};
-use crate::ERR_INVALID_NODE_HANDLE;
+use crate::{ffi_async, try_ffi, ERR_INVALID_NODE_HANDLE};
 
 use super::{
     check_and_set_dac_bypass, extract_doc_id_from_query, is_commits_subscription,
@@ -41,17 +41,11 @@ pub unsafe extern "C" fn exec_request(
     operation_name: *const c_char,
     variables: *const c_char,
 ) -> FfiResult {
-    let rt = get_runtime!(FfiResult);
-
-    let query_str = match c_str_to_string(request_query) {
-        Some(s) => s,
-        None => return FfiResult::error("request_query is null"),
-    };
+    let rt = try_ffi!(get_rt());
+    let query_str = try_ffi!(require_c_str(request_query, "request_query"));
 
     let permission = nac_permission_for_query(&query_str);
-    if let Err(e) = check_nac_for_node(rt, node_ptr, identity_did, permission) {
-        return e;
-    }
+    try_ffi!(check_nac_for_node(rt, node_ptr, identity_did, permission));
 
     let identity_str = c_str_to_string(identity_did);
     let op_name = c_str_to_string(operation_name);
@@ -244,13 +238,9 @@ pub unsafe extern "C" fn exec_request(
         }
     }
 
-    // Validate node handle before entering async block
-    let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
-        Some(r) => r,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
+    let runner = try_ffi!(get_node_runner(node_ptr));
 
-    let result = rt.block_on(async {
+    ffi_async!(rt, {
         // Build request
         let mut request = query::QueryRequest::new(query_str);
         if did.is_some() {
@@ -272,11 +262,6 @@ pub unsafe extern "C" fn exec_request(
         let json = serde_json::to_string(&response)
             .map_err(|e| format!("failed to serialize response: {}", e))?;
 
-        Ok::<String, String>(json)
-    });
-
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
-    }
+        Ok(json)
+    })
 }
