@@ -76,7 +76,26 @@ pub async fn go_list_encrypted_indexes(
     })?;
 
     let indexes = ops
-        .list_encrypted_indexes(&collection)
+        .list_encrypted_indexes(Some(&collection))
+        .await
+        .map_err(HttpError::Internal)?;
+
+    Ok(Json(indexes))
+}
+
+/// List all encrypted indexes across all collections (Go-compatible route).
+///
+/// GET /api/v0/encrypted-indexes
+pub async fn go_list_all_encrypted_indexes(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<Vec<EncryptedIndexInfo>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::IndexList).await?;
+
+    let ops = state.require_encrypted_index()?;
+
+    let indexes = ops
+        .list_encrypted_indexes(None)
         .await
         .map_err(HttpError::Internal)?;
 

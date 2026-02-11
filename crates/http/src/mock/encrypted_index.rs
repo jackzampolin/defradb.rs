@@ -20,6 +20,7 @@ impl EncryptedIndexOperations for MockEncryptedIndexOperations {
         field_name: &str,
     ) -> Result<EncryptedIndexInfo, String> {
         Ok(EncryptedIndexInfo {
+            collection: _collection.to_string(),
             field_name: field_name.to_string(),
             index_type: "equality".to_string(),
         })
@@ -27,7 +28,7 @@ impl EncryptedIndexOperations for MockEncryptedIndexOperations {
 
     async fn list_encrypted_indexes(
         &self,
-        _collection: &str,
+        _collection: Option<&str>,
     ) -> Result<Vec<EncryptedIndexInfo>, String> {
         Ok(vec![])
     }

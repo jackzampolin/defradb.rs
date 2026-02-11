@@ -121,9 +121,7 @@ impl AppState {
     /// Get block operations or return ServiceUnavailable error.
     pub fn require_block(&self) -> Result<&Arc<dyn BlockOperations>, crate::error::HttpError> {
         self.block.as_ref().ok_or_else(|| {
-            crate::error::HttpError::ServiceUnavailable(
-                "Block operations are not enabled.".into(),
-            )
+            crate::error::HttpError::ServiceUnavailable("Block operations are not enabled.".into())
         })
     }
 

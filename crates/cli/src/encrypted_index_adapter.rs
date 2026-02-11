@@ -31,6 +31,7 @@ impl<S: Store + 'static> EncryptedIndexOperations for EncryptedIndexAdapter<S> {
             .ok_or_else(|| format!("collection '{}' not found", collection))?;
 
         Ok(EncryptedIndexInfo {
+            collection: collection.to_string(),
             field_name: field_name.to_string(),
             index_type: "equality".to_string(),
         })
@@ -38,14 +39,16 @@ impl<S: Store + 'static> EncryptedIndexOperations for EncryptedIndexAdapter<S> {
 
     async fn list_encrypted_indexes(
         &self,
-        collection: &str,
+        collection: Option<&str>,
     ) -> Result<Vec<EncryptedIndexInfo>, String> {
-        // Verify collection exists
-        let _col = self
-            .database
-            .get_collection(collection)
-            .map_err(|e| format!("{}", e))?
-            .ok_or_else(|| format!("collection '{}' not found", collection))?;
+        if let Some(name) = collection {
+            // Verify collection exists
+            let _col = self
+                .database
+                .get_collection(name)
+                .map_err(|e| format!("{}", e))?
+                .ok_or_else(|| format!("collection '{}' not found", name))?;
+        }
 
         Ok(vec![])
     }
