@@ -113,7 +113,6 @@ pub struct P2PAdapter<
     // Used by Phases 2-6 (connect_peer, add_replicator, add_documents, etc.)
     #[allow(dead_code)]
     event_bus: Option<Arc<dyn events::Bus>>,
-    #[allow(dead_code)]
     peer_addresses: Arc<std::sync::RwLock<HashMap<String, String>>>,
     #[allow(dead_code)]
     tracked_documents: Arc<std::sync::RwLock<HashSet<String>>>,
@@ -288,27 +287,65 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn connected_peers(&self) -> Result<Vec<String>, String> {
-        self.handle
+        let connected = self
+            .handle
             .connected_peers()
             .await
-            .map(|peers| peers.into_iter().map(|p| p.to_string()).collect())
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+
+        let mut host_addrs = Vec::new();
+        let mut covered = HashSet::new();
+
+        // Retry peer_addresses() up to 5 times (matching FFI behavior)
+        for attempt in 0..5 {
+            host_addrs = self
+                .handle
+                .peer_addresses()
+                .await
+                .map_err(|e| format!("failed to get peer addresses: {}", e))?;
+
+            covered.clear();
+            for addr_str in &host_addrs {
+                if let Some(pid) = addr_str.rsplit("/p2p/").next() {
+                    covered.insert(pid.to_string());
+                }
+            }
+
+            let all_resolved = {
+                let cached = self.peer_addresses.read().ok();
+                connected.iter().all(|pid| {
+                    let pid_str = pid.to_string();
+                    covered.contains(&pid_str)
+                        || cached.as_ref().is_some_and(|c| c.contains_key(&pid_str))
+                })
+            };
+
+            if all_resolved || attempt == 4 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // Append cached addresses for any unresolved peers
+        let mut all_addrs = host_addrs;
+        if let Ok(cached) = self.peer_addresses.read() {
+            for pid in &connected {
+                let pid_str = pid.to_string();
+                if !covered.contains(&pid_str) {
+                    if let Some(cached_addr) = cached.get(&pid_str) {
+                        all_addrs.push(cached_addr.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(all_addrs)
     }
 
     async fn connect_peer(&self, addr: &str) -> Result<(), String> {
-        let multiaddr: libp2p::Multiaddr = addr
-            .parse()
-            .map_err(|e| format!("invalid multiaddr: {}", e))?;
+        let (peer_id, full_multiaddr) = parse_peer_id_from_multiaddr(addr)?;
 
-        let peer_id = multiaddr
-            .iter()
-            .find_map(|proto| match proto {
-                libp2p::multiaddr::Protocol::P2p(peer_id) => Some(peer_id),
-                _ => None,
-            })
-            .ok_or_else(|| "multiaddr must contain /p2p/<peer_id> component".to_string())?;
-
-        let dial_addr: libp2p::Multiaddr = multiaddr
+        let dial_addr: libp2p::Multiaddr = full_multiaddr
             .iter()
             .filter(|proto| !matches!(proto, libp2p::multiaddr::Protocol::P2p(_)))
             .collect();
@@ -316,7 +353,28 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         self.handle
             .dial(peer_id, vec![dial_addr])
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+
+        // Poll until connected (matching FFI: 50ms intervals, 10s timeout)
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(connected) = self.handle.connected_peers().await {
+                if connected.contains(&peer_id) {
+                    break;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("connection timed out waiting for peer".to_string());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // Cache the full multiaddr for connected_peers resolution
+        if let Ok(mut addrs) = self.peer_addresses.write() {
+            addrs.insert(peer_id.to_string(), addr.to_string());
+        }
+
+        Ok(())
     }
 
     async fn get_replicators(&self) -> Result<Vec<ReplicatorInfo>, String> {
