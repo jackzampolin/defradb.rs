@@ -23,6 +23,12 @@ use crate::router::{AppState, NodePermission};
 ///
 /// If NAC is not configured on the server, all permissions are allowed.
 ///
+/// # Anonymous / Wildcard Fallback
+///
+/// When no identity is provided (anonymous), checks the wildcard DID (`*`)
+/// for the requested permission before rejecting. This matches FFI behavior
+/// in `nac_check.rs` where anonymous requests check `Did::wildcard()`.
+///
 /// # Go DefraDB Compatibility
 ///
 /// Returns 401 Unauthorized to match Go DefraDB's CollectionMiddleware which
@@ -37,21 +43,33 @@ pub async fn require_permission(
         return Ok(());
     };
 
-    // Get the identity DID, requiring authentication for NAC-protected operations.
-    // In Go, if no identity is provided, the NAC check proceeds and fails with
-    // "not authorized to perform operation", so we use Unauthorized here too.
-    let did = identity
-        .did()
-        .ok_or_else(|| HttpError::Unauthorized("authentication required".into()))?;
+    let did = match identity.did() {
+        Some(d) => d.clone(),
+        None => {
+            // Anonymous request: check if wildcard DID has the permission.
+            // Matches FFI nac_check.rs behavior where empty/null identity
+            // checks Did::wildcard() before rejecting.
+            let wildcard = Did::wildcard();
+            let wildcard_allowed = nac
+                .check_permission(&wildcard, permission)
+                .await
+                .unwrap_or(false);
+            if wildcard_allowed {
+                return Ok(());
+            }
+            return Err(HttpError::Unauthorized(
+                "not authorized to perform operation".into(),
+            ));
+        }
+    };
 
-    // Check the permission
-    let allowed = nac.check_permission(did, permission).await.map_err(|e| {
+    // Check the permission for the explicit identity
+    let allowed = nac.check_permission(&did, permission).await.map_err(|e| {
         tracing::error!(error = %e, ?permission, "NAC permission check failed");
         HttpError::Internal("permission check failed".into())
     })?;
 
     if !allowed {
-        // Return 401 to match Go DefraDB's CollectionMiddleware behavior
         return Err(HttpError::Unauthorized(
             "not authorized to perform operation".into(),
         ));

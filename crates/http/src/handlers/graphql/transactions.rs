@@ -1,15 +1,10 @@
 //! Transaction endpoint handlers.
 //!
-//! # NAC Transaction Security Model
+//! # NAC Permission Model
 //!
-//! Transaction endpoints require `DocumentUpdate` permission when NAC is enabled.
-//! This is more restrictive than Go DefraDB, which doesn't have explicit handler-level
-//! NAC checks for transaction endpoints (permission checks happen during operations
-//! within the transaction).
-//!
-//! This approach was chosen for defense-in-depth:
-//! - Prevents unauthorized users from starting/managing transactions
-//! - Operations within transactions are still subject to per-operation permission checks
+//! Transaction lifecycle endpoints (begin, commit, discard) have no NAC checks,
+//! matching FFI behavior. Permissions are enforced per-operation when executing
+//! queries within the transaction (via `graphql_transactional` handler).
 
 use axum::{
     extract::{Path, Query, State},
@@ -20,9 +15,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::HttpError;
-use crate::identity_extractor::ExtractIdentity;
-use crate::nac_guard::require_permission;
-use crate::router::{AppState, NodePermission};
+use crate::router::AppState;
 
 /// Query parameters for beginning a transaction (Go-compatible).
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -53,15 +46,11 @@ pub struct TxPathParam {
 /// Go DefraDB uses query parameter `read_only` (not request body).
 /// Returns `{"id": uint64}` to match Go's `CreateTxResponse`.
 ///
-/// Requires `DocumentUpdate` permission when NAC is enabled.
+/// No NAC check — permissions are enforced per-operation within the transaction.
 pub async fn tx_begin(
     State(state): State<AppState>,
-    identity: ExtractIdentity,
     Query(query): Query<TxBeginQuery>,
 ) -> Result<impl IntoResponse, HttpError> {
-    // NAC check: transactions can modify data, require DocumentUpdate permission
-    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
-
     Ok(match state.executor.begin_txn(query.read_only).await {
         Ok(handle) => {
             // Parse handle to u64 to match Go's numeric ID format
@@ -92,17 +81,11 @@ pub async fn tx_begin(
 ///
 /// Concurrent transactions allow multiple transactions to run in parallel.
 ///
-/// Requires `DocumentUpdate` permission when NAC is enabled.
+/// No NAC check — permissions are enforced per-operation within the transaction.
 pub async fn tx_begin_concurrent(
     State(state): State<AppState>,
-    identity: ExtractIdentity,
     Query(query): Query<TxBeginQuery>,
 ) -> Result<impl IntoResponse, HttpError> {
-    // NAC check: transactions can modify data, require DocumentUpdate permission
-    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
-
-    // For now, concurrent transactions use the same implementation as regular transactions.
-    // The distinction is primarily semantic in Go DefraDB.
     Ok(match state.executor.begin_txn(query.read_only).await {
         Ok(handle) => {
             let id: u64 = handle.to_string().parse().unwrap_or(0);
@@ -133,15 +116,11 @@ pub async fn tx_begin_concurrent(
 ///
 /// Go DefraDB uses path parameter for transaction ID and returns empty body on success.
 ///
-/// Requires `DocumentUpdate` permission when NAC is enabled.
+/// No NAC check — permissions are enforced per-operation within the transaction.
 pub async fn tx_commit(
     State(state): State<AppState>,
-    identity: ExtractIdentity,
     Path(params): Path<TxPathParam>,
 ) -> Result<impl IntoResponse, HttpError> {
-    // NAC check: committing transactions requires DocumentUpdate permission
-    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
-
     // Parse transaction ID as u64 (Go format)
     let _txn_id: u64 = params
         .id
@@ -179,15 +158,11 @@ pub async fn tx_commit(
 /// Go DefraDB uses DELETE method with path parameter for transaction ID.
 /// Returns empty body on success.
 ///
-/// Requires `DocumentUpdate` permission when NAC is enabled.
+/// No NAC check — permissions are enforced per-operation within the transaction.
 pub async fn tx_discard(
     State(state): State<AppState>,
-    identity: ExtractIdentity,
     Path(params): Path<TxPathParam>,
 ) -> Result<impl IntoResponse, HttpError> {
-    // NAC check: discarding transactions requires DocumentUpdate permission
-    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
-
     // Parse transaction ID as u64 (Go format)
     let _txn_id: u64 = params
         .id
