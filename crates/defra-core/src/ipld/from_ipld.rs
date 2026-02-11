@@ -211,8 +211,7 @@ impl TryFrom<&Ipld> for CounterDeltaPayload {
             field_name: parse_string(map, "fieldName")?,
             priority: parse_u64(map, "priority")?,
             nonce: parse_i64(map, "nonce")?,
-            // Go's CounterDelta uses "collectionVersionID" (not "schemaVersionID")
-            schema_version_id: parse_string(map, "collectionVersionID")?,
+            schema_version_id: parse_string(map, "schemaVersionID")?,
             data: parse_bytes(map, "data")?,
         })
     }

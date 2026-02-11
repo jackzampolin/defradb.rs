@@ -181,6 +181,39 @@ pub struct IndexFieldInfo {
     pub direction: Option<String>,
 }
 
+/// Trait for encrypted index (searchable encryption) operations.
+#[async_trait::async_trait]
+pub trait EncryptedIndexOperations: Send + Sync {
+    /// Create an encrypted index on a collection field.
+    async fn create_encrypted_index(
+        &self,
+        collection: &str,
+        field_name: &str,
+    ) -> Result<EncryptedIndexInfo, String>;
+
+    /// List encrypted indexes for a collection.
+    async fn list_encrypted_indexes(
+        &self,
+        collection: &str,
+    ) -> Result<Vec<EncryptedIndexInfo>, String>;
+
+    /// Delete an encrypted index from a collection field.
+    async fn delete_encrypted_index(
+        &self,
+        collection: &str,
+        field_name: &str,
+    ) -> Result<(), String>;
+}
+
+/// Encrypted index information for HTTP responses.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EncryptedIndexInfo {
+    #[serde(rename = "FieldName")]
+    pub field_name: String,
+    #[serde(rename = "Type")]
+    pub index_type: String,
+}
+
 /// Result of a backup import operation.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ImportResult {

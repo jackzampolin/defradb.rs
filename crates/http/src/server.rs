@@ -16,8 +16,8 @@ use query::rest::RestOperations;
 use crate::error::Result;
 use crate::router::{
     create_router_with_state, AcpOperations, AppStateBuilder, CollectionManagementOperations,
-    DocumentAcpOperations, IndexOperations, LensOperations, NodeAcpOperations, P2POperations,
-    SchemaOperations,
+    DocumentAcpOperations, EncryptedIndexOperations, IndexOperations, LensOperations,
+    NodeAcpOperations, P2POperations, SchemaOperations,
 };
 
 /// Server configuration options.
@@ -47,6 +47,7 @@ pub struct Server {
     p2p: Option<Arc<dyn P2POperations>>,
     acp: Option<Arc<dyn AcpOperations>>,
     index: Option<Arc<dyn IndexOperations>>,
+    encrypted_index: Option<Arc<dyn EncryptedIndexOperations>>,
     schema: Option<Arc<dyn SchemaOperations>>,
     lens: Option<Arc<dyn LensOperations>>,
     nac: Option<Arc<dyn NodeAcpOperations>>,
@@ -65,6 +66,7 @@ impl Server {
             p2p: None,
             acp: None,
             index: None,
+            encrypted_index: None,
             schema: None,
             lens: None,
             nac: None,
@@ -83,6 +85,7 @@ impl Server {
             p2p: None,
             acp: None,
             index: None,
+            encrypted_index: None,
             schema: None,
             lens: None,
             nac: None,
@@ -101,6 +104,7 @@ impl Server {
             p2p: None,
             acp: None,
             index: None,
+            encrypted_index: None,
             schema: None,
             lens: None,
             nac: None,
@@ -119,6 +123,7 @@ impl Server {
             p2p: None,
             acp: None,
             index: None,
+            encrypted_index: None,
             schema: None,
             lens: None,
             nac: None,
@@ -175,6 +180,15 @@ impl Server {
     /// Set index operations from an Arc.
     pub fn with_index_arc(mut self, index: Arc<dyn IndexOperations>) -> Self {
         self.index = Some(index);
+        self
+    }
+
+    /// Set encrypted index operations from an Arc.
+    pub fn with_encrypted_index_arc(
+        mut self,
+        encrypted_index: Arc<dyn EncryptedIndexOperations>,
+    ) -> Self {
+        self.encrypted_index = Some(encrypted_index);
         self
     }
 
@@ -264,6 +278,9 @@ impl Server {
         }
         if let Some(ref index) = self.index {
             builder = builder.with_index(Arc::clone(index));
+        }
+        if let Some(ref encrypted_index) = self.encrypted_index {
+            builder = builder.with_encrypted_index(Arc::clone(encrypted_index));
         }
         if let Some(ref schema) = self.schema {
             builder = builder.with_schema(Arc::clone(schema));

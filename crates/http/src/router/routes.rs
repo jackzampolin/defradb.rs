@@ -67,6 +67,19 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route(
             "/:name/indexes/:index",
             delete(handlers::index::go_drop_index),
+        )
+        // Go-compatible encrypted index routes
+        .route(
+            "/:name/encrypted-indexes",
+            get(handlers::encrypted_index::go_list_encrypted_indexes),
+        )
+        .route(
+            "/:name/encrypted-indexes",
+            post(handlers::encrypted_index::go_create_encrypted_index),
+        )
+        .route(
+            "/:name/encrypted-indexes/:field",
+            delete(handlers::encrypted_index::go_delete_encrypted_index),
         );
 
     // P2P routes
