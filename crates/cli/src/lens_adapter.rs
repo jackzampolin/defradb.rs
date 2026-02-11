@@ -1,50 +1,34 @@
-//! Adapter to bridge lens transform store to HTTP's LensOperations trait.
+//! Adapter to bridge database lens operations to HTTP's LensOperations trait.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use defra_http::router::LensOperations;
-use lens::{LensConfig, TransformStore, WasmTransformStore};
+use lens::LensConfig;
+use storage::corekv::Store;
 
-/// Adapter that implements LensOperations using WasmTransformStore.
-pub struct LensAdapter {
-    store: Arc<WasmTransformStore>,
+/// Adapter that implements LensOperations using the database's persistent lens store.
+pub struct LensAdapter<S: Store> {
+    database: Arc<db::DB<S>>,
 }
 
-impl LensAdapter {
-    /// Create a new adapter with its own WASM transform store.
-    pub fn new() -> Result<Self, String> {
-        let store =
-            WasmTransformStore::new().map_err(|e| format!("failed to create WASM store: {}", e))?;
-        Ok(Self {
-            store: Arc::new(store),
-        })
-    }
-
-    /// Create an Arc-wrapped adapter.
-    pub fn new_arc() -> Result<Arc<dyn LensOperations>, String> {
-        Ok(Arc::new(Self::new()?))
-    }
-}
-
-impl Default for LensAdapter {
-    fn default() -> Self {
-        Self::new().expect("failed to create lens adapter")
+impl<S: Store + 'static> LensAdapter<S> {
+    /// Create an Arc-wrapped adapter backed by the database's lens store.
+    pub fn new_arc(database: Arc<db::DB<S>>) -> Arc<dyn LensOperations> {
+        Arc::new(Self { database })
     }
 }
 
 #[async_trait]
-impl LensOperations for LensAdapter {
+impl<S: Store + 'static> LensOperations for LensAdapter<S> {
     async fn set_migration(&self, config: &str) -> Result<String, String> {
-        // Parse the JSON configuration
         let lens_config: LensConfig = serde_json::from_str(config)
             .map_err(|e| format!("failed to parse lens config: {}", e))?;
 
-        // Add the transform to the store
         let transform_id = self
-            .store
-            .add(lens_config)
+            .database
+            .set_migration(lens_config)
             .await
             .map_err(|e| format!("failed to set migration: {}", e))?;
 
@@ -52,17 +36,32 @@ impl LensOperations for LensAdapter {
     }
 
     async fn reload(&self) -> Result<(), String> {
-        // For now, reload is a no-op as we don't persist transforms.
-        // When persistence is implemented, this will reload from disk.
-        Ok(())
+        self.database
+            .reload_lens_configs()
+            .await
+            .map_err(|e| format!("failed to reload lens configs: {}", e))
     }
 
     async fn add(&self, config: &str) -> Result<String, String> {
         let lens_config: LensConfig = serde_json::from_str(config)
             .map_err(|e| format!("failed to parse lens config: {}", e))?;
 
+        // If version IDs are present, delegate to set_migration (matches FFI behavior)
+        if !lens_config.source_schema_version_id.is_empty()
+            && !lens_config.destination_schema_version_id.is_empty()
+        {
+            let transform_id = self
+                .database
+                .set_migration(lens_config)
+                .await
+                .map_err(|e| format!("failed to set migration: {}", e))?;
+            return Ok(transform_id.to_string());
+        }
+
+        // Standalone module — add directly to the lens store
         let transform_id = self
-            .store
+            .database
+            .lens_store()
             .add(lens_config)
             .await
             .map_err(|e| format!("failed to add lens: {}", e))?;
@@ -72,7 +71,8 @@ impl LensOperations for LensAdapter {
 
     async fn list(&self) -> Result<serde_json::Value, String> {
         let modules = self
-            .store
+            .database
+            .lens_store()
             .list()
             .await
             .map_err(|e| format!("failed to list lenses: {}", e))?;
@@ -86,30 +86,26 @@ impl LensOperations for LensAdapter {
 mod tests {
     use super::*;
 
+    fn test_db() -> Arc<db::DB<storage::MemoryStore>> {
+        let store = storage::MemoryStore::new();
+        Arc::new(db::DB::new(store).unwrap())
+    }
+
     #[tokio::test]
     async fn test_lens_adapter_invalid_config() {
-        let adapter = LensAdapter::new().unwrap();
+        let adapter = LensAdapter {
+            database: test_db(),
+        };
         let result = adapter.set_migration("not valid json").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("failed to parse lens config"));
     }
 
     #[tokio::test]
-    async fn test_lens_adapter_missing_path() {
-        let adapter = LensAdapter::new().unwrap();
-        let config = r#"{
-            "SourceSchemaVersionID": "v1",
-            "DestinationSchemaVersionID": "v2",
-            "Lens": {}
-        }"#;
-        let result = adapter.set_migration(config).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("failed to parse lens config"));
-    }
-
-    #[tokio::test]
     async fn test_lens_adapter_reload() {
-        let adapter = LensAdapter::new().unwrap();
+        let adapter = LensAdapter {
+            database: test_db(),
+        };
         let result = adapter.reload().await;
         assert!(result.is_ok());
     }

@@ -317,16 +317,10 @@ impl Node {
             server = server.with_schema_arc(schema_adapter);
             info!("Schema HTTP endpoint enabled");
 
-            // Wire lens operations to HTTP server
-            match crate::lens_adapter::LensAdapter::new_arc() {
-                Ok(lens_adapter) => {
-                    server = server.with_lens_arc(lens_adapter);
-                    info!("Lens HTTP endpoint enabled");
-                }
-                Err(e) => {
-                    warn!("Failed to create lens adapter: {}", e);
-                }
-            }
+            // Wire lens operations to HTTP server (backed by persistent database lens store)
+            let lens_adapter = crate::lens_adapter::LensAdapter::new_arc(database.clone());
+            server = server.with_lens_arc(lens_adapter);
+            info!("Lens HTTP endpoint enabled");
 
             // Wire NAC (Node Access Control) to HTTP server only when enabled
             if config.acp.node_enable {
