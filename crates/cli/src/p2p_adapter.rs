@@ -35,6 +35,11 @@ pub trait DocPusher: Send + Sync {
     fn get_collection_id(&self, name: &str) -> Option<String>;
 
     fn list_collections(&self) -> Result<Vec<String>, String>;
+
+    async fn persist_replicator(&self, peer_id: &str, collections: &[String])
+        -> Result<(), String>;
+
+    async fn delete_persisted_replicator(&self, peer_id: &str) -> Result<(), String>;
 }
 
 /// Database-backed `DocPusher` implementation.
@@ -90,6 +95,33 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             .list_collections()
             .map_err(|e| format!("failed to list collections: {}", e))
     }
+
+    async fn persist_replicator(
+        &self,
+        peer_id: &str,
+        collections: &[String],
+    ) -> Result<(), String> {
+        let pid: libp2p::PeerId = peer_id
+            .parse()
+            .map_err(|e| format!("invalid peer ID: {}", e))?;
+        let info = p2p::ReplicatorInfo::new(pid, collections.to_vec());
+        let bytes = info
+            .to_bytes()
+            .map_err(|e| format!("failed to serialize replicator info: {}", e))?;
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        peerstore
+            .set_replicator(peer_id, &bytes)
+            .await
+            .map_err(|e| format!("failed to persist replicator: {}", e))
+    }
+
+    async fn delete_persisted_replicator(&self, peer_id: &str) -> Result<(), String> {
+        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        peerstore
+            .delete_replicator(peer_id)
+            .await
+            .map_err(|e| format!("failed to delete persisted replicator: {}", e))
+    }
 }
 
 /// Also implement `CollectionLookup` so `DbDocPusher` can be used anywhere
@@ -110,8 +142,6 @@ pub struct P2PAdapter<
     handle: P2PHostHandle,
     sync_coordinator: Option<Arc<SyncCoordinator<B>>>,
     doc_pusher: Option<Arc<dyn DocPusher>>,
-    // Used by Phases 2-6 (connect_peer, add_replicator, add_documents, etc.)
-    #[allow(dead_code)]
     event_bus: Option<Arc<dyn events::Bus>>,
     peer_addresses: Arc<std::sync::RwLock<HashMap<String, String>>>,
     #[allow(dead_code)]
@@ -248,6 +278,18 @@ impl DocPusher for LookupOnlyDocPusher {
 
     fn list_collections(&self) -> Result<Vec<String>, String> {
         Err("list_collections not available (no database context)".to_string())
+    }
+
+    async fn persist_replicator(
+        &self,
+        _peer_id: &str,
+        _collections: &[String],
+    ) -> Result<(), String> {
+        Err("persist_replicator not available (no database context)".to_string())
+    }
+
+    async fn delete_persisted_replicator(&self, _peer_id: &str) -> Result<(), String> {
+        Err("delete_persisted_replicator not available (no database context)".to_string())
     }
 }
 
@@ -405,20 +447,98 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         addr: Option<&str>,
     ) -> Result<(), String> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
-        let (peer_id, _) = parse_peer_id_from_multiaddr(addr_str)?;
+        let (peer_id, full_multiaddr) = parse_peer_id_from_multiaddr(addr_str)?;
 
+        // Strip /p2p/ component to get transport address for dialing
+        let dial_addr: libp2p::Multiaddr = full_multiaddr
+            .iter()
+            .filter(|proto| !matches!(proto, libp2p::multiaddr::Protocol::P2p(_)))
+            .collect();
+
+        // If collections empty, replicate all (matching Go behavior)
+        let effective_collections = if collections.is_empty() {
+            if let Some(ref pusher) = self.doc_pusher {
+                pusher.list_collections()?
+            } else {
+                return Err("no database context to list collections".to_string());
+            }
+        } else {
+            collections
+        };
+
+        // Resolve collection names → CIDs
+        let mut collection_cids = Vec::new();
+        if let Some(ref pusher) = self.doc_pusher {
+            for name in &effective_collections {
+                if let Some(cid) = pusher.get_collection_id(name) {
+                    collection_cids.push(cid);
+                } else {
+                    return Err(format!("collection '{}' not found", name));
+                }
+            }
+        } else {
+            collection_cids.clone_from(&effective_collections);
+        }
+
+        // Dial peer
+        self.handle
+            .dial(peer_id, vec![dial_addr])
+            .await
+            .map_err(|e| format!("failed to connect to replicator peer: {}", e))?;
+
+        // Cache peer address for connected_peers resolution
+        if let Ok(mut addrs) = self.peer_addresses.write() {
+            addrs.insert(peer_id.to_string(), addr_str.to_string());
+        }
+
+        // Register replicator (coordinator handles topic auto-subscribe)
         if let Some(ref coordinator) = self.sync_coordinator {
             coordinator
-                .set_replicator(peer_id, collections, true)
+                .set_replicator(peer_id, collection_cids.clone(), true)
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok(())
         } else {
             self.handle
-                .set_replicator(peer_id, collections)
+                .set_replicator(peer_id, collection_cids.clone())
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
         }
+
+        // Persist to peerstore (best-effort, log warning on failure)
+        if let Some(ref pusher) = self.doc_pusher {
+            if let Err(e) = pusher
+                .persist_replicator(&peer_id.to_string(), &collection_cids)
+                .await
+            {
+                tracing::warn!(peer_id = %peer_id, error = %e, "failed to persist replicator");
+            }
+        }
+
+        // Spawn background task: push existing docs → emit ReplicatorCompleted
+        if let Some(ref pusher) = self.doc_pusher {
+            let push_handle = self.handle.clone();
+            let push_pusher = Arc::clone(pusher);
+            let push_event_bus = self.event_bus.clone();
+            let push_collections = effective_collections;
+
+            tokio::spawn(async move {
+                if let Err(e) = push_pusher
+                    .push_existing_docs(&push_handle, peer_id, &push_collections, None)
+                    .await
+                {
+                    tracing::error!(error = %e, "Failed to push existing docs to replicator");
+                }
+                if let Some(bus) = push_event_bus {
+                    tracing::debug!("publishing ReplicatorCompleted event");
+                    bus.publish(events::Message::replicator_completed());
+                    tracing::debug!("ReplicatorCompleted event published");
+                }
+            });
+        } else if let Some(ref bus) = self.event_bus {
+            bus.publish(events::Message::replicator_completed());
+        }
+
+        Ok(())
     }
 
     async fn remove_replicator(
@@ -446,6 +566,25 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 .delete_replicator(peer_id)
                 .await
                 .map_err(|e| e.to_string())?;
+        }
+
+        // Delete from peerstore (best-effort, log warning on failure)
+        if let Some(ref pusher) = self.doc_pusher {
+            if let Err(e) = pusher
+                .delete_persisted_replicator(&peer_id.to_string())
+                .await
+            {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    error = %e,
+                    "Failed to delete replicator from storage"
+                );
+            }
+        }
+
+        // Emit completion event
+        if let Some(ref bus) = self.event_bus {
+            bus.publish(events::Message::replicator_completed());
         }
 
         Ok(())
