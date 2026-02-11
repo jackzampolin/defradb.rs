@@ -12,7 +12,11 @@
 //! - `eval/`: Operator evaluation (comparison, equality, pattern matching)
 //! - `json_match`: JSON object/scalar matching for aggregate filters
 
+mod eval_alias;
+mod eval_relation;
 mod filter_impl;
+#[cfg(test)]
+mod filter_tests;
 
 mod eval;
 mod inspection;
