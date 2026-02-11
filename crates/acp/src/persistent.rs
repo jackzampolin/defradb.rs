@@ -93,7 +93,6 @@ impl PersistentAcpStore<RedbStore> {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let dir_path = path.as_ref();
 
-        // Check if path exists but is not a directory
         if dir_path.exists() && !dir_path.is_dir() {
             return Err(Error::Storage(format!(
                 "ACP path exists but is not a directory: {}",
@@ -101,7 +100,6 @@ impl PersistentAcpStore<RedbStore> {
             )));
         }
 
-        // Create the directory if it doesn't exist
         if !dir_path.exists() {
             std::fs::create_dir_all(dir_path).map_err(|e| {
                 let kind = e.kind();
@@ -118,10 +116,8 @@ impl PersistentAcpStore<RedbStore> {
             })?;
         }
 
-        // Verify we can write to the directory
         let db_path = dir_path.join("acp.redb");
         if db_path.exists() {
-            // Check if we can read the existing file
             let metadata = std::fs::metadata(&db_path).map_err(|e| {
                 Error::Storage(format!(
                     "cannot access ACP database '{}': {}",
@@ -352,7 +348,6 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
 
         let iter_opts = IterOptions::new().with_prefix(prefix.clone().into_bytes());
 
-        // First collect all keys to delete
         let mut keys_to_delete = Vec::new();
         {
             let mut iter = txn
@@ -369,7 +364,6 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             }
         }
 
-        // Now delete all collected keys
         for key in keys_to_delete {
             txn.delete(&key)
                 .await
@@ -402,7 +396,6 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        // Document is registered if any tuple exists for it
         Ok(iter
             .next()
             .await
@@ -430,7 +423,6 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
         let prefix = RelationTuple::doc_prefix(collection_id, doc_id);
         let iter_opts = IterOptions::new().with_prefix(prefix.into_bytes());
 
-        // Check if document is already registered within this transaction
         let mut iter = txn
             .iterator(iter_opts)
             .await
@@ -442,11 +434,9 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .map_err(|e| Error::Storage(e.to_string()))?
             .is_some()
         {
-            // Document already registered, transaction discards
             return Ok(false);
         }
 
-        // Document not registered, insert owner tuple
         let tuple = RelationTuple::owner(owner.clone(), collection_id, doc_id);
         let key = tuple.storage_key();
         let value = serde_json::to_vec(&tuple).map_err(|e| Error::Storage(e.to_string()))?;
@@ -462,5 +452,3 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
         Ok(true)
     }
 }
-
-// Tests extracted to crates/acp/tests/persistent_tests.rs

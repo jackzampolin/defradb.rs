@@ -24,10 +24,8 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<()> {
-        // Ensure policy exists
         self.ensure_policy(policy_id, resource_name).await?;
 
-        // Check if document is already registered
         let subjects = self
             .store
             .get_relation_subjects(policy_id, resource_name, doc_id, OWNER_RELATION)
@@ -49,7 +47,6 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             )));
         }
 
-        // Store owner relationship
         let rel =
             Relationship::with_entity(resource_name, doc_id, OWNER_RELATION, identity.clone());
         self.store.store_relationship(policy_id, &rel).await?;
@@ -88,7 +85,6 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<bool> {
-        // Check if document is registered
         if !self
             .is_doc_registered(policy_id, resource_name, doc_id)
             .await?
@@ -97,7 +93,6 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             return Ok(true);
         }
 
-        // Document is registered, need authenticated identity
         let did = match identity {
             Identity::Authenticated(did) => did,
             Identity::Anonymous => {
@@ -114,10 +109,8 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             }
         };
 
-        // Ensure policy is loaded
         self.ensure_policy(policy_id, resource_name).await?;
 
-        // Use the Zanzibar engine to evaluate permission
         let relation = Self::permission_to_relation(permission);
 
         let granted = {
@@ -163,17 +156,14 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         _managing_relations: &[String],
     ) -> Result<bool> {
         // In DPI model, collection_id serves as both policy_id and resource_name
-        // Ensure the policy exists before operating on relationships
         self.ensure_policy(collection_id, collection_id).await?;
 
-        // Cannot add owner relation
         if relation == OWNER_RELATION {
             return Err(Error::InvalidRelation(
                 "cannot add owner relation".to_string(),
             ));
         }
 
-        // Validate relation name
         if ![
             READER_RELATION,
             UPDATER_RELATION,
@@ -188,7 +178,6 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             )));
         }
 
-        // Check if requestor can manage this relation (owner OR has managing relation)
         self.check_manage_relation(
             requestor,
             collection_id,
@@ -199,7 +188,6 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         )
         .await?;
 
-        // Check if relationship already exists
         let has = self
             .store
             .has_relationship(
@@ -225,7 +213,6 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             return Ok(false);
         }
 
-        // Store relationship
         let rel = Relationship::with_entity(collection_id, doc_id, relation, target.clone());
         self.store.store_relationship(collection_id, &rel).await?;
 
@@ -254,17 +241,14 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         _managing_relations: &[String],
     ) -> Result<bool> {
         // In DPI model, collection_id serves as both policy_id and resource_name
-        // Ensure the policy exists before operating on relationships
         self.ensure_policy(collection_id, collection_id).await?;
 
-        // Cannot delete owner relation
         if relation == OWNER_RELATION {
             return Err(Error::InvalidRelation(
                 "cannot delete owner relation".to_string(),
             ));
         }
 
-        // Check if requestor can manage this relation (owner OR has managing relation)
         self.check_manage_relation(
             requestor,
             collection_id,
@@ -275,7 +259,6 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         )
         .await?;
 
-        // Delete relationship
         let rel = Relationship::with_entity(collection_id, doc_id, relation, target.clone());
         let deleted = self.store.delete_relationship(collection_id, &rel).await?;
 

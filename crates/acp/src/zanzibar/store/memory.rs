@@ -12,7 +12,6 @@ use crate::zanzibar::types::{ObjectRef, Policy, Relationship, Subject};
 /// In-memory Zanzibar store for testing.
 pub struct MemoryZanzibarStore {
     policies: RwLock<HashMap<String, Policy>>,
-    // Key: (policy_id, storage_key)
     relationships: RwLock<HashMap<String, HashMap<String, Relationship>>>,
 }
 
@@ -102,22 +101,18 @@ impl ZanzibarStore for MemoryZanzibarStore {
         relation: &str,
         subject: &Did,
     ) -> Result<bool> {
-        // Check direct relationship
         let direct = Relationship::with_entity(resource, object_id, relation, subject.clone());
         let direct_key = direct.storage_key();
 
-        // Check untyped wildcard relationship
         let wildcard = Relationship::new(resource, object_id, relation, Subject::Wildcard);
         let wildcard_key = wildcard.storage_key();
 
         let guard = self.relationships.read();
         if let Some(rels) = guard.get(policy_id) {
-            // Direct match or untyped wildcard
             if rels.contains_key(&direct_key) || rels.contains_key(&wildcard_key) {
                 return Ok(true);
             }
 
-            // Check for any typed wildcard on this relation
             // TypedWildcard matches any entity (DIDs don't carry resource type info)
             let prefix = Relationship::relation_prefix(resource, object_id, relation);
             for (key, rel) in rels.iter() {
@@ -157,7 +152,6 @@ impl ZanzibarStore for MemoryZanzibarStore {
         object_id: &str,
         relation: &str,
     ) -> Result<Vec<ObjectRef>> {
-        // Find entity set subjects that reference other objects
         let prefix = Relationship::relation_prefix(resource, object_id, relation);
 
         let guard = self.relationships.read();

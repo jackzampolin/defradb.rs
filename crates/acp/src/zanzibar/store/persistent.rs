@@ -152,12 +152,10 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         if exists {
-            // Delete the policy
             txn.delete(key.as_bytes())
                 .await
                 .map_err(|e| Error::Storage(e.to_string()))?;
 
-            // Cascade delete: remove all relationships for this policy
             // Relationships are stored with prefix /zanzibar/{policy_id}/rel/
             let rel_prefix = format!("/zanzibar/{}/rel/", policy_id);
             let iter_opts = IterOptions::new().with_prefix(rel_prefix.into_bytes());
@@ -178,7 +176,6 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
                 }
             }
 
-            // Delete collected relationship keys
             for key in keys_to_delete {
                 txn.delete(&key)
                     .await
@@ -277,7 +274,6 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        // Check direct relationship
         let direct = Relationship::with_entity(resource, object_id, relation, subject.clone());
         let direct_key = Self::relationship_key(policy_id, &direct);
 
@@ -289,7 +285,6 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             return Ok(true);
         }
 
-        // Check untyped wildcard relationship
         let wildcard = Relationship::new(resource, object_id, relation, Subject::Wildcard);
         let wildcard_key = Self::relationship_key(policy_id, &wildcard);
 
@@ -301,7 +296,6 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             return Ok(true);
         }
 
-        // Check for any typed wildcard on this relation
         // TypedWildcard matches any entity (DIDs don't carry resource type info)
         let prefix = Self::relation_prefix(policy_id, resource, object_id, relation);
         let iter_opts = IterOptions::new().with_prefix(prefix.into_bytes());
@@ -401,7 +395,6 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
         let prefix = Self::relationship_prefix(policy_id, resource, object_id);
         let iter_opts = IterOptions::new().with_prefix(prefix.clone().into_bytes());
 
-        // Collect keys to delete
         let mut keys_to_delete = Vec::new();
         {
             let mut iter = txn
@@ -418,7 +411,6 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             }
         }
 
-        // Delete collected keys
         for key in keys_to_delete {
             txn.delete(&key)
                 .await

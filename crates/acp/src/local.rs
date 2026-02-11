@@ -533,4 +533,3 @@ impl AcpStore for MemoryAcpStore {
         Ok(true)
     }
 }
-// Tests extracted to crates/acp/tests/local_tests.rs
