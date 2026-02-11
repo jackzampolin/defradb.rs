@@ -69,8 +69,12 @@ impl TxCreateArgs {
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
-        let response = client.tx_begin(self.read_only).await?;
-        println!("{}", response.txn_id);
+        let response = if self.concurrent {
+            client.tx_begin_concurrent(self.read_only).await?
+        } else {
+            client.tx_begin(self.read_only).await?
+        };
+        println!("{}", response.id);
         Ok(())
     }
 }
@@ -81,8 +85,7 @@ impl TxCommitArgs {
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
-        let response = client.tx_commit(&self.txn_id).await?;
-        println!("{}", response.status);
+        client.tx_commit(&self.txn_id).await?;
         Ok(())
     }
 }
@@ -93,8 +96,7 @@ impl TxDiscardArgs {
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
-        let response = client.tx_rollback(&self.txn_id).await?;
-        println!("{}", response.status);
+        client.tx_rollback(&self.txn_id).await?;
         Ok(())
     }
 }

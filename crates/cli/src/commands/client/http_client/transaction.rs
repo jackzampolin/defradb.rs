@@ -1,32 +1,45 @@
 //! Transaction HTTP client methods
 
-use super::types::{TxBeginRequest, TxBeginResponse, TxRequest, TxSuccessResponse};
+use super::types::TxBeginResponse;
 use super::HttpClient;
 use crate::error::Result;
 
 impl HttpClient {
-    /// Begin a new transaction
-    pub async fn tx_begin(&self, readonly: bool) -> Result<TxBeginResponse> {
-        let url = format!("{}/api/v0/tx/begin", self.base_url);
-        let request = TxBeginRequest { readonly };
-        self.post_json(&url, &request).await
+    /// Begin a new transaction.
+    ///
+    /// POST /api/v0/tx?read_only=true
+    pub async fn tx_begin(&self, read_only: bool) -> Result<TxBeginResponse> {
+        let mut url = format!("{}/api/v0/tx", self.base_url);
+        if read_only {
+            url.push_str("?read_only=true");
+        }
+        self.request_json("POST", &url, None).await
     }
 
-    /// Commit a transaction
-    pub async fn tx_commit(&self, txn_id: &str) -> Result<TxSuccessResponse> {
-        let url = format!("{}/api/v0/tx/commit", self.base_url);
-        let request = TxRequest {
-            txn_id: txn_id.to_string(),
-        };
-        self.post_json(&url, &request).await
+    /// Begin a new concurrent transaction.
+    ///
+    /// POST /api/v0/tx/concurrent?read_only=true
+    pub async fn tx_begin_concurrent(&self, read_only: bool) -> Result<TxBeginResponse> {
+        let mut url = format!("{}/api/v0/tx/concurrent", self.base_url);
+        if read_only {
+            url.push_str("?read_only=true");
+        }
+        self.request_json("POST", &url, None).await
     }
 
-    /// Rollback (discard) a transaction
-    pub async fn tx_rollback(&self, txn_id: &str) -> Result<TxSuccessResponse> {
-        let url = format!("{}/api/v0/tx/rollback", self.base_url);
-        let request = TxRequest {
-            txn_id: txn_id.to_string(),
-        };
-        self.post_json(&url, &request).await
+    /// Commit a transaction.
+    ///
+    /// POST /api/v0/tx/{id}
+    pub async fn tx_commit(&self, txn_id: &str) -> Result<()> {
+        let url = format!("{}/api/v0/tx/{}", self.base_url, txn_id);
+        self.request_void("POST", &url, None).await
+    }
+
+    /// Discard/rollback a transaction.
+    ///
+    /// DELETE /api/v0/tx/{id}
+    pub async fn tx_rollback(&self, txn_id: &str) -> Result<()> {
+        let url = format!("{}/api/v0/tx/{}", self.base_url, txn_id);
+        self.request_void("DELETE", &url, None).await
     }
 }

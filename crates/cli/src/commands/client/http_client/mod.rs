@@ -30,10 +30,7 @@ pub use p2p::{
     P2pCollectionRequest, P2pConnectRequest, P2pDocumentRequest, P2pDocumentSyncRequest, P2pInfo,
     P2pPeerAddRequest, P2pPeerInfo, P2pReplicatorInfo, P2pReplicatorRequest,
 };
-pub use types::{
-    ErrorResponse, GraphQLError, GraphQLRequest, GraphQLResponse, TxBeginRequest, TxBeginResponse,
-    TxRequest, TxSuccessResponse,
-};
+pub use types::{ErrorResponse, GraphQLError, GraphQLRequest, GraphQLResponse, TxBeginResponse};
 
 /// Default timeout for HTTP requests (30 seconds)
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
