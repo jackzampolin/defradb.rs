@@ -46,7 +46,9 @@
 pub mod acp_merge_handler;
 pub mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
+pub mod backup;
 pub mod block_builder;
+pub mod block_verify;
 #[cfg(feature = "p2p")]
 pub mod broadcast_mutator;
 pub mod collection;

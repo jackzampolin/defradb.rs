@@ -179,6 +179,14 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
             tracing::debug!(validator = %sh_signer.address(), "SourceHub ACP configured");
             let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(sh_client, sh_signer));
             (sh_acp.clone() as Arc<dyn acp::DocumentACP>, Some(sh_acp))
+        } else if db_path_opt.is_some() {
+            // File-based storage: use persistent ACP store (namespace isolated in main DB)
+            let acp_store: Arc<dyn acp::AcpStore> =
+                Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
+            (
+                Arc::new(acp::LocalDocumentACP::new(acp_store)) as Arc<dyn acp::DocumentACP>,
+                None,
+            )
         } else {
             let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
             (
@@ -189,23 +197,11 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
 
         // Create NAC manager for node-level access control
         // Use persistent store when file-based storage is configured
-        let nac_manager: Arc<dyn db::NacManagerApi> = if let Some(ref path) = db_path_opt {
-            // db_path is a file (e.g., /tmp/Test/rustffi), use parent dir for NAC store
-            let data_path = std::path::Path::new(path);
-            let parent = data_path
-                .parent()
-                .ok_or_else(|| "db_path has no parent directory".to_string())?;
-            let nac_path = parent.join("local_node_acp");
-            std::fs::create_dir_all(&nac_path)
-                .map_err(|e| format!("failed to create NAC data directory: {}", e))?;
-            let nac_db_path = nac_path.join("nac.db");
-            let nac_store = acp::PersistentZanzibarStore::open(&nac_db_path)
-                .map_err(|e| format!("failed to open persistent NAC store: {}", e))?;
-            let nac_config = db::NacConfig::new()
-                .with_dev_mode()
-                .with_data_path(nac_path.display().to_string());
-            let mgr = Arc::new(db::NacManager::new(Arc::new(nac_store), nac_config));
-            // Load existing NAC state from persistent store
+        let nac_manager: Arc<dyn db::NacManagerApi> = if db_path_opt.is_some() {
+            // File-based storage: use persistent NAC store (namespace isolated in main DB)
+            let nac_store = Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
+            let nac_config = db::NacConfig::new().with_dev_mode();
+            let mgr = Arc::new(db::NacManager::new(nac_store, nac_config));
             mgr.initialize(None)
                 .await
                 .map_err(|e| format!("failed to initialize NAC from persistent store: {}", e))?;

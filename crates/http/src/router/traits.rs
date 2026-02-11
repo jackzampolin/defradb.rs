@@ -217,6 +217,26 @@ pub struct EncryptedIndexInfo {
     pub index_type: String,
 }
 
+/// Trait for block operations.
+///
+/// Block operations provide signature verification capabilities for
+/// DAG-CBOR blocks stored in the blockstore.
+#[async_trait::async_trait]
+pub trait BlockOperations: Send + Sync {
+    /// Verify the signature of a block.
+    ///
+    /// Loads a block by CID, checks its signature, and verifies using the
+    /// provided public key. `key_type` defaults to "secp256k1" if `None`.
+    /// `caller_did` is the DID string of the caller for document-level ACP checks.
+    async fn verify_signature(
+        &self,
+        cid: &str,
+        public_key: &str,
+        key_type: Option<&str>,
+        caller_did: Option<&str>,
+    ) -> Result<(), String>;
+}
+
 /// Result of a backup import operation.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ImportResult {

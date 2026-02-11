@@ -6,9 +6,9 @@ use query::executor::QueryExecutor;
 use query::rest::RestOperations;
 
 use super::{
-    AcpOperations, BackupOperations, CollectionManagementOperations, DocumentAcpOperations,
-    EncryptedIndexOperations, IndexOperations, LensOperations, NodeAcpOperations, P2POperations,
-    SchemaOperations, TransactionOperations, ViewOperations,
+    AcpOperations, BackupOperations, BlockOperations, CollectionManagementOperations,
+    DocumentAcpOperations, EncryptedIndexOperations, IndexOperations, LensOperations,
+    NodeAcpOperations, P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
 };
 
 /// Application state shared across handlers.
@@ -21,6 +21,7 @@ pub struct AppState {
     pub index: Option<Arc<dyn IndexOperations>>,
     pub encrypted_index: Option<Arc<dyn EncryptedIndexOperations>>,
     pub backup: Option<Arc<dyn BackupOperations>>,
+    pub block: Option<Arc<dyn BlockOperations>>,
     pub schema: Option<Arc<dyn SchemaOperations>>,
     pub lens: Option<Arc<dyn LensOperations>>,
     pub nac: Option<Arc<dyn NodeAcpOperations>>,
@@ -50,6 +51,7 @@ impl std::fmt::Debug for AppState {
                 "backup",
                 &self.backup.as_ref().map(|_| "<BackupOperations>"),
             )
+            .field("block", &self.block.as_ref().map(|_| "<BlockOperations>"))
             .field(
                 "schema",
                 &self.schema.as_ref().map(|_| "<SchemaOperations>"),
@@ -113,6 +115,13 @@ impl AppState {
             crate::error::HttpError::ServiceUnavailable(
                 "Encrypted index operations are not enabled.".into(),
             )
+        })
+    }
+
+    /// Get block operations or return ServiceUnavailable error.
+    pub fn require_block(&self) -> Result<&Arc<dyn BlockOperations>, crate::error::HttpError> {
+        self.block.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable("Block operations are not enabled.".into())
         })
     }
 
@@ -202,6 +211,7 @@ pub struct AppStateBuilder {
     index: Option<Arc<dyn IndexOperations>>,
     encrypted_index: Option<Arc<dyn EncryptedIndexOperations>>,
     backup: Option<Arc<dyn BackupOperations>>,
+    block: Option<Arc<dyn BlockOperations>>,
     schema: Option<Arc<dyn SchemaOperations>>,
     lens: Option<Arc<dyn LensOperations>>,
     nac: Option<Arc<dyn NodeAcpOperations>>,
@@ -223,6 +233,7 @@ impl AppStateBuilder {
             index: None,
             encrypted_index: None,
             backup: None,
+            block: None,
             schema: None,
             lens: None,
             nac: None,
@@ -270,6 +281,12 @@ impl AppStateBuilder {
     /// Set backup operations.
     pub fn with_backup(mut self, backup: Arc<dyn BackupOperations>) -> Self {
         self.backup = Some(backup);
+        self
+    }
+
+    /// Set block operations.
+    pub fn with_block(mut self, block: Arc<dyn BlockOperations>) -> Self {
+        self.block = Some(block);
         self
     }
 
@@ -334,6 +351,7 @@ impl AppStateBuilder {
             index: self.index,
             encrypted_index: self.encrypted_index,
             backup: self.backup,
+            block: self.block,
             schema: self.schema,
             lens: self.lens,
             nac: self.nac,

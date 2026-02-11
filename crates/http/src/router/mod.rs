@@ -7,9 +7,9 @@ mod traits;
 pub use routes::{create_router, create_router_with_rest, create_router_with_state};
 pub use state::{AppState, AppStateBuilder};
 pub use traits::{
-    AcpOperations, BackupOperations, CollectionManagementOperations, DocumentAcpOperations,
-    EncryptedIndexInfo, EncryptedIndexOperations, ImportResult, IndexFieldInfo, IndexInfo,
-    IndexOperations, LensOperations, NacStatus, NacStatusInfo, NodeAcpOperations, NodePermission,
-    P2POperations, P2pDocumentInfo, P2pDocumentRequest, PolicyInfo, ReplicatorInfo,
-    SchemaOperations, TransactionOperations, ViewOperations,
+    AcpOperations, BackupOperations, BlockOperations, CollectionManagementOperations,
+    DocumentAcpOperations, EncryptedIndexInfo, EncryptedIndexOperations, ImportResult,
+    IndexFieldInfo, IndexInfo, IndexOperations, LensOperations, NacStatus, NacStatusInfo,
+    NodeAcpOperations, NodePermission, P2POperations, P2pDocumentInfo, P2pDocumentRequest,
+    PolicyInfo, ReplicatorInfo, SchemaOperations, TransactionOperations, ViewOperations,
 };

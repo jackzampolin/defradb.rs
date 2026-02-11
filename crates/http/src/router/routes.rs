@@ -152,6 +152,10 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/export", post(handlers::backup::export))
         .route("/import", post(handlers::backup::import));
 
+    // Block routes
+    let block_routes =
+        Router::new().route("/verify-signature", get(handlers::block::verify_signature));
+
     // Lens migration routes
     let lens_routes = Router::new()
         .route("/", post(handlers::lens::add_lens))
@@ -216,6 +220,8 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .nest("/backup", backup_routes)
         // View endpoints
         .nest("/views", view_routes)
+        // Block endpoints
+        .nest("/block", block_routes)
         // Lens migration endpoints
         .nest("/lens", lens_routes)
         // NAC endpoints (Rust-native routes)

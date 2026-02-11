@@ -81,9 +81,9 @@ pub use error::{HttpError, Result};
 pub use identity_extractor::{ExtractIdentity, ExtractTokenIdentity, IdentityExtractionError};
 pub use router::{
     create_router, create_router_with_rest, create_router_with_state, AcpOperations, AppState,
-    AppStateBuilder, BackupOperations, DocumentAcpOperations, IndexFieldInfo, IndexInfo,
-    IndexOperations, NacStatus, NacStatusInfo, NodeAcpOperations, NodePermission, P2POperations,
-    PolicyInfo, ReplicatorInfo, TransactionOperations, ViewOperations,
+    AppStateBuilder, BackupOperations, BlockOperations, DocumentAcpOperations, IndexFieldInfo,
+    IndexInfo, IndexOperations, NacStatus, NacStatusInfo, NodeAcpOperations, NodePermission,
+    P2POperations, PolicyInfo, ReplicatorInfo, TransactionOperations, ViewOperations,
 };
 pub use server::{Server, ServerConfig};
 
@@ -91,8 +91,8 @@ pub use server::{Server, ServerConfig};
 pub use mock::{
     FailingMockAcpOperations, FailingMockBackupOperations, FailingMockExecutor,
     FailingMockIndexOperations, FailingMockNodeAcpOperations, FailingMockP2POperations,
-    FailingMockRestOperations, MockAcpOperations, MockBackupOperations,
-    MockCollectionManagementOperations, MockDocumentAcpOperations, MockIndexOperations,
-    MockLensOperations, MockNodeAcpOperations, MockP2POperations, MockQueryExecutor,
-    MockRestOperations, MockTransactionOperations,
+    FailingMockRestOperations, MockAcpOperations, MockBackupOperations, MockBlockOperations,
+    MockCollectionManagementOperations, MockDocumentAcpOperations, MockEncryptedIndexOperations,
+    MockIndexOperations, MockLensOperations, MockNodeAcpOperations, MockP2POperations,
+    MockQueryExecutor, MockRestOperations, MockTransactionOperations,
 };

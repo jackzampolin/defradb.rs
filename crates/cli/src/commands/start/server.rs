@@ -113,7 +113,7 @@ impl Node {
             };
 
             // Create auto-committing fetcher for non-transactional queries
-            let fetcher = db::AutoCommitFetcher::new(database.clone());
+            let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
 
             // Create sync coordinator if P2P is enabled (shared between mutator and P2P adapter)
             // Also captures task handles for graceful shutdown
@@ -303,6 +303,7 @@ impl Node {
                     None,
                 )
             };
+            let document_acp_for_block = document_acp.clone();
 
             // Create query runner with transaction, mutation, and ACP support
             // Use Arc-shared registry so it can also be used by TxnRegistryAdapter
@@ -316,6 +317,13 @@ impl Node {
             .with_acp(document_acp)
             .with_lens_store(database.lens_store().clone());
 
+            // Wire CRDT delta encryption key (matches FFI behavior)
+            if !config.datastore.no_encryption {
+                let encryption_key = b"examplekey1234567890examplekey12".to_vec();
+                query_runner = query_runner.with_encryption_key(encryption_key);
+                info!("CRDT delta encryption enabled");
+            }
+
             // Wire default identity for ACP permission checks (from --identity CLI flag)
             if let Some(did) = user_did {
                 info!("Query runner configured with default identity for ACP");
@@ -323,6 +331,7 @@ impl Node {
             }
 
             let runner = Arc::new(query_runner);
+            let runner_for_backup: Arc<dyn query::executor::QueryExecutor> = runner.clone();
 
             // Create REST operations that wrap the query runner
             let rest_ops = query::rest::RestOperationsImpl::new(Arc::clone(&runner));
@@ -432,6 +441,20 @@ impl Node {
                 crate::encrypted_index_adapter::EncryptedIndexAdapter::new_arc(database.clone());
             server = server.with_encrypted_index_arc(encrypted_index_adapter);
             info!("Encrypted index HTTP endpoints enabled");
+
+            // Wire backup operations to HTTP server
+            let backup_adapter =
+                crate::backup_adapter::BackupAdapter::new_arc(database.clone(), runner_for_backup);
+            server = server.with_backup_arc(backup_adapter);
+            info!("Backup HTTP endpoints enabled");
+
+            // Wire block operations to HTTP server
+            let block_adapter = crate::block_adapter::BlockAdapter::new_arc(
+                database.clone(),
+                document_acp_for_block,
+            );
+            server = server.with_block_arc(block_adapter);
+            info!("Block HTTP endpoints enabled");
 
             // Wire event bus to HTTP server for GraphQL subscriptions
             server = server.with_event_bus_arc(event_bus);

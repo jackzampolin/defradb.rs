@@ -1,14 +1,12 @@
 //! Encrypted index HTTP client methods
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use urlencoding::encode;
 
 use super::HttpClient;
 use crate::error::Result;
 
-/// Encrypted index info from list/create (Go-compatible format).
+/// Encrypted index info from list/create
 #[derive(Debug, Deserialize, Serialize)]
 pub struct EncryptedIndexInfo {
     #[serde(rename = "FieldName")]
@@ -17,55 +15,40 @@ pub struct EncryptedIndexInfo {
     pub index_type: String,
 }
 
-/// Request to create an encrypted index (Go-compatible format).
-#[derive(Debug, Serialize)]
-struct CreateEncryptedIndexRequest {
-    #[serde(rename = "FieldName")]
-    field_name: String,
-    #[serde(rename = "Type")]
-    index_type: String,
-}
-
 impl HttpClient {
+    /// Create an encrypted index on a collection field.
     pub async fn encrypted_index_create(
         &self,
         collection: &str,
-        field_name: &str,
+        field: &str,
     ) -> Result<EncryptedIndexInfo> {
         let url = format!(
             "{}/api/v0/collections/{}/encrypted-indexes",
-            self.base_url(),
+            self.base_url,
             encode(collection)
         );
-        let request = CreateEncryptedIndexRequest {
-            field_name: field_name.to_string(),
-            index_type: "equality".to_string(),
-        };
-        self.post_json(&url, &request).await
+        let body = serde_json::to_string(&serde_json::json!({ "FieldName": field }))
+            .map_err(|e| crate::error::Error::Server(e.to_string()))?;
+        self.request_json("POST", &url, Some(&body)).await
     }
 
+    /// List encrypted indexes for a collection.
     pub async fn encrypted_index_list(&self, collection: &str) -> Result<Vec<EncryptedIndexInfo>> {
         let url = format!(
             "{}/api/v0/collections/{}/encrypted-indexes",
-            self.base_url(),
+            self.base_url,
             encode(collection)
         );
         self.request_json("GET", &url, None).await
     }
 
-    pub async fn encrypted_index_list_all(
-        &self,
-    ) -> Result<HashMap<String, Vec<EncryptedIndexInfo>>> {
-        let url = format!("{}/api/v0/encrypted-indexes", self.base_url());
-        self.request_json("GET", &url, None).await
-    }
-
-    pub async fn encrypted_index_delete(&self, collection: &str, field_name: &str) -> Result<()> {
+    /// Delete an encrypted index from a collection field.
+    pub async fn encrypted_index_delete(&self, collection: &str, field: &str) -> Result<()> {
         let url = format!(
             "{}/api/v0/collections/{}/encrypted-indexes/{}",
-            self.base_url(),
+            self.base_url,
             encode(collection),
-            encode(field_name)
+            encode(field)
         );
         self.request_void("DELETE", &url, None).await
     }

@@ -51,9 +51,9 @@ pub struct EncryptedIndexDeleteArgs {
 /// Arguments for encrypted-index list command
 #[derive(Args, Debug)]
 pub struct EncryptedIndexListArgs {
-    /// Collection name (if omitted, lists all encrypted indexes)
+    /// Collection name
     #[arg(value_name = "COLLECTION")]
-    pub collection: Option<String>,
+    pub collection: String,
 }
 
 impl EncryptedIndexArgs {
@@ -107,18 +107,14 @@ impl EncryptedIndexDeleteArgs {
 
 impl EncryptedIndexListArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        validate_identifier(&self.collection)?;
+
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        if let Some(ref collection) = self.collection {
-            validate_identifier(collection)?;
-            let indexes = client.encrypted_index_list(collection).await?;
-            println!("{}", serde_json::to_string_pretty(&indexes)?);
-        } else {
-            let indexes = client.encrypted_index_list_all().await?;
-            println!("{}", serde_json::to_string_pretty(&indexes)?);
-        }
+        let indexes = client.encrypted_index_list(&self.collection).await?;
+        println!("{}", serde_json::to_string_pretty(&indexes)?);
         Ok(())
     }
 }
