@@ -72,6 +72,14 @@ pub struct Cli {
     #[arg(long, global = true, env = "DEFRA_SOURCE_HUB_ADDRESS")]
     pub source_hub_address: Option<String>,
 
+    /// SourceHub CometBFT RPC address for transaction broadcast
+    #[arg(long, global = true, env = "DEFRA_SOURCE_HUB_COMET_ADDRESS")]
+    pub source_hub_comet_address: Option<String>,
+
+    /// SourceHub chain ID (e.g., "sourcehub-test")
+    #[arg(long, global = true, env = "DEFRA_SOURCE_HUB_CHAIN_ID")]
+    pub source_hub_chain_id: Option<String>,
+
     /// Path to the file containing secrets
     #[arg(long, global = true, env = "DEFRA_SECRET_FILE")]
     pub secret_file: Option<String>,

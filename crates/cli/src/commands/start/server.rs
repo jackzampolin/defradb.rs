@@ -48,6 +48,9 @@ impl Node {
             None => None,
         };
 
+        // Extract private key bytes before consuming user_identity (needed for SourceHub signer)
+        let identity_key_bytes = user_identity.as_ref().map(|id| id.private_key_bytes());
+
         // Build database options with optional user identity
         let mut db_options = db::DbOptions::new();
         if let Some(identity) = user_identity {
@@ -258,14 +261,52 @@ impl Node {
                 database.list_collections().map(|c| c.len()).unwrap_or(0)
             );
 
-            // Create LocalDocumentACP with the provided store
-            let acp_store_for_http = acp_store.clone();
-            let document_acp: Arc<dyn acp::DocumentACP> =
-                Arc::new(acp::LocalDocumentACP::new(acp_store));
-            info!("Document ACP configured");
+            // Create DocumentACP: SourceHub (on-chain) or Local
+            let (document_acp, sourcehub_acp_adapter): (
+                Arc<dyn acp::DocumentACP>,
+                Option<Arc<dyn defra_http::router::AcpOperations>>,
+            ) = if config.acp.document_type == AcpDocumentType::SourceHub {
+                if config.acp.sourcehub_address.is_empty() {
+                    return Err(Error::InvalidConfig(
+                        "sourcehub_address required when document_type is source-hub".into(),
+                    ));
+                }
+
+                let signer_key_bytes = identity_key_bytes.as_ref().ok_or_else(|| {
+                    Error::InvalidConfig(
+                        "node identity required for SourceHub ACP (use --identity)".into(),
+                    )
+                })?;
+
+                let client = sourcehub::SourceHubClient::new(
+                    config.acp.sourcehub_address.clone(),
+                    config.acp.sourcehub_comet_address.clone(),
+                );
+                let signer = sourcehub::TxSigner::from_secp256k1_bytes(
+                    signer_key_bytes,
+                    &config.acp.sourcehub_chain_id,
+                )
+                .map_err(|e| Error::InvalidConfig(format!("SourceHub signer: {}", e)))?;
+
+                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(client, signer));
+                let sh_adapter = crate::sourcehub_acp_adapter::SourceHubAcpAdapter::new_arc(
+                    sh_acp.clone(),
+                    zanzibar_store.clone(),
+                );
+
+                info!("Document ACP configured (SourceHub)");
+                (sh_acp as Arc<dyn acp::DocumentACP>, Some(sh_adapter))
+            } else {
+                info!("Document ACP configured (local)");
+                (
+                    Arc::new(acp::LocalDocumentACP::new(acp_store)) as Arc<dyn acp::DocumentACP>,
+                    None,
+                )
+            };
 
             // Create query runner with transaction, mutation, and ACP support
             // Use Arc-shared registry so it can also be used by TxnRegistryAdapter
+            let document_acp_for_http = document_acp.clone();
             let mut query_runner = query::QueryRunner::with_arc_registry_and_provider(
                 fetcher,
                 collection_provider,
@@ -337,16 +378,24 @@ impl Node {
             // Wire ACP adapters only when document ACP is enabled
             if config.acp.document_type != AcpDocumentType::None {
                 let zanzibar_store_for_doc_acp = zanzibar_store.clone();
-                let acp_adapter = crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store);
+
+                // Use SourceHub adapter for policy CRUD when configured, otherwise local
+                let acp_adapter: Arc<dyn defra_http::router::AcpOperations> =
+                    if let Some(sh_adapter) = sourcehub_acp_adapter {
+                        sh_adapter
+                    } else {
+                        crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store)
+                    };
                 server = server.with_acp_arc(acp_adapter);
                 info!(
                     "ACP policy HTTP endpoints enabled (type: {})",
                     config.acp.document_type
                 );
 
+                // Use the already-created document_acp (SourceHub or local) for doc operations
                 let doc_acp_adapter = crate::doc_acp_adapter::DocumentAcpAdapter::new_arc(
                     database.clone(),
-                    Arc::new(acp::LocalDocumentACP::new(acp_store_for_http)),
+                    document_acp_for_http,
                     zanzibar_store_for_doc_acp,
                 );
                 server = server.with_doc_acp_arc(doc_acp_adapter);

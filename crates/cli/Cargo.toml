@@ -32,6 +32,7 @@ events = { path = "../events" }
 lens = { path = "../lens" }
 document = { path = "../document" }
 keyring = { path = "../keyring" }
+sourcehub = { path = "../sourcehub" }
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }

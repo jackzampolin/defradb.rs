@@ -24,6 +24,8 @@ fn cli_with_defaults() -> Cli {
         keyring_path: None,
         no_keyring: None,
         source_hub_address: None,
+        source_hub_comet_address: None,
+        source_hub_chain_id: None,
         secret_file: None,
         acp_node_enable: None,
         acp_document_type: None,
