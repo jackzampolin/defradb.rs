@@ -17,7 +17,6 @@ use std::ptr;
 
 use crate::types::sanitize_to_cstring;
 
-// Re-export all public items so lib.rs imports don't change.
 pub(crate) use create::response_has_data;
 pub use create::{create_merge_complete_subscription, create_subscription};
 pub use manage::{

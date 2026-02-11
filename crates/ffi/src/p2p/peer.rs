@@ -93,11 +93,11 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
                     .connected_peers()
                     .await
                     .map_err(|e| format!("failed to get connected peers: {}", e))?;
-                eprintln!(
-                    "[FFI-ACTIVE-PEERS] node={} node_ptr={} connected={}",
-                    &local_pid[local_pid.len().saturating_sub(8)..],
+                tracing::debug!(
+                    node = &local_pid[local_pid.len().saturating_sub(8)..],
                     node_ptr,
-                    connected.len()
+                    connected = connected.len(),
+                    "active peers query"
                 );
 
                 let mut host_addrs = Vec::new();
@@ -136,14 +136,14 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
                     }
                 }
 
-                eprintln!(
-                    "[FFI-ACTIVE-PEERS] connected={} host_addrs={} all_addrs={}",
-                    connected.len(),
-                    covered.len(),
-                    all_addrs.len()
+                tracing::debug!(
+                    connected = connected.len(),
+                    host_addrs = covered.len(),
+                    all_addrs = all_addrs.len(),
+                    "active peers resolved"
                 );
                 for a in &all_addrs {
-                    eprintln!("[FFI-ACTIVE-PEERS]   addr={}", a);
+                    tracing::debug!(addr = %a, "active peer address");
                 }
 
                 serde_json::to_string(&all_addrs)

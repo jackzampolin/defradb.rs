@@ -14,7 +14,6 @@ use p2p::P2PHost;
 use p2p::ReplicatorInfo;
 use storage::stores::Peerstore;
 
-use crate::get_runtime;
 use crate::state::{FfiStore, NodeState, P2PState, PolicyStore, NODES};
 use crate::types::{c_str_to_string, NewNodeResult, NodeInitOptions};
 
@@ -37,7 +36,10 @@ pub unsafe extern "C" fn new_node_with_p2p(
     options: NodeInitOptions,
     listen_addr: *const c_char,
 ) -> NewNodeResult {
-    let rt = get_runtime!(NewNodeResult);
+    let rt = match crate::runtime::RUNTIME.get() {
+        Some(rt) => rt,
+        None => return NewNodeResult::error("runtime not initialized - call defra_init() first"),
+    };
 
     let listen_addr_str = match c_str_to_string(listen_addr) {
         Some(s) => s,
@@ -121,10 +123,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
                 },
             );
 
-            eprintln!(
-                "[SIGN-DEBUG] new_node_with_p2p: node identity DID={}",
-                did_str
-            );
+            tracing::debug!(did = %did_str, "node identity created");
             (Some(raw_identity), Some(did_str))
         } else {
             (None, None)
@@ -183,7 +182,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
             .map_err(|e| format!("invalid multiaddr '{}': {}", listen_addr_str, e))?;
 
         let rust_peer_id = handle.local_peer_id().await.map_err(|e| format!("peer id: {}", e))?;
-        eprintln!("[RUST-P2P] Created Rust P2P host PeerId={} ListenAddr={}", rust_peer_id, listen_addr_str);
+        tracing::info!(peer_id = %rust_peer_id, listen_addr = %listen_addr_str, "P2P host created");
 
         handle
             .listen(addr)
@@ -305,14 +304,13 @@ pub unsafe extern "C" fn new_node_with_p2p(
                         break;
                     }
                     ReplicationResult::Failed { cid, error } => {
-                        eprintln!("[REPL-LOOP] FAILED cid={} error={}", cid, error);
                         tracing::error!(cid = %cid, error = %error, "Block merge failed");
                     }
                     ReplicationResult::Skipped { cid, reason } => {
-                        eprintln!("[REPL-LOOP] SKIPPED cid={} reason={}", cid, reason);
+                        tracing::debug!(cid = %cid, reason = %reason, "replication loop: skipped");
                     }
                     ReplicationResult::BitswapFetchStarted { root_cid, .. } => {
-                        eprintln!("[REPL-LOOP] BITSWAP_FETCH root={}", root_cid);
+                        tracing::debug!(root_cid = %root_cid, "replication loop: bitswap fetch started");
                     }
                     _ => {}
                 }
@@ -332,7 +330,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let failure_recorder_task = tokio::spawn(async move {
             let mut rx = failure_rx;
             while let Some(failure) = rx.recv().await {
-                eprintln!("[RETRY-RECORDER] Push failure: peer={} doc={} col={}", failure.peer_id, failure.doc_id, failure.collection_id);
+                tracing::debug!(peer_id = %failure.peer_id, doc_id = %failure.doc_id, collection_id = %failure.collection_id, "push failure recorded");
                 let peerstore = Peerstore::new(recorder_store.clone());
                 let retry_info = storage::stores::RetryInfo::new_initial();
                 let info_bytes = match retry_info.to_bytes() {
@@ -342,7 +340,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
                 if let Err(e) = peerstore.record_push_failure(&failure.peer_id.to_string(), &failure.doc_id, &failure.collection_id, &info_bytes).await {
                     tracing::warn!(peer_id = %failure.peer_id, doc_id = %failure.doc_id, error = %e, "Failed to record push failure");
                 } else {
-                    eprintln!("[RETRY-RECORDER] Recorded failure for peer={} doc={}", failure.peer_id, failure.doc_id);
+                    tracing::debug!(peer_id = %failure.peer_id, doc_id = %failure.doc_id, "push failure persisted");
                 }
             }
         });
@@ -355,31 +353,31 @@ pub unsafe extern "C" fn new_node_with_p2p(
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let peerstore = Peerstore::new(retry_store.clone());
                 let peers = match peerstore.get_all_retry_peers().await { Ok(p) => p, Err(_) => continue };
-                if !peers.is_empty() { eprintln!("[RETRY-LOOP] Found {} retry peers", peers.len()); }
+                if !peers.is_empty() { tracing::debug!(peer_count = peers.len(), "retry loop: found retry peers"); }
                 for (peer_id_str, info_bytes) in peers {
                     let mut retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
                         Ok(i) => i,
-                        Err(e) => { eprintln!("[RETRY-LOOP] Failed to parse RetryInfo for peer={}: {}", peer_id_str, e); continue; }
+                        Err(e) => { tracing::warn!(peer_id = %peer_id_str, error = %e, "retry loop: failed to parse RetryInfo"); continue; }
                     };
                     if !retry_info.is_due() { continue; }
                     let peer_id = match libp2p::PeerId::from_str(&peer_id_str) {
                         Ok(p) => p,
-                        Err(e) => { eprintln!("[RETRY-LOOP] Invalid peer ID {}: {}", peer_id_str, e); continue; }
+                        Err(e) => { tracing::warn!(peer_id = %peer_id_str, error = %e, "retry loop: invalid peer ID"); continue; }
                     };
                     let connected = retry_handle.connected_peers().await.unwrap_or_default();
                     if !connected.contains(&peer_id) { continue; }
                     let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await { Ok(d) => d, Err(_) => continue };
                     if docs.is_empty() { let _ = peerstore.clear_retry_peer(&peer_id_str).await; continue; }
-                    eprintln!("[RETRY-LOOP] Retrying {} docs for peer={}", docs.len(), peer_id_str);
+                    tracing::debug!(doc_count = docs.len(), peer_id = %peer_id_str, "retry loop: retrying docs");
                     let mut all_succeeded = true;
                     for (doc_id, collection_id) in &docs {
                         match super::push::retry_doc(&retry_handle, &retry_store, peer_id, doc_id, collection_id).await {
-                            Ok(()) => { eprintln!("[RETRY-LOOP] SUCCESS doc={} peer={}", doc_id, peer_id_str); let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await; }
-                            Err(e) => { eprintln!("[RETRY-LOOP] FAILED doc={} peer={}: {}", doc_id, peer_id_str, e); all_succeeded = false; }
+                            Ok(()) => { tracing::debug!(doc_id = %doc_id, peer_id = %peer_id_str, "retry loop: doc push succeeded"); let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await; }
+                            Err(e) => { tracing::warn!(doc_id = %doc_id, peer_id = %peer_id_str, error = %e, "retry loop: doc push failed"); all_succeeded = false; }
                         }
                     }
                     if all_succeeded {
-                        eprintln!("[RETRY-LOOP] All docs succeeded for peer={}", peer_id_str);
+                        tracing::debug!(peer_id = %peer_id_str, "retry loop: all docs succeeded");
                         let _ = peerstore.clear_retry_peer(&peer_id_str).await;
                     } else {
                         retry_info.bump();
@@ -395,42 +393,42 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let peerstore = Peerstore::new(store.clone());
         match peerstore.get_all_replicators().await {
             Ok(entries) => {
-                eprintln!("[LOAD-REPLICATORS] Found {} stored replicators", entries.len());
+                tracing::debug!(count = entries.len(), "loading stored replicators");
                 for (peer_id_str, data) in entries {
                     match ReplicatorInfo::from_bytes(&data) {
                         Ok(info) => {
                             if let Some(peer_id) = info.peer_id() {
-                                eprintln!("[LOAD-REPLICATORS] Restoring replicator peer={} collections={:?}", peer_id, info.collections);
+                                tracing::debug!(peer_id = %peer_id, collections = ?info.collections, "restoring replicator");
                                 if let Err(e) = handle.set_replicator(peer_id, info.collections.clone()).await {
-                                    eprintln!("[LOAD-REPLICATORS] Failed to set_replicator: {}", e);
+                                    tracing::warn!(error = %e, "failed to restore replicator");
                                     continue;
                                 }
                                 for collection_id in &info.collections {
                                     let topic = DefraTopic::collection(collection_id);
                                     if let Err(e) = handle.subscribe(topic).await {
-                                        eprintln!("[LOAD-REPLICATORS] Failed to subscribe topic {}: {}", collection_id, e);
+                                        tracing::warn!(collection_id = %collection_id, error = %e, "failed to subscribe replicator topic");
                                     }
                                 }
                             }
                         }
-                        Err(e) => { eprintln!("[LOAD-REPLICATORS] Failed to deserialize peer={}: {}", peer_id_str, e); }
+                        Err(e) => { tracing::warn!(peer_id = %peer_id_str, error = %e, "failed to deserialize replicator info"); }
                     }
                 }
             }
-            Err(e) => { eprintln!("[LOAD-REPLICATORS] Failed to load from storage: {}", e); }
+            Err(e) => { tracing::warn!(error = %e, "failed to load replicators from storage"); }
         }
 
         {
             let peerstore = Peerstore::new(store.clone());
             if let Ok(Some(data)) = peerstore.get_p2p_collections().await {
                 if let Ok(collections) = serde_json::from_slice::<Vec<String>>(&data) {
-                    eprintln!("[LOAD-P2P-SUBS] Restoring {} collection subscriptions", collections.len());
+                    tracing::debug!(count = collections.len(), "restoring collection subscriptions");
                     for name in &collections {
                         if let Ok(Some(col)) = database.get_collection(name) {
                             let collection_id = col.collection_id().to_string();
                             let topic = DefraTopic::collection(&collection_id);
                             if let Err(e) = handle.subscribe(topic).await {
-                                eprintln!("[LOAD-P2P-SUBS] Failed to subscribe collection {}: {}", name, e);
+                                tracing::warn!(collection = %name, error = %e, "failed to restore collection subscription");
                             }
                         }
                     }
@@ -442,11 +440,11 @@ pub unsafe extern "C" fn new_node_with_p2p(
             let peerstore = Peerstore::new(store.clone());
             if let Ok(Some(data)) = peerstore.get_p2p_documents().await {
                 if let Ok(doc_ids) = serde_json::from_slice::<Vec<String>>(&data) {
-                    eprintln!("[LOAD-P2P-SUBS] Restoring {} document subscriptions", doc_ids.len());
+                    tracing::debug!(count = doc_ids.len(), "restoring document subscriptions");
                     for doc_id in &doc_ids {
                         let topic = DefraTopic::document(doc_id);
                         if let Err(e) = handle.subscribe(topic).await {
-                            eprintln!("[LOAD-P2P-SUBS] Failed to subscribe document {}: {}", doc_id, e);
+                            tracing::warn!(doc_id = %doc_id, error = %e, "failed to restore document subscription");
                         }
                     }
                 }
@@ -482,7 +480,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
             let sh_client = sourcehub::SourceHubClient::new(grpc_addr, comet_addr);
             let sh_signer = sourcehub::TxSigner::from_secp256k1_bytes(signer_key, &chain_id)
                 .map_err(|e| format!("failed to create SourceHub signer: {}", e))?;
-            eprintln!("[SH-DEBUG] new_node_with_p2p: SourceHub ACP configured, validator={}", sh_signer.address());
+            tracing::debug!(validator = %sh_signer.address(), "SourceHub ACP configured");
             let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(sh_client, sh_signer));
             (sh_acp.clone() as Arc<dyn acp::DocumentACP>, Some(sh_acp))
         } else {

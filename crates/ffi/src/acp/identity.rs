@@ -69,10 +69,7 @@ pub extern "C" fn RegisterIdentity(
         let public_key_bytes =
             hex::decode(&pub_hex).map_err(|e| format!("invalid public key hex: {}", e))?;
 
-        eprintln!(
-            "[SIGN-DEBUG] register_identity: did={}, key_type={}",
-            did_str, key_type_str
-        );
+        tracing::debug!(did = %did_str, key_type = %key_type_str, "registering identity");
 
         defra_core::signing::store_identity(
             &did_str,

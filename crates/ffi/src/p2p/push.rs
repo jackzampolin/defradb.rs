@@ -163,14 +163,11 @@ pub(crate) async fn push_existing_docs(
     // Await all push tasks so ReplicatorCompleted isn't emitted prematurely.
     // The Go test framework copies expected heads on ReplicatorCompleted, then
     // waits for merge events -- if pushes haven't landed yet, we get timeouts.
-    eprintln!(
-        "[PUSH-EXISTING] Awaiting {} push tasks to complete",
-        push_handles.len()
-    );
+    tracing::debug!(task_count = push_handles.len(), "awaiting push tasks");
     for jh in push_handles {
         let _ = jh.await;
     }
-    eprintln!("[PUSH-EXISTING] All push tasks completed");
+    tracing::debug!("all push tasks completed");
 
     // Generate and push SE artifacts for collections with encrypted indexes.
     if let Some(se_key) = se_encryption_key {
@@ -187,11 +184,7 @@ pub(crate) async fn push_existing_docs(
                 continue;
             }
 
-            eprintln!(
-                "[SE-PUSH] Collection {} has {} encrypted indexes, generating artifacts",
-                col_name,
-                encrypted_indexes.len()
-            );
+            tracing::debug!(collection = %col_name, index_count = encrypted_indexes.len(), "generating SE artifacts");
 
             // Iterate datastore to get doc IDs (same pattern as block push above)
             let col_prefix = format!("/d/{}/", collection.collection_id()).into_bytes();
@@ -268,12 +261,7 @@ pub(crate) async fn push_existing_docs(
             }
 
             if !all_artifacts.is_empty() {
-                eprintln!(
-                    "[SE-PUSH] Sending {} SE artifacts for collection {} to peer {}",
-                    all_artifacts.len(),
-                    col_name,
-                    peer_id
-                );
+                tracing::debug!(artifact_count = all_artifacts.len(), collection = %col_name, peer_id = %peer_id, "sending SE artifacts");
 
                 let se_request = p2p::message::PushSEArtifactsRequest::new(
                     collection.collection_id().to_string(),
@@ -327,10 +315,10 @@ pub unsafe extern "C" fn p2p_retry_replicators(node_ptr: usize) -> FfiResult {
                     .list_collections()
                     .map_err(|e| format!("failed to list collections: {}", e))?;
 
-                eprintln!(
-                    "[RETRY-REPLICATORS] Found {} replicators, {} collections",
-                    replicators.len(),
-                    all_collections.len()
+                tracing::debug!(
+                    replicator_count = replicators.len(),
+                    collection_count = all_collections.len(),
+                    "found replicators and collections"
                 );
 
                 let mut push_handles = Vec::new();
@@ -341,10 +329,7 @@ pub unsafe extern "C" fn p2p_retry_replicators(node_ptr: usize) -> FfiResult {
                         None => continue,
                     };
 
-                    eprintln!(
-                        "[RETRY-REPLICATORS] Pushing existing docs to peer {}",
-                        peer_id
-                    );
+                    tracing::debug!(peer_id = %peer_id, "pushing existing docs to replicator");
 
                     let push_handle = p2p.handle.clone();
                     let push_db = Arc::clone(db);
@@ -370,14 +355,11 @@ pub unsafe extern "C" fn p2p_retry_replicators(node_ptr: usize) -> FfiResult {
                     }));
                 }
 
-                eprintln!(
-                    "[RETRY-REPLICATORS] Awaiting {} push tasks",
-                    push_handles.len()
-                );
+                tracing::debug!(task_count = push_handles.len(), "awaiting retry push tasks");
                 for h in push_handles {
                     let _ = h.await;
                 }
-                eprintln!("[RETRY-REPLICATORS] All push tasks completed");
+                tracing::debug!("all retry push tasks completed");
 
                 Ok(())
             })
@@ -422,11 +404,7 @@ pub(crate) async fn retry_doc(
         .map_err(|e| format!("blockstore txn: {}", e))?;
 
     let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
-    eprintln!(
-        "[RETRY-DOC] Looking for heads with prefix={} for doc={}",
-        String::from_utf8_lossy(&prefix),
-        doc_id
-    );
+    tracing::debug!(doc_id = %doc_id, "looking for composite heads");
     let opts = IterOptions::new().with_prefix(prefix);
     let mut iter = head_txn
         .iterator(opts)
@@ -444,13 +422,13 @@ pub(crate) async fn retry_doc(
         let key_str = String::from_utf8_lossy(&pair.key);
         let parts: Vec<&str> = key_str.split('/').collect();
         if parts.len() < 5 {
-            eprintln!("[RETRY-DOC] Skipping key with <5 parts: {}", key_str);
+            tracing::debug!(key = %key_str, "skipping malformed headstore key");
             continue;
         }
         let head_cid = match cid::Cid::from_str(parts[4]) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[RETRY-DOC] Failed to parse CID from {}: {}", parts[4], e);
+                tracing::warn!(cid_str = %parts[4], error = %e, "failed to parse CID");
                 continue;
             }
         };
@@ -460,11 +438,11 @@ pub(crate) async fn retry_doc(
         let block_data = match block_txn.get(&head_cid.to_bytes()).await {
             Ok(Some(data)) => data,
             Ok(None) => {
-                eprintln!("[RETRY-DOC] Block not found for CID={}", head_cid);
+                tracing::debug!(cid = %head_cid, "block not found in blockstore");
                 continue;
             }
             Err(e) => {
-                eprintln!("[RETRY-DOC] Block read error for CID={}: {}", head_cid, e);
+                tracing::warn!(cid = %head_cid, error = %e, "block read error");
                 continue;
             }
         };
@@ -486,10 +464,7 @@ pub(crate) async fn retry_doc(
                         if p2p::signing::sign_message(handle.keypair(), &mut field_req).is_ok() {
                             if let Err(e) = handle.send_two_stream_request(peer_id, field_req).await
                             {
-                                eprintln!(
-                                    "[RETRY-DOC] Field block send failed: cid={} error={}",
-                                    link.link, e
-                                );
+                                tracing::warn!(cid = %link.link, error = %e, "field block send failed");
                                 any_failed = true;
                             }
                         }
@@ -514,23 +489,14 @@ pub(crate) async fn retry_doc(
         }
 
         if let Err(e) = handle.send_two_stream_request(peer_id, request).await {
-            eprintln!(
-                "[RETRY-DOC] PushLog send failed: peer={} doc={} cid={} error={}",
-                peer_id, doc_id, head_cid, e
-            );
+            tracing::warn!(peer_id = %peer_id, doc_id = %doc_id, cid = %head_cid, error = %e, "PushLog send failed");
             any_failed = true;
         } else {
-            eprintln!(
-                "[RETRY-DOC] PushLog sent OK: peer={} doc={} cid={}",
-                peer_id, doc_id, head_cid
-            );
+            tracing::debug!(peer_id = %peer_id, doc_id = %doc_id, cid = %head_cid, "PushLog sent");
         }
     }
 
-    eprintln!(
-        "[RETRY-DOC] Done: doc={} heads_found={} any_failed={}",
-        doc_id, head_count, any_failed
-    );
+    tracing::debug!(doc_id = %doc_id, heads_found = head_count, any_failed, "retry doc complete");
 
     if any_failed {
         Err("some pushes failed".to_string())

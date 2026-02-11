@@ -41,10 +41,7 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
 
     let version_ids_str = try_ffi!(require_c_str(version_ids_json, "version_ids_json"));
 
-    eprintln!(
-        "[FFI-COLLECTION-VERSION] p2p_sync_collection_versions called with version_ids={}",
-        version_ids_str
-    );
+    tracing::debug!(version_ids = %version_ids_str, "p2p_sync_collection_versions called");
 
     // Parse the JSON array of version IDs
     let version_ids: Vec<String> = match serde_json::from_str(&version_ids_str) {
@@ -53,14 +50,11 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
     };
 
     if version_ids.is_empty() {
-        eprintln!("[FFI-COLLECTION-VERSION] No version IDs provided, returning early");
+        tracing::debug!("no version IDs provided, returning early");
         return FfiResult::ok();
     }
 
-    eprintln!(
-        "[FFI-COLLECTION-VERSION] Parsed {} version IDs to sync",
-        version_ids.len()
-    );
+    tracing::debug!(count = version_ids.len(), "parsed version IDs to sync");
 
     let result = NODES
         .get(node_ptr, |state| {
@@ -78,49 +72,34 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                     .await
                     .map_err(|e| format!("failed to get connected peers: {}", e))?;
 
-                eprintln!(
-                    "[FFI-COLLECTION-VERSION] Connected peers: {}",
-                    connected_peers.len()
-                );
+                tracing::debug!(count = connected_peers.len(), "connected peers");
 
                 if connected_peers.is_empty() {
-                    eprintln!("[FFI-COLLECTION-VERSION] No connected peers, returning early");
+                    tracing::debug!("no connected peers, returning early");
                     return Ok(());
                 }
 
                 // Process each version ID
                 for version_id_str in &version_ids {
-                    eprintln!(
-                        "[FFI-COLLECTION-VERSION] Processing version_id={}",
-                        version_id_str
-                    );
+                    tracing::debug!(version_id = %version_id_str, "processing version");
 
                     // Parse CID from version ID string
                     let version_cid = match cid::Cid::try_from(version_id_str.as_str()) {
                         Ok(cid) => cid,
                         Err(e) => {
-                            eprintln!(
-                                "[FFI-COLLECTION-VERSION] Invalid CID '{}': {}",
-                                version_id_str, e
-                            );
+                            tracing::warn!(version_id = %version_id_str, error = %e, "invalid CID, skipping");
                             continue;
                         }
                     };
 
                     // Start Bitswap sync for the version CID
-                    eprintln!(
-                        "[FFI-COLLECTION-VERSION] Starting Bitswap sync for cid={}",
-                        version_cid
-                    );
+                    tracing::debug!(cid = %version_cid, "starting bitswap sync");
 
                     if let Err(e) = p2p.handle
                         .bitswap_sync(version_cid, connected_peers.clone(), vec![version_cid])
                         .await
                     {
-                        eprintln!(
-                            "[FFI-COLLECTION-VERSION] Bitswap sync failed for {}: {}",
-                            version_cid, e
-                        );
+                        tracing::warn!(cid = %version_cid, error = %e, "bitswap sync failed");
                         continue;
                     }
 
@@ -134,10 +113,7 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                         let txn = match db.new_txn(true).await {
                             Ok(t) => t,
                             Err(e) => {
-                                eprintln!(
-                                    "[FFI-COLLECTION-VERSION] Failed to create txn: {}",
-                                    e
-                                );
+                                tracing::warn!(error = %e, "failed to create txn");
                                 break;
                             }
                         };
@@ -145,10 +121,7 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                         let blockstore = match txn.blockstore() {
                             Ok(b) => b,
                             Err(e) => {
-                                eprintln!(
-                                    "[FFI-COLLECTION-VERSION] Failed to get blockstore: {}",
-                                    e
-                                );
+                                tracing::warn!(error = %e, "failed to get blockstore");
                                 break;
                             }
                         };
@@ -158,10 +131,7 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                         match blockstore.has(&cid_bytes).await {
                             Ok(true) => {
                                 block_found = true;
-                                eprintln!(
-                                    "[FFI-COLLECTION-VERSION] Block {} fetched successfully",
-                                    version_cid
-                                );
+                                tracing::debug!(cid = %version_cid, "block fetched successfully");
                                 break;
                             }
                             Ok(false) => {
@@ -169,42 +139,28 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                             }
                             Err(e) => {
-                                eprintln!(
-                                    "[FFI-COLLECTION-VERSION] Blockstore check failed: {}",
-                                    e
-                                );
+                                tracing::warn!(error = %e, "blockstore check failed");
                                 break;
                             }
                         }
                     }
 
                     if !block_found {
-                        eprintln!(
-                            "[FFI-COLLECTION-VERSION] Timeout waiting for block {}",
-                            version_cid
-                        );
+                        tracing::warn!(cid = %version_cid, "timeout waiting for block");
                         continue;
                     }
 
-                    eprintln!(
-                        "[FFI-COLLECTION-VERSION] Block fetched, extracting linked field blocks"
-                    );
+                    tracing::debug!("block fetched, extracting linked field blocks");
 
                     // Read block data from blockstore
                     let block_data = match p2p.blockstore.get(&version_cid).await {
                         Ok(Some(data)) => data,
                         Ok(None) => {
-                            eprintln!(
-                                "[FFI-COLLECTION-VERSION] Block {} not found in blockstore after fetch",
-                                version_cid
-                            );
+                            tracing::warn!(cid = %version_cid, "block not found in blockstore after fetch");
                             continue;
                         }
                         Err(e) => {
-                            eprintln!(
-                                "[FFI-COLLECTION-VERSION] Failed to read block {}: {}",
-                                version_cid, e
-                            );
+                            tracing::warn!(cid = %version_cid, error = %e, "failed to read block");
                             continue;
                         }
                     };
@@ -213,17 +169,11 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                     let linked_cids = match Block::from_dag_cbor(&block_data) {
                         Ok(block) => {
                             let links = block.all_links();
-                            eprintln!(
-                                "[FFI-COLLECTION-VERSION] Collection block has {} linked CIDs",
-                                links.len()
-                            );
+                            tracing::debug!(count = links.len(), "collection block linked CIDs");
                             links
                         }
                         Err(e) => {
-                            eprintln!(
-                                "[FFI-COLLECTION-VERSION] Failed to decode block {}: {}",
-                                version_cid, e
-                            );
+                            tracing::warn!(cid = %version_cid, error = %e, "failed to decode block");
                             vec![]
                         }
                     };
@@ -246,28 +196,19 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                             Ok(Some(_)) => true,
                             Ok(None) => false,
                             Err(e) => {
-                                eprintln!(
-                                    "[FFI-COLLECTION-VERSION] Error checking link {}: {}",
-                                    link_cid, e
-                                );
+                                tracing::warn!(cid = %link_cid, error = %e, "error checking link");
                                 continue;
                             }
                         };
 
                         if !already_present {
-                            eprintln!(
-                                "[FFI-COLLECTION-VERSION] Fetching linked block {}",
-                                link_cid
-                            );
+                            tracing::debug!(cid = %link_cid, "fetching linked block");
 
                             if let Err(e) = p2p.handle
                                 .bitswap_sync(link_cid, connected_peers.clone(), vec![link_cid])
                                 .await
                             {
-                                eprintln!(
-                                    "[FFI-COLLECTION-VERSION] Bitswap sync failed for link {}: {}",
-                                    link_cid, e
-                                );
+                                tracing::warn!(cid = %link_cid, error = %e, "bitswap sync failed for link");
                                 continue;
                             }
 
@@ -285,28 +226,19 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                                     }
                                     Err(e) => {
-                                        eprintln!(
-                                            "[FFI-COLLECTION-VERSION] Error waiting for link {}: {}",
-                                            link_cid, e
-                                        );
+                                        tracing::warn!(cid = %link_cid, error = %e, "error waiting for link");
                                         break;
                                     }
                                 }
                             }
 
                             if !link_found {
-                                eprintln!(
-                                    "[FFI-COLLECTION-VERSION] Timeout waiting for linked block {}",
-                                    link_cid
-                                );
+                                tracing::warn!(cid = %link_cid, "timeout waiting for linked block");
                                 continue;
                             }
                         }
 
-                        eprintln!(
-                            "[FFI-COLLECTION-VERSION] Linked block {} available",
-                            link_cid
-                        );
+                        tracing::debug!(cid = %link_cid, "linked block available");
 
                         // If this linked block is a CollectionDefinition (previous version),
                         // also fetch its linked blocks (field definitions)
@@ -314,10 +246,7 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                             if let Ok(link_block) = Block::from_dag_cbor(&link_data) {
                                 if matches!(&link_block.delta, defra_core::block::CrdtDelta::CollectionDefinition(_)) {
                                     let sub_links = link_block.all_links();
-                                    eprintln!(
-                                        "[FFI-COLLECTION-VERSION] Previous version {} has {} sub-links",
-                                        link_cid, sub_links.len()
-                                    );
+                                    tracing::debug!(cid = %link_cid, count = sub_links.len(), "previous version has sub-links");
                                     for sub_cid in sub_links {
                                         if !fetched.contains(&sub_cid.to_string()) {
                                             fetch_queue.push_back(sub_cid);
@@ -328,9 +257,7 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                         }
                     }
 
-                    eprintln!(
-                        "[FFI-COLLECTION-VERSION] All linked blocks fetched, processing through merge handler"
-                    );
+                    tracing::debug!("all linked blocks fetched, processing through merge handler");
 
                     // Process through merge handler with recovery metadata
                     // (collection definitions don't have doc_id/collection_id in the traditional sense)
@@ -338,37 +265,22 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
 
                     match p2p.merge_handler.handle_block(&version_cid, &block_data, metadata).await {
                         Ok(outcome) => {
-                            eprintln!(
-                                "[FFI-COLLECTION-VERSION] Merge handler result for {}: {:?}",
-                                version_cid, outcome
-                            );
+                            tracing::debug!(cid = %version_cid, ?outcome, "merge handler result");
                         }
                         Err(e) => {
-                            eprintln!(
-                                "[FFI-COLLECTION-VERSION] Merge handler error for {}: {}",
-                                version_cid, e
-                            );
+                            tracing::warn!(cid = %version_cid, error = %e, "merge handler error");
                         }
                     }
 
-                    eprintln!(
-                        "[FFI-COLLECTION-VERSION] Successfully synced version {}",
-                        version_id_str
-                    );
+                    tracing::debug!(version_id = %version_id_str, "successfully synced version");
 
                     // After merge, check if this is a view with a lens transform to sync.
                     if let Ok(block) = Block::from_dag_cbor(&block_data) {
                         if let defra_core::CrdtDelta::CollectionDefinition(ref payload) = block.delta {
                             if let Some(ref transform_cid) = payload.query_transform {
-                                eprintln!(
-                                    "[FFI-COLLECTION-VERSION] View has transform CID={}, syncing lens...",
-                                    transform_cid
-                                );
+                                tracing::debug!(transform_cid = %transform_cid, "view has transform, syncing lens");
                                 if let Err(e) = sync_lens(transform_cid, p2p, db, &connected_peers).await {
-                                    eprintln!(
-                                        "[FFI-COLLECTION-VERSION] Lens sync failed: {}",
-                                        e
-                                    );
+                                    tracing::warn!(error = %e, "lens sync failed");
                                 }
                             }
                         }
@@ -438,16 +350,16 @@ async fn sync_lens(
     let config_block: LensConfigBlock = serde_ipld_dagcbor::from_slice(&config_data)
         .map_err(|e| format!("decode config block: {}", e))?;
 
-    eprintln!(
-        "[FFI-LENS-SYNC] Config block has {} module(s)",
-        config_block.modules.len()
+    tracing::debug!(
+        module_count = config_block.modules.len(),
+        "config block decoded"
     );
 
     let mut lens_modules = Vec::new();
 
     for module_cid in &config_block.modules {
         // 2. Fetch ModuleBlock
-        eprintln!("[FFI-LENS-SYNC] Fetching module block cid={}", module_cid);
+        tracing::debug!(cid = %module_cid, "fetching module block");
         let module_data =
             fetch_lens_block(*module_cid, &p2p.blockstore, &p2p.handle, connected_peers).await?;
         let module_block: LensModuleBlock = serde_ipld_dagcbor::from_slice(&module_data)
@@ -467,7 +379,7 @@ async fn sync_lens(
         let wasm_bytes = match &wasm_block {
             LensWasmBlock::Direct { wasm_bytes } => wasm_bytes.clone(),
             LensWasmBlock::Chunked { chunks } => {
-                eprintln!("[FFI-LENS-SYNC] Fetching {} WASM chunks", chunks.len());
+                tracing::debug!(count = chunks.len(), "fetching WASM chunks");
                 let mut all_bytes = Vec::new();
                 for chunk_cid in chunks {
                     let chunk_data =
@@ -482,10 +394,10 @@ async fn sync_lens(
             }
         };
 
-        eprintln!(
-            "[FFI-LENS-SYNC] Got WASM module ({} bytes), inverse={}",
-            wasm_bytes.len(),
-            module_block.inverse
+        tracing::debug!(
+            size = wasm_bytes.len(),
+            inverse = module_block.inverse,
+            "got WASM module"
         );
 
         let mut lens_mod = lens::LensModule::from_bytes(wasm_bytes);
@@ -517,9 +429,6 @@ async fn sync_lens(
         .await
         .map_err(|e| format!("register lens: {}", e))?;
 
-    eprintln!(
-        "[FFI-LENS-SYNC] Lens registered under CID {}",
-        transform_cid
-    );
+    tracing::debug!(cid = %transform_cid, "lens registered");
     Ok(())
 }

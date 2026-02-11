@@ -49,10 +49,7 @@ pub unsafe extern "C" fn p2p_sync_documents(
         Err(e) => return FfiResult::error(e),
     };
 
-    eprintln!(
-        "[DOCSYNC] p2p_sync_documents called: collection={} doc_ids={:?}",
-        collection_name_str, doc_ids
-    );
+    tracing::debug!(collection = %collection_name_str, doc_ids = ?doc_ids, "p2p_sync_documents called");
 
     let result = NODES
         .get(node_ptr, |state| {
@@ -77,18 +74,14 @@ pub unsafe extern "C" fn p2p_sync_documents(
                     .await
                     .map_err(|e| format!("failed to get connected peers: {}", e))?;
 
-                eprintln!("[DOCSYNC] connected_peers count={}", connected_peers.len());
+                tracing::debug!(count = connected_peers.len(), "connected peers");
 
                 if connected_peers.is_empty() {
-                    eprintln!("[DOCSYNC] No connected peers for DocSync");
+                    tracing::debug!("no connected peers for DocSync");
                     return Ok(());
                 }
 
-                eprintln!(
-                    "[DOCSYNC] Starting DocSync for {} documents to {} peers",
-                    doc_ids.len(),
-                    connected_peers.len()
-                );
+                tracing::debug!(doc_count = doc_ids.len(), peer_count = connected_peers.len(), "starting DocSync");
 
                 // Subscribe to merge_complete events BEFORE sending requests
                 // so we don't miss events that arrive quickly
@@ -114,28 +107,19 @@ pub unsafe extern "C" fn p2p_sync_documents(
                         return Err(format!("failed to sign DocSync request: {}", e));
                     }
 
-                    eprintln!(
-                        "[DOCSYNC] Attempt {} - sending to {} peers, have {}/{} merges",
-                        attempt + 1,
-                        connected_peers.len(),
-                        total_received,
-                        total_expected
-                    );
+                    tracing::debug!(attempt = attempt + 1, peer_count = connected_peers.len(), received = total_received, expected = total_expected, "DocSync attempt");
 
                     for peer_id in &connected_peers {
-                        eprintln!("[DOCSYNC] Sending DocSync request to peer={}", peer_id);
+                        tracing::debug!(peer_id = %peer_id, "sending DocSync request");
                         match p2p
                             .handle
                             .send_doc_sync_request(*peer_id, request.clone())
                             .await
                         {
                             Ok(()) => {
-                                eprintln!("[DOCSYNC] Sent DocSync request to peer={}", peer_id)
+                                tracing::debug!(peer_id = %peer_id, "DocSync request sent")
                             }
-                            Err(e) => eprintln!(
-                                "[DOCSYNC] Failed to send DocSync request to peer={}: {}",
-                                peer_id, e
-                            ),
+                            Err(e) => tracing::warn!(peer_id = %peer_id, error = %e, "failed to send DocSync request"),
                         }
                     }
 
@@ -157,10 +141,7 @@ pub unsafe extern "C" fn p2p_sync_documents(
                                     if doc_set.contains(&data.doc_id) {
                                         total_received += 1;
                                         last_merge = std::time::Instant::now();
-                                        eprintln!(
-                                            "[DOCSYNC] Doc merged: doc_id={} ({}/{})",
-                                            data.doc_id, total_received, total_expected
-                                        );
+                                        tracing::debug!(doc_id = %data.doc_id, received = total_received, expected = total_expected, "document merged");
                                     }
                                 }
                             }
@@ -172,10 +153,7 @@ pub unsafe extern "C" fn p2p_sync_documents(
 
                 event_bus.unsubscribe(sub.id());
 
-                eprintln!(
-                    "[DOCSYNC] Done: {}/{} merges received",
-                    total_received, total_expected
-                );
+                tracing::debug!(received = total_received, expected = total_expected, "DocSync complete");
 
                 Ok(())
             })
@@ -213,10 +191,7 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
 
     let collection_id_str = try_ffi!(require_c_str(collection_id, "collection_id"));
 
-    eprintln!(
-        "[FFI-BRANCHABLE] p2p_sync_branchable_collection called with collection_id={}",
-        collection_id_str
-    );
+    tracing::debug!(collection_id = %collection_id_str, "p2p_sync_branchable_collection called");
 
     let result = NODES
         .get(node_ptr, |state| {
@@ -231,26 +206,19 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
                 let collection = match db.find_collection_by_id(&collection_id_str) {
                     Ok(Some(c)) => c,
                     Ok(None) => {
-                        eprintln!(
-                            "[FFI-BRANCHABLE] collection '{}' not found",
-                            collection_id_str
-                        );
+                        tracing::warn!(collection_id = %collection_id_str, "collection not found");
                         return Err(format!(
                             "collection with ID '{}' not found",
                             collection_id_str
                         ));
                     }
                     Err(e) => {
-                        eprintln!("[FFI-BRANCHABLE] find_collection_by_id error: {}", e);
+                        tracing::warn!(error = %e, "find_collection_by_id error");
                         return Err(format!("failed to find collection: {}", e));
                     }
                 };
 
-                eprintln!(
-                    "[FFI-BRANCHABLE] Found collection name={} branchable={}",
-                    collection.name(),
-                    collection.schema().is_branchable
-                );
+                tracing::debug!(name = %collection.name(), branchable = collection.schema().is_branchable, "found collection");
 
                 // Check if the collection is branchable
                 if !collection.schema().is_branchable {
@@ -264,13 +232,10 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
                     .await
                     .map_err(|e| format!("failed to get connected peers: {}", e))?;
 
-                eprintln!(
-                    "[FFI-BRANCHABLE] Connected peers: {}",
-                    connected_peers.len()
-                );
+                tracing::debug!(count = connected_peers.len(), "connected peers");
 
                 if connected_peers.is_empty() {
-                    eprintln!("[FFI-BRANCHABLE] No connected peers, returning early");
+                    tracing::debug!("no connected peers, returning early");
                     return Ok(());
                 }
 
@@ -285,10 +250,7 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
 
                 // Send to each connected peer (fire-and-forget)
                 for peer_id in &connected_peers {
-                    eprintln!(
-                        "[FFI-BRANCHABLE] Sending BranchableSyncRequest to peer={}",
-                        peer_id
-                    );
+                    tracing::debug!(peer_id = %peer_id, "sending BranchableSyncRequest");
                     let request_clone = request.clone();
                     let handle = p2p.handle.clone();
                     let peer_id = *peer_id;
@@ -298,15 +260,9 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
                             .send_branchable_sync_request(peer_id, request_clone)
                             .await
                         {
-                            eprintln!(
-                                "[FFI-BRANCHABLE] Failed to send request to peer={}: {}",
-                                peer_id, e
-                            );
+                            tracing::warn!(peer_id = %peer_id, error = %e, "failed to send BranchableSyncRequest");
                         } else {
-                            eprintln!(
-                                "[FFI-BRANCHABLE] Successfully sent request to peer={}",
-                                peer_id
-                            );
+                            tracing::debug!(peer_id = %peer_id, "BranchableSyncRequest sent");
                         }
                     });
                 }

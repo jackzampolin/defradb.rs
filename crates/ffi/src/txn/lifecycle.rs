@@ -1,6 +1,5 @@
 use std::ffi::c_char;
 
-use crate::get_runtime;
 use crate::helpers::{get_node_runner, get_rt, require_c_str};
 use crate::state::NODES;
 use crate::types::{FfiResult, NewTxnResult};
@@ -21,7 +20,10 @@ use crate::{ffi_async_ok, try_ffi, ERR_INVALID_NODE_HANDLE};
 /// A `NewTxnResult` containing the transaction ID on success.
 #[no_mangle]
 pub extern "C" fn begin_txn(node_ptr: usize, readonly: i32) -> NewTxnResult {
-    let rt = get_runtime!(NewTxnResult);
+    let rt = match crate::runtime::RUNTIME.get() {
+        Some(rt) => rt,
+        None => return NewTxnResult::error("runtime not initialized - call defra_init() first"),
+    };
 
     // Validate node handle before entering async block
     let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {

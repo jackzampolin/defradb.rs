@@ -149,11 +149,7 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
 
             // Store all blocks in the blockstore for Bitswap availability
             for (cid, data) in &blocks {
-                eprintln!(
-                    "[FFI-LENS-ADD] Storing block cid={} ({} bytes)",
-                    cid,
-                    data.len()
-                );
+                tracing::debug!(cid = %cid, bytes = data.len(), "storing lens block");
                 blockstore
                     .put(cid, data)
                     .await
@@ -163,7 +159,7 @@ pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> 
                     .has(cid)
                     .await
                     .map_err(|e| format!("failed to check block: {}", e))?;
-                eprintln!("[FFI-LENS-ADD] Block {} stored: {}", cid, has);
+                tracing::debug!(cid = %cid, stored = has, "lens block storage verified");
             }
 
             // Register the transform under the real IPLD CID

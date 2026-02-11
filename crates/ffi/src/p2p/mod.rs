@@ -89,13 +89,13 @@ pub(crate) async fn persist_p2p_collections(
     let data = match serde_json::to_vec(collections) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("[PERSIST-P2P] Failed to serialize collections: {}", e);
+            tracing::warn!(error = %e, "failed to serialize P2P collections");
             return;
         }
     };
     let peerstore = Peerstore::new(db.store().clone());
     if let Err(e) = peerstore.set_p2p_collections(&data).await {
-        eprintln!("[PERSIST-P2P] Failed to persist collections: {}", e);
+        tracing::warn!(error = %e, "failed to persist P2P collections");
     }
 }
 
@@ -104,12 +104,12 @@ pub(crate) async fn persist_p2p_documents(db: &crate::state::FfiDatabase, docume
     let data = match serde_json::to_vec(documents) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("[PERSIST-P2P] Failed to serialize documents: {}", e);
+            tracing::warn!(error = %e, "failed to serialize P2P documents");
             return;
         }
     };
     let peerstore = Peerstore::new(db.store().clone());
     if let Err(e) = peerstore.set_p2p_documents(&data).await {
-        eprintln!("[PERSIST-P2P] Failed to persist documents: {}", e);
+        tracing::warn!(error = %e, "failed to persist P2P documents");
     }
 }

@@ -36,7 +36,7 @@ pub fn validate_policy_expressions(policy: &ParsedPolicy) -> Result<(), String> 
                             return Err("BAD_INPUT".to_string());
                         }
                     }
-                    ExprToken::Operator(_) | ExprToken::Paren(_) => {}
+                    ExprToken::Operator | ExprToken::Paren => {}
                 }
             }
         }
@@ -45,12 +45,10 @@ pub fn validate_policy_expressions(policy: &ParsedPolicy) -> Result<(), String> 
     Ok(())
 }
 
-#[derive(Debug)]
-#[allow(dead_code)]
 enum ExprToken {
     Identifier(String),
-    Operator(char),
-    Paren(char),
+    Operator,
+    Paren,
 }
 
 /// Tokenize a permission expression like "reader + writer - admin".
@@ -74,19 +72,19 @@ fn tokenize_expression(expr: &str) -> Result<Vec<ExprToken>, String> {
                         // This is a TTU operator "->", consume both
                         chars.next();
                         chars.next();
-                        tokens.push(ExprToken::Operator('>'));
+                        tokens.push(ExprToken::Operator);
                         continue;
                     }
                 }
-                tokens.push(ExprToken::Operator(ch));
+                tokens.push(ExprToken::Operator);
                 chars.next();
             }
             '&' => {
-                tokens.push(ExprToken::Operator(ch));
+                tokens.push(ExprToken::Operator);
                 chars.next();
             }
             '(' | ')' => {
-                tokens.push(ExprToken::Paren(ch));
+                tokens.push(ExprToken::Paren);
                 chars.next();
             }
             'a'..='z' | 'A'..='Z' | '_' => {

@@ -78,8 +78,8 @@ pub unsafe extern "C" fn p2p_create_replicator(
                 if let Ok(bytes) = info.to_bytes() {
                     let peerstore = Peerstore::new(db.store().clone());
                     match peerstore.set_replicator(&parsed.peer_id.to_string(), &bytes).await {
-                        Ok(()) => { eprintln!("[PERSIST-REPLICATOR] Saved replicator peer={} ({} bytes)", parsed.peer_id, bytes.len()); }
-                        Err(e) => { eprintln!("[PERSIST-REPLICATOR] Failed: {}", e); }
+                        Ok(()) => { tracing::debug!(peer_id = %parsed.peer_id, bytes = bytes.len(), "replicator persisted"); }
+                        Err(e) => { tracing::warn!(error = %e, "failed to persist replicator"); }
                     }
                 }
 
@@ -105,9 +105,9 @@ pub unsafe extern "C" fn p2p_create_replicator(
                     if let Err(e) = super::push::push_existing_docs(&push_handle, &push_db, push_peer_id, &push_collections, push_se_key.as_deref()).await {
                         tracing::error!(error = %e, "Failed to push existing docs to replicator");
                     }
-                    eprintln!("[PUSH-EXISTING] Publishing ReplicatorCompleted event");
+                    tracing::debug!("publishing ReplicatorCompleted event");
                     push_event_bus.publish(events::Message::replicator_completed());
-                    eprintln!("[PUSH-EXISTING] ReplicatorCompleted event published");
+                    tracing::debug!("ReplicatorCompleted event published");
                 });
 
                 Ok(())

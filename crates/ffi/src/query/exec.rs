@@ -65,16 +65,10 @@ pub unsafe extern "C" fn exec_request(
     if let Some(ref s) = identity_str {
         if !s.is_empty() {
             if let Some(signing_config) = defra_core::signing::get_identity(s) {
-                eprintln!(
-                    "[SIGN-DEBUG] Using explicit identity signing config for DID: {}",
-                    s
-                );
+                tracing::debug!(did = %s, "using explicit identity signing config");
                 defra_core::signing::set_signing_config(Some(signing_config));
             } else {
-                eprintln!(
-                    "[SIGN-DEBUG] No signing config found for explicit DID: {}",
-                    s
-                );
+                tracing::debug!(did = %s, "no signing config found for explicit DID");
                 defra_core::signing::set_signing_config(None);
             }
         } else {
@@ -82,10 +76,7 @@ pub unsafe extern "C" fn exec_request(
             let node_did = NODES
                 .get(node_ptr, |state| state.node_identity_did.clone())
                 .flatten();
-            eprintln!(
-                "[SIGN-DEBUG] Empty identity, node_identity_did={:?}",
-                node_did
-            );
+            tracing::debug!(node_did = ?node_did, "empty identity, falling back to node identity");
             let node_signing_config = NODES
                 .get(node_ptr, |state| {
                     state
@@ -94,9 +85,9 @@ pub unsafe extern "C" fn exec_request(
                         .and_then(|did| defra_core::signing::get_identity(did))
                 })
                 .flatten();
-            eprintln!(
-                "[SIGN-DEBUG] Node signing config present: {}",
-                node_signing_config.is_some()
+            tracing::debug!(
+                present = node_signing_config.is_some(),
+                "node signing config"
             );
             defra_core::signing::set_signing_config(node_signing_config);
         }
@@ -105,10 +96,7 @@ pub unsafe extern "C" fn exec_request(
         let node_did = NODES
             .get(node_ptr, |state| state.node_identity_did.clone())
             .flatten();
-        eprintln!(
-            "[SIGN-DEBUG] Null identity, node_identity_did={:?}",
-            node_did
-        );
+        tracing::debug!(node_did = ?node_did, "null identity, falling back to node identity");
         let node_signing_config = NODES
             .get(node_ptr, |state| {
                 state
@@ -117,9 +105,9 @@ pub unsafe extern "C" fn exec_request(
                     .and_then(|did| defra_core::signing::get_identity(did))
             })
             .flatten();
-        eprintln!(
-            "[SIGN-DEBUG] Node signing config present: {}",
-            node_signing_config.is_some()
+        tracing::debug!(
+            present = node_signing_config.is_some(),
+            "node signing config"
         );
         defra_core::signing::set_signing_config(node_signing_config);
     }

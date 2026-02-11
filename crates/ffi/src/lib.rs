@@ -62,23 +62,6 @@ use std::ffi::{c_char, CString};
 /// Error message for invalid node handle.
 pub const ERR_INVALID_NODE_HANDLE: &str = "invalid node handle";
 
-/// Gets the tokio runtime, returning early with an error if not initialized.
-///
-/// Usage: `let rt = get_runtime!(FfiResult);`
-///
-/// The result type must have an `error(msg: impl Into<String>)` constructor.
-#[macro_export]
-macro_rules! get_runtime {
-    ($result_type:ty) => {
-        match $crate::runtime::RUNTIME.get() {
-            Some(rt) => rt,
-            None => {
-                return <$result_type>::error("runtime not initialized - call defra_init() first")
-            }
-        }
-    };
-}
-
 /// Early-return on `Result<T, FfiResult>::Err`.
 #[macro_export]
 macro_rules! try_ffi {
