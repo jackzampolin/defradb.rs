@@ -81,4 +81,50 @@ impl NodeAcpOperations for NacAdapter {
             .await
             .map_err(|e| format!("{}", e))
     }
+
+    async fn enable(&self, owner: &Did) -> Result<(), String> {
+        self.nac.enable(owner).await.map_err(|e| format!("{}", e))
+    }
+
+    async fn add_relationship(
+        &self,
+        requestor: &Did,
+        target: &Did,
+        relation: &str,
+    ) -> Result<bool, String> {
+        if relation == "admin" {
+            self.nac
+                .add_admin(requestor, target)
+                .await
+                .map_err(|e| format!("{}", e))
+        } else if let Some(perm) = NodePermission::parse(relation) {
+            self.nac
+                .add_permission_grant(requestor, target, perm)
+                .await
+                .map_err(|e| format!("{}", e))
+        } else {
+            Err("relation not in resource".to_string())
+        }
+    }
+
+    async fn remove_relationship(
+        &self,
+        requestor: &Did,
+        target: &Did,
+        relation: &str,
+    ) -> Result<bool, String> {
+        if relation == "admin" {
+            self.nac
+                .remove_admin(requestor, target)
+                .await
+                .map_err(|e| format!("{}", e))
+        } else if let Some(perm) = NodePermission::parse(relation) {
+            self.nac
+                .remove_permission_grant(requestor, target, perm)
+                .await
+                .map_err(|e| format!("{}", e))
+        } else {
+            Err("relation not in resource".to_string())
+        }
+    }
 }

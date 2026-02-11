@@ -38,6 +38,14 @@ fn policy_to_info(policy: &Policy) -> PolicyInfo {
 #[async_trait]
 impl AcpOperations for AcpAdapter {
     async fn add_policy(&self, yaml: &str) -> Result<String, String> {
+        acp::policy_yaml::check_duplicate_yaml_keys(yaml)?;
+
+        let parsed = acp::policy_yaml::parse_policy_yaml(yaml)?;
+        if parsed.name.is_empty() {
+            return Err("name required".to_string());
+        }
+        acp::policy_yaml::validate_policy_expressions(&parsed)?;
+
         let policy = Policy::from_yaml(yaml).map_err(|e| format!("invalid policy: {}", e))?;
         let policy_id = policy.id.clone();
 

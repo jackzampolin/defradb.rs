@@ -31,6 +31,7 @@ mod local;
 pub mod nac;
 mod permission;
 mod persistent;
+pub mod policy_yaml;
 mod relation;
 mod store;
 pub mod zanzibar;

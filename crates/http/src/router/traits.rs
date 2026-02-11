@@ -283,6 +283,38 @@ pub trait NodeAcpOperations: Send + Sync {
     ///
     /// The requestor must be an admin (uses persisted check).
     async fn re_enable(&self, requestor: &identity::Did) -> Result<(), String>;
+
+    /// Enable NAC with the given owner identity.
+    ///
+    /// Initializes NAC and sets the owner. Can only be called when NAC
+    /// is not already configured.
+    async fn enable(&self, owner: &identity::Did) -> Result<(), String>;
+
+    /// Add a NAC relationship (admin or permission grant).
+    ///
+    /// Routes to the appropriate operation based on the relation name:
+    /// - "admin" → add admin
+    /// - valid permission name → add permission grant
+    /// - "owner" or invalid → error
+    async fn add_relationship(
+        &self,
+        requestor: &identity::Did,
+        target: &identity::Did,
+        relation: &str,
+    ) -> Result<bool, String>;
+
+    /// Remove a NAC relationship (admin or permission grant).
+    ///
+    /// Routes to the appropriate operation based on the relation name:
+    /// - "admin" → remove admin
+    /// - valid permission name → remove permission grant
+    /// - "owner" or invalid → error
+    async fn remove_relationship(
+        &self,
+        requestor: &identity::Did,
+        target: &identity::Did,
+        relation: &str,
+    ) -> Result<bool, String>;
 }
 
 /// NAC status information for HTTP responses.

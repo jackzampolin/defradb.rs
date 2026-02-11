@@ -8,6 +8,7 @@
 
 use axum::{extract::State, response::IntoResponse, Json};
 
+use crate::auth_error::normalize_auth_error;
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
@@ -32,6 +33,14 @@ pub struct GoNacRelationshipRequest {
     pub target_actor: String,
 }
 
+/// Request body for enabling NAC (Go-compatible format).
+#[derive(Debug, serde::Deserialize)]
+pub struct EnableNacRequest {
+    /// The owner DID to initialize NAC with.
+    #[serde(rename = "OwnerDID")]
+    pub owner_did: String,
+}
+
 /// Response for admin operations.
 #[derive(Debug, serde::Serialize)]
 pub struct AdminResponse {
@@ -39,6 +48,27 @@ pub struct AdminResponse {
     pub success: bool,
     /// A message describing the result.
     pub message: String,
+}
+
+/// POST /api/v0/acp/node/enable
+///
+/// Enable NAC with the given owner identity.
+/// Go DefraDB format: `{"OwnerDID": "did:key:..."}`
+pub async fn enable(
+    State(state): State<AppState>,
+    Json(body): Json<EnableNacRequest>,
+) -> Result<impl IntoResponse, HttpError> {
+    let nac = state.require_nac()?;
+
+    let owner = identity::Did::new(&body.owner_did)
+        .map_err(|e| HttpError::BadRequest(format!("invalid OwnerDID: {}", e)))?;
+
+    nac.enable(&owner).await.map_err(|e| {
+        tracing::warn!(error = %e, "NAC enable operation failed");
+        HttpError::BadRequest(e)
+    })?;
+
+    Ok(axum::http::StatusCode::OK.into_response())
 }
 
 /// GET /api/v0/nac/status
@@ -182,15 +212,13 @@ pub async fn go_add_relationship(
 ) -> Result<impl IntoResponse, HttpError> {
     require_permission(&state, &identity, NodePermission::NacRelationAdd).await?;
 
-    // Require NAC to be available
     let nac = state.require_nac()?;
 
-    // Only "admin" relation is supported
-    if body.relation.to_lowercase() != "admin" {
-        return Err(HttpError::BadRequest(format!(
-            "unsupported relation type '{}': only 'admin' is supported",
-            body.relation
-        )));
+    // "owner" relation is immutable
+    if body.relation == "owner" {
+        return Err(HttpError::BadRequest(
+            "relation not in resource".to_string(),
+        ));
     }
 
     // Require authenticated identity
@@ -202,14 +230,16 @@ pub async fn go_add_relationship(
     let target = identity::Did::new(&body.target_actor)
         .map_err(|e| HttpError::BadRequest(format!("invalid TargetActor DID: {}", e)))?;
 
-    // Add admin
-    let added = nac.add_admin(&requestor, &target).await.map_err(|e| {
-        tracing::warn!(error = %e, "NAC add_admin operation failed");
-        HttpError::Forbidden("not authorized to add relationship".into())
-    })?;
+    let added = nac
+        .add_relationship(&requestor, &target, &body.relation)
+        .await
+        .map_err(|e| {
+            let normalized = normalize_auth_error(e, "nac-relation-add");
+            tracing::warn!(error = %normalized, "NAC add_relationship operation failed");
+            HttpError::Forbidden(normalized)
+        })?;
 
-    // Go returns 200 OK with empty body on success (regardless of whether already added)
-    let _ = added; // Indicate we intentionally don't use this value
+    let _ = added;
     Ok(axum::http::StatusCode::OK.into_response())
 }
 
@@ -226,15 +256,13 @@ pub async fn go_remove_relationship(
 ) -> Result<impl IntoResponse, HttpError> {
     require_permission(&state, &identity, NodePermission::NacRelationDelete).await?;
 
-    // Require NAC to be available
     let nac = state.require_nac()?;
 
-    // Only "admin" relation is supported
-    if body.relation.to_lowercase() != "admin" {
-        return Err(HttpError::BadRequest(format!(
-            "unsupported relation type '{}': only 'admin' is supported",
-            body.relation
-        )));
+    // "owner" relation is immutable
+    if body.relation == "owner" {
+        return Err(HttpError::BadRequest(
+            "relation not in resource".to_string(),
+        ));
     }
 
     // Require authenticated identity
@@ -246,13 +274,15 @@ pub async fn go_remove_relationship(
     let target = identity::Did::new(&body.target_actor)
         .map_err(|e| HttpError::BadRequest(format!("invalid TargetActor DID: {}", e)))?;
 
-    // Remove admin
-    let _removed = nac.remove_admin(&requestor, &target).await.map_err(|e| {
-        tracing::warn!(error = %e, "NAC remove_admin operation failed");
-        HttpError::Forbidden("not authorized to remove relationship".into())
-    })?;
+    let _removed = nac
+        .remove_relationship(&requestor, &target, &body.relation)
+        .await
+        .map_err(|e| {
+            let normalized = normalize_auth_error(e, "nac-relation-delete");
+            tracing::warn!(error = %normalized, "NAC remove_relationship operation failed");
+            HttpError::Forbidden(normalized)
+        })?;
 
-    // Go returns 200 OK with empty body on success
     Ok(axum::http::StatusCode::OK.into_response())
 }
 
@@ -272,8 +302,9 @@ pub async fn disable(
         .ok_or_else(|| HttpError::Forbidden("authentication required to disable NAC".into()))?;
 
     nac.disable(&requestor).await.map_err(|e| {
-        tracing::warn!(error = %e, "NAC disable operation failed");
-        HttpError::Forbidden(e)
+        let normalized = normalize_auth_error(e, "nac-disable");
+        tracing::warn!(error = %normalized, "NAC disable operation failed");
+        HttpError::Forbidden(normalized)
     })?;
 
     Ok(Json(()))
@@ -295,8 +326,9 @@ pub async fn re_enable(
         .ok_or_else(|| HttpError::Forbidden("authentication required to re-enable NAC".into()))?;
 
     nac.re_enable(&requestor).await.map_err(|e| {
-        tracing::warn!(error = %e, "NAC re-enable operation failed");
-        HttpError::Forbidden(e)
+        let normalized = normalize_auth_error(e, "nac-re-enable");
+        tracing::warn!(error = %normalized, "NAC re-enable operation failed");
+        HttpError::Forbidden(normalized)
     })?;
 
     Ok(Json(()))
