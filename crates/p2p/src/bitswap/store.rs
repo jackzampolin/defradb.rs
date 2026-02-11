@@ -73,7 +73,6 @@ impl<B: Blockstore + Debug + 'static> Store for BitswapStoreAdapter<B> {
             .await
             .map_err(|e| anyhow!("blockstore error: {}", e))?
             .ok_or_else(|| anyhow!("block not found: {}", cid))?;
-
         Ok(Block::new(Bytes::from(data), *cid))
     }
 

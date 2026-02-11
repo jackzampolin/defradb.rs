@@ -456,6 +456,12 @@ impl<S: Store> P2PHost<S> {
             query_id = query_id.0,
             "Starting Bitswap block fetch via Client API"
         );
+        eprintln!(
+            "[BITSWAP-SYNC] Starting fetch cid={} providers={:?} missing={}",
+            cid,
+            providers,
+            missing.len()
+        );
 
         // Clone the client for use in the spawned task
         let client = self.swarm.behaviour().bitswap.client().clone();
@@ -465,65 +471,74 @@ impl<S: Store> P2PHost<S> {
 
         // Spawn async task to fetch blocks (with cancellation support)
         let task_handle = tokio::spawn(async move {
-            info!(
-                query_id = query_id.0,
-                missing_count = missing_cids.len(),
-                providers = ?providers_list,
-                "Bitswap fetch task started"
-            );
-
             // Create a session and add providers for each CID
             let session = client.new_session().await;
 
             // Add each provider for each missing CID
             for cid in &missing_cids {
                 for provider in &providers_list {
-                    info!(
-                        query_id = query_id.0,
-                        cid = %cid,
-                        provider = %provider,
-                        "Adding Bitswap provider for CID"
-                    );
                     session.add_provider(cid, *provider).await;
                 }
             }
 
+            eprintln!(
+                "[BITSWAP-SYNC] Session created, providers added, calling get_blocks for {} CIDs",
+                missing_cids.len()
+            );
             match session.get_blocks(&missing_cids).await {
                 Ok(receiver) => {
+                    eprintln!("[BITSWAP-SYNC] get_blocks returned receiver, waiting for blocks...");
                     // Use into_parts() to get the underlying channel
                     // BlockReceiver only implements Deref (not DerefMut), so we can't call recv() through it
                     let (chan, _guard) = receiver.into_parts();
                     let mut fetched = 0;
 
-                    while let Ok(block) = chan.recv().await {
-                        fetched += 1;
-                        let block_cid = *block.cid();
-                        let block_data = block.data().to_vec();
+                    // Timeout per block: 10 seconds. If no block arrives within this
+                    // window, we give up and report partial success so the retry
+                    // mechanism can try again with fresh provider info.
+                    let per_block_timeout = std::time::Duration::from_secs(10);
 
-                        info!(
-                            query_id = query_id.0,
-                            cid = %block_cid,
-                            fetched = fetched,
-                            total = missing_cids.len(),
-                            data_len = block_data.len(),
-                            "Bitswap fetched block"
-                        );
+                    loop {
+                        match tokio::time::timeout(per_block_timeout, chan.recv()).await {
+                            Ok(Ok(block)) => {
+                                fetched += 1;
+                                let block_cid = *block.cid();
+                                let block_data = block.data().to_vec();
 
-                        // Send block to coordinator for storage
-                        if let Err(e) = event_tx
-                            .send(HostEvent::BitswapBlockReceived {
-                                query_id,
-                                cid: block_cid,
-                                data: block_data,
-                            })
-                            .await
-                        {
-                            warn!(
-                                query_id = query_id.0,
-                                cid = %block_cid,
-                                error = %e,
-                                "Failed to send BitswapBlockReceived event"
-                            );
+                                // Send block to coordinator for storage
+                                if let Err(e) = event_tx
+                                    .send(HostEvent::BitswapBlockReceived {
+                                        query_id,
+                                        cid: block_cid,
+                                        data: block_data,
+                                    })
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        query_id = query_id.0,
+                                        error = %e,
+                                        "Failed to send BitswapBlockReceived event"
+                                    );
+                                }
+
+                                if fetched == missing_cids.len() {
+                                    break;
+                                }
+                            }
+                            Ok(Err(_)) => {
+                                // Channel closed — no more blocks coming
+                                eprintln!("[BITSWAP-SYNC] Channel closed, no more blocks");
+                                break;
+                            }
+                            Err(_) => {
+                                // Timeout — no block arrived within the window
+                                eprintln!(
+                                    "[BITSWAP-SYNC] TIMEOUT waiting for block ({} fetched of {})",
+                                    fetched,
+                                    missing_cids.len()
+                                );
+                                break;
+                            }
                         }
                     }
 
@@ -554,7 +569,11 @@ impl<S: Store> P2PHost<S> {
                         .await;
                 }
                 Err(e) => {
-                    warn!(query_id = query_id.0, error = %e, "Bitswap fetch failed");
+                    tracing::error!(
+                        query_id = query_id.0,
+                        error = %e,
+                        "Bitswap get_blocks failed"
+                    );
                     let _ = event_tx
                         .send(HostEvent::BitswapComplete {
                             query_id,

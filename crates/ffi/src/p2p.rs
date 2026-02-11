@@ -23,12 +23,13 @@ use defra_core::Block;
 use p2p::bitswap::BitswapStoreAdapter;
 use p2p::message::PushLogRequest;
 use p2p::sync::{
-    ReplicationConfig, ReplicationLoop, ReplicationResult, SyncConfig, SyncCoordinator,
+    PushFailure, ReplicationConfig, ReplicationLoop, ReplicationResult, SyncConfig, SyncCoordinator,
 };
 use p2p::topics::DefraTopic;
 use p2p::P2PHost;
+use p2p::ReplicatorInfo;
 use storage::corekv::IterOptions;
-use storage::Store as _;
+use storage::stores::Peerstore;
 
 /// Parsed multiaddr containing peer ID and transport address.
 struct ParsedMultiaddr {
@@ -225,61 +226,39 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let blockstore = Arc::new(DefraBlockstore::new(store.clone(), true));
         let bitswap_store = BitswapStoreAdapter::new(blockstore.clone());
 
-        // Try to load persisted P2P keypair from the store.
-        // Key uses systemstore prefix 's' + '/p2p/host_key'.
-        const P2P_HOST_KEY: &[u8] = b"s/p2p/host_key";
-
-        let stored_keypair = {
-            let txn = store
-                .new_txn(true)
-                .await
-                .map_err(|e| format!("failed to create txn for P2P key load: {}", e))?;
-            match txn.get(P2P_HOST_KEY).await {
+        // Load or generate P2P identity key. Go persists the libp2p identity so
+        // PeerIds are stable across restarts; we do the same using the Peerstore.
+        let p2p_keypair = {
+            let ps = Peerstore::new(store.clone());
+            let key_id = "__local_p2p_identity__";
+            match ps.get_replicator(key_id).await {
                 Ok(Some(bytes)) => {
+                    // Restore persisted keypair
                     match libp2p::identity::Keypair::from_protobuf_encoding(&bytes) {
-                        Ok(kp) => Some(kp),
-                        Err(e) => {
-                            eprintln!(
-                                "[P2P] Warning: failed to decode stored keypair: {}, generating new one",
-                                e
-                            );
-                            None
+                        Ok(kp) => kp,
+                        Err(_) => {
+                            let kp = libp2p::identity::Keypair::generate_ed25519();
+                            let _ = ps.set_replicator(key_id, &kp.to_protobuf_encoding().unwrap_or_default()).await;
+                            kp
                         }
                     }
                 }
-                _ => None,
+                _ => {
+                    // First run: generate and persist
+                    let kp = libp2p::identity::Keypair::generate_ed25519();
+                    if let Ok(encoded) = kp.to_protobuf_encoding() {
+                        let _ = ps.set_replicator(key_id, &encoded).await;
+                    }
+                    kp
+                }
             }
         };
 
+        // Create P2P host with the persisted identity
         let (host, handle, event_rx, _replicator_registry) =
-            if let Some(kp) = stored_keypair {
-                P2PHost::with_keypair(kp, bitswap_store.clone())
-                    .await
-                    .map_err(|e| format!("failed to create P2P host with stored keypair: {}", e))?
-            } else {
-                let result = P2PHost::new(bitswap_store.clone())
-                    .await
-                    .map_err(|e| format!("failed to create P2P host: {}", e))?;
-
-                // Persist the newly generated keypair
-                let key_bytes = result
-                    .1
-                    .keypair()
-                    .to_protobuf_encoding()
-                    .map_err(|e| format!("failed to encode P2P keypair: {}", e))?;
-                let mut txn = store
-                    .new_txn(false)
-                    .await
-                    .map_err(|e| format!("failed to create txn for P2P key store: {}", e))?;
-                txn.set(P2P_HOST_KEY, &key_bytes)
-                    .await
-                    .map_err(|e| format!("failed to store P2P keypair: {}", e))?;
-                txn.commit()
-                    .await
-                    .map_err(|e| format!("failed to commit P2P keypair: {}", e))?;
-
-                result
-            };
+            P2PHost::with_keypair(p2p_keypair, bitswap_store.clone())
+                .await
+                .map_err(|e| format!("failed to create P2P host: {}", e))?;
 
         // Spawn the P2P host event loop BEFORE sending any commands.
         // The host must be running to process commands like Listen/Dial.
@@ -293,6 +272,9 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let addr: libp2p::Multiaddr = listen_addr_str
             .parse()
             .map_err(|e| format!("invalid multiaddr '{}': {}", listen_addr_str, e))?;
+
+        let rust_peer_id = handle.local_peer_id().await.map_err(|e| format!("peer id: {}", e))?;
+        eprintln!("[RUST-P2P] Created Rust P2P host PeerId={} ListenAddr={}", rust_peer_id, listen_addr_str);
 
         handle
             .listen(addr)
@@ -315,7 +297,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
             Arc::new(db::DbHeadProvider::new(database.clone()));
 
         // Create SyncCoordinator for processing incoming P2P sync messages
-        let (coordinator, sync_events_rx) = SyncCoordinator::with_head_provider(
+        let (mut coordinator, sync_events_rx) = SyncCoordinator::with_head_provider(
             handle.clone(),
             blockstore.clone(),
             SyncConfig::default(),
@@ -326,6 +308,10 @@ pub unsafe extern "C" fn new_node_with_p2p(
         )
         .await
         .map_err(|e| format!("failed to create sync coordinator: {}", e))?;
+
+        // Create push failure channel and set it on the coordinator before wrapping in Arc.
+        let (failure_tx, failure_rx) = tokio::sync::mpsc::unbounded_channel::<PushFailure>();
+        coordinator.set_failure_channel(failure_tx);
         let coordinator = Arc::new(coordinator);
 
         // Create DbMergeHandler for merging CRDT blocks into the database
@@ -442,7 +428,14 @@ pub unsafe extern "C" fn new_node_with_p2p(
                         break;
                     }
                     ReplicationResult::Failed { cid, error } => {
+                        eprintln!("[REPL-LOOP] FAILED cid={} error={}", cid, error);
                         tracing::error!(cid = %cid, error = %error, "Block merge failed");
+                    }
+                    ReplicationResult::Skipped { cid, reason } => {
+                        eprintln!("[REPL-LOOP] SKIPPED cid={} reason={}", cid, reason);
+                    }
+                    ReplicationResult::BitswapFetchStarted { root_cid, .. } => {
+                        eprintln!("[REPL-LOOP] BITSWAP_FETCH root={}", root_cid);
                     }
                     _ => {}
                 }
@@ -453,13 +446,240 @@ pub unsafe extern "C" fn new_node_with_p2p(
         // Create P2P state with sync pipeline components and abort handles
         // Note: Local update broadcast is now handled by BroadcastMutator directly
         // when mutations are executed, so no separate broadcast task is needed.
-        let p2p_state = Arc::new(P2PState::new(
+        let mut p2p_state = P2PState::new(
             handle.clone(),
             blockstore.clone(),
             merge_handler.clone(),
             host_event_task.abort_handle(),
             replication_task.abort_handle(),
-        ));
+        );
+
+        // Task 3: Failure Recorder — reads push failures from the channel and
+        // persists them to the Peerstore for later retry.
+        let recorder_store = store.clone();
+        let failure_recorder_task = tokio::spawn(async move {
+            let mut rx = failure_rx;
+            while let Some(failure) = rx.recv().await {
+                eprintln!(
+                    "[RETRY-RECORDER] Push failure: peer={} doc={} col={}",
+                    failure.peer_id, failure.doc_id, failure.collection_id
+                );
+                let peerstore = Peerstore::new(recorder_store.clone());
+                let retry_info = storage::stores::RetryInfo::new_initial();
+                let info_bytes = match retry_info.to_bytes() {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to serialize RetryInfo");
+                        continue;
+                    }
+                };
+                if let Err(e) = peerstore
+                    .record_push_failure(
+                        &failure.peer_id.to_string(),
+                        &failure.doc_id,
+                        &failure.collection_id,
+                        &info_bytes,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        peer_id = %failure.peer_id,
+                        doc_id = %failure.doc_id,
+                        error = %e,
+                        "Failed to record push failure"
+                    );
+                } else {
+                    eprintln!(
+                        "[RETRY-RECORDER] Recorded failure for peer={} doc={}",
+                        failure.peer_id, failure.doc_id
+                    );
+                }
+            }
+        });
+        p2p_state.failure_recorder_handle = Some(failure_recorder_task.abort_handle());
+
+        // Task 4: Retry Loop — every 2 seconds, check for due retries and
+        // re-push failed documents to their replicator peers.
+        let retry_store = store.clone();
+        let retry_handle = handle.clone();
+        let retry_loop_task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                let peerstore = Peerstore::new(retry_store.clone());
+                let peers = match peerstore.get_all_retry_peers().await {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+
+                if !peers.is_empty() {
+                    eprintln!("[RETRY-LOOP] Found {} retry peers", peers.len());
+                }
+
+                for (peer_id_str, info_bytes) in peers {
+                    let mut retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            eprintln!("[RETRY-LOOP] Failed to parse RetryInfo for peer={}: {}", peer_id_str, e);
+                            continue;
+                        }
+                    };
+
+                    if !retry_info.is_due() {
+                        continue;
+                    }
+
+                    let peer_id = match libp2p::PeerId::from_str(&peer_id_str) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("[RETRY-LOOP] Invalid peer ID {}: {}", peer_id_str, e);
+                            continue;
+                        }
+                    };
+
+                    // Only attempt retry when the peer is connected. If the peer
+                    // restarted on a new port, we can't reach it at the old address.
+                    // The test framework (or mDNS/DHT) will re-connect the peers,
+                    // at which point we retry immediately.
+                    let connected = retry_handle
+                        .connected_peers()
+                        .await
+                        .unwrap_or_default();
+                    if !connected.contains(&peer_id) {
+                        continue;
+                    }
+
+                    let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+
+                    if docs.is_empty() {
+                        let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                        continue;
+                    }
+
+                    eprintln!(
+                        "[RETRY-LOOP] Retrying {} docs for peer={}",
+                        docs.len(), peer_id_str
+                    );
+
+                    let mut all_succeeded = true;
+                    for (doc_id, collection_id) in &docs {
+                        match retry_doc(
+                            &retry_handle,
+                            &retry_store,
+                            peer_id,
+                            doc_id,
+                            collection_id,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                eprintln!(
+                                    "[RETRY-LOOP] SUCCESS doc={} peer={}",
+                                    doc_id, peer_id_str
+                                );
+                                let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[RETRY-LOOP] FAILED doc={} peer={}: {}",
+                                    doc_id, peer_id_str, e
+                                );
+                                all_succeeded = false;
+                            }
+                        }
+                    }
+
+                    if all_succeeded {
+                        eprintln!("[RETRY-LOOP] All docs succeeded for peer={}", peer_id_str);
+                        let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                    } else {
+                        retry_info.bump();
+                        if let Ok(bytes) = retry_info.to_bytes() {
+                            let _ = peerstore.update_retry_info(&peer_id_str, &bytes).await;
+                        }
+                    }
+                }
+            }
+        });
+        p2p_state.retry_loop_handle = Some(retry_loop_task.abort_handle());
+
+        let p2p_state = Arc::new(p2p_state);
+
+        // Load persisted replicators from the Peerstore (Go's loadAndPublishReplicators).
+        // On restart, this restores the in-memory replicator registry and GossipSub
+        // subscriptions so that syncing resumes without the caller re-creating replicators.
+        let peerstore = Peerstore::new(store.clone());
+        match peerstore.get_all_replicators().await {
+            Ok(entries) => {
+                eprintln!("[LOAD-REPLICATORS] Found {} stored replicators", entries.len());
+                for (peer_id_str, data) in entries {
+                    match ReplicatorInfo::from_bytes(&data) {
+                        Ok(info) => {
+                            if let Some(peer_id) = info.peer_id() {
+                                eprintln!("[LOAD-REPLICATORS] Restoring replicator peer={} collections={:?}", peer_id, info.collections);
+                                if let Err(e) = handle
+                                    .set_replicator(peer_id, info.collections.clone())
+                                    .await
+                                {
+                                    eprintln!("[LOAD-REPLICATORS] Failed to set_replicator: {}", e);
+                                    continue;
+                                }
+                                for collection_id in &info.collections {
+                                    let topic = DefraTopic::collection(collection_id);
+                                    if let Err(e) = handle.subscribe(topic).await {
+                                        eprintln!("[LOAD-REPLICATORS] Failed to subscribe topic {}: {}", collection_id, e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[LOAD-REPLICATORS] Failed to deserialize peer={}: {}", peer_id_str, e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[LOAD-REPLICATORS] Failed to load from storage: {}", e);
+            }
+        }
+
+        // Load persisted P2P collection subscriptions (Go's loadAndPublishP2PCollections).
+        {
+            let peerstore = Peerstore::new(store.clone());
+            if let Ok(Some(data)) = peerstore.get_p2p_collections().await {
+                if let Ok(collections) = serde_json::from_slice::<Vec<String>>(&data) {
+                    eprintln!("[LOAD-P2P-SUBS] Restoring {} collection subscriptions", collections.len());
+                    for name in &collections {
+                        if let Ok(Some(col)) = database.get_collection(name) {
+                            let collection_id = col.collection_id().to_string();
+                            let topic = DefraTopic::collection(&collection_id);
+                            if let Err(e) = handle.subscribe(topic).await {
+                                eprintln!("[LOAD-P2P-SUBS] Failed to subscribe collection {}: {}", name, e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Load persisted P2P document subscriptions (Go's loadAndPublishPeerDocuments).
+        {
+            let peerstore = Peerstore::new(store.clone());
+            if let Ok(Some(data)) = peerstore.get_p2p_documents().await {
+                if let Ok(doc_ids) = serde_json::from_slice::<Vec<String>>(&data) {
+                    eprintln!("[LOAD-P2P-SUBS] Restoring {} document subscriptions", doc_ids.len());
+                    for doc_id in &doc_ids {
+                        let topic = DefraTopic::document(doc_id);
+                        if let Err(e) = handle.subscribe(topic).await {
+                            eprintln!("[LOAD-P2P-SUBS] Failed to subscribe document {}: {}", doc_id, e);
+                        }
+                    }
+                }
+            }
+        }
 
         // Create lensed auto-committing fetcher
         let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
@@ -670,18 +890,28 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
             };
 
             rt.block_on(async {
+                let local_pid = p2p
+                    .handle
+                    .local_peer_id()
+                    .await
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|_| "unknown".to_string());
                 // Get connected peers from the host first (authoritative list).
                 let connected = p2p
                     .handle
                     .connected_peers()
                     .await
                     .map_err(|e| format!("failed to get connected peers: {}", e))?;
+                eprintln!(
+                    "[FFI-ACTIVE-PEERS] node={} node_ptr={} connected={}",
+                    &local_pid[local_pid.len().saturating_sub(8)..],
+                    node_ptr,
+                    connected.len()
+                );
 
-                // Wait for identify protocol to resolve addresses for all connected
-                // peers. Incoming connections initially have no address in peer_addrs
-                // (we skip storing the ephemeral send_back_addr). The identify protocol
-                // updates peer_addrs with the correct listen address, typically within
-                // a few milliseconds on localhost.
+                // Wait for all connected peers to have resolved addresses.
+                // With TCP port reuse + biased select, addresses are typically
+                // available immediately, but we retry for robustness.
                 let mut host_addrs = Vec::new();
                 let mut covered: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
@@ -720,6 +950,16 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
                             all_addrs.push(ffi_addr.to_string());
                         }
                     }
+                }
+
+                eprintln!(
+                    "[FFI-ACTIVE-PEERS] connected={} host_addrs={} all_addrs={}",
+                    connected.len(),
+                    covered.len(),
+                    all_addrs.len()
+                );
+                for a in &all_addrs {
+                    eprintln!("[FFI-ACTIVE-PEERS]   addr={}", a);
                 }
 
                 serde_json::to_string(&all_addrs)
@@ -896,9 +1136,26 @@ pub unsafe extern "C" fn p2p_create_replicator(
 
                 // Set the replicator with collection CIDs (not names)
                 p2p.handle
-                    .set_replicator(parsed.peer_id, collection_cids)
+                    .set_replicator(parsed.peer_id, collection_cids.clone())
                     .await
                     .map_err(|e| format!("failed to set replicator: {}", e))?;
+
+                // Persist to Peerstore so the replicator survives node restarts.
+                let info = ReplicatorInfo::new(parsed.peer_id, collection_cids);
+                if let Ok(bytes) = info.to_bytes() {
+                    let peerstore = Peerstore::new(db.store().clone());
+                    match peerstore
+                        .set_replicator(&parsed.peer_id.to_string(), &bytes)
+                        .await
+                    {
+                        Ok(()) => {
+                            eprintln!("[PERSIST-REPLICATOR] Saved replicator peer={} ({} bytes)", parsed.peer_id, bytes.len());
+                        }
+                        Err(e) => {
+                            eprintln!("[PERSIST-REPLICATOR] Failed: {}", e);
+                        }
+                    }
+                }
 
                 // Auto-subscribe to collection topics using schema root CIDs
                 // (Go does this implicitly via SetReplicator → subscribe_collection)
@@ -1338,6 +1595,155 @@ pub unsafe extern "C" fn p2p_retry_replicators(node_ptr: usize) -> FfiResult {
     }
 }
 
+/// Retry pushing a single document's composite heads to a replicator peer.
+///
+/// Reads composite head CIDs from the headstore, loads block data from the
+/// blockstore, builds signed PushLogRequests, and sends them.
+async fn retry_doc(
+    handle: &p2p::P2PHostHandle,
+    store: &Arc<crate::state::FfiStore>,
+    peer_id: libp2p::PeerId,
+    doc_id: &str,
+    collection_id: &str,
+) -> Result<(), String> {
+    use storage::corekv::{Reader, Store};
+
+    let local_peer_id = handle
+        .local_peer_id()
+        .await
+        .map_err(|e| format!("failed to get local peer ID: {}", e))?;
+
+    let headstore = storage::stores::Headstore::new(store.clone());
+    let head_txn = headstore
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("headstore txn: {}", e))?;
+
+    let blockstore_view = storage::stores::Blockstore::new(store.clone(), true);
+    let block_txn = blockstore_view
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("blockstore txn: {}", e))?;
+
+    let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
+    eprintln!(
+        "[RETRY-DOC] Looking for heads with prefix={} for doc={}",
+        String::from_utf8_lossy(&prefix),
+        doc_id
+    );
+    let opts = IterOptions::new().with_prefix(prefix);
+    let mut iter = head_txn
+        .iterator(opts)
+        .await
+        .map_err(|e| format!("headstore iterator: {}", e))?;
+
+    let mut any_failed = false;
+    let mut head_count = 0u32;
+    while let Some(pair) = iter
+        .next()
+        .await
+        .map_err(|e| format!("headstore iteration: {}", e))?
+    {
+        // Parse CID from key: /d/{doc_id}/C/{cid}
+        let key_str = String::from_utf8_lossy(&pair.key);
+        let parts: Vec<&str> = key_str.split('/').collect();
+        if parts.len() < 5 {
+            eprintln!("[RETRY-DOC] Skipping key with <5 parts: {}", key_str);
+            continue;
+        }
+        let head_cid = match cid::Cid::from_str(parts[4]) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[RETRY-DOC] Failed to parse CID from {}: {}", parts[4], e);
+                continue;
+            }
+        };
+        head_count += 1;
+
+        // Read composite block data from blockstore
+        let block_data = match block_txn.get(&head_cid.to_bytes()).await {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                eprintln!("[RETRY-DOC] Block not found for CID={}", head_cid);
+                continue;
+            }
+            Err(e) => {
+                eprintln!("[RETRY-DOC] Block read error for CID={}: {}", head_cid, e);
+                continue;
+            }
+        };
+
+        // Send the full DAG: field blocks first, then composite last.
+        // This matches push_dag_to_replicators() so the receiver has all
+        // blocks when the composite arrives and doesn't need Bitswap.
+        if let Ok(parsed) = Block::from_dag_cbor(&block_data) {
+            if let Some(ref links) = parsed.links {
+                for link in links {
+                    if let Ok(Some(field_data)) = block_txn.get(&link.link.to_bytes()).await {
+                        let mut field_req = PushLogRequest::new(
+                            doc_id.to_string(),
+                            link.link.to_bytes(),
+                            collection_id.to_string(),
+                            local_peer_id.to_string(),
+                            field_data,
+                        );
+                        if p2p::signing::sign_message(handle.keypair(), &mut field_req).is_ok() {
+                            if let Err(e) =
+                                handle.send_two_stream_request(peer_id, field_req).await
+                            {
+                                eprintln!(
+                                    "[RETRY-DOC] Field block send failed: cid={} error={}",
+                                    link.link, e
+                                );
+                                any_failed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Send composite block last
+        let mut request = PushLogRequest::new(
+            doc_id.to_string(),
+            head_cid.to_bytes(),
+            collection_id.to_string(),
+            local_peer_id.to_string(),
+            block_data,
+        );
+
+        if let Err(e) = p2p::signing::sign_message(handle.keypair(), &mut request) {
+            tracing::warn!(error = %e, "Failed to sign retry PushLog request");
+            any_failed = true;
+            continue;
+        }
+
+        if let Err(e) = handle.send_two_stream_request(peer_id, request).await {
+            eprintln!(
+                "[RETRY-DOC] PushLog send failed: peer={} doc={} cid={} error={}",
+                peer_id, doc_id, head_cid, e
+            );
+            any_failed = true;
+        } else {
+            eprintln!(
+                "[RETRY-DOC] PushLog sent OK: peer={} doc={} cid={}",
+                peer_id, doc_id, head_cid
+            );
+        }
+    }
+
+    eprintln!(
+        "[RETRY-DOC] Done: doc={} heads_found={} any_failed={}",
+        doc_id, head_count, any_failed
+    );
+
+    if any_failed {
+        Err("some pushes failed".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 /// Delete a replicator.
 ///
 /// # Arguments
@@ -1387,16 +1793,58 @@ pub unsafe extern "C" fn p2p_delete_replicator(
                 Some(p2p) => p2p,
                 None => return Err("no p2p system configured".to_string()),
             };
+            let db = &state.database;
 
             rt.block_on(async {
                 let peer_id: libp2p::PeerId = peer_str
                     .parse()
                     .map_err(|e| format!("invalid peer ID '{}': {}", peer_str, e))?;
 
-                p2p.handle
-                    .remove_replicator_collections(peer_id, collections)
+                // Get the replicator's collections BEFORE deleting so we can
+                // unsubscribe from orphaned collection topics afterward.
+                let removed_collections = p2p
+                    .handle
+                    .get_replicator(peer_id)
                     .await
-                    .map_err(|e| format!("failed to delete replicator: {}", e))?;
+                    .ok()
+                    .flatten()
+                    .map(|info| info.collections)
+                    .unwrap_or_default();
+
+                // Empty collections = delete entire replicator (Go behavior).
+                // Must use delete_replicator (which calls remove_peer) rather
+                // than remove_replicator_collections (which loops over empty vec).
+                if collections.is_empty() {
+                    p2p.handle
+                        .delete_replicator(peer_id)
+                        .await
+                        .map_err(|e| format!("failed to delete replicator: {}", e))?;
+                } else {
+                    p2p.handle
+                        .remove_replicator_collections(peer_id, collections)
+                        .await
+                        .map_err(|e| format!("failed to delete replicator: {}", e))?;
+                }
+
+                // Remove from Peerstore so deleted replicators don't reload on restart.
+                let peerstore = Peerstore::new(db.store().clone());
+                if let Err(e) = peerstore.delete_replicator(&peer_id.to_string()).await {
+                    tracing::warn!(peer_id = %peer_id, error = %e, "Failed to delete replicator from storage");
+                }
+
+                // Unsubscribe from collection topics that no longer have replicators.
+                // This prevents GossipSub from delivering updates after deletion.
+                let remaining_replicators =
+                    p2p.handle.get_all_replicators().await.unwrap_or_default();
+                for collection_id in &removed_collections {
+                    let still_needed = remaining_replicators
+                        .iter()
+                        .any(|r| r.collections.contains(collection_id));
+                    if !still_needed {
+                        let topic = DefraTopic::collection(collection_id);
+                        let _ = p2p.handle.unsubscribe(topic).await;
+                    }
+                }
 
                 // Signal that the replicator deletion is complete.
                 // The Go test framework waits for this event before proceeding.
@@ -1559,6 +2007,11 @@ pub unsafe extern "C" fn p2p_create_collections(
                     }
                     p2p.add_collection(name);
                 }
+
+                // Persist collection subscriptions so they survive restarts.
+                let all_cols = p2p.get_collections();
+                persist_p2p_collections(db, &all_cols).await;
+
                 Ok(())
             })
         })
@@ -1733,6 +2186,7 @@ pub unsafe extern "C" fn p2p_create_documents(
                 Some(p2p) => p2p,
                 None => return Err("no p2p system configured".to_string()),
             };
+            let db = &state.database;
 
             rt.block_on(async {
                 // Validate all document IDs have valid format (atomic: all or nothing)
@@ -1751,6 +2205,11 @@ pub unsafe extern "C" fn p2p_create_documents(
                     }
                     p2p.add_document(doc_id);
                 }
+
+                // Persist document subscriptions so they survive restarts.
+                let all_docs = p2p.get_documents();
+                persist_p2p_documents(db, &all_docs).await;
+
                 Ok(())
             })
         })
@@ -1938,6 +2397,8 @@ pub unsafe extern "C" fn p2p_sync_documents(
             };
             let db = &state.database;
 
+            let event_bus = &state.event_bus;
+
             rt.block_on(async {
                 // Verify the collection exists
                 let _collection = db
@@ -1965,29 +2426,45 @@ pub unsafe extern "C" fn p2p_sync_documents(
                     connected_peers.len()
                 );
 
-                // Create DocSync request
-                let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
+                // Subscribe to merge_complete events BEFORE sending requests
+                // so we don't miss events that arrive quickly
+                let mut sub = event_bus.subscribe(&[events::EventName::MergeComplete]);
 
-                // Sign the request
-                if let Err(e) = p2p::signing::sign_message(p2p.handle.keypair(), &mut request) {
-                    return Err(format!("failed to sign DocSync request: {}", e));
-                }
+                let total_expected = connected_peers.len() * doc_ids.len();
+                let mut total_received = 0;
+                let overall_timeout = std::time::Duration::from_secs(30);
+                let idle_timeout = std::time::Duration::from_secs(3);
+                let start = std::time::Instant::now();
+                let doc_set: std::collections::HashSet<String> = doc_ids.iter().cloned().collect();
 
-                // Send DocSync request to each connected peer
-                // The response handling happens asynchronously via the coordinator:
-                // 1. Request is sent via two-stream protocol
-                // 2. Peer responds with DocSyncReply containing head CIDs
-                // 3. Coordinator receives DocSyncReply and initiates Bitswap fetch
-                // 4. Blocks are stored and merged via the replication loop
-                for peer_id in &connected_peers {
-                    eprintln!("[DOCSYNC] Sending DocSync request to peer={}", peer_id);
-                    let request_clone = request.clone();
-                    let handle = p2p.handle.clone();
-                    let peer_id = *peer_id;
+                // Retry DocSync up to 3 times to handle "connection is closed" errors
+                // where a peer fails to send the response back.
+                for attempt in 0..3 {
+                    if total_received >= total_expected || start.elapsed() >= overall_timeout {
+                        break;
+                    }
 
-                    tokio::spawn(async move {
-                        eprintln!("[DOCSYNC] Spawned task sending to peer={}", peer_id);
-                        match handle.send_doc_sync_request(peer_id, request_clone).await {
+                    // Create a fresh request per attempt (unique message_id)
+                    let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
+                    if let Err(e) = p2p::signing::sign_message(p2p.handle.keypair(), &mut request) {
+                        return Err(format!("failed to sign DocSync request: {}", e));
+                    }
+
+                    eprintln!(
+                        "[DOCSYNC] Attempt {} - sending to {} peers, have {}/{} merges",
+                        attempt + 1,
+                        connected_peers.len(),
+                        total_received,
+                        total_expected
+                    );
+
+                    for peer_id in &connected_peers {
+                        eprintln!("[DOCSYNC] Sending DocSync request to peer={}", peer_id);
+                        match p2p
+                            .handle
+                            .send_doc_sync_request(*peer_id, request.clone())
+                            .await
+                        {
                             Ok(()) => {
                                 eprintln!("[DOCSYNC] Sent DocSync request to peer={}", peer_id)
                             }
@@ -1996,8 +2473,45 @@ pub unsafe extern "C" fn p2p_sync_documents(
                                 peer_id, e
                             ),
                         }
-                    });
+                    }
+
+                    // Wait for merges with idle timeout
+                    let mut last_merge = std::time::Instant::now();
+                    while total_received < total_expected && start.elapsed() < overall_timeout {
+                        if total_received >= doc_ids.len() && last_merge.elapsed() > idle_timeout {
+                            break;
+                        }
+
+                        match tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            sub.recv(),
+                        )
+                        .await
+                        {
+                            Ok(Some(msg)) => {
+                                if let Some(data) = msg.as_merge_complete() {
+                                    if doc_set.contains(&data.doc_id) {
+                                        total_received += 1;
+                                        last_merge = std::time::Instant::now();
+                                        eprintln!(
+                                            "[DOCSYNC] Doc merged: doc_id={} ({}/{})",
+                                            data.doc_id, total_received, total_expected
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(_) => {}
+                        }
+                    }
                 }
+
+                event_bus.unsubscribe(sub.id());
+
+                eprintln!(
+                    "[DOCSYNC] Done: {}/{} merges received",
+                    total_received, total_expected
+                );
 
                 Ok(())
             })
@@ -2373,20 +2887,23 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                         }
                     };
 
-                    // Fetch all linked field blocks
-                    for link_cid in &linked_cids {
+                    // Fetch all linked blocks recursively.
+                    // For patched versions, heads point to previous version CIDs which
+                    // themselves have linked field blocks that also need fetching.
+                    let mut fetch_queue: std::collections::VecDeque<cid::Cid> = linked_cids.into_iter().collect();
+                    let mut fetched: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    fetched.insert(version_cid.to_string());
+
+                    while let Some(link_cid) = fetch_queue.pop_front() {
+                        if fetched.contains(&link_cid.to_string()) {
+                            continue;
+                        }
+                        fetched.insert(link_cid.to_string());
+
                         // Check if we already have this block
-                        match p2p.blockstore.get(link_cid).await {
-                            Ok(Some(_)) => {
-                                eprintln!(
-                                    "[FFI-COLLECTION-VERSION] Link {} already present",
-                                    link_cid
-                                );
-                                continue;
-                            }
-                            Ok(None) => {
-                                // Need to fetch
-                            }
+                        let already_present = match p2p.blockstore.get(&link_cid).await {
+                            Ok(Some(_)) => true,
+                            Ok(None) => false,
                             Err(e) => {
                                 eprintln!(
                                     "[FFI-COLLECTION-VERSION] Error checking link {}: {}",
@@ -2394,58 +2911,79 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                                 );
                                 continue;
                             }
-                        }
+                        };
 
-                        eprintln!(
-                            "[FFI-COLLECTION-VERSION] Fetching linked block {}",
-                            link_cid
-                        );
-
-                        // Start Bitswap sync for linked block
-                        if let Err(e) = p2p.handle
-                            .bitswap_sync(*link_cid, connected_peers.clone(), vec![*link_cid])
-                            .await
-                        {
+                        if !already_present {
                             eprintln!(
-                                "[FFI-COLLECTION-VERSION] Bitswap sync failed for link {}: {}",
-                                link_cid, e
+                                "[FFI-COLLECTION-VERSION] Fetching linked block {}",
+                                link_cid
                             );
-                            continue;
-                        }
 
-                        // Wait for linked block
-                        let link_timeout = std::time::Duration::from_secs(10);
-                        let link_start = std::time::Instant::now();
-                        let mut link_found = false;
+                            if let Err(e) = p2p.handle
+                                .bitswap_sync(link_cid, connected_peers.clone(), vec![link_cid])
+                                .await
+                            {
+                                eprintln!(
+                                    "[FFI-COLLECTION-VERSION] Bitswap sync failed for link {}: {}",
+                                    link_cid, e
+                                );
+                                continue;
+                            }
 
-                        while link_start.elapsed() < link_timeout {
-                            match p2p.blockstore.get(link_cid).await {
-                                Ok(Some(_)) => {
-                                    link_found = true;
-                                    eprintln!(
-                                        "[FFI-COLLECTION-VERSION] Linked block {} fetched",
-                                        link_cid
-                                    );
-                                    break;
+                            let link_timeout = std::time::Duration::from_secs(10);
+                            let link_start = std::time::Instant::now();
+                            let mut link_found = false;
+
+                            while link_start.elapsed() < link_timeout {
+                                match p2p.blockstore.get(&link_cid).await {
+                                    Ok(Some(_)) => {
+                                        link_found = true;
+                                        break;
+                                    }
+                                    Ok(None) => {
+                                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[FFI-COLLECTION-VERSION] Error waiting for link {}: {}",
+                                            link_cid, e
+                                        );
+                                        break;
+                                    }
                                 }
-                                Ok(None) => {
-                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "[FFI-COLLECTION-VERSION] Error waiting for link {}: {}",
-                                        link_cid, e
-                                    );
-                                    break;
-                                }
+                            }
+
+                            if !link_found {
+                                eprintln!(
+                                    "[FFI-COLLECTION-VERSION] Timeout waiting for linked block {}",
+                                    link_cid
+                                );
+                                continue;
                             }
                         }
 
-                        if !link_found {
-                            eprintln!(
-                                "[FFI-COLLECTION-VERSION] Timeout waiting for linked block {}",
-                                link_cid
-                            );
+                        eprintln!(
+                            "[FFI-COLLECTION-VERSION] Linked block {} available",
+                            link_cid
+                        );
+
+                        // If this linked block is a CollectionDefinition (previous version),
+                        // also fetch its linked blocks (field definitions)
+                        if let Ok(Some(link_data)) = p2p.blockstore.get(&link_cid).await {
+                            if let Ok(link_block) = Block::from_dag_cbor(&link_data) {
+                                if matches!(&link_block.delta, defra_core::block::CrdtDelta::CollectionDefinition(_)) {
+                                    let sub_links = link_block.all_links();
+                                    eprintln!(
+                                        "[FFI-COLLECTION-VERSION] Previous version {} has {} sub-links",
+                                        link_cid, sub_links.len()
+                                    );
+                                    for sub_cid in sub_links {
+                                        if !fetched.contains(&sub_cid.to_string()) {
+                                            fetch_queue.push_back(sub_cid);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -2477,6 +3015,24 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                         "[FFI-COLLECTION-VERSION] Successfully synced version {}",
                         version_id_str
                     );
+
+                    // After merge, check if this is a view with a lens transform to sync.
+                    if let Ok(block) = Block::from_dag_cbor(&block_data) {
+                        if let defra_core::CrdtDelta::CollectionDefinition(ref payload) = block.delta {
+                            if let Some(ref transform_cid) = payload.query_transform {
+                                eprintln!(
+                                    "[FFI-COLLECTION-VERSION] View has transform CID={}, syncing lens...",
+                                    transform_cid
+                                );
+                                if let Err(e) = sync_lens(transform_cid, p2p, db, &connected_peers).await {
+                                    eprintln!(
+                                        "[FFI-COLLECTION-VERSION] Lens sync failed: {}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
 
                 Ok(())
@@ -2488,5 +3044,172 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
     match result {
         Ok(()) => FfiResult::ok(),
         Err(e) => FfiResult::error(e),
+    }
+}
+
+/// Fetch a single block via Bitswap, polling until available.
+async fn fetch_lens_block(
+    target_cid: cid::Cid,
+    blockstore: &Arc<DefraBlockstore<crate::state::FfiStore>>,
+    handle: &p2p::P2PHostHandle,
+    peers: &[libp2p::PeerId],
+) -> Result<Vec<u8>, String> {
+    // Check local blockstore first
+    if let Ok(Some(data)) = blockstore.get(&target_cid).await {
+        return Ok(data);
+    }
+    // Fetch via Bitswap
+    handle
+        .bitswap_sync(target_cid, peers.to_vec(), vec![target_cid])
+        .await
+        .map_err(|e| format!("bitswap sync for {}: {}", target_cid, e))?;
+
+    // Poll until available
+    let timeout = std::time::Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(Some(data)) = blockstore.get(&target_cid).await {
+            return Ok(data);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Err(format!("timeout fetching block {}", target_cid))
+}
+
+/// Fetch lens IPLD blocks via Bitswap and register the WASM module.
+///
+/// Follows Go's 3-level block hierarchy: ConfigBlock -> ModuleBlock -> LensBlock.
+async fn sync_lens(
+    transform_cid: &cid::Cid,
+    p2p: &P2PState,
+    db: &Arc<crate::state::FfiDatabase>,
+    connected_peers: &[libp2p::PeerId],
+) -> Result<(), String> {
+    use defra_core::{LensConfigBlock, LensModuleBlock, LensWasmBlock};
+
+    // 1. Fetch ConfigBlock
+    let config_data = fetch_lens_block(
+        *transform_cid,
+        &p2p.blockstore,
+        &p2p.handle,
+        connected_peers,
+    )
+    .await?;
+    let config_block: LensConfigBlock = serde_ipld_dagcbor::from_slice(&config_data)
+        .map_err(|e| format!("decode config block: {}", e))?;
+
+    eprintln!(
+        "[FFI-LENS-SYNC] Config block has {} module(s)",
+        config_block.modules.len()
+    );
+
+    let mut lens_modules = Vec::new();
+
+    for module_cid in &config_block.modules {
+        // 2. Fetch ModuleBlock
+        eprintln!("[FFI-LENS-SYNC] Fetching module block cid={}", module_cid);
+        let module_data =
+            fetch_lens_block(*module_cid, &p2p.blockstore, &p2p.handle, connected_peers).await?;
+        let module_block: LensModuleBlock = serde_ipld_dagcbor::from_slice(&module_data)
+            .map_err(|e| format!("decode module block {}: {}", module_cid, e))?;
+
+        // 3. Fetch LensBlock (WASM bytes)
+        let lens_data = fetch_lens_block(
+            module_block.lens,
+            &p2p.blockstore,
+            &p2p.handle,
+            connected_peers,
+        )
+        .await?;
+        let wasm_block: LensWasmBlock = serde_ipld_dagcbor::from_slice(&lens_data)
+            .map_err(|e| format!("decode lens block {}: {}", module_block.lens, e))?;
+
+        let wasm_bytes = match &wasm_block {
+            LensWasmBlock::Direct { wasm_bytes } => wasm_bytes.clone(),
+            LensWasmBlock::Chunked { chunks } => {
+                eprintln!("[FFI-LENS-SYNC] Fetching {} WASM chunks", chunks.len());
+                let mut all_bytes = Vec::new();
+                for chunk_cid in chunks {
+                    let chunk_data =
+                        fetch_lens_block(*chunk_cid, &p2p.blockstore, &p2p.handle, connected_peers)
+                            .await?;
+                    // Chunks are CBOR-encoded byte strings, decode to get raw bytes
+                    let decoded: serde_bytes::ByteBuf = serde_ipld_dagcbor::from_slice(&chunk_data)
+                        .map_err(|e| format!("decode WASM chunk {}: {}", chunk_cid, e))?;
+                    all_bytes.extend_from_slice(&decoded);
+                }
+                all_bytes
+            }
+        };
+
+        eprintln!(
+            "[FFI-LENS-SYNC] Got WASM module ({} bytes), inverse={}",
+            wasm_bytes.len(),
+            module_block.inverse
+        );
+
+        let mut lens_mod = lens::LensModule::from_bytes(wasm_bytes);
+        lens_mod.inverse = module_block.inverse;
+
+        // Convert arguments from key-value pairs to JSON object
+        if !module_block.arguments.is_empty() {
+            let args_map: serde_json::Map<String, serde_json::Value> = module_block
+                .arguments
+                .iter()
+                .map(|kv| (kv.key.clone(), serde_json::Value::String(kv.value.clone())))
+                .collect();
+            lens_mod.arguments = Some(serde_json::Value::Object(args_map));
+        }
+
+        lens_modules.push(lens_mod);
+    }
+
+    // Build LensConfig and register under the Go CID
+    let config = lens::LensConfig {
+        source_schema_version_id: String::new(),
+        destination_schema_version_id: String::new(),
+        lenses: lens_modules,
+    };
+
+    let transform_id = lens::TransformId::new(transform_cid.to_string());
+    db.lens_store()
+        .add_with_id(transform_id, config)
+        .await
+        .map_err(|e| format!("register lens: {}", e))?;
+
+    eprintln!(
+        "[FFI-LENS-SYNC] Lens registered under CID {}",
+        transform_cid
+    );
+    Ok(())
+}
+
+/// Persist the current P2P collection subscription list to the Peerstore.
+async fn persist_p2p_collections(db: &crate::state::FfiDatabase, collections: &[String]) {
+    let data = match serde_json::to_vec(collections) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[PERSIST-P2P] Failed to serialize collections: {}", e);
+            return;
+        }
+    };
+    let peerstore = Peerstore::new(db.store().clone());
+    if let Err(e) = peerstore.set_p2p_collections(&data).await {
+        eprintln!("[PERSIST-P2P] Failed to persist collections: {}", e);
+    }
+}
+
+/// Persist the current P2P document subscription list to the Peerstore.
+async fn persist_p2p_documents(db: &crate::state::FfiDatabase, documents: &[String]) {
+    let data = match serde_json::to_vec(documents) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[PERSIST-P2P] Failed to serialize documents: {}", e);
+            return;
+        }
+    };
+    let peerstore = Peerstore::new(db.store().clone());
+    if let Err(e) = peerstore.set_p2p_documents(&data).await {
+        eprintln!("[PERSIST-P2P] Failed to persist documents: {}", e);
     }
 }

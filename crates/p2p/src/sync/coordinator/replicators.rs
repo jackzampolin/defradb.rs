@@ -81,11 +81,22 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
 
     /// Delete a replicator.
     ///
-    /// Removes the peer from the replicator registry.
-    /// Does not unsubscribe from collections (other peers may still be replicating).
+    /// Removes the peer from the replicator registry and unsubscribes from
+    /// collection topics that no longer have any replicators.
     pub async fn delete_replicator(&self, peer_id: PeerId) -> Result<()> {
+        // Get collections BEFORE deleting so we know what to potentially unsubscribe
+        let removed_collections = match self.host.get_replicator(peer_id).await? {
+            Some(info) => info.collections,
+            None => Vec::new(),
+        };
+
         self.host.delete_replicator(peer_id).await?;
         tracing::info!(peer_id = %peer_id, "Deleted replicator");
+
+        // Unsubscribe from collections that no longer have any replicators
+        self.unsubscribe_orphaned_collections(&removed_collections)
+            .await;
+
         Ok(())
     }
 
@@ -104,8 +115,18 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     ) -> Result<bool> {
         // Go behavior: empty collections = delete all
         if collections.is_empty() {
+            // Get collections BEFORE deleting
+            let removed_collections = match self.host.get_replicator(peer_id).await? {
+                Some(info) => info.collections,
+                None => Vec::new(),
+            };
+
             self.host.delete_replicator(peer_id).await?;
             tracing::info!(peer_id = %peer_id, "Deleted replicator (empty collections = delete all)");
+
+            self.unsubscribe_orphaned_collections(&removed_collections)
+                .await;
+
             return Ok(true);
         }
 
@@ -129,7 +150,31 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             );
         }
 
+        // Unsubscribe from removed collections that no longer have replicators
+        self.unsubscribe_orphaned_collections(&collections).await;
+
         Ok(fully_deleted)
+    }
+
+    /// Unsubscribe from collection topics that no longer have any replicators.
+    async fn unsubscribe_orphaned_collections(&self, collections: &[String]) {
+        for collection_id in collections {
+            // Check if any remaining replicators use this collection
+            let remaining = match self.host.get_all_replicators().await {
+                Ok(reps) => reps.iter().any(|r| r.collections.contains(collection_id)),
+                Err(_) => true, // conservative: don't unsubscribe if we can't check
+            };
+
+            if !remaining {
+                if let Err(e) = self.unsubscribe_collection(collection_id).await {
+                    tracing::warn!(
+                        collection_id = %collection_id,
+                        error = %e,
+                        "Failed to unsubscribe from orphaned collection"
+                    );
+                }
+            }
+        }
     }
 
     /// Get all registered replicators.

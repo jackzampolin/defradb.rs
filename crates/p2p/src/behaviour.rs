@@ -177,6 +177,11 @@ impl<S: Store> DefraBehaviour<S> {
             let gossipsub_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(1))
                 .validation_mode(ValidationMode::Strict)
+                // Enable peer exchange (PX) in PRUNE messages — matches Go's
+                // pubsub.WithPeerExchange(true). Allows peers sharing a topic
+                // to discover each other through mesh management.
+                .do_px()
+                .flood_publish(true)
                 .message_id_fn(|message: &gossipsub::Message| {
                     let hash = crypto::sha256(&message.data);
                     MessageId::from(hash.to_vec())

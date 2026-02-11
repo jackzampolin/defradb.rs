@@ -111,12 +111,23 @@ pub fn generate_collection_cid_full(
     priority: u64,
     heads: &[Cid],
 ) -> crate::Result<Cid> {
-    let mut delta = CollectionDefinitionDeltaPayload::new(priority);
-    if let Some(n) = name {
-        delta = delta.with_name(n);
-    }
+    generate_collection_cid_full_with_query(name, field_cids, priority, heads, None, None)
+}
 
-    // Convert field CIDs to DAGLinks (Go uses empty string as the link name for field definitions)
+/// Generate a collection CID with optional name, priority, head CIDs, and query data.
+///
+/// For view collections, `query_select` contains the CBOR-encoded query definition
+/// and `query_transform` contains the lens transform CID.
+pub fn generate_collection_cid_full_with_query(
+    name: Option<&str>,
+    field_cids: &[Cid],
+    priority: u64,
+    heads: &[Cid],
+    query_select: Option<&[u8]>,
+    query_transform: Option<&Cid>,
+) -> crate::Result<Cid> {
+    let delta = build_collection_delta(name, priority, query_select, query_transform);
+
     let links: Vec<DAGLink> = field_cids
         .iter()
         .map(|cid| DAGLink::new("", *cid))
@@ -128,6 +139,26 @@ pub fn generate_collection_cid_full(
         links,
     );
     generate_block_cid(&block)
+}
+
+/// Helper to build a CollectionDefinitionDeltaPayload with optional fields.
+fn build_collection_delta(
+    name: Option<&str>,
+    priority: u64,
+    query_select: Option<&[u8]>,
+    query_transform: Option<&Cid>,
+) -> CollectionDefinitionDeltaPayload {
+    let mut delta = CollectionDefinitionDeltaPayload::new(priority);
+    if let Some(n) = name {
+        delta = delta.with_name(n);
+    }
+    if let Some(qs) = query_select {
+        delta = delta.with_query_select(qs.to_vec());
+    }
+    if let Some(qt) = query_transform {
+        delta = delta.with_query_transform(*qt);
+    }
+    delta
 }
 
 /// Generates a CID from a Block using DAG-CBOR encoding.
@@ -187,12 +218,23 @@ pub fn generate_collection_block_full(
     priority: u64,
     heads: &[Cid],
 ) -> crate::Result<BlockWithCid> {
-    let mut delta = CollectionDefinitionDeltaPayload::new(priority);
-    if let Some(n) = name {
-        delta = delta.with_name(n);
-    }
+    generate_collection_block_full_with_query(name, field_cids, priority, heads, None, None)
+}
 
-    // Convert field CIDs to DAGLinks (Go uses empty string as the link name for field definitions)
+/// Generate a collection definition block (CID + bytes) with optional query data.
+///
+/// For view collections, includes `query_select` and `query_transform` in the delta
+/// so peers can identify the collection as a view after Bitswap sync.
+pub fn generate_collection_block_full_with_query(
+    name: Option<&str>,
+    field_cids: &[Cid],
+    priority: u64,
+    heads: &[Cid],
+    query_select: Option<&[u8]>,
+    query_transform: Option<&Cid>,
+) -> crate::Result<BlockWithCid> {
+    let delta = build_collection_delta(name, priority, query_select, query_transform);
+
     let links: Vec<DAGLink> = field_cids
         .iter()
         .map(|cid| DAGLink::new("", *cid))

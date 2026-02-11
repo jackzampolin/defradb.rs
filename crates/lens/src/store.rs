@@ -54,6 +54,11 @@ pub trait TransformStore: Send + Sync {
     /// Returns the unique ID for the registered transform.
     async fn add(&self, config: LensConfig) -> Result<TransformId>;
 
+    /// Register a lens transform under a specific ID.
+    ///
+    /// Used for P2P sync where the transform ID is the Go-generated IPLD CID.
+    async fn add_with_id(&self, id: TransformId, config: LensConfig) -> Result<()>;
+
     /// List all registered transforms.
     ///
     /// Returns a map of transform IDs to their lens modules.
@@ -118,6 +123,15 @@ impl TransformStore for MemoryTransformStore {
         transforms.insert(id.clone(), config);
 
         Ok(id)
+    }
+
+    async fn add_with_id(&self, id: TransformId, config: LensConfig) -> Result<()> {
+        let mut transforms = self
+            .transforms
+            .write()
+            .map_err(|e| Error::Pipeline(format!("failed to acquire write lock: {}", e)))?;
+        transforms.insert(id, config);
+        Ok(())
     }
 
     async fn list(&self) -> Result<std::collections::HashMap<String, crate::LensModule>> {

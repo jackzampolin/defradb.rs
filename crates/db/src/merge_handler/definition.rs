@@ -13,16 +13,35 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         payload: &CollectionDefinitionDeltaPayload,
         _metadata: &BlockMetadata<'_>,
     ) -> Result<MergeOutcome, MergeError> {
-        let collection_name = match &payload.name {
-            Some(name) => name.clone(),
-            None => {
-                tracing::debug!(cid = %cid, "CollectionDefinition has no name - skipping");
-                return Ok(MergeOutcome::skipped("collection definition has no name"));
-            }
-        };
-
         // The version_id is the CID of this collection definition block
         let version_id = cid.to_string();
+
+        // For patched versions, payload.name is None (name didn't change).
+        // Resolve name and collection_id from the previous version via block.heads.
+        let (collection_name, collection_id, prev_fields) = match &payload.name {
+            Some(name) => {
+                // Initial version: name is explicit, collection_id = version_id
+                (name.clone(), version_id.clone(), Vec::new())
+            }
+            None => {
+                // Patched version: look up previous version from heads
+                let prev_version = self.resolve_previous_collection_version(block).await?;
+                match prev_version {
+                    Some(prev) => {
+                        let name = prev.name.clone();
+                        let col_id = prev.collection_id.clone();
+                        let fields = prev.fields.clone();
+                        (name, col_id, fields)
+                    }
+                    None => {
+                        tracing::debug!(cid = %cid, "CollectionDefinition has no name and no resolvable previous version - skipping");
+                        return Ok(MergeOutcome::skipped(
+                            "collection definition has no name and no previous version",
+                        ));
+                    }
+                }
+            }
+        };
 
         tracing::info!(
             cid = %cid,
@@ -31,10 +50,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             "Processing collection definition delta"
         );
 
-        // Load and decode all linked field definition blocks
-        // Note: _docID is already included in the linked blocks from the source node,
-        // so we don't need to add it implicitly.
-        let mut fields = Vec::new();
+        // Load and decode linked field definition blocks (new fields for this version)
+        let mut new_fields = Vec::new();
         if let Some(links) = &block.links {
             for link in links.iter() {
                 let field_cid = &link.link;
@@ -52,16 +69,26 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 })?;
 
                 if let CrdtDelta::FieldDefinition(field_payload) = &field_block.delta {
-                    // Use the field block CID as the field ID (matches Go's behavior)
                     let field_desc = self
                         .field_definition_to_description(field_payload, &field_cid.to_string())?;
-                    fields.push(field_desc);
+                    new_fields.push(field_desc);
                 } else {
                     tracing::warn!(
                         field_cid = %field_cid,
                         "Linked block is not a FieldDefinition - skipping"
                     );
                 }
+            }
+        }
+
+        // Merge previous version's fields with new fields from this delta.
+        // For initial versions, prev_fields is empty so fields = new_fields.
+        // For patched versions, combine existing fields + newly added fields.
+        let mut fields = prev_fields;
+        let existing_names: HashSet<String> = fields.iter().map(|f| f.name.clone()).collect();
+        for field in new_fields {
+            if !existing_names.contains(&field.name) {
+                fields.push(field);
             }
         }
 
@@ -73,16 +100,19 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
-        // For initial collection creation, collection_id equals version_id (the CID)
-        // For patched versions, we'd need to look up the existing collection
-        let collection_id = version_id.clone();
-
         // Build the CollectionVersion
         // Synced collections come in as inactive (user must activate manually via SetActiveCollectionVersion)
         // and materialized (matching Go's behavior)
         let mut schema =
             CollectionVersion::new(&collection_name, &version_id, &collection_id, fields);
         schema.is_active = false;
+
+        // For patched versions, set previous_version to point to the head (previous version CID)
+        if let Some(heads) = &block.heads {
+            if let Some(head_cid) = heads.first() {
+                schema.previous_version = Some(CollectionSource::new(head_cid.to_string()));
+            }
+        }
 
         // Views (collections with a query_select) are non-materialized and carry query metadata.
         // Regular collections are materialized.
@@ -156,7 +186,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     }
 
     /// Convert a FieldDefinitionDeltaPayload to a FieldDescription.
-    fn field_definition_to_description(
+    pub(crate) fn field_definition_to_description(
         &self,
         payload: &FieldDefinitionDeltaPayload,
         field_id: &str,

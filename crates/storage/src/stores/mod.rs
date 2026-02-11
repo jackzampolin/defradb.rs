@@ -15,6 +15,7 @@ pub mod datastore;
 pub mod headstore;
 pub mod multistore;
 pub mod peerstore;
+pub mod retry_info;
 pub mod rootstore;
 pub mod systemstore;
 
@@ -24,6 +25,7 @@ pub use datastore::{Datastore, CHUNK_SIZE};
 pub use headstore::Headstore;
 pub use multistore::Multistore;
 pub use peerstore::Peerstore;
+pub use retry_info::RetryInfo;
 pub use rootstore::RootStore;
 pub use systemstore::Systemstore;
 

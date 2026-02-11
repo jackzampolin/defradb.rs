@@ -25,7 +25,8 @@ use document::{DocID, Document, NormalValue};
 use events::{MergeCompleteData, Message, Update};
 use p2p::sync::{BlockMetadata, MergeHandler, MergeOutcome};
 use schema::{
-    self, CType, CollectionVersion, FieldDescription, FieldKind, QuerySource, ScalarKind,
+    self, CType, CollectionSource, CollectionVersion, FieldDescription, FieldKind, QuerySource,
+    ScalarKind,
 };
 use storage::corekv::{Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
@@ -187,6 +188,134 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 Err(MergeError::MergeFailed(format!("Decryption failed: {}", e)))
             }
         }
+    }
+
+    /// Look up a previous CollectionVersion from block heads.
+    ///
+    /// For patched collection versions, the block's heads point to previous version CIDs.
+    /// First checks systemstore, then falls back to decoding the head block directly
+    /// from blockstore (for the UnknownCollection case where the initial version
+    /// hasn't been processed yet).
+    async fn resolve_previous_collection_version(
+        &self,
+        block: &Block,
+    ) -> Result<Option<CollectionVersion>, MergeError> {
+        let heads = match &block.heads {
+            Some(heads) if !heads.is_empty() => heads,
+            _ => return Ok(None),
+        };
+
+        for head_cid in heads {
+            // Fast path: check systemstore (KnownCollection case)
+            let head_key = CollectionKey::new(head_cid.to_string());
+            let txn = self.db.new_txn(true).await.map_err(MergeError::Database)?;
+            let systemstore = txn.systemstore().map_err(MergeError::Database)?;
+
+            if let Ok(Some(data)) = systemstore.get(&head_key.bytes()).await {
+                if let Ok(prev) = serde_json::from_slice::<CollectionVersion>(&data) {
+                    tracing::debug!(
+                        head_cid = %head_cid,
+                        name = %prev.name,
+                        collection_id = %prev.collection_id,
+                        "Resolved previous collection version from systemstore"
+                    );
+                    return Ok(Some(prev));
+                }
+            }
+
+            // Slow path: decode head block directly from blockstore.
+            // Build a CollectionVersion from the raw block data without going
+            // through the full merge handler (avoids async recursion).
+            if let Ok(Some(head_block_data)) = self.blockstore.get(head_cid).await {
+                let head_block = Block::from_dag_cbor(&head_block_data).map_err(|e| {
+                    MergeError::BlockDecode(format!("Failed to decode head block: {}", e))
+                })?;
+
+                if let CrdtDelta::CollectionDefinition(head_payload) = &head_block.delta {
+                    if let Some(name) = &head_payload.name {
+                        tracing::debug!(
+                            head_cid = %head_cid,
+                            name = %name,
+                            "Resolved previous collection version from blockstore"
+                        );
+
+                        // Decode field blocks from the head block's links
+                        let mut prev_fields = Vec::new();
+                        if let Some(links) = &head_block.links {
+                            for link in links.iter() {
+                                let field_cid = &link.link;
+                                if let Ok(Some(field_bytes)) = self.blockstore.get(field_cid).await
+                                {
+                                    if let Ok(field_block) = Block::from_dag_cbor(&field_bytes) {
+                                        if let CrdtDelta::FieldDefinition(fp) = &field_block.delta {
+                                            if let Ok(fd) = self.field_definition_to_description(
+                                                fp,
+                                                &field_cid.to_string(),
+                                            ) {
+                                                prev_fields.push(fd);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let head_version_id = head_cid.to_string();
+                        let mut prev = CollectionVersion::new(
+                            name,
+                            &head_version_id,
+                            &head_version_id,
+                            prev_fields,
+                        );
+                        prev.is_active = false;
+                        prev.is_materialized = true;
+
+                        // Ensure _docID is first in fields
+                        if let Some(pos) = prev.fields.iter().position(|f| f.name == "_docID") {
+                            if pos > 0 {
+                                let f = prev.fields.remove(pos);
+                                prev.fields.insert(0, f);
+                            }
+                        }
+
+                        // Store in systemstore so GetCollections can find it
+                        let txn2 = self.db.new_txn(false).await.map_err(MergeError::Database)?;
+                        {
+                            let ss = txn2.systemstore().map_err(MergeError::Database)?;
+                            let key = CollectionKey::new(&head_version_id);
+                            let data = serde_json::to_vec(&prev).map_err(|e| {
+                                MergeError::Storage(format!(
+                                    "Failed to serialize prev collection: {}",
+                                    e
+                                ))
+                            })?;
+                            ss.set(&key.bytes(), &data).await.map_err(|e| {
+                                MergeError::Storage(format!(
+                                    "Failed to store prev collection: {}",
+                                    e
+                                ))
+                            })?;
+                            let vkey =
+                                CollectionVersionKey::new(&head_version_id, &head_version_id);
+                            ss.set(&vkey.bytes(), b"1").await.map_err(|e| {
+                                MergeError::Storage(format!(
+                                    "Failed to store prev version index: {}",
+                                    e
+                                ))
+                            })?;
+                        }
+                        txn2.commit().await.map_err(MergeError::Database)?;
+                        self.db
+                            .add_collection_to_cache(prev.clone())
+                            .map_err(MergeError::Database)?;
+
+                        return Ok(Some(prev));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 }
 

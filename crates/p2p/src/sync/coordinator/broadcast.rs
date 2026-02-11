@@ -2,6 +2,7 @@
 
 use blockstore::Blockstore;
 use cid::Cid;
+use libp2p::PeerId;
 
 use super::SyncCoordinator;
 use crate::error::Result;
@@ -39,10 +40,109 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         self.broadcaster.broadcast_update(&broadcast).await
     }
 
-    /// Push a local update to all registered replicator peers via direct PushLog.
+    /// Push a composite block and all its linked field blocks to replicator peers.
     ///
-    /// This complements `broadcast_local_update` (GossipSub) by sending the update
-    /// directly to each replicator peer that is registered for the given collection.
+    /// This decodes the composite block to find field block CIDs, loads them from
+    /// the blockstore, and sends field blocks BEFORE the composite to each replicator.
+    /// This ensures the receiver has all DAG blocks when it processes the composite,
+    /// avoiding Bitswap fetches (which can fail after node restarts).
+    pub async fn push_dag_to_replicators(
+        &self,
+        cid: &Cid,
+        block: &[u8],
+        doc_id: &str,
+        collection_id: &str,
+    ) {
+        let replicators = match self.host.get_all_replicators().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to get replicators for push");
+                return;
+            }
+        };
+
+        if replicators.is_empty() {
+            return;
+        }
+
+        // Decode composite block to find linked field block CIDs.
+        let field_blocks = self.load_linked_blocks(block).await;
+
+        tracing::debug!(
+            cid = %cid,
+            doc_id = %doc_id,
+            collection_id = %collection_id,
+            replicator_count = replicators.len(),
+            field_block_count = field_blocks.len(),
+            "Pushing DAG to replicators"
+        );
+
+        for rep in &replicators {
+            if !rep.collections.is_empty() && !rep.collections.contains(&collection_id.to_string())
+            {
+                continue;
+            }
+
+            let peer_id = match rep.peer_id() {
+                Some(id) => id,
+                None => continue,
+            };
+
+            // Build signed requests for field blocks and composite.
+            let mut requests: Vec<(Cid, PushLogRequest)> = Vec::new();
+
+            // Field blocks first so receiver has them when composite arrives.
+            for (field_cid, field_data) in &field_blocks {
+                let mut req = PushLogRequest::new(
+                    doc_id.to_string(),
+                    field_cid.to_bytes(),
+                    collection_id.to_string(),
+                    self.local_peer_id.clone(),
+                    field_data.clone(),
+                );
+                if sign_message(self.host.keypair(), &mut req).is_ok() {
+                    requests.push((*field_cid, req));
+                }
+            }
+
+            // Composite block last.
+            let mut composite_req = PushLogRequest::new(
+                doc_id.to_string(),
+                cid.to_bytes(),
+                collection_id.to_string(),
+                self.local_peer_id.clone(),
+                block.to_vec(),
+            );
+            if let Err(e) = sign_message(self.host.keypair(), &mut composite_req) {
+                tracing::debug!(error = %e, "Failed to sign composite PushLog request");
+                continue;
+            }
+            requests.push((*cid, composite_req));
+
+            // Fire-and-forget: spawn a task per peer that sends blocks in order.
+            let host = self.host.clone();
+            let failure_tx = self.failure_tx.clone();
+            let doc_id_owned = doc_id.to_string();
+            let collection_id_owned = collection_id.to_string();
+            tokio::spawn(async move {
+                let any_failed = Self::send_ordered_pushlogs(host, peer_id, requests).await;
+                if any_failed {
+                    if let Some(tx) = failure_tx {
+                        let _ = tx.send(super::PushFailure {
+                            peer_id,
+                            doc_id: doc_id_owned,
+                            collection_id: collection_id_owned,
+                        });
+                    }
+                }
+            });
+        }
+    }
+
+    /// Push a single block to replicator peers (no DAG expansion).
+    ///
+    /// Used for collection blocks and other non-composite blocks that
+    /// don't have linked field blocks.
     pub async fn push_to_replicators(
         &self,
         cid: &Cid,
@@ -58,24 +158,9 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             }
         };
 
-        tracing::debug!(
-            cid = %cid,
-            doc_id = %doc_id,
-            collection_id = %collection_id,
-            replicator_count = replicators.len(),
-            "Pushing update to replicators"
-        );
-
         for rep in &replicators {
-            // Check if this replicator is registered for the collection
-            // Empty collections means "all collections" in Go semantics
             if !rep.collections.is_empty() && !rep.collections.contains(&collection_id.to_string())
             {
-                tracing::trace!(
-                    replicator_collections = ?rep.collections,
-                    collection_id = %collection_id,
-                    "Skipping replicator (collection mismatch)"
-                );
                 continue;
             }
 
@@ -83,7 +168,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 Some(id) => id,
                 None => continue,
             };
-            tracing::debug!(peer_id = %peer_id, cid = %cid, "Sending to replicator peer");
 
             let mut request = PushLogRequest::new(
                 doc_id.to_string(),
@@ -98,11 +182,78 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 continue;
             }
 
-            // Fire-and-forget: spawn each push so we don't block the broadcast loop.
             let host = self.host.clone();
+            let cid_clone = *cid;
+            let failure_tx = self.failure_tx.clone();
+            let doc_id_owned = doc_id.to_string();
+            let collection_id_owned = collection_id.to_string();
             tokio::spawn(async move {
-                let _ = host.send_two_stream_request(peer_id, request).await;
+                if let Err(e) = host.send_two_stream_request(peer_id, request).await {
+                    tracing::debug!(
+                        peer_id = %peer_id,
+                        cid = %cid_clone,
+                        error = %e,
+                        "PushLog to replicator failed"
+                    );
+                    if let Some(tx) = failure_tx {
+                        let _ = tx.send(super::PushFailure {
+                            peer_id,
+                            doc_id: doc_id_owned,
+                            collection_id: collection_id_owned,
+                        });
+                    }
+                }
             });
         }
+    }
+
+    /// Load all blocks linked from a composite block's DAG links.
+    async fn load_linked_blocks(&self, composite_bytes: &[u8]) -> Vec<(Cid, Vec<u8>)> {
+        let parsed = match defra_core::Block::from_dag_cbor(composite_bytes) {
+            Ok(b) => b,
+            Err(_) => return vec![],
+        };
+
+        let links = match parsed.links {
+            Some(ref links) => links,
+            None => return vec![],
+        };
+
+        let mut blocks = Vec::with_capacity(links.len());
+        for link in links {
+            match self.blockstore().get(&link.link).await {
+                Ok(Some(data)) => blocks.push((link.link, data)),
+                Ok(None) => {
+                    tracing::debug!(cid = %link.link, "Linked block not found in blockstore");
+                }
+                Err(e) => {
+                    tracing::debug!(cid = %link.link, error = %e, "Failed to load linked block");
+                }
+            }
+        }
+        blocks
+    }
+
+    /// Send PushLog requests to a peer in order, waiting for each to complete.
+    ///
+    /// Returns `true` if any request failed.
+    async fn send_ordered_pushlogs(
+        host: crate::host::P2PHostHandle,
+        peer_id: PeerId,
+        requests: Vec<(Cid, PushLogRequest)>,
+    ) -> bool {
+        let mut any_failed = false;
+        for (cid, request) in requests {
+            if let Err(e) = host.send_two_stream_request(peer_id, request).await {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    cid = %cid,
+                    error = %e,
+                    "PushLog to replicator failed"
+                );
+                any_failed = true;
+            }
+        }
+        any_failed
     }
 }

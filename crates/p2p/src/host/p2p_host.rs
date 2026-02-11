@@ -151,13 +151,14 @@ impl<S: Store> P2PHost<S> {
         .await
         .map_err(|e| Error::Behaviour(e.to_string()))?;
 
+        // Enable TCP port reuse to match Go-libp2p behavior.
+        // Go-libp2p reuses the listen port for outgoing connections, so the
+        // remote side sees the listen address (not an ephemeral port).
+        // This is critical for ActivePeers to return correct addresses.
+        let tcp_config = tcp::Config::default().port_reuse(true);
         let swarm = SwarmBuilder::with_existing_identity(keypair.clone())
             .with_tokio()
-            .with_tcp(
-                tcp::Config::default(),
-                noise::Config::new,
-                yamux::Config::default,
-            )
+            .with_tcp(tcp_config, noise::Config::new, yamux::Config::default)
             .map_err(|e| Error::Transport(e.to_string()))?
             .with_behaviour(|_key| behaviour)
             .expect("behaviour already constructed")
@@ -192,12 +193,14 @@ impl<S: Store> P2PHost<S> {
             .accept(TwoStreamHandler::se_response_protocol())
             .map_err(|_| Error::Behaviour("Failed to register SE response protocol".into()))?;
 
-        let two_stream_handler = Arc::new(tokio::sync::Mutex::new(TwoStreamHandler::new(control)));
+        let handler = TwoStreamHandler::new(control);
+        let pending = handler.pending_responses();
+        let two_stream_handler = Arc::new(tokio::sync::Mutex::new(handler));
         let (two_stream_event_tx, two_stream_event_rx) = mpsc::channel(256);
 
         // Spawn the two-stream runner as a background task
         let runner = TwoStreamRunner::new(
-            Arc::clone(&two_stream_handler),
+            pending,
             request_streams,
             response_streams,
             se_request_streams,
@@ -238,7 +241,19 @@ impl<S: Store> P2PHost<S> {
     /// This method runs until shutdown is requested.
     pub async fn run(mut self) {
         loop {
+            // Biased select: process swarm events before commands.
+            // This ensures ConnectionEstablished events (which update peer_addrs)
+            // are processed before PeerAddresses commands read them.
             tokio::select! {
+                biased;
+
+                event = self.swarm.select_next_some() => {
+                    self.handle_swarm_event(event).await;
+                }
+                // Handle two-stream protocol events (Go compatibility)
+                Some(two_stream_event) = self.two_stream_event_rx.recv() => {
+                    self.handle_two_stream_event(two_stream_event).await;
+                }
                 command = self.command_rx.recv() => {
                     match command {
                         Some(cmd) => {
@@ -251,13 +266,6 @@ impl<S: Store> P2PHost<S> {
                             break;
                         }
                     }
-                }
-                event = self.swarm.select_next_some() => {
-                    self.handle_swarm_event(event).await;
-                }
-                // Handle two-stream protocol events (Go compatibility)
-                Some(two_stream_event) = self.two_stream_event_rx.recv() => {
-                    self.handle_two_stream_event(two_stream_event).await;
                 }
             }
         }
@@ -416,12 +424,53 @@ impl<S: Store> P2PHost<S> {
                 peer_id, endpoint, ..
             } => {
                 info!("Connected to peer: {}", peer_id);
-                // For dialer: store the address we dialed (which is the peer's listen addr).
-                // For listener: do NOT store send_back_addr (it has an ephemeral port).
-                // The identify protocol will provide the correct listen address shortly.
-                if let libp2p::core::ConnectedPoint::Dialer { address, .. } = &endpoint {
-                    self.peer_addrs.insert(peer_id, address.clone());
-                }
+                // Store the remote peer's address from the connection endpoint.
+                // For dialer: the address we dialed (peer's listen addr).
+                // For listener: the send_back_addr. With TCP port reuse enabled,
+                // this IS the peer's listen address (Go-compatible behavior).
+                let peer_addr = match &endpoint {
+                    libp2p::core::ConnectedPoint::Dialer { address, .. } => address.clone(),
+                    libp2p::core::ConnectedPoint::Listener { send_back_addr, .. } => {
+                        send_back_addr.clone()
+                    }
+                };
+                self.peer_addrs.insert(peer_id, peer_addr.clone());
+
+                // Add peer to Kademlia BEFORE bootstrap. Kademlia's own
+                // ConnectionEstablished handler doesn't add peers to the
+                // routing table until protocol negotiation completes (async).
+                // We add the address now so bootstrap() has a peer to query.
+                self.swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&peer_id, peer_addr);
+
+                // Pre-announce bitswap protocols so the peer immediately transitions
+                // from Connected → Responsive in iroh-bitswap. Without this, there's
+                // a race between the Identify protocol completing and the first
+                // Bitswap fetch: after a node restart, GossipSub notifications can
+                // trigger Bitswap fetches before Identify finishes, leaving the peer
+                // in Connected state where peer_connected() is never called and the
+                // peer has no MessageQueue, so want messages are never sent.
+                // The actual protocol version is negotiated per-substream regardless.
+                eprintln!(
+                    "[BITSWAP-PREANNOUNCE] Pre-announcing bitswap protocols for peer={}",
+                    peer_id
+                );
+                self.swarm.behaviour().on_identify(
+                    &peer_id,
+                    &[
+                        "/ipfs/bitswap/1.2.0".to_string(),
+                        "/ipfs/bitswap/1.1.0".to_string(),
+                        "/ipfs/bitswap/1.0.0".to_string(),
+                    ],
+                );
+                eprintln!("[BITSWAP-PREANNOUNCE] Done for peer={}", peer_id);
+
+                // Trigger Kademlia bootstrap to discover peers through the DHT.
+                // When node2 connects to node0 (who already knows node1),
+                // this causes node2 to query node0, discover node1, and dial it.
+                let _ = self.swarm.behaviour_mut().kademlia.bootstrap();
 
                 if self
                     .event_tx
@@ -571,11 +620,16 @@ impl<S: Store> P2PHost<S> {
                 );
                 self.swarm.behaviour().on_identify(&peer_id, &protocols);
 
+                // Store the peer's listen addresses in Kademlia for routing.
+                // Do NOT call add_external_address — those are the REMOTE peer's
+                // addresses, not ours. Adding them as local external addresses
+                // causes address cross-contamination between peers.
                 for addr in &info.listen_addrs {
-                    debug!(peer_id = %peer_id, address = %addr, "Adding external address from identify");
-                }
-                for addr in info.listen_addrs {
-                    self.swarm.add_external_address(addr);
+                    debug!(peer_id = %peer_id, address = %addr, "Adding peer address to Kademlia");
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr.clone());
                 }
             }
             libp2p::identify::Event::Sent { peer_id, .. } => {
@@ -759,9 +813,18 @@ impl<S: Store> P2PHost<S> {
                 limit,
             } => {
                 debug!(cid = %key, limit = limit, "Bitswap requests to find providers");
-                // Could query Kademlia DHT to find providers
-                // For now, send empty set (peer discovery via manual dial)
-                let _ = response.send(Ok(std::collections::HashSet::new())).await;
+                // Return all connected peers as potential providers. In a small
+                // DefraDB network, any connected peer may have the requested block.
+                // This complements session.add_provider() which may not take effect
+                // if processed before get_blocks() adds CIDs to the want list.
+                let providers: std::collections::HashSet<PeerId> =
+                    self.peer_addrs.keys().copied().collect();
+                eprintln!(
+                    "[BITSWAP-FIND-PROVIDERS] cid={} returning {} connected peers",
+                    key,
+                    providers.len()
+                );
+                let _ = response.send(Ok(providers)).await;
             }
             BitswapEvent::Ping { peer, response } => {
                 debug!(peer_id = %peer, "Bitswap ping request");

@@ -151,6 +151,10 @@ pub struct P2PState {
     pub host_event_handle: Option<tokio::task::AbortHandle>,
     /// Abort handle for the replication loop task.
     pub replication_handle: Option<tokio::task::AbortHandle>,
+    /// Abort handle for the failure recorder task.
+    pub failure_recorder_handle: Option<tokio::task::AbortHandle>,
+    /// Abort handle for the retry loop task.
+    pub retry_loop_handle: Option<tokio::task::AbortHandle>,
 }
 
 impl P2PState {
@@ -171,6 +175,8 @@ impl P2PState {
             peer_addresses: RwLock::new(HashMap::new()),
             host_event_handle: Some(host_event_handle),
             replication_handle: Some(replication_handle),
+            failure_recorder_handle: None,
+            retry_loop_handle: None,
         }
     }
 
@@ -180,6 +186,12 @@ impl P2PState {
             h.abort();
         }
         if let Some(ref h) = self.replication_handle {
+            h.abort();
+        }
+        if let Some(ref h) = self.failure_recorder_handle {
+            h.abort();
+        }
+        if let Some(ref h) = self.retry_loop_handle {
             h.abort();
         }
     }

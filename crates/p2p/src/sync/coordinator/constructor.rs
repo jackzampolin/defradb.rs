@@ -146,8 +146,17 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 )),
                 collection_store,
                 head_provider,
+                failure_tx: None,
             },
             events,
         ))
+    }
+
+    /// Set the failure channel for reporting push failures to the FFI layer.
+    pub fn set_failure_channel(
+        &mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<super::PushFailure>,
+    ) {
+        self.failure_tx = Some(tx);
     }
 }
