@@ -20,6 +20,7 @@ pub mod lens;
 pub mod nac;
 pub mod p2p;
 pub mod schema;
+pub mod txn_ops;
 pub mod utility;
 pub mod views;
 

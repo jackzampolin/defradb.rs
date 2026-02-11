@@ -48,7 +48,12 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/", post(handlers::tx_begin))
         .route("/concurrent", post(handlers::tx_begin_concurrent))
         .route("/:id", post(handlers::tx_commit))
-        .route("/:id", delete(handlers::tx_discard));
+        .route("/:id", delete(handlers::tx_discard))
+        .route("/:id/lens", post(handlers::txn_ops::set_migration_in_txn))
+        .route(
+            "/:id/collections",
+            get(handlers::txn_ops::get_collections_in_txn),
+        );
 
     // Collection routes (REST API)
     // Static routes must come before parametric `:name` routes

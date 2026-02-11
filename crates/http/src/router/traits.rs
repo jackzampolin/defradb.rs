@@ -461,6 +461,29 @@ pub trait BackupOperations: Send + Sync {
     async fn import(&self, data: &str) -> Result<ImportResult, String>;
 }
 
+/// Trait for transaction-scoped operations.
+///
+/// Provides access to operations that must execute within an existing transaction,
+/// such as setting migrations or reading collection versions including uncommitted writes.
+#[async_trait::async_trait]
+pub trait TransactionOperations: Send + Sync {
+    /// Set a migration within an existing transaction.
+    ///
+    /// Registers a lens migration configuration within the specified transaction.
+    /// The migration will only be visible after the transaction is committed.
+    /// Returns the transform ID.
+    async fn set_migration_in_txn(&self, txn_id: &str, config: &str) -> Result<String, String>;
+
+    /// Get all collection versions visible within a transaction.
+    ///
+    /// Reads from the transaction's systemstore, which includes both
+    /// committed data and any uncommitted writes made within this transaction.
+    async fn get_collections_in_txn(
+        &self,
+        txn_id: &str,
+    ) -> Result<Vec<schema::CollectionVersion>, String>;
+}
+
 /// Trait for view operations.
 ///
 /// Views are virtual collections backed by a GQL query. Materialized views
