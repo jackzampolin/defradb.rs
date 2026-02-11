@@ -336,6 +336,7 @@ impl Node {
 
             // Wire ACP adapters only when document ACP is enabled
             if config.acp.document_type != AcpDocumentType::None {
+                let zanzibar_store_for_doc_acp = zanzibar_store.clone();
                 let acp_adapter = crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store);
                 server = server.with_acp_arc(acp_adapter);
                 info!(
@@ -346,6 +347,7 @@ impl Node {
                 let doc_acp_adapter = crate::doc_acp_adapter::DocumentAcpAdapter::new_arc(
                     database.clone(),
                     Arc::new(acp::LocalDocumentACP::new(acp_store_for_http)),
+                    zanzibar_store_for_doc_acp,
                 );
                 server = server.with_doc_acp_arc(doc_acp_adapter);
                 info!("Document ACP HTTP endpoints enabled");

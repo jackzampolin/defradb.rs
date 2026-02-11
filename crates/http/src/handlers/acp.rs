@@ -131,6 +131,12 @@ pub async fn add_doc_relationship(
         .did()
         .ok_or_else(|| HttpError::BadRequest("identity required for document ACP".into()))?;
 
+    if body.relation == "owner" {
+        return Err(HttpError::BadRequest(
+            "OPERATION_FORBIDDEN: cannot add owner relation".into(),
+        ));
+    }
+
     let doc_acp = state.require_doc_acp()?;
 
     let is_new = doc_acp
@@ -164,6 +170,12 @@ pub async fn remove_doc_relationship(
     let requestor = identity
         .did()
         .ok_or_else(|| HttpError::BadRequest("identity required for document ACP".into()))?;
+
+    if body.relation == "owner" {
+        return Err(HttpError::BadRequest(
+            "OPERATION_FORBIDDEN: cannot delete owner relation".into(),
+        ));
+    }
 
     let doc_acp = state.require_doc_acp()?;
 
