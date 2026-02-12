@@ -11,17 +11,17 @@ pub struct RustNode {
 }
 
 impl RustNode {
-    /// Point to the release binary in the workspace target dir.
+    /// Point to the debug binary in the workspace target dir.
     pub fn from_workspace() -> Self {
         Self {
-            binary_path: PathBuf::from("target/release/defra"),
+            binary_path: PathBuf::from("target/debug/defra"),
         }
     }
 
-    /// Build the Rust binary via cargo.
+    /// Build the Rust binary via cargo (debug mode for fast iteration).
     pub fn build() -> Result<()> {
         let status = Command::new("cargo")
-            .args(["build", "--release", "-p", "cli"])
+            .args(["build", "-p", "cli"])
             .status()
             .context("failed to run cargo build")?;
 
