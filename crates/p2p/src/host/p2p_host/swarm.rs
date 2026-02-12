@@ -119,6 +119,10 @@ impl<S: Store> P2PHost<S> {
                 self.handle_bitswap_event(bitswap_event).await;
             }
 
+            SwarmEvent::Behaviour(DefraEvent::Relay(relay_event)) => {
+                debug!(event = ?relay_event, "Relay client event");
+            }
+
             SwarmEvent::Behaviour(DefraEvent::Kademlia(kad_event)) => {
                 self.handle_kademlia_event(kad_event).await;
             }

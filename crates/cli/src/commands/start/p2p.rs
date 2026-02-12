@@ -1,7 +1,7 @@
 //! P2P initialization methods for Node
 
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use super::node::Node;
 use crate::config::Config;
@@ -111,11 +111,17 @@ impl Node {
         tokio::sync::mpsc::Receiver<p2p::HostEvent>,
         JoinHandle<()>,
     )> {
+        let enable_relay = config.net.relay_enabled;
         let (host, handle, events, _replicators) = match keypair {
-            Some(kp) => p2p::P2PHost::with_keypair_and_config(kp, bitswap_store, enable_pubsub)
-                .await
-                .map_err(Error::P2P)?,
-            None => p2p::P2PHost::with_pubsub(bitswap_store, enable_pubsub)
+            Some(kp) => p2p::P2PHost::with_keypair_and_config(
+                kp,
+                bitswap_store,
+                enable_pubsub,
+                enable_relay,
+            )
+            .await
+            .map_err(Error::P2P)?,
+            None => p2p::P2PHost::with_pubsub(bitswap_store, enable_pubsub, enable_relay)
                 .await
                 .map_err(Error::P2P)?,
         };
@@ -146,7 +152,9 @@ impl Node {
         }
 
         if config.net.relay_enabled {
-            warn!("net.relay_enabled=true is not yet supported; relay is not available");
+            info!("Relay client enabled");
+        } else {
+            info!("Relay client disabled");
         }
 
         // Get and display peer ID
