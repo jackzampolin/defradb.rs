@@ -102,11 +102,12 @@ impl std::str::FromStr for LogOutput {
 
 /// Keyring backend options
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum KeyringBackend {
     #[default]
     File,
     System,
+    SystemdCreds,
 }
 
 impl std::fmt::Display for KeyringBackend {
@@ -114,6 +115,7 @@ impl std::fmt::Display for KeyringBackend {
         match self {
             KeyringBackend::File => write!(f, "file"),
             KeyringBackend::System => write!(f, "system"),
+            KeyringBackend::SystemdCreds => write!(f, "systemd-creds"),
         }
     }
 }
@@ -125,6 +127,7 @@ impl std::str::FromStr for KeyringBackend {
         match s.to_lowercase().as_str() {
             "file" => Ok(KeyringBackend::File),
             "system" => Ok(KeyringBackend::System),
+            "systemd-creds" => Ok(KeyringBackend::SystemdCreds),
             _ => Err(Error::InvalidKeyringBackend(s.to_string())),
         }
     }

@@ -26,6 +26,9 @@ pub enum Error {
     #[error("system keyring error: {0}")]
     SystemKeyring(String),
 
+    #[error("systemd-creds error: {0}")]
+    SystemdCreds(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -5,7 +5,7 @@ use crate::error::Result;
 /// Keyring provides a simple set/get interface for a keyring service.
 ///
 /// Keys are stored as raw bytes and can be used for cryptographic operations.
-/// Different backends (file-based, OS keyring) implement this trait.
+/// Different backends (file-based, OS keyring, systemd-creds) implement this trait.
 pub trait Keyring: Send + Sync {
     /// Stores the given key in the keystore under the given name.
     ///
