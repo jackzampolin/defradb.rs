@@ -249,7 +249,7 @@ fn generate_auth_token_from_keyring(config: &Config, name: &str, audience: &str)
         KeyringBackend::System => {
             #[cfg(target_os = "linux")]
             {
-                if std::env::var("DBUS_SESSION_BUS_ADDRESS").is_ok() {
+                if std::env::var("DBUS_SESSION_BUS_ADDRESS").is_ok_and(|v| !v.is_empty()) {
                     Box::new(keyring::SystemKeyring::open(&config.keyring.namespace))
                 } else if keyring::systemd_creds_available() {
                     let p = PathBuf::from(&config.keyring.path);

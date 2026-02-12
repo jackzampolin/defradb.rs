@@ -32,7 +32,7 @@ impl Node {
             KeyringBackend::System => {
                 #[cfg(target_os = "linux")]
                 {
-                    if std::env::var("DBUS_SESSION_BUS_ADDRESS").is_ok() {
+                    if std::env::var("DBUS_SESSION_BUS_ADDRESS").is_ok_and(|v| !v.is_empty()) {
                         Box::new(SystemKeyring::open(&config.keyring.namespace))
                     } else if keyring::systemd_creds_available() {
                         let path = if config.keyring.path.starts_with('/') {

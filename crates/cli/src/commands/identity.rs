@@ -136,7 +136,7 @@ fn open_keyring(config: &Config) -> Result<Box<dyn keyring::Keyring>> {
         KeyringBackend::System => {
             #[cfg(target_os = "linux")]
             {
-                if std::env::var("DBUS_SESSION_BUS_ADDRESS").is_ok() {
+                if std::env::var("DBUS_SESSION_BUS_ADDRESS").is_ok_and(|v| !v.is_empty()) {
                     Ok(Box::new(keyring::SystemKeyring::open(
                         &config.keyring.namespace,
                     )))
