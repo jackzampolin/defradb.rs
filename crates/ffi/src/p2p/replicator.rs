@@ -62,14 +62,12 @@ pub unsafe extern "C" fn p2p_create_replicator(
                     .map_err(|e| format!("failed to connect to replicator peer: {}", e))?;
                 p2p.set_peer_address(&parsed.peer_id.to_string(), &addr_str);
 
-                let mut collection_cids = Vec::new();
-                for name in &effective_collections {
-                    if let Ok(Some(col)) = db.get_collection(name) {
-                        collection_cids.push(col.collection_id().to_string());
-                    } else {
-                        return Err(format!("collection '{}' not found", name));
-                    }
-                }
+                let collection_cids: Vec<String> = db
+                    .resolve_collection_ids(&effective_collections)
+                    .map_err(|e| format!("{}", e))?
+                    .into_iter()
+                    .map(|(_, id)| id)
+                    .collect();
 
                 p2p.handle.set_replicator(parsed.peer_id, collection_cids.clone()).await
                     .map_err(|e| format!("failed to set replicator: {}", e))?;

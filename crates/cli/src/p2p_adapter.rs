@@ -180,11 +180,10 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
     }
 
     fn validate_collection_exists(&self, name: &str) -> Result<(), String> {
-        match self.db.get_collection(name) {
-            Ok(Some(_)) => Ok(()),
-            Ok(None) => Err(format!("collection '{}' not found", name)),
-            Err(e) => Err(format!("failed to get collection: {}", e)),
-        }
+        self.db
+            .require_collection(name)
+            .map(|_| ())
+            .map_err(|e| format!("{}", e))
     }
 
     fn validate_branchable_collection(&self, collection_id: &str) -> Result<(), String> {

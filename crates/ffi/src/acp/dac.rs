@@ -11,6 +11,37 @@ use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
+/// Resolve managing relations for a given relation within a policy resource.
+///
+/// Loads the policy YAML, finds the resource, validates the relation exists,
+/// and returns the list of managing relations.
+pub(crate) fn resolve_managing_relations(
+    policy_store: &crate::state::PolicyStore,
+    policy_id: &str,
+    resource_name: &str,
+    relation: &str,
+) -> Result<Vec<String>, String> {
+    let mut managing_relations: Vec<String> = Vec::new();
+    if let Some(policy_yaml) = policy_store.get_policy(policy_id) {
+        if let Ok(parsed) = crate::policy_yaml::parse_policy_yaml(&policy_yaml) {
+            if let Some(resource) = parsed.find_resource(resource_name) {
+                if !resource.has_relation(relation) {
+                    return Err(format!(
+                        "relation '{}' not found in policy resource '{}'",
+                        relation, resource_name
+                    ));
+                }
+                managing_relations = resource
+                    .get_managers_for_relation(relation)
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect();
+            }
+        }
+    }
+    Ok(managing_relations)
+}
+
 /// Add a DAC policy.
 ///
 /// Accepts a policy definition in YAML or JSON format.
@@ -255,25 +286,15 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
         return FfiResult::error("OPERATION_FORBIDDEN: cannot add owner relation");
     }
 
-    // Validate relation against policy definition and resolve managing relations
-    let mut managing_relations: Vec<String> = Vec::new();
-    if let Some(policy_yaml) = policy_store.get_policy(&policy_id) {
-        if let Ok(parsed) = crate::policy_yaml::parse_policy_yaml(&policy_yaml) {
-            if let Some(resource) = parsed.find_resource(&resource_name) {
-                if !resource.has_relation(&relation_str) {
-                    return FfiResult::error(format!(
-                        "relation '{}' not found in policy resource '{}'",
-                        relation_str, resource_name
-                    ));
-                }
-                managing_relations = resource
-                    .get_managers_for_relation(&relation_str)
-                    .into_iter()
-                    .map(|s| s.to_string())
-                    .collect();
-            }
-        }
-    }
+    let managing_relations = match resolve_managing_relations(
+        &policy_store,
+        &policy_id,
+        &resource_name,
+        &relation_str,
+    ) {
+        Ok(r) => r,
+        Err(e) => return FfiResult::error(e),
+    };
 
     let result = rt.block_on(async {
         let requestor = identity::Did::new(&requestor_str)
@@ -394,25 +415,15 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
         return FfiResult::error("OPERATION_FORBIDDEN: cannot delete owner relation");
     }
 
-    // Validate relation against policy definition and resolve managing relations
-    let mut managing_relations: Vec<String> = Vec::new();
-    if let Some(policy_yaml) = policy_store.get_policy(&policy_id) {
-        if let Ok(parsed) = crate::policy_yaml::parse_policy_yaml(&policy_yaml) {
-            if let Some(resource) = parsed.find_resource(&resource_name) {
-                if !resource.has_relation(&relation_str) {
-                    return FfiResult::error(format!(
-                        "relation '{}' not found in policy resource '{}'",
-                        relation_str, resource_name
-                    ));
-                }
-                managing_relations = resource
-                    .get_managers_for_relation(&relation_str)
-                    .into_iter()
-                    .map(|s| s.to_string())
-                    .collect();
-            }
-        }
-    }
+    let managing_relations = match resolve_managing_relations(
+        &policy_store,
+        &policy_id,
+        &resource_name,
+        &relation_str,
+    ) {
+        Ok(r) => r,
+        Err(e) => return FfiResult::error(e),
+    };
 
     let result = rt.block_on(async {
         let requestor = identity::Did::new(&requestor_str)

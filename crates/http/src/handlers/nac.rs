@@ -8,17 +8,13 @@
 
 use axum::{extract::State, response::IntoResponse, Json};
 
+use acp::nac::is_valid_nac_relation;
+
 use crate::auth_error::normalize_auth_error;
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
 use crate::router::{AppState, NacStatusInfo, NodePermission};
-
-const VALID_NAC_RELATIONS: &[&str] = &["owner", "admin"];
-
-fn is_valid_nac_relation(relation: &str) -> bool {
-    VALID_NAC_RELATIONS.contains(&relation) || NodePermission::parse(relation).is_some()
-}
 
 /// Request body for adding/removing admin (Rust format).
 #[derive(Debug, serde::Deserialize)]
