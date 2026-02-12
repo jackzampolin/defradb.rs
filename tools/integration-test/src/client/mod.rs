@@ -61,23 +61,11 @@ impl DefraClient {
 
     /// Execute a GraphQL query/mutation via `client query '<gql>'`.
     ///
-    /// Returns the `data` field from the response. Fails if the response
-    /// contains GraphQL errors.
+    /// The CLI already extracts the `data` field and exits non-zero on
+    /// GraphQL errors, so the returned value is the data directly.
     pub fn query(&self, gql: &str) -> Result<Value> {
         let out = self.exec(&["client", "query", gql])?;
-        let resp: Value = serde_json::from_str(&out).context("failed to parse query output")?;
-
-        if let Some(errors) = resp.get("errors") {
-            if let Some(arr) = errors.as_array() {
-                if !arr.is_empty() {
-                    return Err(anyhow::anyhow!("graphql errors: {}", errors));
-                }
-            }
-        }
-
-        resp.get("data")
-            .cloned()
-            .context("query response missing data field")
+        serde_json::from_str(&out).context("failed to parse query output")
     }
 
     /// Create a document via `client collection create --name <n> '<json>'`.
