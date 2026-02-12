@@ -221,83 +221,10 @@ pub fn generate_auth_token(identity_hex: &str, audience: &str) -> Result<String>
 
 /// Generate a JWT auth token from a named key in the keyring.
 fn generate_auth_token_from_keyring(config: &Config, name: &str, audience: &str) -> Result<String> {
-    use crate::config::KeyringBackend;
     use crypto::KeyType;
     use identity::{new_token, RawIdentity};
-    use std::path::PathBuf;
 
-    if config.keyring.disabled {
-        return Err(Error::Keyring("keyring is disabled".to_string()));
-    }
-
-    let keyring: Box<dyn keyring::Keyring> = match config.keyring.backend {
-        KeyringBackend::File => {
-            let path = {
-                let p = PathBuf::from(&config.keyring.path);
-                if p.is_absolute() {
-                    p
-                } else {
-                    config.rootdir.join(p)
-                }
-            };
-            let secret =
-                keyring::load_secret_from_env().map_err(|e| Error::Keyring(e.to_string()))?;
-            let kr = keyring::FileKeyring::open(&path, secret)
-                .map_err(|e| Error::Keyring(e.to_string()))?;
-            Box::new(kr)
-        }
-        KeyringBackend::System => {
-            #[cfg(target_os = "linux")]
-            {
-                if std::env::var("DBUS_SESSION_BUS_ADDRESS").is_ok_and(|v| !v.is_empty()) {
-                    Box::new(keyring::SystemKeyring::open(&config.keyring.namespace))
-                } else if keyring::systemd_creds_available() {
-                    tracing::warn!(
-                        "no D-Bus session available; falling back to systemd-creds keyring"
-                    );
-                    let p = PathBuf::from(&config.keyring.path);
-                    let path = if p.is_absolute() {
-                        p
-                    } else {
-                        config.rootdir.join(p)
-                    };
-                    let kr = keyring::SystemdCredsKeyring::open(&path)
-                        .map_err(|e| Error::Keyring(e.to_string()))?;
-                    Box::new(kr)
-                } else {
-                    return Err(Error::Keyring(
-                        "no system keyring available: no D-Bus session for secret-service \
-                         and systemd-creds not found; use --keyring-backend file"
-                            .to_string(),
-                    ));
-                }
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                Box::new(keyring::SystemKeyring::open(&config.keyring.namespace))
-            }
-        }
-        KeyringBackend::SystemdCreds => {
-            #[cfg(target_os = "linux")]
-            {
-                let p = PathBuf::from(&config.keyring.path);
-                let path = if p.is_absolute() {
-                    p
-                } else {
-                    config.rootdir.join(p)
-                };
-                let kr = keyring::SystemdCredsKeyring::open(&path)
-                    .map_err(|e| Error::Keyring(e.to_string()))?;
-                Box::new(kr)
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                return Err(Error::Keyring(
-                    "systemd-creds backend is only available on Linux".to_string(),
-                ));
-            }
-        }
-    };
+    let keyring = super::open_keyring(config)?;
 
     let key_bytes = keyring
         .get(name)
