@@ -1,4 +1,7 @@
 use std::path::PathBuf;
+use std::time::Duration;
+
+use anyhow::Result;
 
 use crate::client::DefraClient;
 use crate::observe::LogTracker;
@@ -54,5 +57,18 @@ impl TestCluster {
 
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// Wait for a named log pattern on the node at `index`.
+    pub async fn wait_for_log(
+        &self,
+        index: usize,
+        pattern: &str,
+        timeout: Duration,
+    ) -> Result<String> {
+        self.nodes[index]
+            .log_tracker
+            .wait_for_pattern(pattern, timeout)
+            .await
     }
 }

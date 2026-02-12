@@ -6,12 +6,14 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
+use super::patterns::NamedPattern;
+
 /// Events emitted by parsing node log output.
 #[derive(Clone, Debug)]
 pub enum LogEvent {
     Ready,
     Error(String),
-    Custom(String),
+    Pattern { name: String, line: String },
 }
 
 /// Tails a node's stdout.log and emits structured events.
@@ -21,13 +23,13 @@ pub struct LogTracker {
 }
 
 impl LogTracker {
-    /// Start tailing `log_path`, matching the ready pattern and any custom patterns.
-    pub fn start(log_path: PathBuf, custom_patterns: Vec<regex::Regex>) -> Self {
+    /// Start tailing `log_path`, matching the ready pattern and any named patterns.
+    pub fn start(log_path: PathBuf, named_patterns: Vec<NamedPattern>) -> Self {
         let (tx, _) = broadcast::channel(64);
         let tx_clone = tx.clone();
 
         let task = tokio::spawn(async move {
-            if let Err(e) = tail_loop(log_path, tx_clone, custom_patterns).await {
+            if let Err(e) = tail_loop(log_path, tx_clone, named_patterns).await {
                 tracing::warn!("log tracker stopped: {}", e);
             }
         });
@@ -45,7 +47,7 @@ impl LogTracker {
                     Ok(LogEvent::Error(e)) => {
                         return Err(anyhow::anyhow!("node error: {}", e));
                     }
-                    Ok(LogEvent::Custom(_)) => {}
+                    Ok(LogEvent::Pattern { .. }) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => {
                         return Err(anyhow::anyhow!("log tracker closed"));
@@ -58,6 +60,36 @@ impl LogTracker {
         match result {
             Ok(inner) => inner,
             Err(_) => Err(anyhow::anyhow!("timed out waiting for node ready")),
+        }
+    }
+
+    /// Wait for a named pattern to match, returning the matched line.
+    pub async fn wait_for_pattern(&self, name: &str, timeout: Duration) -> Result<String> {
+        let mut rx = self.tx.subscribe();
+        let name = name.to_string();
+
+        let result = tokio::time::timeout(timeout, async {
+            loop {
+                match rx.recv().await {
+                    Ok(LogEvent::Pattern {
+                        name: ref n,
+                        ref line,
+                    }) if *n == name => {
+                        return Ok(line.clone());
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(anyhow::anyhow!("log tracker closed"));
+                    }
+                }
+            }
+        })
+        .await;
+
+        match result {
+            Ok(inner) => inner,
+            Err(_) => Err(anyhow::anyhow!("timed out waiting for pattern '{}'", name)),
         }
     }
 }
@@ -73,7 +105,7 @@ const READY_PATTERN: &str = "DefraDB HTTP server listening";
 async fn tail_loop(
     log_path: PathBuf,
     tx: broadcast::Sender<LogEvent>,
-    custom_patterns: Vec<regex::Regex>,
+    named_patterns: Vec<NamedPattern>,
 ) -> Result<()> {
     // Wait for the log file to appear
     loop {
@@ -104,9 +136,12 @@ async fn tail_loop(
                 if line.contains("ERROR") {
                     let _ = tx.send(LogEvent::Error(line.trim().to_string()));
                 }
-                for pattern in &custom_patterns {
-                    if pattern.is_match(&line) {
-                        let _ = tx.send(LogEvent::Custom(line.trim().to_string()));
+                for pattern in &named_patterns {
+                    if pattern.regex.is_match(&line) {
+                        let _ = tx.send(LogEvent::Pattern {
+                            name: pattern.name.to_string(),
+                            line: line.trim().to_string(),
+                        });
                     }
                 }
             }

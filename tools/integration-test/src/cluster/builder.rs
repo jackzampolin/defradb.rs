@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 
 use crate::node::{DefraNode, GoNode, NodeConfig, RustNode};
+use crate::observe::patterns::{self, NamedPattern};
 use crate::observe::LogTracker;
 use crate::ports::allocate_node_ports;
 use crate::process::ManagedProcess;
@@ -96,6 +97,7 @@ impl TestClusterBuilder {
                 self.p2p_enabled,
                 &run_dir,
                 self.health_timeout,
+                patterns::rust_patterns(),
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -114,6 +116,7 @@ impl TestClusterBuilder {
                 self.p2p_enabled,
                 &run_dir,
                 self.health_timeout,
+                patterns::go_patterns(),
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -131,6 +134,7 @@ impl TestClusterBuilder {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_node(
     name: &str,
     node: &dyn DefraNode,
@@ -139,6 +143,7 @@ async fn spawn_node(
     p2p_enabled: bool,
     run_dir: &TestRunDir,
     ready_timeout: Duration,
+    named_patterns: Vec<NamedPattern>,
 ) -> Result<RunningNode> {
     let node_dir = run_dir.node_dir(name)?;
     let log_dir = node_dir.join("logs");
@@ -167,7 +172,7 @@ async fn spawn_node(
 
     // Start log tracker before spawning so it catches early output
     let stdout_path = log_dir.join("stdout.log");
-    let log_tracker = LogTracker::start(stdout_path, vec![]);
+    let log_tracker = LogTracker::start(stdout_path, named_patterns);
 
     let process = ManagedProcess::spawn(name, cmd, &log_dir)?;
 

@@ -117,4 +117,25 @@ impl DefraClient {
         args.extend(addrs);
         self.exec(&args)
     }
+
+    /// Add collections to P2P sync via `client p2p collection add -c <cols>`.
+    pub fn p2p_collection_add(&self, collections: &[&str]) -> Result<String> {
+        let cols = collections.join(",");
+        self.exec(&["client", "p2p", "collection", "add", "-c", &cols])
+    }
+
+    /// Set a replicator for collections via `client p2p replicator set -c <cols> -a <addr>`.
+    pub fn p2p_replicator_set(&self, collections: &[&str], addr: &str) -> Result<String> {
+        let cols = collections.join(",");
+        self.exec(&[
+            "client",
+            "p2p",
+            "replicator",
+            "set",
+            "-c",
+            &cols,
+            "-a",
+            addr,
+        ])
+    }
 }
