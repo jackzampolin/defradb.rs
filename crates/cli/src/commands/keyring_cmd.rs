@@ -238,6 +238,9 @@ fn open_keyring(config: &Config) -> Result<Box<dyn keyring::Keyring>> {
                         &config.keyring.namespace,
                     )))
                 } else if keyring::systemd_creds_available() {
+                    tracing::warn!(
+                        "no D-Bus session available; falling back to systemd-creds keyring"
+                    );
                     let path = resolve_keyring_path(config)?;
                     let kr = keyring::SystemdCredsKeyring::open(&path)
                         .map_err(|e| Error::Keyring(e.to_string()))?;

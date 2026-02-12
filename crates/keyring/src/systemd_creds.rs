@@ -58,12 +58,10 @@ impl SystemdCredsKeyring {
             .spawn()
             .map_err(|e| Error::SystemdCreds(format!("failed to run systemd-creds: {}", e)))?;
 
-        child
-            .stdin
-            .as_mut()
-            .expect("stdin was piped")
-            .write_all(data)
-            .map_err(|e| Error::Encryption(format!("failed to write to systemd-creds: {}", e)))?;
+        let write_result = {
+            let mut stdin = child.stdin.take().expect("stdin was piped");
+            stdin.write_all(data)
+        };
 
         let output = child
             .wait_with_output()
@@ -75,6 +73,19 @@ impl SystemdCredsKeyring {
                 "systemd-creds encrypt failed: {}",
                 stderr.trim()
             )));
+        }
+
+        if let Err(e) = write_result {
+            return Err(Error::Encryption(format!(
+                "failed to write to systemd-creds: {}",
+                e
+            )));
+        }
+
+        if output.stdout.is_empty() {
+            return Err(Error::Encryption(
+                "systemd-creds encrypt produced empty output".to_string(),
+            ));
         }
 
         Ok(output.stdout)
@@ -89,12 +100,10 @@ impl SystemdCredsKeyring {
             .spawn()
             .map_err(|e| Error::SystemdCreds(format!("failed to run systemd-creds: {}", e)))?;
 
-        child
-            .stdin
-            .as_mut()
-            .expect("stdin was piped")
-            .write_all(data)
-            .map_err(|e| Error::Decryption(format!("failed to write to systemd-creds: {}", e)))?;
+        let write_result = {
+            let mut stdin = child.stdin.take().expect("stdin was piped");
+            stdin.write_all(data)
+        };
 
         let output = child
             .wait_with_output()
@@ -106,6 +115,19 @@ impl SystemdCredsKeyring {
                 "systemd-creds decrypt failed: {}",
                 stderr.trim()
             )));
+        }
+
+        if let Err(e) = write_result {
+            return Err(Error::Decryption(format!(
+                "failed to write to systemd-creds: {}",
+                e
+            )));
+        }
+
+        if output.stdout.is_empty() {
+            return Err(Error::Decryption(
+                "systemd-creds decrypt produced empty output".to_string(),
+            ));
         }
 
         Ok(output.stdout)
@@ -125,6 +147,7 @@ impl Keyring for SystemdCredsKeyring {
             .mode(0o600)
             .open(&path)?;
         file.write_all(&encrypted)?;
+        file.sync_all()?;
 
         Ok(())
     }

@@ -252,6 +252,9 @@ fn generate_auth_token_from_keyring(config: &Config, name: &str, audience: &str)
                 if std::env::var("DBUS_SESSION_BUS_ADDRESS").is_ok_and(|v| !v.is_empty()) {
                     Box::new(keyring::SystemKeyring::open(&config.keyring.namespace))
                 } else if keyring::systemd_creds_available() {
+                    tracing::warn!(
+                        "no D-Bus session available; falling back to systemd-creds keyring"
+                    );
                     let p = PathBuf::from(&config.keyring.path);
                     let path = if p.is_absolute() {
                         p

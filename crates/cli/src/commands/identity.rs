@@ -141,6 +141,9 @@ fn open_keyring(config: &Config) -> Result<Box<dyn keyring::Keyring>> {
                         &config.keyring.namespace,
                     )))
                 } else if keyring::systemd_creds_available() {
+                    tracing::warn!(
+                        "no D-Bus session available; falling back to systemd-creds keyring"
+                    );
                     let p = PathBuf::from(&config.keyring.path);
                     let path = if p.is_absolute() {
                         p
