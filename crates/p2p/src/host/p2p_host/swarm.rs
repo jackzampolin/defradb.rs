@@ -120,7 +120,38 @@ impl<S: Store> P2PHost<S> {
             }
 
             SwarmEvent::Behaviour(DefraEvent::Relay(relay_event)) => {
-                debug!(event = ?relay_event, "Relay client event");
+                use libp2p::relay;
+                match relay_event {
+                    relay::client::Event::ReservationReqAccepted {
+                        relay_peer_id,
+                        renewal,
+                        limit,
+                    } => {
+                        info!(
+                            relay_peer_id = %relay_peer_id,
+                            renewal = renewal,
+                            limit = ?limit,
+                            "Relay reservation accepted"
+                        );
+                    }
+                    relay::client::Event::OutboundCircuitEstablished {
+                        relay_peer_id,
+                        limit,
+                    } => {
+                        info!(
+                            relay_peer_id = %relay_peer_id,
+                            limit = ?limit,
+                            "Outbound relay circuit established"
+                        );
+                    }
+                    relay::client::Event::InboundCircuitEstablished { src_peer_id, limit } => {
+                        info!(
+                            src_peer_id = %src_peer_id,
+                            limit = ?limit,
+                            "Inbound relay circuit established"
+                        );
+                    }
+                }
             }
 
             SwarmEvent::Behaviour(DefraEvent::Kademlia(kad_event)) => {

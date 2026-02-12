@@ -111,17 +111,15 @@ impl Node {
         tokio::sync::mpsc::Receiver<p2p::HostEvent>,
         JoinHandle<()>,
     )> {
-        let enable_relay = config.net.relay_enabled;
+        let p2p_config = p2p::P2PHostConfig {
+            enable_pubsub,
+            enable_relay: config.net.relay_enabled,
+        };
         let (host, handle, events, _replicators) = match keypair {
-            Some(kp) => p2p::P2PHost::with_keypair_and_config(
-                kp,
-                bitswap_store,
-                enable_pubsub,
-                enable_relay,
-            )
-            .await
-            .map_err(Error::P2P)?,
-            None => p2p::P2PHost::with_pubsub(bitswap_store, enable_pubsub, enable_relay)
+            Some(kp) => p2p::P2PHost::with_keypair_and_config(kp, bitswap_store, p2p_config)
+                .await
+                .map_err(Error::P2P)?,
+            None => p2p::P2PHost::with_config(bitswap_store, p2p_config)
                 .await
                 .map_err(Error::P2P)?,
         };
@@ -152,7 +150,7 @@ impl Node {
         }
 
         if config.net.relay_enabled {
-            info!("Relay client enabled");
+            info!("Relay client transport enabled");
         } else {
             info!("Relay client disabled");
         }

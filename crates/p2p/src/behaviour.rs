@@ -7,6 +7,7 @@
 //! - Bitswap for block exchange (Go compatibility via iroh-bitswap)
 //! - Request-response for PushLog synchronization
 //! - GossipSub for pubsub messaging
+//! - Circuit relay client for NAT traversal (optional)
 //!
 //! # Wire Compatibility with Go
 //!
@@ -69,6 +70,7 @@ pub struct DefraBehaviour<S: Store> {
     pub gossipsub: Toggle<gossipsub::Behaviour>,
 
     /// Relay client for circuit relay (optional, controlled by `relay_enabled` config).
+    /// Initialized as disabled; the SwarmBuilder injects the client when relay is enabled.
     pub relay: Toggle<relay::client::Behaviour>,
 
     /// Raw stream protocol for Go two-stream compatibility.

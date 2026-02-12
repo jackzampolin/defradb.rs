@@ -35,6 +35,22 @@ use super::ResponseChannel;
 /// Default idle connection timeout.
 const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Configuration options for P2P host construction.
+#[derive(Debug, Clone)]
+pub struct P2PHostConfig {
+    pub enable_pubsub: bool,
+    pub enable_relay: bool,
+}
+
+impl Default for P2PHostConfig {
+    fn default() -> Self {
+        Self {
+            enable_pubsub: true,
+            enable_relay: false,
+        }
+    }
+}
+
 /// P2P Host that manages the libp2p swarm.
 pub struct P2PHost<S: Store> {
     pub(super) swarm: Swarm<DefraBehaviour<S>>,
@@ -83,11 +99,10 @@ impl<S: Store> P2PHost<S> {
         Self::with_keypair(keypair, bitswap_store).await
     }
 
-    /// Create a new P2P host with pubsub and relay optionally configured.
-    pub async fn with_pubsub(
+    /// Create a new P2P host with the given config options.
+    pub async fn with_config(
         bitswap_store: S,
-        enable_pubsub: bool,
-        enable_relay: bool,
+        config: P2PHostConfig,
     ) -> Result<(
         Self,
         P2PHostHandle,
@@ -95,10 +110,12 @@ impl<S: Store> P2PHost<S> {
         Arc<ReplicatorRegistry>,
     )> {
         let keypair = Keypair::generate_ed25519();
-        Self::with_keypair_and_config(keypair, bitswap_store, enable_pubsub, enable_relay).await
+        Self::with_keypair_and_config(keypair, bitswap_store, config).await
     }
 
     /// Create a new P2P host with the given keypair and blockstore.
+    ///
+    /// Uses default config: pubsub enabled, relay disabled.
     ///
     /// # Arguments
     ///
@@ -123,15 +140,20 @@ impl<S: Store> P2PHost<S> {
         mpsc::Receiver<HostEvent>,
         Arc<ReplicatorRegistry>,
     )> {
-        Self::with_keypair_and_config(keypair, bitswap_store, true, false).await
+        Self::with_keypair_and_config(keypair, bitswap_store, P2PHostConfig::default()).await
     }
 
     /// Create a new P2P host with the given keypair, blockstore, and config options.
+    ///
+    /// # Arguments
+    ///
+    /// * `keypair` - The identity keypair for this node
+    /// * `bitswap_store` - The blockstore for Bitswap block exchange
+    /// * `config` - P2P host configuration (pubsub, relay toggles)
     pub async fn with_keypair_and_config(
         keypair: Keypair,
         bitswap_store: S,
-        enable_pubsub: bool,
-        enable_relay: bool,
+        config: P2PHostConfig,
     ) -> Result<(
         Self,
         P2PHostHandle,
@@ -152,7 +174,7 @@ impl<S: Store> P2PHost<S> {
             local_public_key,
             keypair.clone(),
             bitswap_store,
-            enable_pubsub,
+            config.enable_pubsub,
         )
         .await
         .map_err(|e| Error::Behaviour(e.to_string()))?;
@@ -163,9 +185,11 @@ impl<S: Store> P2PHost<S> {
         // This is critical for ActivePeers to return correct addresses.
         let tcp_config = tcp::Config::default().port_reuse(true);
 
-        // Two builder paths required: `.with_relay_client()` changes the
-        // SwarmBuilder's generic types so it cannot be called conditionally.
-        let swarm = if enable_relay {
+        // Two builder paths required: libp2p's SwarmBuilder uses a typestate
+        // pattern where `.with_relay_client()` transitions to a different builder
+        // type (different `.with_behaviour()` closure signature), so it cannot be
+        // called conditionally on a single builder chain.
+        let swarm = if config.enable_relay {
             SwarmBuilder::with_existing_identity(keypair.clone())
                 .with_tokio()
                 .with_tcp(tcp_config, noise::Config::new, yamux::Config::default)
