@@ -40,16 +40,16 @@ impl DefraNode for GoNode {
 
         cmd.arg("--rootdir").arg(&config.rootdir);
         cmd.arg("--url").arg(&config.http_addr);
-        cmd.arg("--no-log-color").arg("true");
+        cmd.arg("--no-log-color");
         cmd.arg("--log-output").arg("stdout");
-        cmd.arg("--no-keyring").arg("true");
+        cmd.arg("--no-keyring");
 
         cmd.arg("start");
         cmd.arg("--store").arg("memory");
-        cmd.arg("--no-telemetry").arg("true");
-        cmd.arg("--no-encryption").arg("true");
-        cmd.arg("--no-signing").arg("true");
-        cmd.arg("--no-searchable-encryption").arg("true");
+        cmd.arg("--no-telemetry");
+        cmd.arg("--no-encryption");
+        cmd.arg("--no-signing");
+        cmd.arg("--no-searchable-encryption");
 
         if config.p2p_enabled {
             if let Some(ref addr) = config.p2p_addr {
@@ -59,7 +59,7 @@ impl DefraNode for GoNode {
                 cmd.arg("--peers").arg(peer);
             }
         } else {
-            cmd.arg("--no-p2p").arg("true");
+            cmd.arg("--no-p2p");
         }
 
         if let Some(ref identity) = config.identity {

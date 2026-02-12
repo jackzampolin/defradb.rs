@@ -16,28 +16,28 @@ pub struct P2pReplicatorArgs {
 /// Replicator subcommands
 #[derive(Subcommand, Debug)]
 pub enum P2pReplicatorCommand {
-    /// Get all replicators
-    GetAll(P2pReplicatorGetAllArgs),
-    /// Set a replicator for collections
-    Set(P2pReplicatorSetArgs),
-    /// Delete a replicator
+    /// Create replicator(s) and start synchronization
+    Create(P2pReplicatorCreateArgs),
+    /// Delete replicator(s) and stop synchronization
     Delete(P2pReplicatorDeleteArgs),
+    /// List all replicators
+    List(P2pReplicatorListArgs),
 }
 
-/// Arguments for replicator getall command
+/// Arguments for replicator list command
 #[derive(Args, Debug)]
-pub struct P2pReplicatorGetAllArgs {}
+pub struct P2pReplicatorListArgs {}
 
-/// Arguments for replicator set command
+/// Arguments for replicator create command
 #[derive(Args, Debug)]
-pub struct P2pReplicatorSetArgs {
+pub struct P2pReplicatorCreateArgs {
     /// Collection(s) to replicate (comma-separated or multiple --collection)
     #[arg(long, short = 'c', required = true, value_delimiter = ',')]
     pub collection: Vec<String>,
 
-    /// Peer address to replicate with
-    #[arg(long, short = 'a')]
-    pub address: Option<String>,
+    /// Peer address(es) to replicate with
+    #[arg(value_name = "addresses")]
+    pub addresses: Vec<String>,
 }
 
 /// Arguments for replicator delete command
@@ -47,24 +47,24 @@ pub struct P2pReplicatorDeleteArgs {
     #[arg(long, short = 'c', required = true, value_delimiter = ',')]
     pub collection: Vec<String>,
 
-    /// Peer address to stop replicating with
-    #[arg(long, short = 'a')]
-    pub address: Option<String>,
+    /// Peer ID to stop replicating with
+    #[arg(value_name = "peerID")]
+    pub peer_id: Option<String>,
 }
 
 impl P2pReplicatorArgs {
     /// Execute the replicator subcommand
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            P2pReplicatorCommand::GetAll(args) => args.execute(ctx).await,
-            P2pReplicatorCommand::Set(args) => args.execute(ctx).await,
+            P2pReplicatorCommand::Create(args) => args.execute(ctx).await,
             P2pReplicatorCommand::Delete(args) => args.execute(ctx).await,
+            P2pReplicatorCommand::List(args) => args.execute(ctx).await,
         }
     }
 }
 
-impl P2pReplicatorGetAllArgs {
-    /// Execute the replicator getall command
+impl P2pReplicatorListArgs {
+    /// Execute the replicator list command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
@@ -76,8 +76,8 @@ impl P2pReplicatorGetAllArgs {
     }
 }
 
-impl P2pReplicatorSetArgs {
-    /// Execute the replicator set command
+impl P2pReplicatorCreateArgs {
+    /// Execute the replicator create command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         for col in &self.collection {
             validate_identifier(col)?;
@@ -87,9 +87,9 @@ impl P2pReplicatorSetArgs {
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        client
-            .p2p_replicator_add(&self.collection, self.address.as_deref())
-            .await?;
+        // Use first address if provided (Go API sends all addresses)
+        let address = self.addresses.first().map(|s| s.as_str());
+        client.p2p_replicator_add(&self.collection, address).await?;
         println!(
             "Set replicator for collections: {}",
             self.collection.join(", ")
@@ -110,7 +110,7 @@ impl P2pReplicatorDeleteArgs {
             .with_verbose(ctx.verbose);
 
         client
-            .p2p_replicator_delete(&self.collection, self.address.as_deref())
+            .p2p_replicator_delete(&self.collection, self.peer_id.as_deref())
             .await?;
         println!(
             "Removed replicator for collections: {}",

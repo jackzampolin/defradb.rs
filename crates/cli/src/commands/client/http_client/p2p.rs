@@ -46,12 +46,13 @@ pub struct P2pReplicatorInfo {
     pub address: Option<String>,
 }
 
-/// P2P replicator request
+/// P2P replicator request (Go-compatible format).
 #[derive(Debug, Serialize)]
 pub struct P2pReplicatorRequest {
+    #[serde(rename = "Collections")]
     pub collections: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub address: Option<String>,
+    #[serde(rename = "Addresses")]
+    pub addresses: Vec<String>,
 }
 
 /// P2P collection request
@@ -105,9 +106,10 @@ impl HttpClient {
         address: Option<&str>,
     ) -> Result<()> {
         let url = format!("{}/api/v0/p2p/replicator", self.base_url);
+        let addresses = address.map(|s| vec![s.to_string()]).unwrap_or_default();
         let body = serde_json::to_string(&P2pReplicatorRequest {
             collections: collections.to_vec(),
-            address: address.map(|s| s.to_string()),
+            addresses,
         })?;
         self.request_void("POST", &url, Some(&body)).await
     }
@@ -133,9 +135,7 @@ impl HttpClient {
 
     pub async fn p2p_collection_add(&self, collections: &[String]) -> Result<()> {
         let url = format!("{}/api/v0/p2p/collections", self.base_url);
-        let body = serde_json::to_string(&P2pCollectionRequest {
-            collections: collections.to_vec(),
-        })?;
+        let body = serde_json::to_string(&collections)?;
         self.request_void("POST", &url, Some(&body)).await
     }
 
@@ -153,9 +153,7 @@ impl HttpClient {
 
     pub async fn p2p_connect(&self, addresses: &[String]) -> Result<()> {
         let url = format!("{}/api/v0/p2p/connect", self.base_url);
-        let body = serde_json::to_string(&P2pConnectRequest {
-            addresses: addresses.to_vec(),
-        })?;
+        let body = serde_json::to_string(&addresses)?;
         self.request_void("POST", &url, Some(&body)).await
     }
 

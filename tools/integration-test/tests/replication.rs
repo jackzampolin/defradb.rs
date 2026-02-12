@@ -6,6 +6,26 @@ async fn replication_test(cluster: TestCluster) {
     let node0 = cluster.client(0);
     let node1 = cluster.client(1);
 
+    // Wait for P2P listeners to be ready on both nodes before calling p2p info
+    let timeout = Duration::from_secs(15);
+    cluster
+        .wait_for_log(0, "p2p_listening", timeout)
+        .await
+        .expect("node0 P2P listener did not start");
+    cluster
+        .wait_for_log(1, "p2p_listening", timeout)
+        .await
+        .expect("node1 P2P listener did not start");
+
+    // Get full multiaddrs (with peer ID) from p2p info
+    // Response is a flat JSON array: ["/ip4/127.0.0.1/tcp/PORT/p2p/PEERID"]
+    let info1 = node1.p2p_info().expect("failed to get node1 p2p info");
+    let addr1 = info1
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .expect("node1 has no P2P address");
+
     // Deploy schema on both nodes
     node0
         .schema_add("type User { name: String  age: Int }")
@@ -14,25 +34,8 @@ async fn replication_test(cluster: TestCluster) {
         .schema_add("type User { name: String  age: Int }")
         .unwrap();
 
-    // Get P2P info, extract addresses
-    let info1 = node1.p2p_info().unwrap();
-    let addr1 = info1["addresses"][0]
-        .as_str()
-        .expect("node1 has no P2P address");
-
-    // Connect peers
+    // Connect peers (HTTP call is synchronous — returns after connection is established)
     node0.p2p_connect(&[addr1]).unwrap();
-
-    // Event-based: wait for "Peer connected" on both nodes
-    let timeout = Duration::from_secs(10);
-    cluster
-        .wait_for_log(0, "peer_connected", timeout)
-        .await
-        .unwrap();
-    cluster
-        .wait_for_log(1, "peer_connected", timeout)
-        .await
-        .unwrap();
 
     // Enable collection sync + set replicator
     node0.p2p_collection_add(&["User"]).unwrap();

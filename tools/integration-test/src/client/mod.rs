@@ -61,11 +61,19 @@ impl DefraClient {
 
     /// Execute a GraphQL query/mutation via `client query '<gql>'`.
     ///
-    /// The CLI already extracts the `data` field and exits non-zero on
-    /// GraphQL errors, so the returned value is the data directly.
+    /// Normalizes output across Go and Rust CLIs:
+    /// - Go wraps in `{"data": ...}` with a header; Rust returns data directly.
     pub fn query(&self, gql: &str) -> Result<Value> {
         let out = self.exec(&["client", "query", gql])?;
-        serde_json::from_str(&out).context("failed to parse query output")
+        // Go CLI prefixes output with "------ Request Results ------\n"
+        let json_str = out.find('{').map(|i| &out[i..]).unwrap_or(&out);
+        let val: Value = serde_json::from_str(json_str).context("failed to parse query output")?;
+        // Go CLI wraps in {"data": ...}; Rust returns data directly
+        if let Some(data) = val.get("data") {
+            Ok(data.clone())
+        } else {
+            Ok(val)
+        }
     }
 
     /// Create a document via `client collection create --name <n> '<json>'`.
@@ -118,24 +126,15 @@ impl DefraClient {
         self.exec(&args)
     }
 
-    /// Add collections to P2P sync via `client p2p collection add -c <cols>`.
+    /// Create P2P collections via `client p2p collection create <cols>`.
     pub fn p2p_collection_add(&self, collections: &[&str]) -> Result<String> {
         let cols = collections.join(",");
-        self.exec(&["client", "p2p", "collection", "add", "-c", &cols])
+        self.exec(&["client", "p2p", "collection", "create", &cols])
     }
 
-    /// Set a replicator for collections via `client p2p replicator set -c <cols> -a <addr>`.
+    /// Create a replicator via `client p2p replicator create -c <cols> <addr>`.
     pub fn p2p_replicator_set(&self, collections: &[&str], addr: &str) -> Result<String> {
         let cols = collections.join(",");
-        self.exec(&[
-            "client",
-            "p2p",
-            "replicator",
-            "set",
-            "-c",
-            &cols,
-            "-a",
-            addr,
-        ])
+        self.exec(&["client", "p2p", "replicator", "create", "-c", &cols, addr])
     }
 }

@@ -464,7 +464,7 @@ impl Server {
             ))
         })?;
 
-        tracing::info!("DefraDB HTTP server listening on {}", self.config.address);
+        tracing::info!("Providing HTTP API at http://{}", self.config.address);
 
         axum::serve(listener, router).await.map_err(|e| {
             tracing::error!(error = %e, "HTTP server encountered fatal error");

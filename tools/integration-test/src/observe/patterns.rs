@@ -21,26 +21,33 @@ pub fn rust_patterns() -> Vec<NamedPattern> {
             name: "replication_started",
             regex: Regex::new(r"Starting replication loop").unwrap(),
         },
+        NamedPattern {
+            name: "p2p_listening",
+            regex: Regex::new(r"Now listening on: ").unwrap(),
+        },
     ]
 }
 
 /// Standard log patterns emitted by Go DefraDB nodes.
 ///
-/// Go DefraDB uses the same log strings for core events.
-/// If divergence is found at runtime, adjust here.
+/// Go DefraDB uses different log strings from its go-p2p library.
 pub fn go_patterns() -> Vec<NamedPattern> {
     vec![
         NamedPattern {
             name: "peer_connected",
-            regex: Regex::new(r"Peer connected: ").unwrap(),
+            regex: Regex::new(r"Peer connected|PeerConnect").unwrap(),
         },
         NamedPattern {
             name: "peer_disconnected",
-            regex: Regex::new(r"Peer disconnected: ").unwrap(),
+            regex: Regex::new(r"Peer disconnected|PeerDisconnect").unwrap(),
         },
         NamedPattern {
             name: "replication_started",
             regex: Regex::new(r"Starting replication loop").unwrap(),
+        },
+        NamedPattern {
+            name: "p2p_listening",
+            regex: Regex::new(r"Created LibP2P host").unwrap(),
         },
     ]
 }

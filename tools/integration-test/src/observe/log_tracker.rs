@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,9 +18,13 @@ pub enum LogEvent {
     Pattern { name: String, line: String },
 }
 
+/// Stores the first matched line for each named pattern.
+type SeenPatterns = Arc<Mutex<HashMap<String, String>>>;
+
 /// Tails a node's stdout.log and emits structured events.
 pub struct LogTracker {
     tx: broadcast::Sender<LogEvent>,
+    seen: SeenPatterns,
     task: JoinHandle<()>,
 }
 
@@ -27,14 +33,16 @@ impl LogTracker {
     pub fn start(log_path: PathBuf, named_patterns: Vec<NamedPattern>) -> Self {
         let (tx, _) = broadcast::channel(64);
         let tx_clone = tx.clone();
+        let seen: SeenPatterns = Arc::new(Mutex::new(HashMap::new()));
+        let seen_clone = seen.clone();
 
         let task = tokio::spawn(async move {
-            if let Err(e) = tail_loop(log_path, tx_clone, named_patterns).await {
+            if let Err(e) = tail_loop(log_path, tx_clone, named_patterns, seen_clone).await {
                 tracing::warn!("log tracker stopped: {}", e);
             }
         });
 
-        Self { tx, task }
+        Self { tx, seen, task }
     }
 
     /// Wait for the Ready event or timeout.
@@ -64,21 +72,39 @@ impl LogTracker {
     }
 
     /// Wait for a named pattern to match, returning the matched line.
+    ///
+    /// If the pattern was already matched before this call, returns immediately.
     pub async fn wait_for_pattern(&self, name: &str, timeout: Duration) -> Result<String> {
-        let mut rx = self.tx.subscribe();
-        let name = name.to_string();
+        // Check if already seen
+        if let Some(line) = self.seen.lock().unwrap().get(name) {
+            return Ok(line.clone());
+        }
 
-        let result = tokio::time::timeout(timeout, async {
+        let mut rx = self.tx.subscribe();
+        let name_owned = name.to_string();
+        let seen = self.seen.clone();
+
+        let result = tokio::time::timeout(timeout, async move {
             loop {
+                // Re-check seen map in case of race between check above and subscribe
+                if let Some(line) = seen.lock().unwrap().get(&name_owned) {
+                    return Ok(line.clone());
+                }
+
                 match rx.recv().await {
                     Ok(LogEvent::Pattern {
                         name: ref n,
                         ref line,
-                    }) if *n == name => {
+                    }) if *n == name_owned => {
                         return Ok(line.clone());
                     }
                     Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // After lag, re-check seen map
+                        if let Some(line) = seen.lock().unwrap().get(&name_owned) {
+                            return Ok(line.clone());
+                        }
+                    }
                     Err(broadcast::error::RecvError::Closed) => {
                         return Err(anyhow::anyhow!("log tracker closed"));
                     }
@@ -100,12 +126,13 @@ impl Drop for LogTracker {
     }
 }
 
-const READY_PATTERN: &str = "DefraDB HTTP server listening";
+const READY_PATTERN: &str = "Providing HTTP API at";
 
 async fn tail_loop(
     log_path: PathBuf,
     tx: broadcast::Sender<LogEvent>,
     named_patterns: Vec<NamedPattern>,
+    seen: SeenPatterns,
 ) -> Result<()> {
     // Wait for the log file to appear
     loop {
@@ -138,9 +165,14 @@ async fn tail_loop(
                 }
                 for pattern in &named_patterns {
                     if pattern.regex.is_match(&line) {
+                        let trimmed = line.trim().to_string();
+                        seen.lock()
+                            .unwrap()
+                            .entry(pattern.name.to_string())
+                            .or_insert_with(|| trimmed.clone());
                         let _ = tx.send(LogEvent::Pattern {
                             name: pattern.name.to_string(),
-                            line: line.trim().to_string(),
+                            line: trimmed,
                         });
                     }
                 }
