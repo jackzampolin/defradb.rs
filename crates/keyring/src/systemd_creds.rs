@@ -1,6 +1,6 @@
-//! systemd-creds keyring backend for headless Linux servers
+//! systemd-creds keyring backend
 //!
-//! Encrypts credentials using TPM2 or host key via the `systemd-creds` binary.
+//! Encrypts credentials via the `systemd-creds` binary with automatic key selection.
 //! Each key is stored as a separate `.cred` file in a directory with 0700 permissions.
 
 use std::fs;
@@ -12,12 +12,7 @@ use crate::error::{Error, Result};
 use crate::key_name::KeyName;
 use crate::keyring::Keyring;
 
-const CRED_EXTENSION: &str = "cred";
-
-/// Keyring backend that uses `systemd-creds` for encryption.
-///
-/// Stores each key as a `.cred` file encrypted with TPM2 or a host key.
-/// Requires the `systemd-creds` binary to be available on the system.
+/// Keyring backend using `systemd-creds` for encryption.
 pub struct SystemdCredsKeyring {
     dir: PathBuf,
 }
@@ -26,7 +21,7 @@ impl SystemdCredsKeyring {
     /// Opens or creates a systemd-creds keyring in the given directory.
     ///
     /// Returns an error if `systemd-creds` is not available on the system.
-    /// The directory is created with 0700 permissions if it does not exist.
+    /// The directory is created if it does not exist. Permissions are set to 0700.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
         if !systemd_creds_available() {
             return Err(Error::SystemdCreds(
@@ -46,12 +41,21 @@ impl SystemdCredsKeyring {
 
     fn key_path(&self, name: &str) -> Result<PathBuf> {
         KeyName::validate(name)?;
-        Ok(self.dir.join(format!("{}.{}", name, CRED_EXTENSION)))
+        Ok(self.dir.join(format!("{}.cred", name)))
     }
 
-    fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
+    /// Run a systemd-creds subcommand, piping `input` to stdin and returning stdout.
+    fn run(&self, args: &[&str], operation: &str, input: &[u8]) -> Result<Vec<u8>> {
+        let make_err = |msg: String| -> Error {
+            if operation == "encrypt" {
+                Error::Encryption(msg)
+            } else {
+                Error::Decryption(msg)
+            }
+        };
+
         let mut child = Command::new("systemd-creds")
-            .args(["encrypt", "--with-key=auto", "--name=", "-", "-"])
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -59,78 +63,57 @@ impl SystemdCredsKeyring {
             .map_err(|e| Error::SystemdCreds(format!("failed to run systemd-creds: {}", e)))?;
 
         let write_result = {
-            let mut stdin = child.stdin.take().expect("stdin was piped");
-            stdin.write_all(data)
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| Error::SystemdCreds("failed to open stdin pipe".to_string()))?;
+            stdin.write_all(input)
         };
 
         let output = child
             .wait_with_output()
-            .map_err(|e| Error::Encryption(format!("systemd-creds encrypt failed: {}", e)))?;
+            .map_err(|e| make_err(format!("systemd-creds {} failed: {}", operation, e)))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::Encryption(format!(
-                "systemd-creds encrypt failed: {}",
-                stderr.trim()
-            )));
-        }
-
+        // Check write result first — a write failure is the root cause
+        // if the process also failed.
         if let Err(e) = write_result {
-            return Err(Error::Encryption(format!(
-                "failed to write to systemd-creds: {}",
+            return Err(make_err(format!(
+                "failed to write to systemd-creds stdin: {}",
                 e
             )));
         }
 
-        if output.stdout.is_empty() {
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(make_err(format!(
+                "systemd-creds {} failed: {}",
+                operation,
+                stderr.trim()
+            )));
+        }
+
+        Ok(output.stdout)
+    }
+
+    fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
+        let output = self.run(
+            &["encrypt", "--with-key=auto", "--name=", "-", "-"],
+            "encrypt",
+            data,
+        )?;
+
+        // Encrypted ciphertext is never empty.
+        if output.is_empty() {
             return Err(Error::Encryption(
                 "systemd-creds encrypt produced empty output".to_string(),
             ));
         }
 
-        Ok(output.stdout)
+        Ok(output)
     }
 
     fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let mut child = Command::new("systemd-creds")
-            .args(["decrypt", "--name=", "-", "-"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| Error::SystemdCreds(format!("failed to run systemd-creds: {}", e)))?;
-
-        let write_result = {
-            let mut stdin = child.stdin.take().expect("stdin was piped");
-            stdin.write_all(data)
-        };
-
-        let output = child
-            .wait_with_output()
-            .map_err(|e| Error::Decryption(format!("systemd-creds decrypt failed: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Error::Decryption(format!(
-                "systemd-creds decrypt failed: {}",
-                stderr.trim()
-            )));
-        }
-
-        if let Err(e) = write_result {
-            return Err(Error::Decryption(format!(
-                "failed to write to systemd-creds: {}",
-                e
-            )));
-        }
-
-        if output.stdout.is_empty() {
-            return Err(Error::Decryption(
-                "systemd-creds decrypt produced empty output".to_string(),
-            ));
-        }
-
-        Ok(output.stdout)
+        self.run(&["decrypt", "--name=", "-", "-"], "decrypt", data)
     }
 }
 
@@ -182,10 +165,21 @@ impl Keyring for SystemdCredsKeyring {
             let entry = entry?;
             if entry.file_type()?.is_file() {
                 let file_name = entry.file_name();
-                let file_name = file_name.to_string_lossy();
-                if let Some(name) = file_name.strip_suffix(&format!(".{}", CRED_EXTENSION)) {
+                let Some(file_name) = file_name.to_str() else {
+                    tracing::warn!(
+                        "skipping credential file with non-UTF-8 filename in {}",
+                        self.dir.display()
+                    );
+                    continue;
+                };
+                if let Some(name) = file_name.strip_suffix(".cred") {
                     if KeyName::validate(name).is_ok() {
                         keys.push(name.to_string());
+                    } else {
+                        tracing::warn!(
+                            file = file_name,
+                            "skipping .cred file with invalid key name"
+                        );
                     }
                 }
             }
@@ -196,11 +190,17 @@ impl Keyring for SystemdCredsKeyring {
 
 /// Returns true if the `systemd-creds` binary is available on this system.
 pub fn systemd_creds_available() -> bool {
-    Command::new("systemd-creds")
+    match Command::new("systemd-creds")
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    {
+        Ok(status) => status.success(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            tracing::warn!("systemd-creds availability check failed: {}", e);
+            false
+        }
+    }
 }

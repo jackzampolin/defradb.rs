@@ -156,8 +156,16 @@ fn test_keyring_backend_from_str_valid() {
         KeyringBackend::System
     );
     assert_eq!(
+        "systemd-creds".parse::<KeyringBackend>().unwrap(),
+        KeyringBackend::SystemdCreds
+    );
+    assert_eq!(
         "FILE".parse::<KeyringBackend>().unwrap(),
         KeyringBackend::File
+    );
+    assert_eq!(
+        "SYSTEMD-CREDS".parse::<KeyringBackend>().unwrap(),
+        KeyringBackend::SystemdCreds
     );
 }
 
@@ -172,9 +180,27 @@ fn test_keyring_backend_from_str_invalid() {
 
 #[test]
 fn test_keyring_backend_display_roundtrip() {
-    for backend in [KeyringBackend::File, KeyringBackend::System] {
+    for backend in [
+        KeyringBackend::File,
+        KeyringBackend::System,
+        KeyringBackend::SystemdCreds,
+    ] {
         let display = backend.to_string();
         let parsed: KeyringBackend = display.parse().unwrap();
         assert_eq!(backend, parsed);
+    }
+}
+
+#[test]
+fn test_keyring_backend_serde_roundtrip() {
+    for (variant, expected_str) in [
+        (KeyringBackend::File, "\"file\""),
+        (KeyringBackend::System, "\"system\""),
+        (KeyringBackend::SystemdCreds, "\"systemd-creds\""),
+    ] {
+        let serialized = serde_json::to_string(&variant).unwrap();
+        assert_eq!(serialized, expected_str);
+        let deserialized: KeyringBackend = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, variant);
     }
 }

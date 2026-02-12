@@ -1,7 +1,4 @@
 //! Tests for systemd-creds keyring backend
-//!
-//! These tests require the `systemd-creds` binary (systemd 250+) on Linux.
-//! Run with: cargo test -p keyring -- --ignored systemd_creds
 
 #![cfg(target_os = "linux")]
 
@@ -45,6 +42,16 @@ fn test_systemd_creds_delete() {
 
 #[test]
 #[ignore]
+fn test_systemd_creds_delete_not_found() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let kr = SystemdCredsKeyring::open(temp_dir.path()).unwrap();
+
+    let result = kr.delete("nonexistent");
+    assert!(matches!(result, Err(Error::NotFound(_))));
+}
+
+#[test]
+#[ignore]
 fn test_systemd_creds_list() {
     let temp_dir = tempfile::tempdir().unwrap();
     let kr = SystemdCredsKeyring::open(temp_dir.path()).unwrap();
@@ -56,6 +63,32 @@ fn test_systemd_creds_list() {
     let mut keys = kr.list().unwrap();
     keys.sort();
     assert_eq!(keys, vec!["key-a", "key-b", "key-c"]);
+}
+
+#[test]
+#[ignore]
+fn test_systemd_creds_list_empty() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let kr = SystemdCredsKeyring::open(temp_dir.path()).unwrap();
+
+    let keys = kr.list().unwrap();
+    assert!(keys.is_empty());
+}
+
+#[test]
+#[ignore]
+fn test_systemd_creds_list_ignores_non_cred_files() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let kr = SystemdCredsKeyring::open(temp_dir.path()).unwrap();
+
+    kr.set("real-key", b"data").unwrap();
+
+    // Create non-.cred files in the directory
+    std::fs::write(temp_dir.path().join("stray.txt"), b"not a cred").unwrap();
+    std::fs::write(temp_dir.path().join(".hidden"), b"hidden").unwrap();
+
+    let keys = kr.list().unwrap();
+    assert_eq!(keys, vec!["real-key"]);
 }
 
 #[test]

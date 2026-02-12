@@ -23,8 +23,8 @@ use crate::error::{Error, Result};
 
 /// Open the appropriate keyring based on config.
 ///
-/// Handles all backend types including auto-detection of systemd-creds
-/// fallback on Linux when no D-Bus session is available.
+/// On Linux, the System backend falls back to systemd-creds
+/// when no D-Bus session is available.
 pub(crate) fn open_keyring(config: &Config) -> Result<Box<dyn keyring::Keyring>> {
     use crate::config::KeyringBackend;
 
@@ -49,13 +49,15 @@ pub(crate) fn open_keyring(config: &Config) -> Result<Box<dyn keyring::Keyring>>
                         &config.keyring.namespace,
                     )))
                 } else if keyring::systemd_creds_available() {
+                    eprintln!(
+                        "WARNING: no D-Bus session available; using systemd-creds keyring \
+                         instead of secret-service. Keys are stored as .cred files in {:?}.",
+                        resolve_keyring_path(config).unwrap_or_default()
+                    );
                     tracing::warn!(
                         "no D-Bus session available; falling back to systemd-creds keyring"
                     );
-                    let path = resolve_keyring_path(config)?;
-                    let kr = keyring::SystemdCredsKeyring::open(&path)
-                        .map_err(|e| Error::Keyring(e.to_string()))?;
-                    Ok(Box::new(kr))
+                    open_systemd_creds(config)
                 } else {
                     Err(Error::Keyring(
                         "no system keyring available: no D-Bus session for secret-service \
@@ -74,10 +76,7 @@ pub(crate) fn open_keyring(config: &Config) -> Result<Box<dyn keyring::Keyring>>
         KeyringBackend::SystemdCreds => {
             #[cfg(target_os = "linux")]
             {
-                let path = resolve_keyring_path(config)?;
-                let kr = keyring::SystemdCredsKeyring::open(&path)
-                    .map_err(|e| Error::Keyring(e.to_string()))?;
-                Ok(Box::new(kr))
+                open_systemd_creds(config)
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -89,8 +88,15 @@ pub(crate) fn open_keyring(config: &Config) -> Result<Box<dyn keyring::Keyring>>
     }
 }
 
-/// Resolve the keyring path, using rootdir if path is relative.
-pub(crate) fn resolve_keyring_path(config: &Config) -> Result<PathBuf> {
+#[cfg(target_os = "linux")]
+fn open_systemd_creds(config: &Config) -> Result<Box<dyn keyring::Keyring>> {
+    let path = resolve_keyring_path(config)?;
+    let kr =
+        keyring::SystemdCredsKeyring::open(&path).map_err(|e| Error::Keyring(e.to_string()))?;
+    Ok(Box::new(kr))
+}
+
+fn resolve_keyring_path(config: &Config) -> Result<PathBuf> {
     let path = PathBuf::from(&config.keyring.path);
     if path.is_absolute() {
         Ok(path)

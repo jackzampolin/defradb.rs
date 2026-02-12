@@ -3,6 +3,7 @@
 //! Provides secure storage for cryptographic keys with support for multiple backends:
 //! - File-based storage with JWE encryption (PBES2-HS512-A256KW)
 //! - System keyring (OS-provided key management)
+//! - systemd-creds encryption (Linux, requires systemd 250+)
 
 mod error;
 mod file;
