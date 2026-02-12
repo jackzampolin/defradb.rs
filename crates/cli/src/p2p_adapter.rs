@@ -146,34 +146,25 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
     }
 
     async fn persist_p2p_documents(&self, doc_ids: &[String]) -> Result<(), String> {
-        let data = serde_json::to_vec(doc_ids)
-            .map_err(|e| format!("failed to serialize P2P documents: {}", e))?;
         let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
         peerstore
-            .set_p2p_documents(&data)
+            .persist_documents(doc_ids)
             .await
             .map_err(|e| format!("failed to persist P2P documents: {}", e))
     }
 
     async fn load_p2p_documents(&self) -> Result<Vec<String>, String> {
         let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
-        match peerstore
-            .get_p2p_documents()
+        peerstore
+            .load_documents()
             .await
-            .map_err(|e| format!("failed to load P2P documents: {}", e))?
-        {
-            Some(data) => serde_json::from_slice(&data)
-                .map_err(|e| format!("failed to deserialize P2P documents: {}", e)),
-            None => Ok(Vec::new()),
-        }
+            .map_err(|e| format!("failed to load P2P documents: {}", e))
     }
 
     async fn persist_p2p_collections(&self, collections: &[String]) -> Result<(), String> {
-        let data = serde_json::to_vec(collections)
-            .map_err(|e| format!("failed to serialize P2P collections: {}", e))?;
         let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
         peerstore
-            .set_p2p_collections(&data)
+            .persist_collections(collections)
             .await
             .map_err(|e| format!("failed to persist P2P collections: {}", e))
     }
@@ -754,12 +745,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     ) -> Result<(), String> {
         let doc_ids: Vec<String> = docs.into_iter().map(|d| d.doc_id).collect();
 
-        // Validate all doc IDs atomically
-        for doc_id in &doc_ids {
-            if document::DocID::from_string(doc_id).is_err() {
-                return Err("malformed document ID, missing either version or cid".to_string());
-            }
-        }
+        // Validate all document IDs have valid format (atomic: all or nothing)
+        document::validate_doc_ids(&doc_ids)
+            .map_err(|_| "malformed document ID, missing either version or cid".to_string())?;
 
         for doc_id in &doc_ids {
             let topic = DefraTopic::document(doc_id);
@@ -792,12 +780,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     ) -> Result<(), String> {
         let doc_ids: Vec<String> = docs.into_iter().map(|d| d.doc_id).collect();
 
-        // Validate all doc IDs atomically
-        for doc_id in &doc_ids {
-            if document::DocID::from_string(doc_id).is_err() {
-                return Err("malformed document ID, missing either version or cid".to_string());
-            }
-        }
+        // Validate all document IDs have valid format (atomic: all or nothing)
+        document::validate_doc_ids(&doc_ids)
+            .map_err(|_| "malformed document ID, missing either version or cid".to_string())?;
 
         for doc_id in &doc_ids {
             let topic = DefraTopic::document(doc_id);

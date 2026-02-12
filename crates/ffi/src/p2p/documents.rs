@@ -52,13 +52,8 @@ pub unsafe extern "C" fn p2p_create_documents(
 
             rt.block_on(async {
                 // Validate all document IDs have valid format (atomic: all or nothing)
-                for doc_id in &doc_ids {
-                    if document::DocID::from_string(doc_id).is_err() {
-                        return Err(
-                            "malformed document ID, missing either version or cid".to_string(),
-                        );
-                    }
-                }
+                document::validate_doc_ids(&doc_ids)
+                    .map_err(|_| "malformed document ID, missing either version or cid".to_string())?;
 
                 for doc_id in &doc_ids {
                     let topic = DefraTopic::document(doc_id);
@@ -124,13 +119,8 @@ pub unsafe extern "C" fn p2p_delete_documents(
 
             rt.block_on(async {
                 // Validate all document IDs have valid format (atomic: all or nothing)
-                for doc_id in &doc_ids {
-                    if document::DocID::from_string(doc_id).is_err() {
-                        return Err(
-                            "malformed document ID, missing either version or cid".to_string()
-                        );
-                    }
-                }
+                document::validate_doc_ids(&doc_ids)
+                    .map_err(|_| "malformed document ID, missing either version or cid".to_string())?;
 
                 for doc_id in &doc_ids {
                     let topic = DefraTopic::document(doc_id);

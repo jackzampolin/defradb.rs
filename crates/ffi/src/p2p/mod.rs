@@ -48,30 +48,16 @@ pub(crate) async fn persist_p2p_collections(
     db: &crate::state::FfiDatabase,
     collections: &[String],
 ) {
-    let data = match serde_json::to_vec(collections) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to serialize P2P collections");
-            return;
-        }
-    };
     let peerstore = Peerstore::new(db.store().clone());
-    if let Err(e) = peerstore.set_p2p_collections(&data).await {
+    if let Err(e) = peerstore.persist_collections(collections).await {
         tracing::warn!(error = %e, "failed to persist P2P collections");
     }
 }
 
 /// Persist the current P2P document subscription list to the Peerstore.
 pub(crate) async fn persist_p2p_documents(db: &crate::state::FfiDatabase, documents: &[String]) {
-    let data = match serde_json::to_vec(documents) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to serialize P2P documents");
-            return;
-        }
-    };
     let peerstore = Peerstore::new(db.store().clone());
-    if let Err(e) = peerstore.set_p2p_documents(&data).await {
+    if let Err(e) = peerstore.persist_documents(documents).await {
         tracing::warn!(error = %e, "failed to persist P2P documents");
     }
 }

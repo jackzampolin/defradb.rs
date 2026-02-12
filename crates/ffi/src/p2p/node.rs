@@ -421,16 +421,14 @@ pub unsafe extern "C" fn new_node_with_p2p(
 
         {
             let peerstore = Peerstore::new(store.clone());
-            if let Ok(Some(data)) = peerstore.get_p2p_collections().await {
-                if let Ok(collections) = serde_json::from_slice::<Vec<String>>(&data) {
-                    tracing::debug!(count = collections.len(), "restoring collection subscriptions");
-                    for name in &collections {
-                        if let Ok(Some(col)) = database.get_collection(name) {
-                            let collection_id = col.collection_id().to_string();
-                            let topic = DefraTopic::collection(&collection_id);
-                            if let Err(e) = handle.subscribe(topic).await {
-                                tracing::warn!(collection = %name, error = %e, "failed to restore collection subscription");
-                            }
+            if let Ok(collections) = peerstore.load_collections().await {
+                tracing::debug!(count = collections.len(), "restoring collection subscriptions");
+                for name in &collections {
+                    if let Ok(Some(col)) = database.get_collection(name) {
+                        let collection_id = col.collection_id().to_string();
+                        let topic = DefraTopic::collection(&collection_id);
+                        if let Err(e) = handle.subscribe(topic).await {
+                            tracing::warn!(collection = %name, error = %e, "failed to restore collection subscription");
                         }
                     }
                 }
@@ -439,14 +437,12 @@ pub unsafe extern "C" fn new_node_with_p2p(
 
         {
             let peerstore = Peerstore::new(store.clone());
-            if let Ok(Some(data)) = peerstore.get_p2p_documents().await {
-                if let Ok(doc_ids) = serde_json::from_slice::<Vec<String>>(&data) {
-                    tracing::debug!(count = doc_ids.len(), "restoring document subscriptions");
-                    for doc_id in &doc_ids {
-                        let topic = DefraTopic::document(doc_id);
-                        if let Err(e) = handle.subscribe(topic).await {
-                            tracing::warn!(doc_id = %doc_id, error = %e, "failed to restore document subscription");
-                        }
+            if let Ok(doc_ids) = peerstore.load_documents().await {
+                tracing::debug!(count = doc_ids.len(), "restoring document subscriptions");
+                for doc_id in &doc_ids {
+                    let topic = DefraTopic::document(doc_id);
+                    if let Err(e) = handle.subscribe(topic).await {
+                        tracing::warn!(doc_id = %doc_id, error = %e, "failed to restore document subscription");
                     }
                 }
             }

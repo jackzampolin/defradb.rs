@@ -34,7 +34,7 @@ mod json_traverse;
 mod normal;
 mod value;
 
-pub use doc_id::{DocID, DOC_ID_V0, SDN_NAMESPACE_V0};
+pub use doc_id::{validate_doc_ids, DocID, DOC_ID_V0, SDN_NAMESPACE_V0};
 pub use document::Document;
 pub use error::{Error, Result};
 pub use field::{special, Field};

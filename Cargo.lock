@@ -7049,6 +7049,7 @@ dependencies = [
  "schema",
  "serde",
  "serde_cbor",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
