@@ -1,0 +1,70 @@
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Context, Result};
+
+use super::{DefraNode, NodeConfig};
+
+/// A Rust DefraDB node backed by the `defra` binary from this workspace.
+pub struct RustNode {
+    binary_path: PathBuf,
+}
+
+impl RustNode {
+    /// Point to the release binary in the workspace target dir.
+    pub fn from_workspace() -> Self {
+        Self {
+            binary_path: PathBuf::from("target/release/defra"),
+        }
+    }
+
+    /// Build the Rust binary via cargo.
+    pub fn build() -> Result<()> {
+        let status = Command::new("cargo")
+            .args(["build", "--release", "-p", "cli"])
+            .status()
+            .context("failed to run cargo build")?;
+
+        anyhow::ensure!(status.success(), "cargo build failed with {}", status);
+        Ok(())
+    }
+}
+
+impl DefraNode for RustNode {
+    fn command(&self, config: &NodeConfig) -> Command {
+        let mut cmd = Command::new(&self.binary_path);
+
+        cmd.arg("--rootdir").arg(&config.rootdir);
+        cmd.arg("--url").arg(&config.http_addr);
+        cmd.arg("--no-log-color").arg("true");
+        cmd.arg("--no-keyring").arg("true");
+
+        cmd.arg("start");
+        cmd.arg("--store").arg("memory");
+        cmd.arg("--no-telemetry").arg("true");
+        cmd.arg("--no-encryption").arg("true");
+        cmd.arg("--no-signing").arg("true");
+        cmd.arg("--no-searchable-encryption").arg("true");
+
+        if config.p2p_enabled {
+            if let Some(ref addr) = config.p2p_addr {
+                cmd.arg("--p2paddr").arg(addr);
+            }
+            for peer in &config.peers {
+                cmd.arg("--peers").arg(peer);
+            }
+        } else {
+            cmd.arg("--no-p2p").arg("true");
+        }
+
+        if let Some(ref identity) = config.identity {
+            cmd.arg("--identity").arg(identity);
+        }
+
+        cmd
+    }
+
+    fn binary_path(&self) -> &Path {
+        &self.binary_path
+    }
+}
