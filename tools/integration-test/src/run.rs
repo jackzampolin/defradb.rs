@@ -14,8 +14,8 @@ pub struct TestRunDir {
 
 impl TestRunDir {
     pub fn new() -> Result<Self> {
-        let base = Path::new("target/e2e");
-        fs::create_dir_all(base).context("failed to create target/e2e")?;
+        let base = crate::workspace_root().join("target/e2e");
+        fs::create_dir_all(&base).context("failed to create target/e2e")?;
 
         let now = chrono_lite_timestamp();
         let rand_hex = format!("{:08x}", rand::random::<u32>());

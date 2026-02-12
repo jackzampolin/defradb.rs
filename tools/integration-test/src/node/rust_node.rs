@@ -4,6 +4,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 
 use super::{DefraNode, NodeConfig};
+use crate::workspace_root;
 
 /// A Rust DefraDB node backed by the `defra` binary from this workspace.
 pub struct RustNode {
@@ -14,7 +15,7 @@ impl RustNode {
     /// Point to the debug binary in the workspace target dir.
     pub fn from_workspace() -> Self {
         Self {
-            binary_path: PathBuf::from("target/debug/defra"),
+            binary_path: workspace_root().join("target/debug/defra"),
         }
     }
 
@@ -22,6 +23,7 @@ impl RustNode {
     pub fn build() -> Result<()> {
         let status = Command::new("cargo")
             .args(["build", "-p", "cli"])
+            .current_dir(workspace_root())
             .status()
             .context("failed to run cargo build")?;
 
