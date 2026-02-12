@@ -503,6 +503,71 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Poll until a peer is connected or timeout expires.
+    ///
+    /// Uses 50ms polling interval (matches Go behavior).
+    pub async fn poll_until_connected(
+        &self,
+        peer_id: PeerId,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Ok(connected) = self.connected_peers().await {
+                if connected.contains(&peer_id) {
+                    return Ok(());
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::ConnectionTimeout(peer_id.to_string()));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Resolve full multiaddr strings for connected peers.
+    ///
+    /// Retries up to 5 times with 100ms delay, falling back to
+    /// a caller-provided cache for peers not in the host's address book.
+    pub async fn resolve_peer_addresses(
+        &self,
+        connected: &[PeerId],
+        get_cached: impl Fn(&str) -> Option<String>,
+    ) -> Result<Vec<String>> {
+        let mut host_addrs = Vec::new();
+        let mut covered = std::collections::HashSet::new();
+
+        for attempt in 0..5 {
+            host_addrs = self.peer_addresses().await?;
+            covered.clear();
+            for addr_str in &host_addrs {
+                if let Some(pid) = addr_str.rsplit("/p2p/").next() {
+                    covered.insert(pid.to_string());
+                }
+            }
+            let all_resolved = connected.iter().all(|pid| {
+                let pid_str = pid.to_string();
+                covered.contains(&pid_str) || get_cached(&pid_str).is_some()
+            });
+            if all_resolved || attempt == 4 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // Append cached addresses for unresolved peers
+        for pid in connected {
+            let pid_str = pid.to_string();
+            if !covered.contains(&pid_str) {
+                if let Some(cached_addr) = get_cached(&pid_str) {
+                    host_addrs.push(cached_addr);
+                }
+            }
+        }
+
+        Ok(host_addrs)
+    }
+
     /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
     pub async fn peer_addresses(&self) -> Result<Vec<String>> {
         let (response_tx, response_rx) = oneshot::channel();

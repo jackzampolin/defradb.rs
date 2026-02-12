@@ -1,7 +1,6 @@
 //! Adapter to bridge P2PHostHandle to HTTP's P2POperations trait.
 
 use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -207,104 +206,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         doc_id: &str,
         collection_id: &str,
     ) -> Result<(), String> {
-        use storage::corekv::{IterOptions, Reader, Store};
-
-        let local_peer_id = handle
-            .local_peer_id()
-            .await
-            .map_err(|e| format!("failed to get local peer ID: {}", e))?;
-
-        let headstore = storage::stores::Headstore::new(self.db.store().clone());
-        let head_txn = headstore
-            .new_txn(true)
-            .await
-            .map_err(|e| format!("headstore txn: {}", e))?;
-
-        let blockstore_view = storage::stores::Blockstore::new(self.db.store().clone(), true);
-        let block_txn = blockstore_view
-            .new_txn(true)
-            .await
-            .map_err(|e| format!("blockstore txn: {}", e))?;
-
-        let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
-        let opts = IterOptions::new().with_prefix(prefix);
-        let mut iter = head_txn
-            .iterator(opts)
-            .await
-            .map_err(|e| format!("headstore iterator: {}", e))?;
-
-        let mut any_failed = false;
-        while let Some(pair) = iter
-            .next()
-            .await
-            .map_err(|e| format!("headstore iteration: {}", e))?
-        {
-            let key_str = String::from_utf8_lossy(&pair.key);
-            let parts: Vec<&str> = key_str.split('/').collect();
-            if parts.len() < 5 {
-                continue;
-            }
-            let head_cid = match cid::Cid::from_str(parts[4]) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            let block_data = match block_txn.get(&head_cid.to_bytes()).await {
-                Ok(Some(data)) => data,
-                _ => continue,
-            };
-
-            if let Ok(parsed) = defra_core::Block::from_dag_cbor(&block_data) {
-                if let Some(ref links) = parsed.links {
-                    for link in links {
-                        if let Ok(Some(field_data)) = block_txn.get(&link.link.to_bytes()).await {
-                            let mut field_req = p2p::message::PushLogRequest::new(
-                                doc_id.to_string(),
-                                link.link.to_bytes(),
-                                collection_id.to_string(),
-                                local_peer_id.to_string(),
-                                field_data,
-                            );
-                            if p2p::signing::sign_message(handle.keypair(), &mut field_req).is_ok()
-                                && handle
-                                    .send_two_stream_request(peer_id, field_req)
-                                    .await
-                                    .is_err()
-                            {
-                                any_failed = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            let mut request = p2p::message::PushLogRequest::new(
-                doc_id.to_string(),
-                head_cid.to_bytes(),
-                collection_id.to_string(),
-                local_peer_id.to_string(),
-                block_data,
-            );
-
-            if p2p::signing::sign_message(handle.keypair(), &mut request).is_err() {
-                any_failed = true;
-                continue;
-            }
-
-            if handle
-                .send_two_stream_request(peer_id, request)
-                .await
-                .is_err()
-            {
-                any_failed = true;
-            }
-        }
-
-        if any_failed {
-            Err("some pushes failed".to_string())
-        } else {
-            Ok(())
-        }
+        db::retry_doc(handle, &self.db, peer_id, doc_id, collection_id).await
     }
 }
 
@@ -532,23 +434,6 @@ impl DocPusher for LookupOnlyDocPusher {
     }
 }
 
-/// Parse a peer ID and multiaddr from a full multiaddr string.
-fn parse_peer_id_from_multiaddr(addr: &str) -> Result<(libp2p::PeerId, libp2p::Multiaddr), String> {
-    let multiaddr: libp2p::Multiaddr = addr
-        .parse()
-        .map_err(|e| format!("invalid multiaddr: {}", e))?;
-
-    let peer_id = multiaddr
-        .iter()
-        .find_map(|proto| match proto {
-            libp2p::multiaddr::Protocol::P2p(peer_id) => Some(peer_id),
-            _ => None,
-        })
-        .ok_or_else(|| "multiaddr must contain /p2p/<peer_id> component".to_string())?;
-
-    Ok((peer_id, multiaddr))
-}
-
 #[async_trait]
 impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     async fn local_peer_id(&self) -> Result<String, String> {
@@ -574,85 +459,33 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .await
             .map_err(|e| e.to_string())?;
 
-        let mut host_addrs = Vec::new();
-        let mut covered = HashSet::new();
-
-        // Retry peer_addresses() up to 5 times (matching FFI behavior)
-        for attempt in 0..5 {
-            host_addrs = self
-                .handle
-                .peer_addresses()
-                .await
-                .map_err(|e| format!("failed to get peer addresses: {}", e))?;
-
-            covered.clear();
-            for addr_str in &host_addrs {
-                if let Some(pid) = addr_str.rsplit("/p2p/").next() {
-                    covered.insert(pid.to_string());
-                }
-            }
-
-            let all_resolved = {
-                let cached = self.peer_addresses.read().ok();
-                connected.iter().all(|pid| {
-                    let pid_str = pid.to_string();
-                    covered.contains(&pid_str)
-                        || cached.as_ref().is_some_and(|c| c.contains_key(&pid_str))
-                })
-            };
-
-            if all_resolved || attempt == 4 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-
-        // Append cached addresses for any unresolved peers
-        let mut all_addrs = host_addrs;
-        if let Ok(cached) = self.peer_addresses.read() {
-            for pid in &connected {
-                let pid_str = pid.to_string();
-                if !covered.contains(&pid_str) {
-                    if let Some(cached_addr) = cached.get(&pid_str) {
-                        all_addrs.push(cached_addr.clone());
-                    }
-                }
-            }
-        }
+        let all_addrs = self
+            .handle
+            .resolve_peer_addresses(&connected, |pid| {
+                self.peer_addresses.read().ok()?.get(pid).cloned()
+            })
+            .await
+            .map_err(|e| e.to_string())?;
 
         Ok(all_addrs)
     }
 
     async fn connect_peer(&self, addr: &str) -> Result<(), String> {
-        let (peer_id, full_multiaddr) = parse_peer_id_from_multiaddr(addr)?;
-
-        let dial_addr: libp2p::Multiaddr = full_multiaddr
-            .iter()
-            .filter(|proto| !matches!(proto, libp2p::multiaddr::Protocol::P2p(_)))
-            .collect();
+        let parsed = p2p::parse_multiaddr_with_peer_id(addr)?;
 
         self.handle
-            .dial(peer_id, vec![dial_addr])
+            .dial(parsed.peer_id, vec![parsed.transport_addr])
             .await
             .map_err(|e| e.to_string())?;
 
-        // Poll until connected (matching FFI: 50ms intervals, 10s timeout)
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            if let Ok(connected) = self.handle.connected_peers().await {
-                if connected.contains(&peer_id) {
-                    break;
-                }
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err("connection timed out waiting for peer".to_string());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        self.handle
+            .poll_until_connected(parsed.peer_id, std::time::Duration::from_secs(10))
+            .await
+            .map_err(|e| e.to_string())?;
 
         // Cache the full multiaddr for connected_peers resolution
         if let Ok(mut addrs) = self.peer_addresses.write() {
-            addrs.insert(peer_id.to_string(), addr.to_string());
+            addrs.insert(parsed.peer_id.to_string(), addr.to_string());
         }
 
         Ok(())
@@ -686,13 +519,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         addr: Option<&str>,
     ) -> Result<(), String> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
-        let (peer_id, full_multiaddr) = parse_peer_id_from_multiaddr(addr_str)?;
-
-        // Strip /p2p/ component to get transport address for dialing
-        let dial_addr: libp2p::Multiaddr = full_multiaddr
-            .iter()
-            .filter(|proto| !matches!(proto, libp2p::multiaddr::Protocol::P2p(_)))
-            .collect();
+        let parsed = p2p::parse_multiaddr_with_peer_id(addr_str)?;
 
         // If collections empty, replicate all (matching Go behavior)
         let effective_collections = if collections.is_empty() {
@@ -719,9 +546,11 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             collection_cids.clone_from(&effective_collections);
         }
 
+        let peer_id = parsed.peer_id;
+
         // Dial peer
         self.handle
-            .dial(peer_id, vec![dial_addr])
+            .dial(peer_id, vec![parsed.transport_addr])
             .await
             .map_err(|e| format!("failed to connect to replicator peer: {}", e))?;
 
@@ -786,7 +615,8 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         addr: Option<&str>,
     ) -> Result<(), String> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
-        let (peer_id, _) = parse_peer_id_from_multiaddr(addr_str)?;
+        let parsed = p2p::parse_multiaddr_with_peer_id(addr_str)?;
+        let peer_id = parsed.peer_id;
 
         if let Some(ref coordinator) = self.sync_coordinator {
             coordinator

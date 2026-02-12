@@ -52,6 +52,7 @@
 //! - Protocol ID: `/defra/0.0.1` (multicodec 961)
 //! - Messages: CBOR encoded using serde
 
+pub mod address;
 pub mod behaviour;
 pub mod bitswap;
 pub mod codec;
@@ -66,6 +67,9 @@ pub mod sync;
 pub mod testutil;
 pub mod topics;
 pub mod two_stream;
+
+// Re-export address parsing
+pub use address::{parse_multiaddr_with_peer_id, ParsedMultiaddr};
 
 // Re-export main types for convenience
 pub use error::{Error, Result};

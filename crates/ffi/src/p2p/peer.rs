@@ -100,51 +100,19 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
                     "active peers query"
                 );
 
-                let mut host_addrs = Vec::new();
-                let mut covered: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-
-                for attempt in 0..5 {
-                    host_addrs = p2p
-                        .handle
-                        .peer_addresses()
-                        .await
-                        .map_err(|e| format!("failed to get peer addresses: {}", e))?;
-                    covered.clear();
-                    for addr_str in &host_addrs {
-                        if let Some(pid) = addr_str.rsplit("/p2p/").next() {
-                            covered.insert(pid.to_string());
-                        }
-                    }
-                    let all_resolved = connected.iter().all(|pid| {
-                        let pid_str = pid.to_string();
-                        covered.contains(&pid_str) || p2p.get_peer_address(&pid_str).is_some()
-                    });
-                    if all_resolved || attempt == 4 {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-
-                let mut all_addrs = host_addrs;
-                for pid in &connected {
-                    let pid_str = pid.to_string();
-                    if !covered.contains(&pid_str) {
-                        if let Some(ffi_addr) = p2p.get_peer_address(&pid_str) {
-                            all_addrs.push(ffi_addr.to_string());
-                        }
-                    }
-                }
+                let all_addrs = p2p
+                    .handle
+                    .resolve_peer_addresses(&connected, |pid| {
+                        p2p.get_peer_address(pid).map(|s| s.to_string())
+                    })
+                    .await
+                    .map_err(|e| format!("{}", e))?;
 
                 tracing::debug!(
                     connected = connected.len(),
-                    host_addrs = covered.len(),
                     all_addrs = all_addrs.len(),
                     "active peers resolved"
                 );
-                for a in &all_addrs {
-                    tracing::debug!(addr = %a, "active peer address");
-                }
 
                 serde_json::to_string(&all_addrs)
                     .map_err(|e| format!("failed to serialize peer list: {}", e))
@@ -199,18 +167,10 @@ pub unsafe extern "C" fn p2p_connect(
                     .await
                     .map_err(|e| format!("failed to connect: {}", e))?;
 
-                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-                loop {
-                    if let Ok(connected) = p2p.handle.connected_peers().await {
-                        if connected.contains(&parsed.peer_id) {
-                            break;
-                        }
-                    }
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err("connection timed out waiting for peer".to_string());
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
+                p2p.handle
+                    .poll_until_connected(parsed.peer_id, std::time::Duration::from_secs(10))
+                    .await
+                    .map_err(|e| e.to_string())?;
 
                 p2p.set_peer_address(&parsed.peer_id.to_string(), &addr_str);
                 Ok(())

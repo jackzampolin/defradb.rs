@@ -348,6 +348,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
 
         let retry_store = store.clone();
         let retry_handle = handle.clone();
+        let retry_db = database.clone();
         let retry_loop_task = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -371,7 +372,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
                     tracing::debug!(doc_count = docs.len(), peer_id = %peer_id_str, "retry loop: retrying docs");
                     let mut all_succeeded = true;
                     for (doc_id, collection_id) in &docs {
-                        match super::push::retry_doc(&retry_handle, &retry_store, peer_id, doc_id, collection_id).await {
+                        match db::retry_doc(&retry_handle, &retry_db, peer_id, doc_id, collection_id).await {
                             Ok(()) => { tracing::debug!(doc_id = %doc_id, peer_id = %peer_id_str, "retry loop: doc push succeeded"); let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await; }
                             Err(e) => { tracing::warn!(doc_id = %doc_id, peer_id = %peer_id_str, error = %e, "retry loop: doc push failed"); all_succeeded = false; }
                         }

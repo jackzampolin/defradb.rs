@@ -185,6 +185,10 @@ pub enum Error {
         collection_id: String,
     },
 
+    /// Connection timed out waiting for peer.
+    #[error("connection timed out waiting for peer {0}")]
+    ConnectionTimeout(String),
+
     /// Storage error during P2P operation.
     #[error("storage error: {0}")]
     Storage(String),
