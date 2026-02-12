@@ -41,6 +41,7 @@ impl DefraNode for GoNode {
         cmd.arg("--rootdir").arg(&config.rootdir);
         cmd.arg("--url").arg(&config.http_addr);
         cmd.arg("--no-log-color").arg("true");
+        cmd.arg("--log-output").arg("stdout");
         cmd.arg("--no-keyring").arg("true");
 
         cmd.arg("start");
