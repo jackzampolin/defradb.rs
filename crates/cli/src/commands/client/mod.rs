@@ -247,8 +247,52 @@ fn generate_auth_token_from_keyring(config: &Config, name: &str, audience: &str)
             Box::new(kr)
         }
         KeyringBackend::System => {
-            let kr = keyring::SystemKeyring::open(&config.keyring.namespace);
-            Box::new(kr)
+            #[cfg(target_os = "linux")]
+            {
+                if std::env::var("DBUS_SESSION_BUS_ADDRESS").is_ok() {
+                    Box::new(keyring::SystemKeyring::open(&config.keyring.namespace))
+                } else if keyring::systemd_creds_available() {
+                    let p = PathBuf::from(&config.keyring.path);
+                    let path = if p.is_absolute() {
+                        p
+                    } else {
+                        config.rootdir.join(p)
+                    };
+                    let kr = keyring::SystemdCredsKeyring::open(&path)
+                        .map_err(|e| Error::Keyring(e.to_string()))?;
+                    Box::new(kr)
+                } else {
+                    return Err(Error::Keyring(
+                        "no system keyring available: no D-Bus session for secret-service \
+                         and systemd-creds not found; use --keyring-backend file"
+                            .to_string(),
+                    ));
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Box::new(keyring::SystemKeyring::open(&config.keyring.namespace))
+            }
+        }
+        KeyringBackend::SystemdCreds => {
+            #[cfg(target_os = "linux")]
+            {
+                let p = PathBuf::from(&config.keyring.path);
+                let path = if p.is_absolute() {
+                    p
+                } else {
+                    config.rootdir.join(p)
+                };
+                let kr = keyring::SystemdCredsKeyring::open(&path)
+                    .map_err(|e| Error::Keyring(e.to_string()))?;
+                Box::new(kr)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(Error::Keyring(
+                    "systemd-creds backend is only available on Linux".to_string(),
+                ));
+            }
         }
     };
 

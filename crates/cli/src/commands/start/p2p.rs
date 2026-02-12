@@ -29,7 +29,52 @@ impl Node {
                     FileKeyring::open(&path, secret).map_err(|e| Error::Keyring(e.to_string()))?,
                 )
             }
-            KeyringBackend::System => Box::new(SystemKeyring::open(&config.keyring.namespace)),
+            KeyringBackend::System => {
+                #[cfg(target_os = "linux")]
+                {
+                    if std::env::var("DBUS_SESSION_BUS_ADDRESS").is_ok() {
+                        Box::new(SystemKeyring::open(&config.keyring.namespace))
+                    } else if keyring::systemd_creds_available() {
+                        let path = if config.keyring.path.starts_with('/') {
+                            std::path::PathBuf::from(&config.keyring.path)
+                        } else {
+                            config.rootdir.join(&config.keyring.path)
+                        };
+                        let kr = keyring::SystemdCredsKeyring::open(&path)
+                            .map_err(|e| Error::Keyring(e.to_string()))?;
+                        Box::new(kr)
+                    } else {
+                        return Err(Error::Keyring(
+                            "no system keyring available: no D-Bus session for secret-service \
+                             and systemd-creds not found; use --keyring-backend file"
+                                .to_string(),
+                        ));
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Box::new(SystemKeyring::open(&config.keyring.namespace))
+                }
+            }
+            KeyringBackend::SystemdCreds => {
+                #[cfg(target_os = "linux")]
+                {
+                    let path = if config.keyring.path.starts_with('/') {
+                        std::path::PathBuf::from(&config.keyring.path)
+                    } else {
+                        config.rootdir.join(&config.keyring.path)
+                    };
+                    let kr = keyring::SystemdCredsKeyring::open(&path)
+                        .map_err(|e| Error::Keyring(e.to_string()))?;
+                    Box::new(kr)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    return Err(Error::Keyring(
+                        "systemd-creds backend is only available on Linux".to_string(),
+                    ));
+                }
+            }
         };
 
         // Try to load existing peer key
