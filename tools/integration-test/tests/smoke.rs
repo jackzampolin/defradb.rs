@@ -19,7 +19,7 @@ async fn smoke_single_rust_node() {
         )
         .await
         .unwrap();
-    assert_eq!(data["create_User"]["name"], "Alice");
+    assert_eq!(data["create_User"][0]["name"], "Alice");
 
     // 4. Query document back
     let data = gql
