@@ -13,7 +13,7 @@ mod p2p_host;
 pub use command::HostCommand;
 pub use event::HostEvent;
 pub use handle::P2PHostHandle;
-pub use p2p_host::P2PHost;
+pub use p2p_host::{P2PHost, P2PHostConfig};
 
 use libp2p::request_response;
 

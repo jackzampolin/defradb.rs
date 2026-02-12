@@ -7,6 +7,7 @@
 //! - Bitswap for block exchange (Go compatibility via iroh-bitswap)
 //! - Request-response for PushLog synchronization
 //! - GossipSub for pubsub messaging
+//! - Circuit relay client for NAT traversal (optional)
 //!
 //! # Wire Compatibility with Go
 //!
@@ -32,6 +33,7 @@ use libp2p::{
     gossipsub::{self, MessageAuthenticity, MessageId, ValidationMode},
     identify,
     kad::{self, store::MemoryStore, Mode},
+    relay,
     request_response::{self, ProtocolSupport},
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour},
     PeerId, StreamProtocol,
@@ -67,6 +69,10 @@ pub struct DefraBehaviour<S: Store> {
     /// GossipSub for pubsub messaging (optional, controlled by `pubsub_enabled` config).
     pub gossipsub: Toggle<gossipsub::Behaviour>,
 
+    /// Relay client for circuit relay (optional, controlled by `relay_enabled` config).
+    /// Initialized as disabled; the SwarmBuilder injects the client when relay is enabled.
+    pub relay: Toggle<relay::client::Behaviour>,
+
     /// Raw stream protocol for Go two-stream compatibility.
     /// Go's DefraDB uses separate streams for request and response.
     pub stream: stream::Behaviour,
@@ -89,6 +95,9 @@ pub enum DefraEvent {
 
     /// GossipSub event.
     GossipSub(gossipsub::Event),
+
+    /// Relay client event.
+    Relay(relay::client::Event),
 }
 
 impl From<identify::Event> for DefraEvent {
@@ -118,6 +127,12 @@ impl From<request_response::Event<PushLogRequest, PushLogReply>> for DefraEvent 
 impl From<gossipsub::Event> for DefraEvent {
     fn from(event: gossipsub::Event) -> Self {
         DefraEvent::GossipSub(event)
+    }
+}
+
+impl From<relay::client::Event> for DefraEvent {
+    fn from(event: relay::client::Event) -> Self {
+        DefraEvent::Relay(event)
     }
 }
 
@@ -228,6 +243,7 @@ impl<S: Store> DefraBehaviour<S> {
             bitswap,
             pushlog,
             gossipsub,
+            relay: Toggle::from(None),
             stream,
         })
     }
@@ -313,6 +329,7 @@ impl<S: Store> DefraBehaviour<S> {
             bitswap,
             pushlog,
             gossipsub,
+            relay: Toggle::from(None),
             stream,
         })
     }

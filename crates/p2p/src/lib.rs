@@ -69,7 +69,7 @@ pub mod two_stream;
 
 // Re-export main types for convenience
 pub use error::{Error, Result};
-pub use host::{HostCommand, HostEvent, P2PHost, P2PHostHandle, ResponseChannel};
+pub use host::{HostCommand, HostEvent, P2PHost, P2PHostConfig, P2PHostHandle, ResponseChannel};
 pub use message::{Message, MetaData, PushLogBroadcast, PushLogReply, PushLogRequest};
 pub use protocol::{
     BASE_PROTOCOL_ID, CODE, MESSAGE_VERSION, NAME, PROTOCOL_BASE, REP_REQUEST_PROTOCOL,
