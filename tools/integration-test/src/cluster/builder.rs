@@ -82,7 +82,6 @@ impl TestClusterBuilder {
         // Create run directory
         let run_dir = TestRunDir::new()?;
 
-        let client = Client::new();
         let mut nodes = Vec::with_capacity(total);
 
         // Spawn Rust nodes
@@ -122,12 +121,13 @@ impl TestClusterBuilder {
         }
 
         // Confirm all nodes are healthy via HTTP
+        let client = Client::new();
         let urls: Vec<String> = nodes.iter().map(|n| n.api_url.clone()).collect();
         health_check_all(&client, &urls, self.health_timeout)
             .await
             .context("health check failed")?;
 
-        Ok(TestCluster::new(nodes, client, run_dir))
+        Ok(TestCluster::new(nodes, run_dir))
     }
 }
 
@@ -152,7 +152,7 @@ async fn spawn_node(
         name: name.to_string(),
         rootdir: rootdir.clone(),
         log_dir: log_dir.clone(),
-        http_addr,
+        http_addr: http_addr.clone(),
         p2p_enabled,
         p2p_addr: if p2p_enabled {
             Some(format!("/ip4/127.0.0.1/tcp/{}", p2p_port))
@@ -180,6 +180,8 @@ async fn spawn_node(
     Ok(RunningNode {
         name: name.to_string(),
         api_url,
+        http_addr,
+        binary_path: node.binary_path().to_path_buf(),
         process,
         log_tracker,
         rootdir,

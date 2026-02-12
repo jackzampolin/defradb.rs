@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
-use reqwest::Client;
-
+use crate::client::DefraClient;
 use crate::observe::LogTracker;
 use crate::process::ManagedProcess;
 use crate::run::TestRunDir;
@@ -10,6 +9,8 @@ use crate::run::TestRunDir;
 pub struct RunningNode {
     pub name: String,
     pub api_url: String,
+    pub http_addr: String,
+    pub binary_path: PathBuf,
     #[allow(dead_code)]
     pub process: ManagedProcess,
     #[allow(dead_code)]
@@ -24,22 +25,23 @@ pub struct RunningNode {
 /// processes are killed before their data directories are removed.
 pub struct TestCluster {
     pub nodes: Vec<RunningNode>,
-    pub client: Client,
     #[allow(dead_code)]
     run_dir: TestRunDir,
 }
 
 impl TestCluster {
-    pub(crate) fn new(nodes: Vec<RunningNode>, client: Client, run_dir: TestRunDir) -> Self {
-        Self {
-            nodes,
-            client,
-            run_dir,
-        }
+    pub(crate) fn new(nodes: Vec<RunningNode>, run_dir: TestRunDir) -> Self {
+        Self { nodes, run_dir }
     }
 
     pub fn builder() -> super::builder::TestClusterBuilder {
         super::builder::TestClusterBuilder::new()
+    }
+
+    /// Return a CLI-based client for the node at `index`.
+    pub fn client(&self, index: usize) -> DefraClient {
+        let node = &self.nodes[index];
+        DefraClient::new(&node.binary_path, &node.http_addr)
     }
 
     pub fn api_url(&self, index: usize) -> &str {

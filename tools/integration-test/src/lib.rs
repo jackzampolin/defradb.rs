@@ -8,7 +8,7 @@ pub mod ports;
 pub mod process;
 pub mod run;
 
-pub use client::GraphQLClient;
+pub use client::DefraClient;
 pub use cluster::{TestCluster, TestClusterBuilder};
 
 /// Return the absolute path to the workspace root.
