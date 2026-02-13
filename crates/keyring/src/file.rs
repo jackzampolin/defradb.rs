@@ -126,6 +126,13 @@ impl Keyring for FileKeyring {
 
     fn delete(&self, name: &str) -> Result<()> {
         let path = self.key_path(name)?;
+        // Overwrite file contents with zeros before unlinking.
+        // Defense-in-depth: prevents trivial recovery from filesystem journals.
+        // (SSD wear-leveling may retain old blocks regardless.)
+        if let Ok(metadata) = fs::metadata(&path) {
+            let zeros = vec![0u8; metadata.len() as usize];
+            let _ = fs::write(&path, &zeros);
+        }
         fs::remove_file(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 Error::NotFound(name.to_string())

@@ -64,6 +64,9 @@ getrandom = "0.2"
 # Hex encoding/decoding
 hex = "0.4"
 
+# Base64 encoding/decoding (JWK export/import)
+base64 = { workspace = true }
+
 # IPLD (for Bitswap type parameters)
 libipld = { workspace = true }
 cid = { workspace = true }

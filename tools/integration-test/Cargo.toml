@@ -16,3 +16,6 @@ rand = "0.8"
 libc = "0.2"
 futures = "0.3"
 cosmrs = { version = "0.22", features = ["rpc"] }
+
+[dev-dependencies]
+tempfile = "3.17"
