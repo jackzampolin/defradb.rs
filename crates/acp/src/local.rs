@@ -154,19 +154,34 @@ impl DocumentACP for LocalDocumentACP {
                         self.has_relation(&wildcard, resource_name, doc_id, READER_RELATION)
                             .await?
                             || self
+                                .has_relation(&wildcard, resource_name, doc_id, "writer")
+                                .await?
+                            || self
                                 .has_relation(&wildcard, resource_name, doc_id, UPDATER_RELATION)
                                 .await?
                             || self
                                 .has_relation(&wildcard, resource_name, doc_id, DELETER_RELATION)
                                 .await?
+                            || self
+                                .has_relation(&wildcard, resource_name, doc_id, "admin")
+                                .await?
                     }
                     DocumentPermission::Update => {
                         self.has_relation(&wildcard, resource_name, doc_id, UPDATER_RELATION)
                             .await?
+                            || self
+                                .has_relation(&wildcard, resource_name, doc_id, "writer")
+                                .await?
+                            || self
+                                .has_relation(&wildcard, resource_name, doc_id, "admin")
+                                .await?
                     }
                     DocumentPermission::Delete => {
                         self.has_relation(&wildcard, resource_name, doc_id, DELETER_RELATION)
                             .await?
+                            || self
+                                .has_relation(&wildcard, resource_name, doc_id, "admin")
+                                .await?
                     }
                 };
                 return Ok(granted);
@@ -178,29 +193,43 @@ impl DocumentACP for LocalDocumentACP {
             return Ok(true);
         }
 
-        // Check specific relations based on permission
-        // DPI rule: permissions are unions (owner + relation)
+        // Check specific relations based on permission.
+        // Go DefraDB: any write permission implies read access.
+        // Relations checked: reader, writer, updater, deleter, admin.
         let granted = match permission {
             DocumentPermission::Read => {
-                // reader OR updater OR deleter grants read (implied read)
+                // Any relation that could imply read access (matches Go behavior)
                 self.has_relation(did, resource_name, doc_id, READER_RELATION)
                     .await?
+                    || self
+                        .has_relation(did, resource_name, doc_id, "writer")
+                        .await?
                     || self
                         .has_relation(did, resource_name, doc_id, UPDATER_RELATION)
                         .await?
                     || self
                         .has_relation(did, resource_name, doc_id, DELETER_RELATION)
                         .await?
+                    || self
+                        .has_relation(did, resource_name, doc_id, "admin")
+                        .await?
             }
             DocumentPermission::Update => {
-                // updater grants update
                 self.has_relation(did, resource_name, doc_id, UPDATER_RELATION)
                     .await?
+                    || self
+                        .has_relation(did, resource_name, doc_id, "writer")
+                        .await?
+                    || self
+                        .has_relation(did, resource_name, doc_id, "admin")
+                        .await?
             }
             DocumentPermission::Delete => {
-                // deleter grants delete
                 self.has_relation(did, resource_name, doc_id, DELETER_RELATION)
                     .await?
+                    || self
+                        .has_relation(did, resource_name, doc_id, "admin")
+                        .await?
             }
         };
 

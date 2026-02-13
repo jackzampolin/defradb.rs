@@ -3,10 +3,7 @@
 use async_trait::async_trait;
 use identity::Did;
 
-use super::{
-    ZanzibarDocumentACP, ADMIN_RELATION, DELETER_RELATION, OWNER_RELATION, READER_RELATION,
-    UPDATER_RELATION,
-};
+use super::{ZanzibarDocumentACP, OWNER_RELATION};
 use crate::dac::DocumentACP;
 use crate::error::{Error, Result};
 use crate::identity::Identity;
@@ -111,9 +108,27 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
 
         self.ensure_policy(policy_id, resource_name).await?;
 
-        let relation = Self::permission_to_relation(permission);
-
-        let granted = {
+        // Go DefraDB: for read access, any write permission also implies read.
+        // Try "read", then "update", then "delete" — matching Go's ImplyDocumentReadPerm.
+        let granted = if permission == DocumentPermission::Read {
+            let engine = self.engine.read().await;
+            let mut result = false;
+            for perm_name in &["read", "update", "delete"] {
+                match engine
+                    .check(policy_id, resource_name, doc_id, perm_name, did)
+                    .await
+                {
+                    Ok(true) => {
+                        result = true;
+                        break;
+                    }
+                    Ok(false) => continue,
+                    Err(_) => continue, // Permission not defined in policy
+                }
+            }
+            result
+        } else {
+            let relation = Self::permission_to_relation(permission);
             let engine = self.engine.read().await;
             engine
                 .check(policy_id, resource_name, doc_id, relation, did)
@@ -164,19 +179,8 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             ));
         }
 
-        if ![
-            READER_RELATION,
-            UPDATER_RELATION,
-            DELETER_RELATION,
-            ADMIN_RELATION,
-        ]
-        .contains(&relation)
-        {
-            return Err(Error::InvalidRelation(format!(
-                "unknown relation '{}', valid relations are: reader, updater, deleter, admin",
-                relation
-            )));
-        }
+        // Go DefraDB accepts any relation defined in the policy (not a hardcoded list).
+        // Relation validation is done by DocumentAcpAdapter.validate_and_get_managing_relations().
 
         self.check_manage_relation(
             requestor,

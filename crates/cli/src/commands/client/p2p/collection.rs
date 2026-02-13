@@ -16,36 +16,36 @@ pub struct P2pCollectionArgs {
 /// P2P collection subcommands
 #[derive(Subcommand, Debug)]
 pub enum P2pCollectionCommand {
-    /// Get all collections available for P2P sync
-    GetAll(P2pCollectionGetAllArgs),
-    /// Add a collection to P2P sync
-    Add(P2pCollectionAddArgs),
-    /// Remove a collection from P2P sync
-    Remove(P2pCollectionRemoveArgs),
+    /// Create P2P collections to the synchronized pubsub topics
+    Create(P2pCollectionCreateArgs),
+    /// Delete P2P collections from the followed pubsub topics
+    Delete(P2pCollectionDeleteArgs),
+    /// List P2P collections
+    List(P2pCollectionListArgs),
     /// Sync collection versions
     SyncVersions(P2pCollectionSyncVersionsArgs),
     /// Sync branchable collection
     SyncBranchable(P2pCollectionSyncBranchableArgs),
 }
 
-/// Arguments for collection getall command
+/// Arguments for collection list command
 #[derive(Args, Debug)]
-pub struct P2pCollectionGetAllArgs {}
+pub struct P2pCollectionListArgs {}
 
-/// Arguments for collection add command
+/// Arguments for collection create command
 #[derive(Args, Debug)]
-pub struct P2pCollectionAddArgs {
-    /// Collection(s) to add (comma-separated or multiple --collection)
-    #[arg(long, short = 'c', required = true, value_delimiter = ',')]
-    pub collection: Vec<String>,
+pub struct P2pCollectionCreateArgs {
+    /// Collection names (comma-separated, e.g. User,Address)
+    #[arg(value_name = "collectionNames")]
+    pub collections: String,
 }
 
-/// Arguments for collection remove command
+/// Arguments for collection delete command
 #[derive(Args, Debug)]
-pub struct P2pCollectionRemoveArgs {
-    /// Collection(s) to remove (comma-separated or multiple --collection)
-    #[arg(long, short = 'c', required = true, value_delimiter = ',')]
-    pub collection: Vec<String>,
+pub struct P2pCollectionDeleteArgs {
+    /// Collection names (comma-separated, e.g. User,Address)
+    #[arg(value_name = "collectionNames")]
+    pub collections: String,
 }
 
 /// Arguments for collection sync-versions command
@@ -60,17 +60,17 @@ impl P2pCollectionArgs {
     /// Execute the collection subcommand
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            P2pCollectionCommand::GetAll(args) => args.execute(ctx).await,
-            P2pCollectionCommand::Add(args) => args.execute(ctx).await,
-            P2pCollectionCommand::Remove(args) => args.execute(ctx).await,
+            P2pCollectionCommand::List(args) => args.execute(ctx).await,
+            P2pCollectionCommand::Create(args) => args.execute(ctx).await,
+            P2pCollectionCommand::Delete(args) => args.execute(ctx).await,
             P2pCollectionCommand::SyncVersions(args) => args.execute(ctx).await,
             P2pCollectionCommand::SyncBranchable(args) => args.execute(ctx).await,
         }
     }
 }
 
-impl P2pCollectionGetAllArgs {
-    /// Execute the collection getall command
+impl P2pCollectionListArgs {
+    /// Execute the collection list command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
@@ -82,10 +82,15 @@ impl P2pCollectionGetAllArgs {
     }
 }
 
-impl P2pCollectionAddArgs {
-    /// Execute the collection add command
+impl P2pCollectionCreateArgs {
+    /// Execute the collection create command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
-        for col in &self.collection {
+        let collections: Vec<String> = self
+            .collections
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
+        for col in &collections {
             validate_identifier(col)?;
         }
 
@@ -93,16 +98,21 @@ impl P2pCollectionAddArgs {
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        client.p2p_collection_add(&self.collection).await?;
-        println!("Added collections to P2P: {}", self.collection.join(", "));
+        client.p2p_collection_add(&collections).await?;
+        println!("Added collections to P2P: {}", collections.join(", "));
         Ok(())
     }
 }
 
-impl P2pCollectionRemoveArgs {
-    /// Execute the collection remove command
+impl P2pCollectionDeleteArgs {
+    /// Execute the collection delete command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
-        for col in &self.collection {
+        let collections: Vec<String> = self
+            .collections
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
+        for col in &collections {
             validate_identifier(col)?;
         }
 
@@ -110,11 +120,8 @@ impl P2pCollectionRemoveArgs {
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        client.p2p_collection_remove(&self.collection).await?;
-        println!(
-            "Removed collections from P2P: {}",
-            self.collection.join(", ")
-        );
+        client.p2p_collection_remove(&collections).await?;
+        println!("Removed collections from P2P: {}", collections.join(", "));
         Ok(())
     }
 }

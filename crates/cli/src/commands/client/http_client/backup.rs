@@ -1,9 +1,19 @@
 //! Backup HTTP client methods
 
-use urlencoding::encode;
+use serde::Serialize;
 
 use super::HttpClient;
 use crate::error::Result;
+
+/// Export request body (Go-compatible format).
+#[derive(Serialize)]
+struct ExportRequest<'a> {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    collections: Vec<&'a str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pretty: bool,
+    format: &'a str,
+}
 
 impl HttpClient {
     pub async fn backup_export(
@@ -11,20 +21,16 @@ impl HttpClient {
         collections: Option<&[String]>,
         pretty: bool,
     ) -> Result<String> {
-        let mut url = format!("{}/api/v0/backup/export", self.base_url);
-        let mut params = Vec::new();
-        if let Some(cols) = collections {
-            for col in cols {
-                params.push(format!("collections={}", encode(col)));
-            }
-        }
-        if pretty {
-            params.push("pretty=true".to_string());
-        }
-        if !params.is_empty() {
-            url = format!("{}?{}", url, params.join("&"));
-        }
-        self.request_text("GET", &url, None).await
+        let url = format!("{}/api/v0/backup/export", self.base_url);
+        let cols: Vec<&str> = collections
+            .map(|c| c.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default();
+        let body = serde_json::to_string(&ExportRequest {
+            collections: cols,
+            pretty,
+            format: "json",
+        })?;
+        self.request_text("POST", &url, Some(&body)).await
     }
 
     pub async fn backup_import(&self, data: &str) -> Result<()> {

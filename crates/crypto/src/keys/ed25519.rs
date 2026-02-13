@@ -244,6 +244,23 @@ impl PublicKey for Ed25519PublicKey {
     }
 }
 
+/// Reconstruct a 64-byte Ed25519 key (seed || pubkey) from a 32-byte seed.
+///
+/// Ed25519 private keys in this codebase use the 64-byte representation
+/// (32-byte seed + 32-byte derived public key). This function takes just the
+/// seed and derives the full keypair bytes. Used for JWK import.
+pub fn ed25519_key_from_seed(seed: &[u8]) -> Result<Vec<u8>> {
+    let seed_array: [u8; 32] = seed
+        .try_into()
+        .map_err(|_| crypto_error("ed25519 seed must be exactly 32 bytes"))?;
+    let signing_key = SigningKey::from_bytes(&seed_array);
+    let verifying_key = signing_key.verifying_key();
+    let mut full_key = Vec::with_capacity(64);
+    full_key.extend_from_slice(seed);
+    full_key.extend_from_slice(verifying_key.as_bytes());
+    Ok(full_key)
+}
+
 // Custom serde module for VerifyingKey
 mod ed25519_public_key_serde {
     use ed25519_dalek::VerifyingKey;

@@ -58,10 +58,24 @@ pub struct NacRelationshipRequest {
 impl HttpClient {
     pub async fn acp_add_policy(&self, policy: &str) -> Result<AcpAddPolicyResponse> {
         let url = format!("{}/api/v0/acp/policy", self.base_url);
-        let request = AcpAddPolicyRequest {
-            policy: policy.to_string(),
-        };
-        self.post_json(&url, &request).await
+        let response = self.post_text(&url, policy).await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body_text = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("[failed to read body: {}]", e));
+            if let Ok(err) = serde_json::from_str::<super::types::ErrorResponse>(&body_text) {
+                return Err(crate::error::Error::Server(err.error));
+            }
+            return Err(crate::error::Error::Server(format!(
+                "HTTP {}: {}",
+                status,
+                body_text.trim()
+            )));
+        }
+        let result: AcpAddPolicyResponse = response.json().await?;
+        Ok(result)
     }
 
     pub async fn acp_get_policy(&self, policy_id: &str) -> Result<AcpPolicy> {

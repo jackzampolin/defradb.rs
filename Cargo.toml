@@ -23,6 +23,7 @@ members = [
     "crates/lens",
     "crates/wasm",
     "tools/ffi-test",
+    "tools/integration-test",
     "tools/shinzo-bench",
 ]
 

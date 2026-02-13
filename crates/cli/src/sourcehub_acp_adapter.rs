@@ -59,7 +59,8 @@ impl AcpOperations for SourceHubAcpAdapter {
         }
         acp::policy_yaml::validate_policy_expressions(&parsed)?;
 
-        let policy = Policy::from_yaml(yaml).map_err(|e| format!("invalid policy: {}", e))?;
+        let policy =
+            Policy::from_parsed(yaml, &parsed).map_err(|e| format!("invalid policy: {}", e))?;
 
         let options = StorePolicyOptions::new()
             .with_validation()
@@ -77,6 +78,20 @@ impl AcpOperations for SourceHubAcpAdapter {
             .add_policy("", yaml)
             .await
             .map_err(|e| format!("SourceHub create policy failed: {}", e))?;
+
+        // Re-store the policy under the on-chain ID so relationship validation
+        // can find it. The initial store used a locally-computed SHA256 ID, but
+        // the schema references the on-chain ID. Go doesn't cache locally at all
+        // (it queries Source Hub on-demand), but since our doc_acp_adapter validates
+        // against the local store, we need the policy indexed by on-chain ID.
+        if policy_id != policy.id {
+            let mut on_chain_policy = policy;
+            on_chain_policy.id = policy_id.clone();
+            self.local_store
+                .store_policy_with_options(&on_chain_policy, &options)
+                .await
+                .map_err(|e| format!("failed to cache policy with on-chain ID: {}", e))?;
+        }
 
         Ok(policy_id)
     }

@@ -356,7 +356,7 @@ impl HttpClient {
     }
 
     // P2P
-    endpoint!(p2p_info,            GET  "/api/v0/p2p/info"           => P2pInfo);
+    endpoint!(p2p_info,            GET  "/api/v0/p2p/info"           => Vec<String>);
     endpoint!(p2p_peers_list,      GET  "/api/v0/p2p/peers"          => Vec<P2pPeerInfo>);
     endpoint!(p2p_replicator_list, GET  "/api/v0/p2p/replicator"     => Vec<P2pReplicatorInfo>);
     endpoint!(p2p_collection_list, GET  "/api/v0/p2p/collections"    => Vec<String>);

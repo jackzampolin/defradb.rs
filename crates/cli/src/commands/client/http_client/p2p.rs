@@ -1,7 +1,6 @@
 //! P2P HTTP client methods
 
 use serde::{Deserialize, Serialize};
-use urlencoding::encode;
 
 use super::HttpClient;
 use crate::error::Result;
@@ -46,12 +45,13 @@ pub struct P2pReplicatorInfo {
     pub address: Option<String>,
 }
 
-/// P2P replicator request
+/// P2P replicator request (Go-compatible format).
 #[derive(Debug, Serialize)]
 pub struct P2pReplicatorRequest {
+    #[serde(rename = "Collections")]
     pub collections: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub address: Option<String>,
+    #[serde(rename = "Addresses")]
+    pub addresses: Vec<String>,
 }
 
 /// P2P collection request
@@ -105,9 +105,10 @@ impl HttpClient {
         address: Option<&str>,
     ) -> Result<()> {
         let url = format!("{}/api/v0/p2p/replicator", self.base_url);
+        let addresses = address.map(|s| vec![s.to_string()]).unwrap_or_default();
         let body = serde_json::to_string(&P2pReplicatorRequest {
             collections: collections.to_vec(),
-            address: address.map(|s| s.to_string()),
+            addresses,
         })?;
         self.request_void("POST", &url, Some(&body)).await
     }
@@ -117,45 +118,29 @@ impl HttpClient {
         collections: &[String],
         address: Option<&str>,
     ) -> Result<()> {
-        let mut url = format!("{}/api/v0/p2p/replicator", self.base_url);
-        let mut params = Vec::new();
-        for col in collections {
-            params.push(format!("collections={}", encode(col)));
-        }
-        if let Some(addr) = address {
-            params.push(format!("address={}", encode(addr)));
-        }
-        if !params.is_empty() {
-            url = format!("{}?{}", url, params.join("&"));
-        }
-        self.request_void("DELETE", &url, None).await
+        let url = format!("{}/api/v0/p2p/replicator", self.base_url);
+        let body = serde_json::to_string(&serde_json::json!({
+            "ID": address,
+            "Collections": collections,
+        }))?;
+        self.request_void("DELETE", &url, Some(&body)).await
     }
 
     pub async fn p2p_collection_add(&self, collections: &[String]) -> Result<()> {
         let url = format!("{}/api/v0/p2p/collections", self.base_url);
-        let body = serde_json::to_string(&P2pCollectionRequest {
-            collections: collections.to_vec(),
-        })?;
+        let body = serde_json::to_string(&collections)?;
         self.request_void("POST", &url, Some(&body)).await
     }
 
     pub async fn p2p_collection_remove(&self, collections: &[String]) -> Result<()> {
-        let mut url = format!("{}/api/v0/p2p/collections", self.base_url);
-        let params: Vec<String> = collections
-            .iter()
-            .map(|c| format!("collections={}", encode(c)))
-            .collect();
-        if !params.is_empty() {
-            url = format!("{}?{}", url, params.join("&"));
-        }
-        self.request_void("DELETE", &url, None).await
+        let url = format!("{}/api/v0/p2p/collections", self.base_url);
+        let body = serde_json::to_string(&collections)?;
+        self.request_void("DELETE", &url, Some(&body)).await
     }
 
     pub async fn p2p_connect(&self, addresses: &[String]) -> Result<()> {
         let url = format!("{}/api/v0/p2p/connect", self.base_url);
-        let body = serde_json::to_string(&P2pConnectRequest {
-            addresses: addresses.to_vec(),
-        })?;
+        let body = serde_json::to_string(&addresses)?;
         self.request_void("POST", &url, Some(&body)).await
     }
 
