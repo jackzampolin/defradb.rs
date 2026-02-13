@@ -30,11 +30,28 @@ pub struct TestCluster {
     pub nodes: Vec<RunningNode>,
     #[allow(dead_code)]
     run_dir: TestRunDir,
+    startup_identity: Option<String>,
 }
 
 impl TestCluster {
-    pub(crate) fn new(nodes: Vec<RunningNode>, run_dir: TestRunDir) -> Self {
-        Self { nodes, run_dir }
+    pub(crate) fn new(
+        nodes: Vec<RunningNode>,
+        run_dir: TestRunDir,
+        startup_identity: Option<String>,
+    ) -> Self {
+        Self {
+            nodes,
+            run_dir,
+            startup_identity,
+        }
+    }
+
+    /// Return the private key hex used to start nodes (if any).
+    ///
+    /// In NAC mode, Go grants automatic admin access to the startup identity.
+    /// Tests must use this identity for admin operations.
+    pub fn startup_identity(&self) -> Option<&str> {
+        self.startup_identity.as_deref()
     }
 
     pub fn builder() -> super::builder::TestClusterBuilder {

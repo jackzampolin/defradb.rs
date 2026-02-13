@@ -73,6 +73,10 @@ impl DefraNode for RustNode {
             cmd.arg("--acp-document-type").arg(acp_type);
         }
 
+        if config.nac_enabled {
+            cmd.arg("--acp-node-enable").arg("true");
+        }
+
         cmd
     }
 

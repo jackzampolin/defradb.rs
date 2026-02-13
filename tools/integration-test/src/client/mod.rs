@@ -489,10 +489,17 @@ impl DefraClient {
 
     // -- ACP Node (NAC) operations --
 
-    /// Add an ACP node relationship via `client acp node relationship add`.
-    pub fn acp_node_relationship_add(&self, relation: &str, actor_did: &str) -> Result<Value> {
+    /// Add an ACP node relationship via `client -i <key> acp node relationship add -r <rel> -a <did>`.
+    pub fn acp_node_relationship_add(
+        &self,
+        relation: &str,
+        actor_did: &str,
+        hex_key: &str,
+    ) -> Result<Value> {
         let out = self.exec(&[
             "client",
+            "-i",
+            hex_key,
             "acp",
             "node",
             "relationship",
@@ -505,10 +512,17 @@ impl DefraClient {
         serde_json::from_str(&out).context("failed to parse acp_node_relationship_add output")
     }
 
-    /// Delete an ACP node relationship via `client acp node relationship delete`.
-    pub fn acp_node_relationship_delete(&self, relation: &str, actor_did: &str) -> Result<Value> {
+    /// Delete an ACP node relationship via `client -i <key> acp node relationship delete -r <rel> -a <did>`.
+    pub fn acp_node_relationship_delete(
+        &self,
+        relation: &str,
+        actor_did: &str,
+        hex_key: &str,
+    ) -> Result<Value> {
         let out = self.exec(&[
             "client",
+            "-i",
+            hex_key,
             "acp",
             "node",
             "relationship",
@@ -541,7 +555,9 @@ impl DefraClient {
 
     // -- Encrypted Index operations --
 
-    /// Create an encrypted index via `client encrypted-index create <collection> <field>`.
+    /// Create an encrypted index.
+    /// Rust: `client encrypted-index create <collection> <field>`
+    /// Go: `client encrypted-index create --collection <c> --field <f>`
     pub fn encrypted_index_create(&self, collection: &str, field: &str) -> Result<Value> {
         let out = self
             .exec(&["client", "encrypted-index", "create", collection, field])
@@ -552,14 +568,16 @@ impl DefraClient {
                     "create",
                     "--collection",
                     collection,
-                    "--fields",
+                    "--field",
                     field,
                 ])
             })?;
         serde_json::from_str(&out).context("failed to parse encrypted_index_create output")
     }
 
-    /// Delete an encrypted index via `client encrypted-index delete <collection> <field>`.
+    /// Delete an encrypted index.
+    /// Rust: `client encrypted-index delete <collection> <field>`
+    /// Go: `client encrypted-index delete --collection <c> --field <f>`
     pub fn encrypted_index_delete(&self, collection: &str, field: &str) -> Result<String> {
         self.exec(&["client", "encrypted-index", "delete", collection, field])
             .or_else(|_| {
@@ -569,13 +587,15 @@ impl DefraClient {
                     "delete",
                     "--collection",
                     collection,
-                    "--fields",
+                    "--field",
                     field,
                 ])
             })
     }
 
-    /// List encrypted indexes via `client encrypted-index list <collection>`.
+    /// List encrypted indexes.
+    /// Rust: `client encrypted-index list <collection>`
+    /// Go: `client encrypted-index list --collection <c>`
     pub fn encrypted_index_list(&self, collection: &str) -> Result<Value> {
         let out = self
             .exec(&["client", "encrypted-index", "list", collection])
@@ -594,9 +614,11 @@ impl DefraClient {
     // -- Node/Block operations --
 
     /// Get node identity via `client node-identity`.
+    /// Returns JSON if available, or wraps raw text in a JSON string.
     pub fn node_identity(&self) -> Result<Value> {
         let out = self.exec(&["client", "node-identity"])?;
-        serde_json::from_str(&out).context("failed to parse node_identity output")
+        let trimmed = out.trim();
+        serde_json::from_str(trimmed).or_else(|_| Ok(Value::String(trimmed.to_string())))
     }
 
     /// Verify a block signature via `client block verify-signature <public_key> <cid>`.

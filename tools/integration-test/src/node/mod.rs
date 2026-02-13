@@ -20,6 +20,7 @@ pub struct NodeConfig {
     pub acp_document_type: Option<String>,
     pub encryption_enabled: bool,
     pub signing_enabled: bool,
+    pub nac_enabled: bool,
 }
 
 /// Trait for building a DefraDB command from config.

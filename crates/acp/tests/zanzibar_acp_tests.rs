@@ -363,6 +363,8 @@ async fn test_cannot_add_owner_relation() {
 
 #[tokio::test]
 async fn test_invalid_relation() {
+    // Go DefraDB accepts any relation (validation is done at the adapter layer
+    // against the policy definition). Only "owner" is universally rejected.
     let store = Arc::new(MemoryZanzibarStore::new());
     let acp = ZanzibarDocumentACP::new(store);
 
@@ -373,6 +375,7 @@ async fn test_invalid_relation() {
         .await
         .unwrap();
 
+    // "owner" should still be rejected
     let result = acp
         .add_actor_relationship(
             &owner,
@@ -380,12 +383,25 @@ async fn test_invalid_relation() {
             "collection1",
             "collection1",
             "doc1",
-            "invalid_relation",
+            "owner",
             &[],
         )
         .await;
-
     assert!(matches!(result, Err(Error::InvalidRelation(_))));
+
+    // Non-owner relations are accepted (matching Go behavior)
+    let result = acp
+        .add_actor_relationship(
+            &owner,
+            &target,
+            "collection1",
+            "collection1",
+            "doc1",
+            "custom_relation",
+            &[],
+        )
+        .await;
+    assert!(result.is_ok());
 }
 
 // Manager delegation pattern tests

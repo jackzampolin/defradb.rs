@@ -23,6 +23,7 @@ pub struct TestClusterBuilder {
     node_identity: Option<String>,
     encryption_enabled: bool,
     signing_enabled: bool,
+    nac_enabled: bool,
 }
 
 impl Default for TestClusterBuilder {
@@ -43,6 +44,7 @@ impl TestClusterBuilder {
             node_identity: None,
             encryption_enabled: false,
             signing_enabled: false,
+            nac_enabled: false,
         }
     }
 
@@ -91,7 +93,12 @@ impl TestClusterBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<TestCluster> {
+    pub fn with_nac(mut self) -> Self {
+        self.nac_enabled = true;
+        self
+    }
+
+    pub async fn build(mut self) -> Result<TestCluster> {
         let total = self.rust_nodes + self.go_nodes;
         anyhow::ensure!(total > 0, "must have at least one node");
 
@@ -103,6 +110,18 @@ impl TestClusterBuilder {
         // Check Go binary if needed
         if self.go_nodes > 0 {
             GoNode::check_available().context("Go defradb binary not available")?;
+        }
+
+        // NAC requires an identity at startup. Auto-generate one if not provided.
+        if self.nac_enabled && self.node_identity.is_none() {
+            let binary = if self.go_nodes > 0 {
+                std::path::PathBuf::from("defradb")
+            } else {
+                RustNode::from_workspace().binary_path().to_path_buf()
+            };
+            let id = crate::identity::generate_identity(&binary)
+                .context("auto-generating identity for NAC")?;
+            self.node_identity = Some(id.private_key_hex);
         }
 
         // Allocate ports for all nodes
@@ -130,6 +149,7 @@ impl TestClusterBuilder {
                 self.node_identity.clone(),
                 self.encryption_enabled,
                 self.signing_enabled,
+                self.nac_enabled,
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -153,6 +173,7 @@ impl TestClusterBuilder {
                 self.node_identity.clone(),
                 self.encryption_enabled,
                 self.signing_enabled,
+                self.nac_enabled,
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -166,7 +187,7 @@ impl TestClusterBuilder {
             .await
             .context("health check failed")?;
 
-        Ok(TestCluster::new(nodes, run_dir))
+        Ok(TestCluster::new(nodes, run_dir, self.node_identity))
     }
 }
 
@@ -184,6 +205,7 @@ async fn spawn_node(
     node_identity: Option<String>,
     encryption_enabled: bool,
     signing_enabled: bool,
+    nac_enabled: bool,
 ) -> Result<RunningNode> {
     let node_dir = run_dir.node_dir(name)?;
     let log_dir = node_dir.join("logs");
@@ -209,6 +231,7 @@ async fn spawn_node(
         acp_document_type,
         encryption_enabled,
         signing_enabled,
+        nac_enabled,
     };
 
     let cmd = node.command(&config);

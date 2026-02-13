@@ -50,8 +50,8 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
     pub fn create_default_policy(policy_id: &str, resource_name: &str) -> Policy {
         Policy::new(policy_id, format!("Policy for {}", resource_name)).with_resource(
             Resource::new(resource_name)
+                // Direct relations (assignable to actors)
                 .with_relation(Relation::direct(OWNER_RELATION))
-                // Admin relation with manages capability
                 .with_relation(
                     Relation::computed(
                         ADMIN_RELATION,
@@ -66,31 +66,34 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
                         DELETER_RELATION,
                     ]),
                 )
+                .with_relation(Relation::direct(READER_RELATION))
+                .with_relation(Relation::direct(UPDATER_RELATION))
+                .with_relation(Relation::direct(DELETER_RELATION))
+                // Computed permissions (match Go's "read"/"update"/"delete" names)
                 .with_relation(Relation::computed(
-                    READER_RELATION,
+                    "read",
                     RelationExpression::union(vec![
-                        RelationExpression::this(),
                         RelationExpression::computed_userset(OWNER_RELATION),
                         RelationExpression::computed_userset(ADMIN_RELATION),
-                        // Updater and deleter also imply read
+                        RelationExpression::computed_userset(READER_RELATION),
                         RelationExpression::computed_userset(UPDATER_RELATION),
                         RelationExpression::computed_userset(DELETER_RELATION),
                     ]),
                 ))
                 .with_relation(Relation::computed(
-                    UPDATER_RELATION,
+                    "update",
                     RelationExpression::union(vec![
-                        RelationExpression::this(),
                         RelationExpression::computed_userset(OWNER_RELATION),
                         RelationExpression::computed_userset(ADMIN_RELATION),
+                        RelationExpression::computed_userset(UPDATER_RELATION),
                     ]),
                 ))
                 .with_relation(Relation::computed(
-                    DELETER_RELATION,
+                    "delete",
                     RelationExpression::union(vec![
-                        RelationExpression::this(),
                         RelationExpression::computed_userset(OWNER_RELATION),
                         RelationExpression::computed_userset(ADMIN_RELATION),
+                        RelationExpression::computed_userset(DELETER_RELATION),
                     ]),
                 )),
         )
@@ -204,10 +207,12 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
     }
 
     fn permission_to_relation(permission: DocumentPermission) -> &'static str {
+        // These must match the permission names in the policy YAML (not the relation names).
+        // Go DefraDB uses "read"/"update"/"delete" as permission names.
         match permission {
-            DocumentPermission::Read => READER_RELATION,
-            DocumentPermission::Update => UPDATER_RELATION,
-            DocumentPermission::Delete => DELETER_RELATION,
+            DocumentPermission::Read => "read",
+            DocumentPermission::Update => "update",
+            DocumentPermission::Delete => "delete",
         }
     }
 

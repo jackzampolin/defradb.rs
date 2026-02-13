@@ -75,6 +75,10 @@ impl DefraNode for GoNode {
             cmd.arg("--document-acp-type").arg(acp_type);
         }
 
+        if config.nac_enabled {
+            cmd.arg("--node-acp-enable");
+        }
+
         cmd
     }
 

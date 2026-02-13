@@ -14,8 +14,8 @@ pub mod run;
 pub use client::DefraClient;
 pub use cluster::{TestCluster, TestClusterBuilder};
 pub use fixtures::{
-    documents_schema_with_policy, users_schema_with_policy, MULTI_ROLE_ACP_POLICY, PRODUCT_SCHEMA,
-    USER_ACP_POLICY,
+    documents_schema_with_policy, multi_resource_policy, typed_schema, users_schema_with_policy,
+    MULTI_ROLE_ACP_POLICY, PRODUCT_SCHEMA, STANDARD_FIELDS, USER_ACP_POLICY,
 };
 pub use identity::{generate_ed25519_identity, generate_identity, TestIdentity};
 pub use poll::poll_until;
