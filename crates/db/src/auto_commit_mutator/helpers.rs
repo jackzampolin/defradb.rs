@@ -17,19 +17,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
     /// Emit update events for subscriptions.
     ///
     /// For branchable collections, emits a second event for the collection-level DAG.
-    pub(super) fn emit_update_events(
-        &self,
-        collection: &Collection,
-        doc_id_str: &str,
-        cid: Cid,
-        block: Vec<u8>,
-    ) {
+    pub(super) fn emit_update_events(&self, collection: &Collection, doc_id_str: &str, cid: Cid) {
         if let Some(bus) = self.db.event_bus() {
             let update = Update::new(
                 doc_id_str.to_string(),
                 cid,
                 collection.collection_id().to_string(),
-                block.clone(),
+                vec![],
                 false, // is_retry
                 false, // is_relay (local mutation)
             );
@@ -40,7 +34,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     String::new(), // empty doc_id → keyed by collection_id
                     cid,
                     collection.collection_id().to_string(),
-                    block,
+                    vec![],
                     false,
                     false,
                 );

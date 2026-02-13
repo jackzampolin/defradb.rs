@@ -88,7 +88,9 @@ impl Node {
             }
             DatastoreType::Badger => {
                 info!("Using Redb datastore at {}", config.data_path().display());
-                let opts = RedbStoreOptions::new().with_durability(config.datastore.durability);
+                let opts = RedbStoreOptions::new()
+                    .with_durability(config.datastore.durability)
+                    .with_cache_size(256 * 1024 * 1024);
                 let store = Arc::new(storage::RedbStore::open_with_options(
                     config.data_path(),
                     opts,

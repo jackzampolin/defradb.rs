@@ -179,11 +179,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 }
 
                 // Emit update event for subscriptions
-                let (cid, block) = commit_result
+                let cid = commit_result
                     .as_ref()
-                    .map(|(c, b, _)| (*c, b.clone()))
+                    .map(|(c, _, _)| *c)
                     .unwrap_or_default();
-                self.emit_update_events(&collection, &doc_id.to_string(), cid, block);
+                self.emit_update_events(&collection, &doc_id.to_string(), cid);
 
                 // Return result with commit CID and block if available
                 match commit_result {
