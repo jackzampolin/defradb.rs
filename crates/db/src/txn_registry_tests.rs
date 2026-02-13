@@ -31,7 +31,7 @@ async fn test_begin_transaction() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(false).await.unwrap();
-    assert!(txn_id.starts_with("txn-"));
+    assert!(!txn_id.as_str().is_empty());
 }
 
 #[tokio::test]

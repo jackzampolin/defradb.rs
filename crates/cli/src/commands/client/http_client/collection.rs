@@ -12,19 +12,14 @@ impl HttpClient {
         self.request_json("GET", &url, None).await
     }
 
-    pub async fn collection_update_doc(
-        &self,
-        name: &str,
-        doc_id: &str,
-        patch: &str,
-    ) -> Result<JsonValue> {
+    pub async fn collection_update_doc(&self, name: &str, doc_id: &str, patch: &str) -> Result<()> {
         let url = format!(
             "{}/api/v0/collections/{}/{}",
             self.base_url,
             encode(name),
             encode(doc_id)
         );
-        self.request_json("PATCH", &url, Some(patch)).await
+        self.request_void("PATCH", &url, Some(patch)).await
     }
 
     pub async fn collection_delete_doc(&self, name: &str, doc_id: &str) -> Result<()> {

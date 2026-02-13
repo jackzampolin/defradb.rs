@@ -196,8 +196,8 @@ impl DefraClient {
     // -- Collection extensions --
 
     /// Update a document via `client collection update --name <n> --docID <id> --updater '<json>'`.
-    pub fn collection_update(&self, name: &str, doc_id: &str, updater: &str) -> Result<Value> {
-        let out = self.exec(&[
+    pub fn collection_update(&self, name: &str, doc_id: &str, updater: &str) -> Result<String> {
+        self.exec(&[
             "client",
             "collection",
             "update",
@@ -207,8 +207,7 @@ impl DefraClient {
             doc_id,
             "--updater",
             updater,
-        ])?;
-        serde_json::from_str(&out).context("failed to parse collection_update output")
+        ])
     }
 
     /// Describe a collection via `client collection describe --name <n>`.
@@ -218,9 +217,51 @@ impl DefraClient {
     }
 
     /// List document IDs via `client collection doc-ids --name <n>`.
-    pub fn collection_doc_ids(&self, name: &str) -> Result<Value> {
+    ///
+    /// Normalizes across implementations:
+    /// - Rust returns `{"doc_ids": ["id1", ...]}`
+    /// - Go returns line-separated `{"DocID": "id1"}\n{"DocID": "id2"}\n...`
+    pub fn collection_doc_ids(&self, name: &str) -> Result<Vec<String>> {
+        // Rust CLI uses "doc-ids", Go CLI uses "docIDs"
         let out = self.exec(&["client", "collection", "doc-ids", "--name", name])?;
-        serde_json::from_str(&out).context("failed to parse collection_doc_ids output")
+        let trimmed = out.trim();
+
+        // If output doesn't look like JSON, try Go's "docIDs" subcommand
+        // Go CLI uses "docIDs"; also try --name before subcommand
+        let trimmed = if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+            let out = self
+                .exec(&["client", "collection", "docIDs", "--name", name])
+                .or_else(|_| self.exec(&["client", "collection", "--name", name, "docIDs"]))?;
+            out.trim().to_string()
+        } else {
+            trimmed.to_string()
+        };
+        let trimmed = trimmed.as_str();
+
+        // Try Rust format: {"doc_ids": [...]}
+        if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+            if let Some(arr) = val.get("doc_ids").and_then(|v| v.as_array()) {
+                return Ok(arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect());
+            }
+        }
+
+        // Go format: line-separated JSON objects {"DocID": "..."}
+        let mut ids = Vec::new();
+        for line in trimmed.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(obj) = serde_json::from_str::<Value>(line) {
+                if let Some(id) = obj.get("DocID").and_then(|v| v.as_str()) {
+                    ids.push(id.to_string());
+                }
+            }
+        }
+        Ok(ids)
     }
 
     /// Truncate a collection via `client collection truncate --name <n>`.
@@ -237,7 +278,8 @@ impl DefraClient {
 
     // -- Index operations --
 
-    /// Create an index via `client index create <collection> --fields <f> [--name <n>] [--unique]`.
+    /// Create an index. Rust CLI: `client index create <collection> --fields <f>`.
+    /// Go CLI: `client index create --collection <c> --fields <f>`.
     pub fn index_create(
         &self,
         collection: &str,
@@ -246,14 +288,28 @@ impl DefraClient {
         unique: bool,
     ) -> Result<Value> {
         let fields_csv = fields.join(",");
-        let mut args = vec![
-            "client",
-            "index",
-            "create",
-            collection,
-            "--fields",
-            &fields_csv,
-        ];
+        // Try Rust positional format first, fall back to Go --collection flag
+        let out = self
+            .try_index_create_args(collection, &fields_csv, name, unique, false)
+            .or_else(|_| self.try_index_create_args(collection, &fields_csv, name, unique, true))?;
+        serde_json::from_str(&out).context("failed to parse index_create output")
+    }
+
+    fn try_index_create_args(
+        &self,
+        collection: &str,
+        fields_csv: &str,
+        name: Option<&str>,
+        unique: bool,
+        use_flag: bool,
+    ) -> Result<String> {
+        let mut args = vec!["client", "index", "create"];
+        if use_flag {
+            args.push("--collection");
+        }
+        args.push(collection);
+        args.push("--fields");
+        args.push(fields_csv);
         if let Some(n) = name {
             args.push("--name");
             args.push(n);
@@ -261,37 +317,60 @@ impl DefraClient {
         if unique {
             args.push("--unique");
         }
-        let out = self.exec(&args)?;
-        serde_json::from_str(&out).context("failed to parse index_create output")
+        self.exec(&args)
     }
 
-    /// List indexes via `client index list [collection]`.
+    /// List indexes. Rust: positional collection. Go: `--collection` flag.
     pub fn index_list(&self, collection: Option<&str>) -> Result<Value> {
-        let mut args = vec!["client", "index", "list"];
-        if let Some(c) = collection {
-            args.push(c);
-        }
-        let out = self.exec(&args)?;
+        let out = if let Some(c) = collection {
+            // Try Rust positional first, then Go --collection flag
+            self.exec(&["client", "index", "list", c])
+                .or_else(|_| self.exec(&["client", "index", "list", "--collection", c]))?
+        } else {
+            self.exec(&["client", "index", "list"])?
+        };
         serde_json::from_str(&out).context("failed to parse index_list output")
     }
 
-    /// Drop an index via `client index drop <collection> <name>`.
+    /// Drop an index. Rust: positional args. Go: `--collection` and `--name` flags.
     pub fn index_drop(&self, collection: &str, name: &str) -> Result<String> {
         self.exec(&["client", "index", "drop", collection, name])
+            .or_else(|_| {
+                self.exec(&[
+                    "client",
+                    "index",
+                    "drop",
+                    "--collection",
+                    collection,
+                    "--name",
+                    name,
+                ])
+            })
     }
 
     // -- Transaction operations --
 
     /// Create a transaction via `client tx create`.
+    /// Both Go and Rust output JSON: `{"id": N}`.
     pub fn tx_create(&self) -> Result<String> {
         let out = self.exec(&["client", "tx", "create"])?;
-        Ok(out.trim().to_string())
+        Self::parse_tx_id(&out)
     }
 
     /// Create a concurrent transaction via `client tx create --concurrent`.
     pub fn tx_create_concurrent(&self) -> Result<String> {
         let out = self.exec(&["client", "tx", "create", "--concurrent"])?;
-        Ok(out.trim().to_string())
+        Self::parse_tx_id(&out)
+    }
+
+    fn parse_tx_id(output: &str) -> Result<String> {
+        let trimmed = output.trim();
+        let val: Value =
+            serde_json::from_str(trimmed).context("failed to parse tx create output as JSON")?;
+        let id = val
+            .get("id")
+            .context("tx create output missing 'id' field")?;
+        Ok(id.to_string())
     }
 
     /// Commit a transaction via `client tx commit <id>`.
@@ -363,9 +442,17 @@ impl DefraClient {
         serde_json::from_str(&out).context("failed to parse p2p_replicator_list output")
     }
 
-    /// Delete a replicator via `client p2p replicator delete -c <cols>`.
-    pub fn p2p_replicator_delete(&self, collections: &[&str]) -> Result<String> {
+    /// Delete a replicator via `client p2p replicator delete -c <cols> [peerID]`.
+    pub fn p2p_replicator_delete(
+        &self,
+        collections: &[&str],
+        peer_addr: Option<&str>,
+    ) -> Result<String> {
         let cols = collections.join(",");
-        self.exec(&["client", "p2p", "replicator", "delete", "-c", &cols])
+        let mut args = vec!["client", "p2p", "replicator", "delete", "-c", &cols];
+        if let Some(addr) = peer_addr {
+            args.push(addr);
+        }
+        self.exec(&args)
     }
 }

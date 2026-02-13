@@ -74,7 +74,10 @@ impl TxCreateArgs {
         } else {
             client.tx_begin(self.read_only).await?
         };
-        println!("{}", response.id);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "id": response.id }))?
+        );
         Ok(())
     }
 }

@@ -324,7 +324,7 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         &self,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
-        let txn_id = format!("txn-{}", self.id_counter.fetch_add(1, Ordering::SeqCst));
+        let txn_id = self.id_counter.fetch_add(1, Ordering::SeqCst).to_string();
 
         let db_txn = self
             .db

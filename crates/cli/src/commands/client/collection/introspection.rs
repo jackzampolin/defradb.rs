@@ -21,6 +21,12 @@ const INTROSPECTION_QUERY: &str = r#"
 }
 "#;
 
+/// Check if a field is a DefraDB internal/aggregate field that may require arguments.
+/// Keeps `_docID` (document identifier), filters out everything else starting with `_`.
+fn is_aggregate_field(name: &str) -> bool {
+    name.starts_with('_') && name != "_docID"
+}
+
 /// Check if a field name is a built-in GraphQL or DefraDB field.
 fn is_builtin_field(name: &str) -> bool {
     if name.starts_with("__") {
@@ -192,6 +198,12 @@ pub(super) async fn get_collection_fields(
         .iter()
         .filter_map(|f| {
             let name = f.get("name")?.as_str()?;
+
+            // Skip aggregate fields that require arguments
+            if is_aggregate_field(name) {
+                return None;
+            }
+
             let type_info = f.get("type")?;
             let kind = type_info.get("kind").and_then(|k| k.as_str())?;
 
