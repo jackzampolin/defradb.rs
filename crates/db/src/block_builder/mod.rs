@@ -21,12 +21,15 @@ pub use collection::write_collection_block;
 pub use read::read_latest_composite_block;
 pub use write::{write_delete_block, write_document_blocks};
 
+use std::collections::HashMap;
+
 use cid::Cid;
 use crypto::PrivateKey;
 use datastore::NamespaceView;
 use defra_core::block::{
-    Block, CollectionDeltaPayload, CompositeDeltaPayload, CounterDeltaPayload, CrdtDelta, DAGLink,
-    Encryption, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
+    generate_cid_from_bytes, Block, CollectionDeltaPayload, CompositeDeltaPayload,
+    CounterDeltaPayload, CrdtDelta, DAGLink, Encryption, LwwDeltaPayload, Signature,
+    SignatureHeader, SignatureType,
 };
 use defra_core::encryption::EncryptionConfig;
 use defra_core::signing::SigningConfig;
@@ -102,8 +105,7 @@ pub(super) async fn sign_block(
     let sig_cbor = signature
         .to_dag_cbor()
         .map_err(|e| format!("Failed to encode signature block: {}", e))?;
-    let sig_cid = signature
-        .generate_cid()
+    let sig_cid = generate_cid_from_bytes(&sig_cbor)
         .map_err(|e| format!("Failed to generate signature CID: {}", e))?;
 
     blockstore
@@ -165,6 +167,7 @@ pub(super) fn decode_priority_varint(buf: &[u8]) -> u64 {
 }
 
 /// A single head entry for a document field.
+#[derive(Clone)]
 pub(super) struct FieldHeadEntry {
     /// The CID of the head
     pub(super) cid: Cid,
@@ -216,35 +219,79 @@ pub(super) async fn get_all_field_heads(
     Ok(entries)
 }
 
-/// Get the maximum priority from existing heads for a document.
+/// Snapshot of all head entries for a single document, loaded in one scan.
 ///
-/// Scans the headstore for all existing heads of the given document
-/// and returns the maximum priority found. Returns 0 if no heads exist.
-pub(super) async fn get_max_priority(
-    headstore: &NamespaceView,
-    doc_id: &str,
-) -> Result<u64, String> {
-    use storage::corekv::IterOptions;
+/// Replaces multiple overlapping headstore scans with a single prefix scan
+/// of `/d/{doc_id}/`.
+pub(super) struct DocHeadsSnapshot {
+    max_priority: u64,
+    entries_by_field: HashMap<String, Vec<FieldHeadEntry>>,
+}
 
-    let prefix = HeadstoreDocKey::document_prefix(doc_id);
-    let opts = IterOptions::new().with_prefix(prefix);
+impl DocHeadsSnapshot {
+    /// Load all heads for a document in a single headstore scan.
+    pub async fn load(headstore: &NamespaceView, doc_id: &str) -> Result<Self, String> {
+        use storage::corekv::IterOptions;
 
-    let mut iter = headstore
-        .iterator(opts)
-        .await
-        .map_err(|e| format!("Failed to create headstore iterator: {}", e))?;
+        let prefix = HeadstoreDocKey::document_prefix(doc_id);
+        let opts = IterOptions::new().with_prefix(prefix);
 
-    let mut max_priority: u64 = 0;
-    while let Some(kv_pair) = iter
-        .next()
-        .await
-        .map_err(|e| format!("Failed to iterate headstore: {}", e))?
-    {
-        let priority = decode_priority_varint(&kv_pair.value);
-        if priority > max_priority {
-            max_priority = priority;
+        let mut iter = headstore
+            .iterator(opts)
+            .await
+            .map_err(|e| format!("Failed to create headstore iterator: {}", e))?;
+
+        let mut max_priority: u64 = 0;
+        let mut entries_by_field: HashMap<String, Vec<FieldHeadEntry>> = HashMap::new();
+
+        while let Some(kv_pair) = iter
+            .next()
+            .await
+            .map_err(|e| format!("Failed to iterate headstore: {}", e))?
+        {
+            let priority = decode_priority_varint(&kv_pair.value);
+            if priority > max_priority {
+                max_priority = priority;
+            }
+
+            // Parse key: /d/{doc_id}/{field_id}/{cid}
+            let key_str = String::from_utf8_lossy(&kv_pair.key);
+            let parts: Vec<&str> = key_str.split('/').collect();
+            // parts: ["", "d", doc_id, field_id, cid]
+            if parts.len() >= 5 {
+                let field_id = parts[3].to_string();
+                if let Ok(cid) = parts[4].parse::<Cid>() {
+                    entries_by_field
+                        .entry(field_id)
+                        .or_default()
+                        .push(FieldHeadEntry {
+                            cid,
+                            key: kv_pair.key.clone(),
+                        });
+                }
+            }
         }
+
+        // Sort each field's entries by CID string to match Go's deterministic ordering.
+        for entries in entries_by_field.values_mut() {
+            entries.sort_by(|a, b| a.cid.to_string().cmp(&b.cid.to_string()));
+        }
+
+        Ok(Self {
+            max_priority,
+            entries_by_field,
+        })
     }
 
-    Ok(max_priority)
+    pub fn max_priority(&self) -> u64 {
+        self.max_priority
+    }
+
+    /// Get heads for a specific field (returns empty vec if none).
+    pub fn field_heads(&self, field_id: &str) -> Vec<FieldHeadEntry> {
+        self.entries_by_field
+            .get(field_id)
+            .cloned()
+            .unwrap_or_default()
+    }
 }

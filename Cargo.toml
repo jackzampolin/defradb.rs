@@ -97,6 +97,9 @@ proptest = "1.4"
 # Synchronization (non-poisoning locks)
 parking_lot = "0.12"
 
+# Caching
+lru = "0.12"
+
 # Async streams
 tokio-stream = "0.1"
 

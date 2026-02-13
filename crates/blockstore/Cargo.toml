@@ -30,6 +30,10 @@ thiserror = { workspace = true }
 # Logging
 tracing = { workspace = true }
 
+# Caching
+lru = { workspace = true }
+parking_lot = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 multihash = { workspace = true }

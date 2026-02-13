@@ -80,8 +80,7 @@ pub async fn write_collection_block(
     let collection_bytes = collection_block
         .to_dag_cbor()
         .map_err(|e| format!("Failed to encode collection block: {}", e))?;
-    let collection_cid = collection_block
-        .generate_cid()
+    let collection_cid = generate_cid_from_bytes(&collection_bytes)
         .map_err(|e| format!("Failed to generate collection CID: {}", e))?;
 
     // Store the collection block in blockstore
@@ -106,7 +105,7 @@ pub async fn write_collection_block(
         .await
         .map_err(|e| format!("Failed to write collection head: {}", e))?;
 
-    tracing::info!(
+    tracing::debug!(
         collection_id = collection_short_id,
         cid = %collection_cid,
         priority = priority,

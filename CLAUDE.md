@@ -153,6 +153,64 @@ git worktree remove ../defradb.rs-foo          # Remove worktree
 - When fixing ACP (Access Control Policy) filtering, always verify BOTH User queries AND Commits queries are filtered. These are two separate code paths that both require ACP checks.
 - After fixing any ACP-related code, run the full ACP test suite (all 36+ tests) not just the immediately failing one.
 
+## Shinzo Benchmarking (this branch: `shinzo/memory-leak`)
+
+### Tracking
+
+- **Issue #419**: Persistent scratch pad. Post a comment after every ~1000-block run with metrics.
+- **PR #418**: Push code fixes to this branch.
+
+### Running a 1000-block benchmark
+
+```bash
+# 1. Always start clean
+./scripts/shinzo-test.sh clean
+
+# 2. Build release (required after code changes)
+cargo build --release
+
+# 3. Start defra + indexer (uses random ports, logs to /tmp/shinzo-test/)
+./scripts/shinzo-test.sh
+
+# 4. In another terminal / background, monitor RSS/CPU/disk every 5s
+./scripts/shinzo-test.sh monitor
+```
+
+The script picks random free ports, so no conflicts. Everything lives under `/tmp/shinzo-test/`.
+
+### Monitoring a run
+
+- `./scripts/shinzo-test.sh status` — ports, PIDs, latest block height, disk
+- `./scripts/shinzo-test.sh logs defra` — tail defra log
+- `./scripts/shinzo-test.sh logs indexer` — tail indexer log
+- `./scripts/shinzo-test.sh monitor` — live RSS/CPU/disk/block/errors every 5s
+- `./scripts/shinzo-test.sh query '{ Ethereum__Mainnet__Block(limit:1, order:{number:DESC}) { number } }'`
+
+### After a run completes (~1000 blocks)
+
+1. Stop: `./scripts/shinzo-test.sh stop`
+2. Capture final metrics from monitor output and logs
+3. Post a comment on issue #419 with the run results
+4. Save logs: `cp /tmp/shinzo-test/*.log /tmp/shinzo-run-N/`
+5. If a bottleneck was found: fix, rebuild, run again
+
+### Metrics to capture per run
+
+| Metric | Source |
+|--------|--------|
+| RSS start/peak/end | `ps -o rss=` or monitor output |
+| Blocks indexed | Indexer log height delta from start height |
+| Wall time | Timestamps from monitor |
+| Blocks/sec | blocks / wall_time |
+| Disk usage | `du -sh /tmp/shinzo-test/` |
+| Error count | `grep -c ERROR /tmp/shinzo-test/indexer.log` |
+
+### Config knobs
+
+- `CONCURRENCY=N` — concurrent blocks (default 4)
+- `RECEIPT_WORKERS=N` — receipt workers (default 4)
+- `START_HEIGHT_OVERRIDE=N` — start block (default 23700000)
+
 ## Goal
 
 **New contributor feels ready to do productive work immediately.**

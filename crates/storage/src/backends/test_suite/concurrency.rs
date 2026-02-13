@@ -235,12 +235,19 @@ pub async fn test_snapshot_isolation_concurrent<S: Store + 'static>(store: Arc<S
             // Small random delay to interleave with readers
             tokio::time::sleep(std::time::Duration::from_millis(i * 5)).await;
 
-            let mut writer = store.new_txn(false).await.unwrap();
-            writer
-                .set(b"snapshot_key", format!("writer_{}", i).as_bytes())
-                .await
-                .unwrap();
-            writer.commit().await.unwrap();
+            // Retry on TxnConflict since all writers target the same key
+            loop {
+                let mut writer = store.new_txn(false).await.unwrap();
+                writer
+                    .set(b"snapshot_key", format!("writer_{}", i).as_bytes())
+                    .await
+                    .unwrap();
+                match writer.commit().await {
+                    Ok(()) => break,
+                    Err(crate::corekv::Error::TxnConflict) => continue,
+                    Err(e) => panic!("Unexpected commit error: {:?}", e),
+                }
+            }
         }));
     }
 

@@ -703,8 +703,11 @@ pub enum SignatureType {
 // Helper Functions
 // ============================================================================
 
-/// Generate CID from raw bytes using DAG-CBOR codec and SHA2-256
-fn generate_cid_from_bytes(bytes: &[u8]) -> Result<Cid> {
+/// Generate CID from raw DAG-CBOR bytes using SHA2-256.
+///
+/// Use this when you already have the serialized bytes to avoid
+/// double-serializing (e.g., when you called `to_dag_cbor()` separately).
+pub fn generate_cid_from_bytes(bytes: &[u8]) -> Result<Cid> {
     // Hash with SHA2-256
     let mut hasher = Sha256::new();
     hasher.update(bytes);

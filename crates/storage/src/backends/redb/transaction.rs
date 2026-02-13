@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::config::DurabilityMode;
+use super::group_commit::{GroupCommitBuffer, PendingCommit};
 use super::iterator::MergingIterator;
 use super::{bound_as_ref, compute_range_bounds, KV_TABLE};
 use crate::backends::shared::{CallbackCounts, CallbackManager, ConflictTracker};
@@ -60,6 +61,9 @@ pub(crate) struct RedbTxn {
 
     /// Transaction lifecycle callbacks
     pub(crate) callbacks: CallbackManager,
+
+    /// Group commit buffer for coalescing writes (None = direct commit)
+    pub(crate) group_commit: Option<Arc<GroupCommitBuffer>>,
 }
 
 impl Drop for RedbTxn {
@@ -285,8 +289,36 @@ impl Txn for RedbTxn {
         // Take pending changes (avoids clone — commit consumes self via Box<Self>)
         let pending = std::mem::take(&mut *self.pending.lock());
 
-        // Check for write-write conflicts before applying
+        // Apply pending changes to the database if there are any
         if !pending.is_empty() {
+            // Group commit path: enqueue changes for batched flush.
+            // Conflict detection is deferred to the flush loop so that version
+            // tracking is atomic with the data write.
+            if let Some(ref gc) = self.group_commit {
+                let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+                let commit = PendingCommit {
+                    changes: pending,
+                    read_version: self.read_version,
+                    result_tx,
+                    on_success: self.callbacks.take_success(),
+                    on_success_async: self.callbacks.take_success_async(),
+                    on_error: self.callbacks.take_error(),
+                    on_error_async: self.callbacks.take_error_async(),
+                };
+
+                if gc.enqueue(commit).is_err() {
+                    return Err(Error::Other("group commit channel closed".into()));
+                }
+
+                *self.committed.lock() = true;
+
+                // Wait for the batch flush to complete
+                return result_rx
+                    .await
+                    .map_err(|_| Error::Other("group commit result channel dropped".into()))?;
+            }
+
+            // Direct commit path: check conflicts eagerly
             let write_set: HashSet<Vec<u8>> = pending.keys().cloned().collect();
             if let Err(e) = self
                 .conflict_tracker
@@ -296,10 +328,7 @@ impl Txn for RedbTxn {
                 CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
                 return Err(e);
             }
-        }
 
-        // Apply pending changes to the database if there are any
-        if !pending.is_empty() {
             let mut write_txn = match self.db.begin_write() {
                 Ok(txn) => txn,
                 Err(e) => {
@@ -345,7 +374,6 @@ impl Txn for RedbTxn {
                                     value_len = v.len(),
                                     "Failed to insert key during commit - transaction will be rolled back"
                                 );
-                                // Note: write_txn is automatically rolled back when dropped (redb guarantee)
                                 tracing::debug!(
                                     pending_changes = pending.len(),
                                     "Write transaction aborted - no partial writes persisted"
@@ -365,7 +393,6 @@ impl Txn for RedbTxn {
                                     key_len = key.len(),
                                     "Failed to delete key during commit - transaction will be rolled back"
                                 );
-                                // Note: write_txn is automatically rolled back when dropped (redb guarantee)
                                 tracing::debug!(
                                     pending_changes = pending.len(),
                                     "Write transaction aborted - no partial writes persisted"
@@ -388,7 +415,6 @@ impl Txn for RedbTxn {
                     pending_changes = pending.len(),
                     "Failed to finalize commit - all changes rolled back"
                 );
-                // Note: redb guarantees atomicity - if commit fails, no changes are persisted
                 tracing::debug!("Commit failed at finalization stage - database state unchanged");
                 CallbackManager::execute_callbacks(self.callbacks.take_error());
                 CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
@@ -397,7 +423,6 @@ impl Txn for RedbTxn {
         }
 
         // Mark as committed AFTER successful database commit
-        // This ensures the flag accurately reflects the transaction state
         *self.committed.lock() = true;
 
         // Execute success callbacks

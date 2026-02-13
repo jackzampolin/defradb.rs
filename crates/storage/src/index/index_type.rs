@@ -42,6 +42,19 @@ impl IndexType {
         }
     }
 
+    /// Save a document to the index without checking uniqueness on unique indexes.
+    pub async fn save_blind<T: Reader + Writer + MaybeSend>(
+        &self,
+        txn: &mut T,
+        doc_id: &str,
+        values: &[NormalValue],
+    ) -> Result<()> {
+        match self {
+            IndexType::Simple(idx) => idx.save(txn, doc_id, values).await,
+            IndexType::Unique(idx) => idx.save_blind(txn, doc_id, values).await,
+        }
+    }
+
     /// Update modifies an existing document's index entry.
     pub async fn update<T: Reader + Writer + MaybeSend>(
         &self,
