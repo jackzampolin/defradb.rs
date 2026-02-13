@@ -32,25 +32,64 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
     let result = rt.block_on(async {
         // Create storage backend based on options
         let db_path_opt: Option<String>;
-        let store: Arc<FfiStore> = if options.in_memory == 0 && !options.db_path.is_null() {
+        let backend_name = unsafe { c_str_to_string(options.datastore_backend) }
+            .unwrap_or_default()
+            .to_lowercase();
+
+        let store: Arc<FfiStore> = if options.in_memory != 0
+            || backend_name == "memory"
+            || options.db_path.is_null()
+        {
+            db_path_opt = None;
+            Arc::new(FfiStore::Memory(storage::MemoryStore::new()))
+        } else {
             let path = unsafe { c_str_to_string(options.db_path) }
                 .ok_or_else(|| "db_path is not valid UTF-8".to_string())?;
             db_path_opt = Some(path.clone());
-            #[cfg(feature = "fjall")]
-            {
-                let fjall = storage::FjallStore::open(&path)
-                    .map_err(|e| format!("failed to open fjall store at '{}': {}", path, e))?;
-                Arc::new(FfiStore::Fjall(fjall))
+
+            // Pick backend: explicit choice > compile-time default
+            let effective_backend = if backend_name.is_empty() {
+                "redb"
+            } else {
+                &backend_name
+            };
+
+            match effective_backend {
+                "redb" | "badger" => {
+                    let redb = storage::RedbStore::open(&path)
+                        .map_err(|e| format!("failed to open redb store at '{}': {}", path, e))?;
+                    Arc::new(FfiStore::Redb(redb))
+                }
+                #[cfg(feature = "fjall")]
+                "fjall" => {
+                    let fjall = storage::FjallStore::open(&path)
+                        .map_err(|e| format!("failed to open fjall store at '{}': {}", path, e))?;
+                    Arc::new(FfiStore::Fjall(fjall))
+                }
+                #[cfg(not(feature = "fjall"))]
+                "fjall" => {
+                    return Err("fjall backend not enabled. Rebuild with --features fjall".into());
+                }
+                #[cfg(feature = "rocksdb")]
+                "rocksdb" => {
+                    let rocks = storage::RocksDbStore::open(&path).map_err(|e| {
+                        format!("failed to open rocksdb store at '{}': {}", path, e)
+                    })?;
+                    Arc::new(FfiStore::RocksDb(rocks))
+                }
+                #[cfg(not(feature = "rocksdb"))]
+                "rocksdb" => {
+                    return Err(
+                        "rocksdb backend not enabled. Rebuild with --features rocksdb".into(),
+                    );
+                }
+                other => {
+                    return Err(format!(
+                        "unknown datastore backend '{}'. Supported: redb, fjall, rocksdb, memory",
+                        other
+                    ));
+                }
             }
-            #[cfg(not(feature = "fjall"))]
-            {
-                let redb = storage::RedbStore::open(&path)
-                    .map_err(|e| format!("failed to open redb store at '{}': {}", path, e))?;
-                Arc::new(FfiStore::Redb(redb))
-            }
-        } else {
-            db_path_opt = None;
-            Arc::new(FfiStore::Memory(storage::MemoryStore::new()))
         };
 
         // Create event bus for subscriptions (created early so it can be wired to database)

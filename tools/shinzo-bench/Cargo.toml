@@ -1,0 +1,22 @@
+[package]
+name = "shinzo-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Shinzo indexer benchmark and integration test harness"
+
+[[bin]]
+name = "shinzo-bench"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "env"] }
+tokio = { version = "1.35", features = ["process", "fs", "rt-multi-thread", "macros", "io-util", "signal", "time"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+colored = "2.0"
+sysinfo = "0.33"
+libc = "0.2"
+reqwest = { version = "0.12", features = ["json"] }

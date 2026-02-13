@@ -23,6 +23,7 @@ members = [
     "crates/lens",
     "crates/wasm",
     "tools/ffi-test",
+    "tools/shinzo-bench",
 ]
 
 [workspace.package]
@@ -57,6 +58,7 @@ multiaddr = "0.18"
 # Storage
 redb = "2.4"
 fjall = "3"
+rocksdb = "0.22"
 
 # Cryptography
 ed25519-dalek = { version = "2.1", features = ["serde"] }

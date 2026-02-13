@@ -82,14 +82,12 @@ impl FjallStore {
                 let mut ks_opts = fjall::KeyspaceCreateOptions::default()
                     .max_memtable_size(max_memtable_size)
                     .compaction_strategy(Arc::new(
-                        fjall::compaction::Leveled::default()
-                            .with_l0_threshold(l0_threshold),
+                        fjall::compaction::Leveled::default().with_l0_threshold(l0_threshold),
                     ));
 
                 if kv_separation {
                     ks_opts = ks_opts.with_kv_separation(Some(
-                        fjall::KvSeparationOptions::default()
-                            .separation_threshold(256),
+                        fjall::KvSeparationOptions::default().separation_threshold(256),
                     ));
                 }
 

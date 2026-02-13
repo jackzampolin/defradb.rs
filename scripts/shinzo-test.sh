@@ -401,7 +401,7 @@ indexer:
   start_height: ${START_HEIGHT}
   concurrent_blocks: ${CONCURRENCY}
   receipt_workers: ${RECEIPT_WORKERS}
-  max_docs_per_txn: 1000
+  max_docs_per_txn: 500
   blocks_per_minute: 0
   health_server_port: 0
   pprof_port: 0
@@ -462,14 +462,16 @@ cmd_start_rust_ffi() {
 
   mkdir -p "$BASE_DIR"
 
+  # Default to fjall for FFI mode, but allow override via STORE env var
+  FFI_STORE="${STORE:-fjall}"
   cat > "$PORTS_FILE" << EOF
 RUST_FFI=1
-STORE=fjall
+STORE=${FFI_STORE}
 EOF
 
   echo "=== Shinzo Integration Test (Rust FFI Embedded) ==="
   echo "  Base dir:     ${BASE_DIR}"
-  echo "  Mode:         Rust FFI embedded (fjall backend)"
+  echo "  Mode:         Rust FFI embedded (${FFI_STORE} backend)"
   echo "  Concurrency:  ${CONCURRENCY} blocks / ${RECEIPT_WORKERS} workers"
   echo "  Start height: ${START_HEIGHT}"
   echo ""
@@ -502,7 +504,7 @@ indexer:
   start_height: ${START_HEIGHT}
   concurrent_blocks: ${CONCURRENCY}
   receipt_workers: ${RECEIPT_WORKERS}
-  max_docs_per_txn: 1000
+  max_docs_per_txn: 500
   blocks_per_minute: 0
   health_server_port: 0
   pprof_port: 0

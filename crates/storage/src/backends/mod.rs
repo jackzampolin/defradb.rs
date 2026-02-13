@@ -57,6 +57,10 @@ pub mod redb;
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 pub mod fjall;
 
+// RocksDB backend - tunable LSM-tree with universal compaction (native only)
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+pub mod rocksdb;
+
 // LevelDB backend - pure Rust, WASM only (rusty-leveldb uses Rc internally, not Send/Sync)
 // On native platforms, use redb instead for full concurrency support.
 #[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
@@ -81,6 +85,9 @@ pub use redb::{IntegrityReport, RedbStore, RedbStoreOptions};
 
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 pub use fjall::{FjallStore, FjallStoreOptions};
+
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+pub use rocksdb::{RocksDbStore, RocksDbStoreOptions};
 
 #[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
 pub use leveldb::LevelDbStore;
