@@ -64,6 +64,10 @@ impl DefraNode for RustNode {
             cmd.arg("--identity").arg(identity);
         }
 
+        if let Some(ref acp_type) = config.acp_document_type {
+            cmd.arg("--acp-document-type").arg(acp_type);
+        }
+
         cmd
     }
 

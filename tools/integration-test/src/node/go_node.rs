@@ -66,6 +66,10 @@ impl DefraNode for GoNode {
             cmd.arg("--identity").arg(identity);
         }
 
+        if let Some(ref acp_type) = config.acp_document_type {
+            cmd.arg("--document-acp-type").arg(acp_type);
+        }
+
         cmd
     }
 

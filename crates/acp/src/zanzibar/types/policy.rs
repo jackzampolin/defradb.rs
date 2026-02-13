@@ -167,6 +167,62 @@ impl Policy {
         })
     }
 
+    /// Build a Policy from an already-parsed ParsedPolicy and raw YAML (for ID hashing).
+    pub fn from_parsed(yaml: &str, parsed: &crate::policy_yaml::ParsedPolicy) -> Result<Self> {
+        let mut hasher = Sha256::new();
+        hasher.update(yaml.as_bytes());
+        let hash = hasher.finalize();
+        let id = hash
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
+
+        let mut attributes = HashMap::new();
+        if !parsed.description.is_empty() {
+            attributes.insert("description".to_string(), parsed.description.clone());
+        }
+
+        let mut resources = Vec::new();
+        for res in &parsed.resources {
+            let mut relations = Vec::new();
+
+            // Auto-inject the reserved 'owner' relation (matches Go DefraDB behavior)
+            relations.push(Relation::direct("owner"));
+
+            for rel in &res.relations {
+                let mut relation = Relation::direct(&rel.name);
+                if !rel.manages.is_empty() {
+                    relation = relation.with_manages(rel.manages.clone());
+                }
+                relations.push(relation);
+            }
+
+            for perm in &res.permissions {
+                if !perm.expr.is_empty() {
+                    let user_expr = RelationExpression::parse(&perm.expr)?;
+                    // DPI: every permission must include 'owner' in its expression
+                    let expression = RelationExpression::Union(vec![
+                        RelationExpression::computed_userset("owner"),
+                        user_expr,
+                    ]);
+                    relations.push(Relation::computed(&perm.name, expression));
+                }
+            }
+
+            resources.push(Resource {
+                name: res.name.clone(),
+                relations,
+            });
+        }
+
+        Ok(Self {
+            id,
+            name: parsed.name.clone(),
+            resources,
+            attributes,
+        })
+    }
+
     /// Find a resource by name.
     pub fn get_resource(&self, name: &str) -> Option<&Resource> {
         self.resources.iter().find(|r| r.name == name)

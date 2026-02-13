@@ -137,4 +137,59 @@ impl DefraClient {
         let cols = collections.join(",");
         self.exec(&["client", "p2p", "replicator", "create", "-c", &cols, addr])
     }
+
+    /// Execute a GraphQL query with an identity via `client -i <key> query '<gql>'`.
+    pub fn query_with_identity(&self, gql: &str, hex_key: &str) -> Result<Value> {
+        let out = self.exec(&["client", "-i", hex_key, "query", gql])?;
+        let json_str = out.find('{').map(|i| &out[i..]).unwrap_or(&out);
+        let val: Value = serde_json::from_str(json_str).context("failed to parse query output")?;
+        if let Some(data) = val.get("data") {
+            Ok(data.clone())
+        } else {
+            Ok(val)
+        }
+    }
+
+    /// Deploy a schema with identity via `client -i <key> schema add '<sdl>'`.
+    pub fn schema_add_with_identity(&self, sdl: &str, hex_key: &str) -> Result<Value> {
+        let out = self.exec(&["client", "-i", hex_key, "schema", "add", sdl])?;
+        serde_json::from_str(&out).context("failed to parse schema_add output")
+    }
+
+    /// Add an ACP policy via `client -i <key> acp document policy add '<yaml>'`.
+    pub fn acp_policy_add(&self, policy: &str, hex_key: &str) -> Result<Value> {
+        let out = self.exec(&[
+            "client", "-i", hex_key, "acp", "document", "policy", "add", policy,
+        ])?;
+        serde_json::from_str(&out).context("failed to parse acp_policy_add output")
+    }
+
+    /// Add an ACP document relationship.
+    pub fn acp_relationship_add(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        relation: &str,
+        actor_did: &str,
+        hex_key: &str,
+    ) -> Result<Value> {
+        let out = self.exec(&[
+            "client",
+            "-i",
+            hex_key,
+            "acp",
+            "document",
+            "relationship",
+            "add",
+            "-c",
+            collection,
+            "--docID",
+            doc_id,
+            "-r",
+            relation,
+            "-a",
+            actor_did,
+        ])?;
+        serde_json::from_str(&out).context("failed to parse acp_relationship_add output")
+    }
 }

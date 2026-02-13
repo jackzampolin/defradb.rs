@@ -46,7 +46,8 @@ impl AcpOperations for AcpAdapter {
         }
         acp::policy_yaml::validate_policy_expressions(&parsed)?;
 
-        let policy = Policy::from_yaml(yaml).map_err(|e| format!("invalid policy: {}", e))?;
+        let policy =
+            Policy::from_parsed(yaml, &parsed).map_err(|e| format!("invalid policy: {}", e))?;
         let policy_id = policy.id.clone();
 
         let options = StorePolicyOptions::new()

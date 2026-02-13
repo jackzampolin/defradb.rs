@@ -16,43 +16,43 @@ pub struct P2pDocumentArgs {
 /// P2P document subcommands
 #[derive(Subcommand, Debug)]
 pub enum P2pDocumentCommand {
-    /// Add a document to P2P sync
-    Add(P2pDocumentAddArgs),
-    /// Remove a document from P2P sync
-    Remove(P2pDocumentRemoveArgs),
-    /// Get all P2P synced documents
-    GetAll(P2pDocumentGetAllArgs),
+    /// Add document(s) to P2P sync
+    Create(P2pDocumentCreateArgs),
+    /// Remove document(s) from P2P sync
+    Delete(P2pDocumentDeleteArgs),
+    /// List all P2P synced documents
+    List(P2pDocumentListArgs),
     /// Sync a document
     Sync(P2pDocumentSyncArgs),
 }
 
-/// Arguments for p2p document add command
+/// Arguments for p2p document create command
 #[derive(Args, Debug)]
-pub struct P2pDocumentAddArgs {
-    /// Document ID
-    #[arg(long = "docID")]
-    pub doc_id: Option<String>,
+pub struct P2pDocumentCreateArgs {
+    /// Document IDs to add
+    #[arg(value_name = "docIDs")]
+    pub doc_ids: Vec<String>,
 
     /// Schema ID
     #[arg(long = "schemaID")]
     pub schema_id: Option<String>,
 }
 
-/// Arguments for p2p document remove command
+/// Arguments for p2p document delete command
 #[derive(Args, Debug)]
-pub struct P2pDocumentRemoveArgs {
-    /// Document ID
-    #[arg(long = "docID")]
-    pub doc_id: Option<String>,
+pub struct P2pDocumentDeleteArgs {
+    /// Document IDs to remove
+    #[arg(value_name = "docIDs")]
+    pub doc_ids: Vec<String>,
 
     /// Schema ID
     #[arg(long = "schemaID")]
     pub schema_id: Option<String>,
 }
 
-/// Arguments for p2p document get-all command
+/// Arguments for p2p document list command
 #[derive(Args, Debug)]
-pub struct P2pDocumentGetAllArgs {}
+pub struct P2pDocumentListArgs {}
 
 /// Arguments for p2p document sync command
 #[derive(Args, Debug)]
@@ -69,45 +69,45 @@ pub struct P2pDocumentSyncArgs {
 impl P2pDocumentArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            P2pDocumentCommand::Add(args) => args.execute(ctx).await,
-            P2pDocumentCommand::Remove(args) => args.execute(ctx).await,
-            P2pDocumentCommand::GetAll(args) => args.execute(ctx).await,
+            P2pDocumentCommand::Create(args) => args.execute(ctx).await,
+            P2pDocumentCommand::Delete(args) => args.execute(ctx).await,
+            P2pDocumentCommand::List(args) => args.execute(ctx).await,
             P2pDocumentCommand::Sync(args) => args.execute(ctx).await,
         }
     }
 }
 
-impl P2pDocumentAddArgs {
+impl P2pDocumentCreateArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
-        let doc_ids: Vec<String> = self.doc_id.iter().cloned().collect();
         let schema_ids: Vec<String> = self.schema_id.iter().cloned().collect();
 
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        client.p2p_document_add(&doc_ids, &schema_ids).await?;
+        client.p2p_document_add(&self.doc_ids, &schema_ids).await?;
         println!("Added document(s) to P2P sync");
         Ok(())
     }
 }
 
-impl P2pDocumentRemoveArgs {
+impl P2pDocumentDeleteArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
-        let doc_ids: Vec<String> = self.doc_id.iter().cloned().collect();
         let schema_ids: Vec<String> = self.schema_id.iter().cloned().collect();
 
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        client.p2p_document_remove(&doc_ids, &schema_ids).await?;
+        client
+            .p2p_document_remove(&self.doc_ids, &schema_ids)
+            .await?;
         println!("Removed document(s) from P2P sync");
         Ok(())
     }
 }
 
-impl P2pDocumentGetAllArgs {
+impl P2pDocumentListArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())

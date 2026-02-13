@@ -19,6 +19,8 @@ pub struct TestClusterBuilder {
     p2p_enabled: bool,
     health_timeout: Duration,
     build_rust: bool,
+    acp_document_type: Option<String>,
+    node_identity: Option<String>,
 }
 
 impl Default for TestClusterBuilder {
@@ -35,6 +37,8 @@ impl TestClusterBuilder {
             p2p_enabled: false,
             health_timeout: Duration::from_secs(30),
             build_rust: true,
+            acp_document_type: None,
+            node_identity: None,
         }
     }
 
@@ -60,6 +64,16 @@ impl TestClusterBuilder {
 
     pub fn skip_build(mut self) -> Self {
         self.build_rust = false;
+        self
+    }
+
+    pub fn with_acp_local(mut self) -> Self {
+        self.acp_document_type = Some("local".to_string());
+        self
+    }
+
+    pub fn with_identity(mut self, key: impl Into<String>) -> Self {
+        self.node_identity = Some(key.into());
         self
     }
 
@@ -98,6 +112,8 @@ impl TestClusterBuilder {
                 &run_dir,
                 self.health_timeout,
                 patterns::rust_patterns(),
+                self.acp_document_type.clone(),
+                self.node_identity.clone(),
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -117,6 +133,8 @@ impl TestClusterBuilder {
                 &run_dir,
                 self.health_timeout,
                 patterns::go_patterns(),
+                self.acp_document_type.clone(),
+                self.node_identity.clone(),
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -144,6 +162,8 @@ async fn spawn_node(
     run_dir: &TestRunDir,
     ready_timeout: Duration,
     named_patterns: Vec<NamedPattern>,
+    acp_document_type: Option<String>,
+    node_identity: Option<String>,
 ) -> Result<RunningNode> {
     let node_dir = run_dir.node_dir(name)?;
     let log_dir = node_dir.join("logs");
@@ -165,7 +185,8 @@ async fn spawn_node(
             None
         },
         peers: vec![],
-        identity: None,
+        identity: node_identity,
+        acp_document_type,
     };
 
     let cmd = node.command(&config);

@@ -17,6 +17,7 @@ pub struct NodeConfig {
     pub p2p_addr: Option<String>,
     pub peers: Vec<String>,
     pub identity: Option<String>,
+    pub acp_document_type: Option<String>,
 }
 
 /// Trait for building a DefraDB command from config.

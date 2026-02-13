@@ -8,6 +8,18 @@ use super::ParsedPolicy;
 /// 3. Expressions can only reference relations declared in the same resource
 pub fn validate_policy_expressions(policy: &ParsedPolicy) -> Result<(), String> {
     for resource in &policy.resources {
+        // 'owner' is a reserved relation name, auto-injected by the system
+        for relation in &resource.relations {
+            if relation.name == "owner" {
+                return Err(format!(
+                    "invalid resource: 'owner` is a reserved relation name: \
+                     rename 'owner' to a different name; attrs={{\"resource\":\"{}\",\
+                     \"transformer\":\"Discretionary transformer\"}}; kind=BAD_INPUT",
+                    resource.name
+                ));
+            }
+        }
+
         for permission in &resource.permissions {
             if permission.expr.is_empty() {
                 continue;
@@ -155,6 +167,30 @@ resources:
         let result = validate_policy_expressions(&policy);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("token recognition error"));
+    }
+
+    #[test]
+    fn test_reserved_owner_relation_error() {
+        let yaml = r#"
+name: test
+description: a policy
+resources:
+- name: users
+  permissions:
+  - name: read
+    expr: reader
+  relations:
+  - name: owner
+    types:
+    - actor
+  - name: reader
+    types:
+    - actor
+"#;
+        let policy = parse_policy_yaml(yaml).unwrap();
+        let result = validate_policy_expressions(&policy);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("reserved relation name"));
     }
 
     #[test]
