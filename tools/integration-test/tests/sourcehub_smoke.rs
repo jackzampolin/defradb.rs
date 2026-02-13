@@ -1,25 +1,34 @@
 use integration_test::{generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY};
 
+use integration_test::node::{DefraNode, RustNode};
+
 /// Smoke test proving DefraDB -> Source Hub ACP pipeline works end-to-end.
 ///
 /// 1. Starts a Source Hub devnet + 1 Rust DefraDB node connected to it
 /// 2. Creates an ACP policy (on-chain via MsgCreatePolicy)
-/// 3. Creates a protected document as Alice (owner)
-/// 4. Alice sees the document, anonymous sees nothing
+/// 3. Creates a protected document as Jack (owner)
+/// 4. Jack sees the document, anonymous sees nothing
+///
+/// The node must be started with Jack's identity so the SourceHub TxSigner
+/// can create bearer tokens for Jack's DID.
 #[tokio::test]
 #[ignore]
 async fn rust_sourcehub_smoke() {
+    // Pre-generate Jack's identity so the node starts with his key
+    let binary = RustNode::from_workspace().binary_path().to_path_buf();
+    RustNode::build().expect("build rust binary");
+    let jack = generate_identity(&binary).expect("failed to generate Jack identity");
+
     let cluster = TestCluster::builder()
         .rust_nodes(1)
+        .skip_build()
         .with_source_hub()
+        .with_identity(&jack.private_key_hex)
         .build()
         .await
         .expect("failed to build source hub cluster");
 
     let node = cluster.client(0);
-    let binary_path = node.binary_path().to_path_buf();
-
-    let jack = generate_identity(&binary_path).expect("failed to generate Jack identity");
 
     // Add ACP policy — this submits MsgCreatePolicy on Source Hub
     let policy_result = node

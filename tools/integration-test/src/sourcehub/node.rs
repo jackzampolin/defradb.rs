@@ -61,8 +61,7 @@ impl SourceHubNode {
             .arg(format!("tcp://0.0.0.0:{}", ports.lcd));
         cmd.arg("--p2p.laddr")
             .arg(format!("tcp://0.0.0.0:{}", ports.p2p));
-        cmd.arg("--minimum-gas-prices")
-            .arg("0.001uopen,0.001ucredit");
+        cmd.arg("--minimum-gas-prices").arg("0uopen");
         cmd.arg("--log_no_color");
 
         let stdout_path = log_dir.join("stdout.log");

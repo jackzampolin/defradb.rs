@@ -5,7 +5,6 @@ use anyhow::{Context, Result};
 
 use crate::ports::SourceHubPorts;
 
-const CHAIN_DENOM: &str = "uopen";
 const VALIDATOR_STAKE: &str = "100000000000uopen";
 const VALIDATOR_BALANCE: &str = "1000000000000uopen";
 const IDENTITY_BALANCE: &str = "100000000uopen";
@@ -113,39 +112,9 @@ pub fn provision_genesis(
     )
     .context("sourcehubd collect-gentxs failed")?;
 
-    patch_genesis_json(home_dir)?;
     patch_config_toml(home_dir, ports)?;
     patch_app_toml(home_dir, ports)?;
 
-    Ok(())
-}
-
-/// Set `allow_zero_fee_txs = true` in genesis.json so DefraDB transactions succeed.
-fn patch_genesis_json(home_dir: &Path) -> Result<()> {
-    let genesis_path = home_dir.join("config/genesis.json");
-    let content = std::fs::read_to_string(&genesis_path).context("read genesis.json")?;
-    let mut genesis: serde_json::Value =
-        serde_json::from_str(&content).context("parse genesis.json")?;
-
-    // Set minimum gas prices to empty and allow zero-fee transactions
-    if let Some(app_state) = genesis.get_mut("app_state") {
-        if let Some(acp) = app_state.get_mut("acp") {
-            if let Some(params) = acp.get_mut("params") {
-                params["allow_zero_fee_txs"] = serde_json::Value::Bool(true);
-            }
-        }
-        // Set globalfee to allow zero fees
-        if let Some(globalfee) = app_state.get_mut("globalfee") {
-            if let Some(params) = globalfee.get_mut("params") {
-                params["minimum_gas_prices"] = serde_json::json!([
-                    {"denom": CHAIN_DENOM, "amount": "0"}
-                ]);
-            }
-        }
-    }
-
-    let patched = serde_json::to_string_pretty(&genesis).context("serialize genesis.json")?;
-    std::fs::write(&genesis_path, patched).context("write genesis.json")?;
     Ok(())
 }
 

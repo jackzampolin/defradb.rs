@@ -52,6 +52,21 @@ impl Node {
         // Extract private key bytes before consuming user_identity (needed for SourceHub signer)
         let identity_key_bytes = user_identity.as_ref().map(|id| id.private_key_bytes());
 
+        // Store identity in global identity store so HTTP handlers can look up
+        // signing config from DID (mirrors FFI path in crates/ffi/src/node.rs)
+        if let (Some(did), Some(identity)) = (&user_did, &user_identity) {
+            defra_core::signing::store_identity(
+                did.as_ref(),
+                defra_core::signing::SigningConfig {
+                    key_type: identity.identity_key_type().to_string(),
+                    private_key_bytes: identity.private_key_bytes(),
+                    public_key_bytes: identity.public_key_bytes(),
+                    public_key_hex: hex::encode(identity.public_key_bytes()),
+                },
+            );
+            info!("Stored node identity signing config for DID {}", did);
+        }
+
         // Build database options with optional user identity
         let mut db_options = db::DbOptions::new();
         if let Some(identity) = user_identity {
@@ -499,10 +514,14 @@ impl Node {
                 info!("CRDT delta encryption enabled");
             }
 
-            // Wire default identity for ACP permission checks (from --identity CLI flag)
+            // Wire default identity for ACP permission checks (from --identity CLI flag).
+            // Skip for SourceHub ACP: identity must come from bearer tokens, not defaults.
+            // Anonymous requests should be truly anonymous for on-chain policy evaluation.
             if let Some(did) = user_did {
-                info!("Query runner configured with default identity for ACP");
-                query_runner = query_runner.with_default_identity(did);
+                if config.acp.document_type != AcpDocumentType::SourceHub {
+                    info!("Query runner configured with default identity for ACP");
+                    query_runner = query_runner.with_default_identity(did);
+                }
             }
 
             let runner = Arc::new(query_runner);
