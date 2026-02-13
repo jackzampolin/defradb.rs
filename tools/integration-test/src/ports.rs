@@ -41,3 +41,22 @@ pub fn allocate_node_ports(n: usize) -> Result<Vec<NodePorts>> {
         })
         .collect())
 }
+
+/// Ports assigned to a Source Hub node.
+pub struct SourceHubPorts {
+    pub lcd: u16,
+    pub comet_rpc: u16,
+    pub grpc: u16,
+    pub p2p: u16,
+}
+
+/// Allocate ports for a single Source Hub instance.
+pub fn allocate_source_hub_ports() -> Result<SourceHubPorts> {
+    let ports = allocate_ports(4)?;
+    Ok(SourceHubPorts {
+        lcd: ports[0],
+        comet_rpc: ports[1],
+        grpc: ports[2],
+        p2p: ports[3],
+    })
+}

@@ -6,9 +6,10 @@ use reqwest::Client;
 use crate::node::{DefraNode, GoNode, NodeConfig, RustNode};
 use crate::observe::patterns::{self, NamedPattern};
 use crate::observe::LogTracker;
-use crate::ports::allocate_node_ports;
+use crate::ports::{allocate_node_ports, allocate_source_hub_ports};
 use crate::process::ManagedProcess;
 use crate::run::TestRunDir;
+use crate::sourcehub::SourceHubNode;
 
 use super::health::health_check_all;
 use super::runtime::{RunningNode, TestCluster};
@@ -24,6 +25,7 @@ pub struct TestClusterBuilder {
     encryption_enabled: bool,
     signing_enabled: bool,
     nac_enabled: bool,
+    source_hub_enabled: bool,
 }
 
 impl Default for TestClusterBuilder {
@@ -45,6 +47,7 @@ impl TestClusterBuilder {
             encryption_enabled: false,
             signing_enabled: false,
             nac_enabled: false,
+            source_hub_enabled: false,
         }
     }
 
@@ -98,6 +101,12 @@ impl TestClusterBuilder {
         self
     }
 
+    pub fn with_source_hub(mut self) -> Self {
+        self.source_hub_enabled = true;
+        self.acp_document_type = Some("source-hub".to_string());
+        self
+    }
+
     pub async fn build(mut self) -> Result<TestCluster> {
         let total = self.rust_nodes + self.go_nodes;
         anyhow::ensure!(total > 0, "must have at least one node");
@@ -112,15 +121,15 @@ impl TestClusterBuilder {
             GoNode::check_available().context("Go defradb binary not available")?;
         }
 
-        // NAC requires an identity at startup. Auto-generate one if not provided.
-        if self.nac_enabled && self.node_identity.is_none() {
+        // Source Hub or NAC requires an identity at startup.
+        if (self.nac_enabled || self.source_hub_enabled) && self.node_identity.is_none() {
             let binary = if self.go_nodes > 0 {
                 std::path::PathBuf::from("defradb")
             } else {
                 RustNode::from_workspace().binary_path().to_path_buf()
             };
             let id = crate::identity::generate_identity(&binary)
-                .context("auto-generating identity for NAC")?;
+                .context("auto-generating identity for NAC/SourceHub")?;
             self.node_identity = Some(id.private_key_hex);
         }
 
@@ -129,6 +138,40 @@ impl TestClusterBuilder {
 
         // Create run directory
         let run_dir = TestRunDir::new()?;
+
+        // Start Source Hub if enabled
+        let source_hub = if self.source_hub_enabled {
+            let sh_ports = allocate_source_hub_ports().context("allocating source hub ports")?;
+
+            let sh_home = run_dir.node_dir("sourcehub")?;
+            let sh_log_dir = sh_home.join("logs");
+            std::fs::create_dir_all(&sh_log_dir)?;
+
+            let identity_keys: Vec<String> = self.node_identity.iter().cloned().collect();
+
+            let sh_node = SourceHubNode::start(
+                sh_home,
+                sh_log_dir,
+                &sh_ports,
+                &identity_keys,
+                Duration::from_secs(60),
+            )
+            .await
+            .context("failed to start source hub node")?;
+
+            Some(sh_node)
+        } else {
+            None
+        };
+
+        let (sh_lcd, sh_comet, sh_chain_id) = match &source_hub {
+            Some(sh) => (
+                Some(sh.lcd_url.clone()),
+                Some(sh.comet_rpc_url.clone()),
+                Some(sh.chain_id.clone()),
+            ),
+            None => (None, None, None),
+        };
 
         let mut nodes = Vec::with_capacity(total);
 
@@ -150,6 +193,9 @@ impl TestClusterBuilder {
                 self.encryption_enabled,
                 self.signing_enabled,
                 self.nac_enabled,
+                sh_lcd.clone(),
+                sh_comet.clone(),
+                sh_chain_id.clone(),
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -174,6 +220,9 @@ impl TestClusterBuilder {
                 self.encryption_enabled,
                 self.signing_enabled,
                 self.nac_enabled,
+                sh_lcd.clone(),
+                sh_comet.clone(),
+                sh_chain_id.clone(),
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -187,7 +236,12 @@ impl TestClusterBuilder {
             .await
             .context("health check failed")?;
 
-        Ok(TestCluster::new(nodes, run_dir, self.node_identity))
+        Ok(TestCluster::new(
+            nodes,
+            run_dir,
+            self.node_identity,
+            source_hub,
+        ))
     }
 }
 
@@ -206,6 +260,9 @@ async fn spawn_node(
     encryption_enabled: bool,
     signing_enabled: bool,
     nac_enabled: bool,
+    source_hub_address: Option<String>,
+    source_hub_comet_address: Option<String>,
+    source_hub_chain_id: Option<String>,
 ) -> Result<RunningNode> {
     let node_dir = run_dir.node_dir(name)?;
     let log_dir = node_dir.join("logs");
@@ -232,6 +289,9 @@ async fn spawn_node(
         encryption_enabled,
         signing_enabled,
         nac_enabled,
+        source_hub_address,
+        source_hub_comet_address,
+        source_hub_chain_id,
     };
 
     let cmd = node.command(&config);

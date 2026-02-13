@@ -7,6 +7,7 @@ use crate::client::DefraClient;
 use crate::observe::LogTracker;
 use crate::process::ManagedProcess;
 use crate::run::TestRunDir;
+use crate::sourcehub::SourceHubNode;
 
 /// A running node within a test cluster.
 pub struct RunningNode {
@@ -24,10 +25,11 @@ pub struct RunningNode {
 
 /// A cluster of running DefraDB nodes.
 ///
-/// Field order matters: `nodes` is dropped before `run_dir`, ensuring
-/// processes are killed before their data directories are removed.
+/// Field order matters: `nodes` and `source_hub` are dropped before `run_dir`,
+/// ensuring processes are killed before their data directories are removed.
 pub struct TestCluster {
     pub nodes: Vec<RunningNode>,
+    source_hub: Option<SourceHubNode>,
     #[allow(dead_code)]
     run_dir: TestRunDir,
     startup_identity: Option<String>,
@@ -38,9 +40,11 @@ impl TestCluster {
         nodes: Vec<RunningNode>,
         run_dir: TestRunDir,
         startup_identity: Option<String>,
+        source_hub: Option<SourceHubNode>,
     ) -> Self {
         Self {
             nodes,
+            source_hub,
             run_dir,
             startup_identity,
         }
@@ -74,6 +78,10 @@ impl TestCluster {
 
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    pub fn source_hub(&self) -> Option<&SourceHubNode> {
+        self.source_hub.as_ref()
     }
 
     /// Wait for a named log pattern on the node at `index`.

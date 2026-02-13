@@ -77,6 +77,16 @@ impl DefraNode for RustNode {
             cmd.arg("--acp-node-enable").arg("true");
         }
 
+        if let Some(ref addr) = config.source_hub_address {
+            cmd.arg("--source-hub-address").arg(addr);
+        }
+        if let Some(ref addr) = config.source_hub_comet_address {
+            cmd.arg("--source-hub-comet-address").arg(addr);
+        }
+        if let Some(ref chain_id) = config.source_hub_chain_id {
+            cmd.arg("--source-hub-chain-id").arg(chain_id);
+        }
+
         cmd
     }
 

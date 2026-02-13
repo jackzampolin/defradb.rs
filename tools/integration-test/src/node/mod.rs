@@ -21,6 +21,9 @@ pub struct NodeConfig {
     pub encryption_enabled: bool,
     pub signing_enabled: bool,
     pub nac_enabled: bool,
+    pub source_hub_address: Option<String>,
+    pub source_hub_comet_address: Option<String>,
+    pub source_hub_chain_id: Option<String>,
 }
 
 /// Trait for building a DefraDB command from config.

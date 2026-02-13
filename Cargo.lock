@@ -3470,6 +3470,7 @@ name = "integration-test"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cosmrs",
  "futures",
  "libc",
  "rand 0.8.5",

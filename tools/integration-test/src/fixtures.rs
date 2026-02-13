@@ -110,3 +110,140 @@ pub fn typed_schema(type_name: &str, policy_id: &str, resource: &str, fields: &s
         type_name, policy_id, resource, fields
     )
 }
+
+/// ACP policy for x-archive compartment (tweets, interactions).
+pub const XARCHIVE_ACP_POLICY: &str = r#"name: xarchive-policy
+description: X-archive compartment policy for tweets and interactions
+
+resources:
+  - name: tweets
+    permissions:
+      - name: read
+        expr: owner + writer + reader
+      - name: update
+        expr: owner + writer
+      - name: delete
+        expr: owner
+    relations:
+      - name: owner
+        types:
+          - actor
+      - name: writer
+        types:
+          - actor
+      - name: reader
+        types:
+          - actor
+  - name: interactions
+    permissions:
+      - name: read
+        expr: owner + writer + reader
+      - name: update
+        expr: owner + writer
+      - name: delete
+        expr: owner
+    relations:
+      - name: owner
+        types:
+          - actor
+      - name: writer
+        types:
+          - actor
+      - name: reader
+        types:
+          - actor"#;
+
+/// ACP policy for hiking compartment (workouts, peaks).
+pub const HIKING_ACP_POLICY: &str = r#"name: hiking-policy
+description: Hiking compartment policy for workouts and peaks
+
+resources:
+  - name: workouts
+    permissions:
+      - name: read
+        expr: owner + writer + reader
+      - name: update
+        expr: owner + writer
+      - name: delete
+        expr: owner
+    relations:
+      - name: owner
+        types:
+          - actor
+      - name: writer
+        types:
+          - actor
+      - name: reader
+        types:
+          - actor
+  - name: peaks
+    permissions:
+      - name: read
+        expr: owner + writer + reader
+      - name: update
+        expr: owner + writer
+      - name: delete
+        expr: owner
+    relations:
+      - name: owner
+        types:
+          - actor
+      - name: writer
+        types:
+          - actor
+      - name: reader
+        types:
+          - actor"#;
+
+/// Strict owner-only ACP policy for secrets.
+pub const SECRET_ACP_POLICY: &str = r#"name: secret-policy
+description: Owner-only policy for secret collections
+
+resources:
+  - name: secrets
+    permissions:
+      - name: read
+        expr: owner
+      - name: update
+        expr: owner
+      - name: delete
+        expr: owner
+    relations:
+      - name: owner
+        types:
+          - actor"#;
+
+pub fn tweet_schema_with_policy(policy_id: &str) -> String {
+    format!(
+        r#"type Tweet @policy(id: "{}", resource: "tweets") {{ text: String  likes: Int  archived: Boolean }}"#,
+        policy_id
+    )
+}
+
+pub fn interaction_schema_with_policy(policy_id: &str) -> String {
+    format!(
+        r#"type Interaction @policy(id: "{}", resource: "interactions") {{ kind: String  target_id: String }}"#,
+        policy_id
+    )
+}
+
+pub fn workout_schema_with_policy(policy_id: &str) -> String {
+    format!(
+        r#"type Workout @policy(id: "{}", resource: "workouts") {{ activity: String  duration_min: Int }}"#,
+        policy_id
+    )
+}
+
+pub fn peak_schema_with_policy(policy_id: &str) -> String {
+    format!(
+        r#"type Peak @policy(id: "{}", resource: "peaks") {{ name: String  elevation_m: Int }}"#,
+        policy_id
+    )
+}
+
+pub fn secret_schema_with_policy(policy_id: &str) -> String {
+    format!(
+        r#"type Secret @policy(id: "{}", resource: "secrets") {{ content: String  classification: String }}"#,
+        policy_id
+    )
+}
