@@ -192,4 +192,180 @@ impl DefraClient {
         ])?;
         serde_json::from_str(&out).context("failed to parse acp_relationship_add output")
     }
+
+    // -- Collection extensions --
+
+    /// Update a document via `client collection update --name <n> --docID <id> --updater '<json>'`.
+    pub fn collection_update(&self, name: &str, doc_id: &str, updater: &str) -> Result<Value> {
+        let out = self.exec(&[
+            "client",
+            "collection",
+            "update",
+            "--name",
+            name,
+            "--docID",
+            doc_id,
+            "--updater",
+            updater,
+        ])?;
+        serde_json::from_str(&out).context("failed to parse collection_update output")
+    }
+
+    /// Describe a collection via `client collection describe --name <n>`.
+    pub fn collection_describe(&self, name: &str) -> Result<Value> {
+        let out = self.exec(&["client", "collection", "describe", "--name", name])?;
+        serde_json::from_str(&out).context("failed to parse collection_describe output")
+    }
+
+    /// List document IDs via `client collection doc-ids --name <n>`.
+    pub fn collection_doc_ids(&self, name: &str) -> Result<Value> {
+        let out = self.exec(&["client", "collection", "doc-ids", "--name", name])?;
+        serde_json::from_str(&out).context("failed to parse collection_doc_ids output")
+    }
+
+    /// Truncate a collection via `client collection truncate --name <n>`.
+    pub fn collection_truncate(&self, name: &str) -> Result<String> {
+        self.exec(&["client", "collection", "truncate", "--name", name])
+    }
+
+    // -- Schema extensions --
+
+    /// Describe the full schema via `client schema describe`.
+    pub fn schema_describe(&self) -> Result<String> {
+        self.exec(&["client", "schema", "describe"])
+    }
+
+    // -- Index operations --
+
+    /// Create an index via `client index create <collection> --fields <f> [--name <n>] [--unique]`.
+    pub fn index_create(
+        &self,
+        collection: &str,
+        fields: &[&str],
+        name: Option<&str>,
+        unique: bool,
+    ) -> Result<Value> {
+        let fields_csv = fields.join(",");
+        let mut args = vec![
+            "client",
+            "index",
+            "create",
+            collection,
+            "--fields",
+            &fields_csv,
+        ];
+        if let Some(n) = name {
+            args.push("--name");
+            args.push(n);
+        }
+        if unique {
+            args.push("--unique");
+        }
+        let out = self.exec(&args)?;
+        serde_json::from_str(&out).context("failed to parse index_create output")
+    }
+
+    /// List indexes via `client index list [collection]`.
+    pub fn index_list(&self, collection: Option<&str>) -> Result<Value> {
+        let mut args = vec!["client", "index", "list"];
+        if let Some(c) = collection {
+            args.push(c);
+        }
+        let out = self.exec(&args)?;
+        serde_json::from_str(&out).context("failed to parse index_list output")
+    }
+
+    /// Drop an index via `client index drop <collection> <name>`.
+    pub fn index_drop(&self, collection: &str, name: &str) -> Result<String> {
+        self.exec(&["client", "index", "drop", collection, name])
+    }
+
+    // -- Transaction operations --
+
+    /// Create a transaction via `client tx create`.
+    pub fn tx_create(&self) -> Result<String> {
+        let out = self.exec(&["client", "tx", "create"])?;
+        Ok(out.trim().to_string())
+    }
+
+    /// Create a concurrent transaction via `client tx create --concurrent`.
+    pub fn tx_create_concurrent(&self) -> Result<String> {
+        let out = self.exec(&["client", "tx", "create", "--concurrent"])?;
+        Ok(out.trim().to_string())
+    }
+
+    /// Commit a transaction via `client tx commit <id>`.
+    pub fn tx_commit(&self, tx_id: &str) -> Result<String> {
+        self.exec(&["client", "tx", "commit", tx_id])
+    }
+
+    /// Discard a transaction via `client tx discard <id>`.
+    pub fn tx_discard(&self, tx_id: &str) -> Result<String> {
+        self.exec(&["client", "tx", "discard", tx_id])
+    }
+
+    /// Execute a GraphQL query inside a transaction via `client --tx <id> query '<gql>'`.
+    pub fn query_with_tx(&self, gql: &str, tx_id: &str) -> Result<Value> {
+        let out = self.exec(&["client", "--tx", tx_id, "query", gql])?;
+        let json_str = out.find('{').map(|i| &out[i..]).unwrap_or(&out);
+        let val: Value =
+            serde_json::from_str(json_str).context("failed to parse query_with_tx output")?;
+        if let Some(data) = val.get("data") {
+            Ok(data.clone())
+        } else {
+            Ok(val)
+        }
+    }
+
+    // -- Backup operations --
+
+    /// Export backup via `client backup export <file> [--collections <c>] [--pretty]`.
+    pub fn backup_export(&self, file: &str, collections: &[&str], pretty: bool) -> Result<String> {
+        let mut args = vec!["client", "backup", "export", file];
+        for c in collections {
+            args.push("-c");
+            args.push(c);
+        }
+        if pretty {
+            args.push("--pretty");
+        }
+        self.exec(&args)
+    }
+
+    /// Import backup via `client backup import <file>`.
+    pub fn backup_import(&self, file: &str) -> Result<String> {
+        self.exec(&["client", "backup", "import", file])
+    }
+
+    // -- P2P extensions --
+
+    /// List active peers via `client p2p active-peers`.
+    pub fn p2p_active_peers(&self) -> Result<Value> {
+        let out = self.exec(&["client", "p2p", "active-peers"])?;
+        serde_json::from_str(&out).context("failed to parse p2p_active_peers output")
+    }
+
+    /// List P2P collections via `client p2p collection list`.
+    pub fn p2p_collection_list(&self) -> Result<Value> {
+        let out = self.exec(&["client", "p2p", "collection", "list"])?;
+        serde_json::from_str(&out).context("failed to parse p2p_collection_list output")
+    }
+
+    /// Delete P2P collections via `client p2p collection delete <cols>`.
+    pub fn p2p_collection_delete(&self, collections: &[&str]) -> Result<String> {
+        let cols = collections.join(",");
+        self.exec(&["client", "p2p", "collection", "delete", &cols])
+    }
+
+    /// List replicators via `client p2p replicator list`.
+    pub fn p2p_replicator_list(&self) -> Result<Value> {
+        let out = self.exec(&["client", "p2p", "replicator", "list"])?;
+        serde_json::from_str(&out).context("failed to parse p2p_replicator_list output")
+    }
+
+    /// Delete a replicator via `client p2p replicator delete -c <cols>`.
+    pub fn p2p_replicator_delete(&self, collections: &[&str]) -> Result<String> {
+        let cols = collections.join(",");
+        self.exec(&["client", "p2p", "replicator", "delete", "-c", &cols])
+    }
 }
