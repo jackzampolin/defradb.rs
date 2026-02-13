@@ -139,6 +139,7 @@ pub enum DatastoreType {
     #[default]
     Badger,
     Memory,
+    Fjall,
 }
 
 /// Document ACP (Access Control Policy) type options.
@@ -183,6 +184,7 @@ impl std::fmt::Display for DatastoreType {
         match self {
             DatastoreType::Badger => write!(f, "badger"),
             DatastoreType::Memory => write!(f, "memory"),
+            DatastoreType::Fjall => write!(f, "fjall"),
         }
     }
 }
@@ -194,6 +196,7 @@ impl std::str::FromStr for DatastoreType {
         match s.to_lowercase().as_str() {
             "badger" | "rocksdb" | "redb" => Ok(DatastoreType::Badger),
             "memory" => Ok(DatastoreType::Memory),
+            "fjall" => Ok(DatastoreType::Fjall),
             _ => Err(Error::InvalidDatastore(s.to_string())),
         }
     }

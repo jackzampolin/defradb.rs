@@ -53,6 +53,10 @@ pub mod memory;
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub mod redb;
 
+// Fjall LSM-tree backend - concurrent writes without global lock (native only)
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+pub mod fjall;
+
 // LevelDB backend - pure Rust, WASM only (rusty-leveldb uses Rc internally, not Send/Sync)
 // On native platforms, use redb instead for full concurrency support.
 #[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
@@ -67,13 +71,16 @@ pub mod opfs_env;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub mod test_suite;
 
-pub use shared::CallbackCounts;
+pub use shared::{CallbackCounts, DurabilityMode};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use memory::MemoryStore;
 
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
-pub use redb::{DurabilityMode, IntegrityReport, RedbStore, RedbStoreOptions};
+pub use redb::{IntegrityReport, RedbStore, RedbStoreOptions};
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+pub use fjall::{FjallStore, FjallStoreOptions};
 
 #[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
 pub use leveldb::LevelDbStore;

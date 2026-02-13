@@ -56,6 +56,7 @@ multiaddr = "0.18"
 
 # Storage
 redb = "2.4"
+fjall = "3"
 
 # Cryptography
 ed25519-dalek = { version = "2.1", features = ["serde"] }
