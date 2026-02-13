@@ -51,9 +51,6 @@ pub(crate) fn check_and_set_dac_bypass(
     node_ptr: usize,
     identity_did: *const c_char,
 ) {
-    use acp::nac::NacStatus;
-
-    // Default: no bypass
     defra_core::dac_bypass::set_dac_bypass(false);
 
     let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
@@ -61,24 +58,21 @@ pub(crate) fn check_and_set_dac_bypass(
         None => return,
     };
 
-    // Only bypass when NAC is enabled
-    let status = rt.block_on(nac_manager.status());
-    if status != NacStatus::Enabled {
-        return;
-    }
-
     let identity_str = unsafe { c_str_to_string(identity_did) };
     let did = match identity_str {
         Some(s) if !s.is_empty() => match identity::Did::new(&s) {
-            Ok(d) => d,
+            Ok(d) => Some(d),
             Err(_) => return,
         },
-        _ => return,
+        _ => None,
     };
 
-    let has_bypass = rt
-        .block_on(nac_manager.check_permission(&did, NodePermission::DacBypass))
-        .unwrap_or(false);
+    let status = rt.block_on(nac_manager.status());
+    let bypass = rt.block_on(acp::nac::should_bypass_dac(
+        status,
+        did.as_ref(),
+        |d, p| async move { nac_manager.check_permission(d, p).await.unwrap_or(false) },
+    ));
 
-    defra_core::dac_bypass::set_dac_bypass(has_bypass);
+    defra_core::dac_bypass::set_dac_bypass(bypass);
 }

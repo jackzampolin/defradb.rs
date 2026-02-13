@@ -8,7 +8,11 @@ use tracing::info;
 
 use crate::config::{Config, DatastoreType};
 use crate::error::Result;
+#[cfg(feature = "fjall")]
+use storage::backends::FjallStoreOptions;
 use storage::backends::RedbStoreOptions;
+#[cfg(feature = "rocksdb")]
+use storage::backends::RocksDbStoreOptions;
 
 /// Tracks spawned P2P background tasks for graceful shutdown.
 pub(super) struct P2PTasks {
@@ -88,7 +92,9 @@ impl Node {
             }
             DatastoreType::Badger => {
                 info!("Using Redb datastore at {}", config.data_path().display());
-                let opts = RedbStoreOptions::new().with_durability(config.datastore.durability);
+                let opts = RedbStoreOptions::new()
+                    .with_durability(config.datastore.durability)
+                    .with_cache_size(256 * 1024 * 1024);
                 let store = Arc::new(storage::RedbStore::open_with_options(
                     config.data_path(),
                     opts,
@@ -109,6 +115,69 @@ impl Node {
                     node_identity_did.clone(),
                 )
                 .await?
+            }
+            #[cfg(feature = "fjall")]
+            DatastoreType::Fjall => {
+                info!("Using Fjall datastore at {}", config.data_path().display());
+                let opts = FjallStoreOptions::new().with_durability(config.datastore.durability);
+                let store = Arc::new(storage::FjallStore::open_with_options(
+                    config.data_path(),
+                    opts,
+                )?);
+                info!("Using unified ACP store (namespace isolated in main database)");
+                let acp_store: Arc<dyn acp::AcpStore> =
+                    Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
+                let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
+                    Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
+                Self::init_store_and_server(
+                    store,
+                    &config,
+                    peer_keypair,
+                    user_identity.clone(),
+                    acp_store,
+                    zanzibar_store,
+                    node_identity_did.clone(),
+                )
+                .await?
+            }
+            #[cfg(not(feature = "fjall"))]
+            DatastoreType::Fjall => {
+                return Err(crate::error::Error::InvalidDatastore(
+                    "fjall backend not enabled. Rebuild with --features fjall".into(),
+                ));
+            }
+            #[cfg(feature = "rocksdb")]
+            DatastoreType::RocksDb => {
+                info!(
+                    "Using RocksDB datastore at {}",
+                    config.data_path().display()
+                );
+                let opts = RocksDbStoreOptions::new().with_durability(config.datastore.durability);
+                let store = Arc::new(storage::RocksDbStore::open_with_options(
+                    config.data_path(),
+                    opts,
+                )?);
+                info!("Using unified ACP store (namespace isolated in main database)");
+                let acp_store: Arc<dyn acp::AcpStore> =
+                    Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
+                let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
+                    Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
+                Self::init_store_and_server(
+                    store,
+                    &config,
+                    peer_keypair,
+                    user_identity.clone(),
+                    acp_store,
+                    zanzibar_store,
+                    node_identity_did.clone(),
+                )
+                .await?
+            }
+            #[cfg(not(feature = "rocksdb"))]
+            DatastoreType::RocksDb => {
+                return Err(crate::error::Error::InvalidDatastore(
+                    "rocksdb backend not enabled. Rebuild with --features rocksdb".into(),
+                ));
             }
         };
 

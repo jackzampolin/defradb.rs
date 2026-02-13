@@ -68,6 +68,7 @@ async fn test_redb_persistence_through_multiple_sessions() {
         txn.set(b"key1", b"value1").await.unwrap();
         txn.set(b"key2", b"value2").await.unwrap();
         txn.commit().await.unwrap();
+        store.close().await.unwrap();
     }
 
     // Session 2: Modify and add
@@ -78,6 +79,7 @@ async fn test_redb_persistence_through_multiple_sessions() {
         txn.set(b"key3", b"value3").await.unwrap();
         txn.delete(b"key2").await.unwrap();
         txn.commit().await.unwrap();
+        store.close().await.unwrap();
     }
 
     // Session 3: Verify all changes

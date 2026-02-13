@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use p2p::message::PushLogRequest;
-use storage::corekv::IterOptions;
+use storage::corekv::{IterOptions, Reader, Store};
 
 use crate::database::DB;
 
@@ -276,4 +276,116 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
     }
 
     Ok(())
+}
+
+/// Retry pushing a single document's composite heads to a replicator peer.
+///
+/// Reads composite head CIDs from the headstore, loads block data
+/// (field blocks + composite block) from the blockstore, and sends
+/// signed PushLogRequests to the target peer.
+pub async fn retry_doc<S: Store + 'static>(
+    handle: &p2p::P2PHostHandle,
+    db: &DB<S>,
+    peer_id: libp2p::PeerId,
+    doc_id: &str,
+    collection_id: &str,
+) -> Result<(), String> {
+    let local_peer_id = handle
+        .local_peer_id()
+        .await
+        .map_err(|e| format!("failed to get local peer ID: {}", e))?;
+
+    let headstore = storage::stores::Headstore::new(db.store().clone());
+    let head_txn = headstore
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("headstore txn: {}", e))?;
+
+    let blockstore_view = storage::stores::Blockstore::new(db.store().clone(), true);
+    let block_txn = blockstore_view
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("blockstore txn: {}", e))?;
+
+    let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
+    let opts = IterOptions::new().with_prefix(prefix);
+    let mut iter = head_txn
+        .iterator(opts)
+        .await
+        .map_err(|e| format!("headstore iterator: {}", e))?;
+
+    let mut any_failed = false;
+    while let Some(pair) = iter
+        .next()
+        .await
+        .map_err(|e| format!("headstore iteration: {}", e))?
+    {
+        let key_str = String::from_utf8_lossy(&pair.key);
+        let parts: Vec<&str> = key_str.split('/').collect();
+        if parts.len() < 5 {
+            continue;
+        }
+        let head_cid = match cid::Cid::from_str(parts[4]) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let block_data = match block_txn.get(&head_cid.to_bytes()).await {
+            Ok(Some(data)) => data,
+            _ => continue,
+        };
+
+        // Send the full DAG: field blocks first, then composite last.
+        if let Ok(parsed) = defra_core::Block::from_dag_cbor(&block_data) {
+            if let Some(ref links) = parsed.links {
+                for link in links {
+                    if let Ok(Some(field_data)) = block_txn.get(&link.link.to_bytes()).await {
+                        let mut field_req = PushLogRequest::new(
+                            doc_id.to_string(),
+                            link.link.to_bytes(),
+                            collection_id.to_string(),
+                            local_peer_id.to_string(),
+                            field_data,
+                        );
+                        if p2p::signing::sign_message(handle.keypair(), &mut field_req).is_ok()
+                            && handle
+                                .send_two_stream_request(peer_id, field_req)
+                                .await
+                                .is_err()
+                        {
+                            any_failed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Send composite block last
+        let mut request = PushLogRequest::new(
+            doc_id.to_string(),
+            head_cid.to_bytes(),
+            collection_id.to_string(),
+            local_peer_id.to_string(),
+            block_data,
+        );
+
+        if p2p::signing::sign_message(handle.keypair(), &mut request).is_err() {
+            any_failed = true;
+            continue;
+        }
+
+        if handle
+            .send_two_stream_request(peer_id, request)
+            .await
+            .is_err()
+        {
+            any_failed = true;
+        }
+    }
+
+    if any_failed {
+        Err("some pushes failed".to_string())
+    } else {
+        Ok(())
+    }
 }

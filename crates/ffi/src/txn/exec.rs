@@ -53,37 +53,12 @@ pub unsafe extern "C" fn exec_request_in_txn(
         _ => None,
     };
 
-    // Set up thread-local signer for block signing during mutations.
-    // Matches Go's behavior: if no explicit identity, fall back to node identity.
-    if let Some(ref s) = identity_str {
-        if !s.is_empty() {
-            if let Some(signing_config) = defra_core::signing::get_identity(s) {
-                defra_core::signing::set_signing_config(Some(signing_config));
-            } else {
-                defra_core::signing::set_signing_config(None);
-            }
-        } else {
-            let node_signing_config = NODES
-                .get(node_ptr, |state| {
-                    state
-                        .node_identity_did
-                        .as_ref()
-                        .and_then(|did| defra_core::signing::get_identity(did))
-                })
-                .flatten();
-            defra_core::signing::set_signing_config(node_signing_config);
-        }
-    } else {
-        let node_signing_config = NODES
-            .get(node_ptr, |state| {
-                state
-                    .node_identity_did
-                    .as_ref()
-                    .and_then(|did| defra_core::signing::get_identity(did))
-            })
-            .flatten();
-        defra_core::signing::set_signing_config(node_signing_config);
-    }
+    let node_did = NODES
+        .get(node_ptr, |state| state.node_identity_did.clone())
+        .flatten();
+    let signing =
+        defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
+    defra_core::signing::set_signing_config(signing);
 
     // Check if identity has DAC bypass (NAC admin/owner can read all documents)
     crate::query::check_and_set_dac_bypass(rt, node_ptr, identity_did);

@@ -1,7 +1,7 @@
 //! P2P initialization methods for Node
 
 use tokio::task::JoinHandle;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use super::node::Node;
 use crate::config::Config;
@@ -13,24 +13,9 @@ impl Node {
     /// If a peer key exists in the keyring, it is loaded and converted to a libp2p Keypair.
     /// If no peer key exists, a new Ed25519 key is generated and stored in the keyring.
     pub(super) fn init_peer_key(config: &Config) -> Result<(p2p::Keypair, String)> {
-        use crate::config::KeyringBackend;
-        use keyring::{FileKeyring, Keyring, SystemKeyring, PEER_KEY};
+        use keyring::PEER_KEY;
 
-        let kr: Box<dyn Keyring> = match config.keyring.backend {
-            KeyringBackend::File => {
-                let path = if config.keyring.path.starts_with('/') {
-                    std::path::PathBuf::from(&config.keyring.path)
-                } else {
-                    config.rootdir.join(&config.keyring.path)
-                };
-                let secret =
-                    keyring::load_secret_from_env().map_err(|e| Error::Keyring(e.to_string()))?;
-                Box::new(
-                    FileKeyring::open(&path, secret).map_err(|e| Error::Keyring(e.to_string()))?,
-                )
-            }
-            KeyringBackend::System => Box::new(SystemKeyring::open(&config.keyring.namespace)),
-        };
+        let kr = crate::commands::open_keyring(config)?;
 
         // Try to load existing peer key
         match kr.get(PEER_KEY) {
@@ -111,11 +96,15 @@ impl Node {
         tokio::sync::mpsc::Receiver<p2p::HostEvent>,
         JoinHandle<()>,
     )> {
+        let p2p_config = p2p::P2PHostConfig {
+            enable_pubsub,
+            enable_relay: config.net.relay_enabled,
+        };
         let (host, handle, events, _replicators) = match keypair {
-            Some(kp) => p2p::P2PHost::with_keypair_and_config(kp, bitswap_store, enable_pubsub)
+            Some(kp) => p2p::P2PHost::with_keypair_and_config(kp, bitswap_store, p2p_config)
                 .await
                 .map_err(Error::P2P)?,
-            None => p2p::P2PHost::with_pubsub(bitswap_store, enable_pubsub)
+            None => p2p::P2PHost::with_config(bitswap_store, p2p_config)
                 .await
                 .map_err(Error::P2P)?,
         };
@@ -146,7 +135,9 @@ impl Node {
         }
 
         if config.net.relay_enabled {
-            warn!("net.relay_enabled=true is not yet supported; relay is not available");
+            info!("Relay client transport enabled");
+        } else {
+            info!("Relay client disabled");
         }
 
         // Get and display peer ID

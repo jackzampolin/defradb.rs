@@ -24,6 +24,7 @@
 //! - Every permission expression MUST start with `owner`
 //! - Only union (`+`) operations allowed: `owner + reader`
 
+mod auth_error;
 mod dac;
 mod error;
 mod identity;
@@ -36,6 +37,7 @@ mod relation;
 mod store;
 pub mod zanzibar;
 
+pub use auth_error::normalize_auth_error;
 pub use dac::DocumentACP;
 pub use error::{Error, Result};
 pub use identity::Identity;
@@ -57,7 +59,7 @@ pub use zanzibar::{
 
 // Re-export NAC types
 pub use nac::{
-    create_node_policy, validate_node_policy, NacStatus, NodeACP, NodeAcpOperations,
-    NodePermission, ADMIN_RELATION as NAC_ADMIN_RELATION, NODE_OBJECT_ID, NODE_POLICY_ID,
-    NODE_RESOURCE_NAME, OWNER_RELATION as NAC_OWNER_RELATION,
+    create_node_policy, is_valid_nac_relation, validate_node_policy, NacStatus, NodeACP,
+    NodeAcpOperations, NodePermission, ADMIN_RELATION as NAC_ADMIN_RELATION, NODE_OBJECT_ID,
+    NODE_POLICY_ID, NODE_RESOURCE_NAME, OWNER_RELATION as NAC_OWNER_RELATION, VALID_NAC_RELATIONS,
 };

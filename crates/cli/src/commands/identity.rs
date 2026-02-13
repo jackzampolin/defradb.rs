@@ -130,7 +130,7 @@ impl IdentityNewArgs {
         let raw_bytes = identity.private_key_bytes();
 
         if let Some(ref name) = self.name {
-            let keyring = open_keyring(&config)?;
+            let keyring = super::open_keyring(&config)?;
             keyring
                 .set(name, &raw_bytes)
                 .map_err(|e| Error::Keyring(e.to_string()))?;
@@ -377,32 +377,5 @@ fn parse_jwk(text: &str) -> Result<Vec<u8>> {
 }
 
 fn open_keyring(config: &Config) -> Result<Box<dyn keyring::Keyring>> {
-    use crate::config::KeyringBackend;
-    use std::path::PathBuf;
-
-    if config.keyring.disabled {
-        return Err(Error::Keyring("keyring is disabled".to_string()));
-    }
-
-    match config.keyring.backend {
-        KeyringBackend::File => {
-            let path = {
-                let p = PathBuf::from(&config.keyring.path);
-                if p.is_absolute() {
-                    p
-                } else {
-                    config.rootdir.join(p)
-                }
-            };
-            let secret =
-                keyring::load_secret_from_env().map_err(|e| Error::Keyring(e.to_string()))?;
-            let kr = keyring::FileKeyring::open(&path, secret)
-                .map_err(|e| Error::Keyring(e.to_string()))?;
-            Ok(Box::new(kr))
-        }
-        KeyringBackend::System => {
-            let kr = keyring::SystemKeyring::open(&config.keyring.namespace);
-            Ok(Box::new(kr))
-        }
-    }
+    super::open_keyring(config)
 }

@@ -77,18 +77,24 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         .await
                 }
             }
-            ParsedOperation::Mutation { explain, .. } => {
+            ParsedOperation::Mutation {
+                mutations, explain, ..
+            } => {
                 if let Some(explain_type) = explain {
                     // Return mutation plan instead of executing
                     self.explain_mutation_with_identity(&request.query, identity, explain_type)
                         .await
                 } else {
-                    self.execute_mutation_with_identity_and_vars(
-                        &request.query,
-                        identity,
-                        variables.as_ref(),
-                    )
-                    .await
+                    // Use pre-parsed mutations to avoid redundant re-parsing
+                    match self.mutator.as_ref() {
+                        Some(mutator) => {
+                            self.execute_parsed_mutations(mutations, mutator.clone(), identity)
+                                .await
+                        }
+                        None => Err(crate::error::QueryError::execution(
+                            "mutations require a mutator; call with_mutator() first",
+                        )),
+                    }
                 }
             }
             ParsedOperation::Subscription { .. } => {

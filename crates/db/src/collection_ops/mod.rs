@@ -9,6 +9,7 @@
 mod create;
 mod delete;
 mod lookup;
+mod resolve;
 mod version;
 
 use crate::collection::Collection;

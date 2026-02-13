@@ -3,12 +3,14 @@ use super::*;
 impl Collection {
     /// Create a new document and update all indexes.
     ///
-    /// This method wraps the standard create operation with index maintenance.
+    /// When `blind` is true, skips the document existence check. Use this when
+    /// the document ID was just generated (content-addressed), guaranteeing uniqueness.
     pub async fn create_with_indexes(
         &self,
         datastore: &NamespaceView,
         doc: &Document,
         index_manager: &IndexManager,
+        blind: bool,
     ) -> Result<DocID> {
         // Validate document against schema
         self.validate_document(doc)?;
@@ -19,9 +21,10 @@ impl Collection {
             .cloned()
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
 
-        // Check if document already exists
         let key = self.doc_key(&doc_id);
-        if datastore.has(&key).await.map_err(Error::Storage)? {
+
+        // Skip existence check for blind creates (content-addressed IDs are unique by construction)
+        if !blind && datastore.has(&key).await.map_err(Error::Storage)? {
             return Err(Error::InvalidDocument(format!(
                 "Document with ID {} already exists",
                 doc_id
@@ -39,10 +42,16 @@ impl Collection {
         // Store schema version for lens migration support
         self.store_version(datastore, &doc_id).await?;
 
-        // Update indexes
-        index_manager
-            .on_document_create(datastore, doc, &self.def)
-            .await?;
+        // Update indexes (skip unique constraint checks for blind creates)
+        if blind {
+            index_manager
+                .on_document_create_blind(datastore, doc, &self.def)
+                .await?;
+        } else {
+            index_manager
+                .on_document_create(datastore, doc, &self.def)
+                .await?;
+        }
 
         Ok(doc_id)
     }

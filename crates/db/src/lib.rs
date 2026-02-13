@@ -128,7 +128,7 @@ pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
 };
 #[cfg(feature = "p2p")]
-pub use push_docs::push_existing_docs;
+pub use push_docs::{push_existing_docs, retry_doc};
 pub use schema_loader::{
     get_collection_by_version_id, get_collection_version_ids, get_collections_by_collection_id,
     load_active_collections,

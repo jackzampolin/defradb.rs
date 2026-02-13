@@ -278,13 +278,23 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
         )
     }
 
-    /// Build a GraphQL create mutation.
+    /// Build a GraphQL create mutation for a single document.
     fn build_create_mutation(&self, collection: &str, data: &JsonValue) -> String {
         let graphql_data = Self::json_to_graphql_input(data);
         format!(
             r#"mutation {{ create_{collection}(input: [{graphql_data}]) {{ _docID }} }}"#,
             collection = collection,
             graphql_data = graphql_data
+        )
+    }
+
+    /// Build a GraphQL create mutation for multiple documents in a single batch.
+    fn build_create_many_mutation(&self, collection: &str, docs: &[JsonValue]) -> String {
+        let inputs: Vec<String> = docs.iter().map(Self::json_to_graphql_input).collect();
+        format!(
+            r#"mutation {{ create_{collection}(input: [{inputs}]) {{ _docID }} }}"#,
+            collection = collection,
+            inputs = inputs.join(", ")
         )
     }
 
@@ -449,20 +459,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
             .execute_mutation_with_identity(&mutation, identity.cloned())
             .await?;
 
-        // Extract the created document's ID and fetch the full document
-        let doc_id = result
+        // Return the mutation result directly (the caller discards the body)
+        let doc = result
             .get(format!("create_{}", collection))
             .or_else(|| result.get(collection))
             .and_then(|v| v.as_array())
             .and_then(|arr| arr.first())
-            .and_then(|doc| doc.get("_docID"))
-            .and_then(|id| id.as_str())
-            .ok_or_else(|| RestError::internal("failed to get created document ID"))?;
-
-        // Fetch and return the full document
-        self.fetch_full_document(collection, doc_id, identity)
-            .await?
-            .ok_or_else(|| RestError::internal("created document not found"))
+            .cloned()
+            .unwrap_or_default();
+        Ok(doc)
     }
 
     async fn create_documents(
@@ -471,14 +476,30 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
         data: Vec<JsonValue>,
         identity: Option<&Did>,
     ) -> RestResult<Vec<JsonValue>> {
-        let mut results = Vec::with_capacity(data.len());
-        for item in data {
-            let result = self
-                .create_document(collection, item.clone(), identity)
-                .await?;
-            results.push(result);
+        if !self
+            .runner
+            .has_collection(collection)
+            .await
+            .map_err(|e| RestError::internal(e.to_string()))?
+        {
+            return Err(RestError::collection_not_found(collection));
         }
-        Ok(results)
+
+        // Build a single batched mutation for all documents (1 transaction instead of N)
+        let mutation = self.build_create_many_mutation(collection, &data);
+        let result = self
+            .runner
+            .execute_mutation_with_identity(&mutation, identity.cloned())
+            .await?;
+
+        // Return the mutation results directly (the caller discards the body)
+        let docs = result
+            .get(format!("create_{}", collection))
+            .or_else(|| result.get(collection))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(docs)
     }
 
     async fn update_document(

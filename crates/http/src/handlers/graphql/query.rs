@@ -89,6 +89,17 @@ fn check_encrypted_fields(state: &AppState, query: &str) -> Result<(), HttpError
     ))
 }
 
+/// Fast check for whether a query could be a subscription.
+///
+/// Returns `false` if the query definitely starts with `mutation` or `query` or `{`,
+/// which means it cannot be a subscription. Returns `true` if the query might be a
+/// subscription (starts with `subscription` or is ambiguous), requiring a full parse.
+fn might_be_subscription(query: &str) -> bool {
+    let trimmed = query.trim_start();
+    // mutation/query/anonymous queries are definitely not subscriptions
+    !(trimmed.starts_with("mutation") || trimmed.starts_with("query") || trimmed.starts_with('{'))
+}
+
 /// Check if a request has an `Accept: text/event-stream` header.
 fn wants_sse(headers: &HeaderMap) -> bool {
     headers
@@ -117,9 +128,11 @@ pub async fn graphql(
     identity: ExtractIdentity,
     Json(mut request): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, HttpError> {
-    // NAC check: Determine required permission based on operation type
-    let required_permission = permission_for_query(&request.query);
-    require_permission(&state, &identity, required_permission).await?;
+    // NAC check: Only parse for permission type when NAC is enabled
+    if state.nac.is_some() {
+        let required_permission = permission_for_query(&request.query);
+        require_permission(&state, &identity, required_permission).await?;
+    }
 
     // Validate encrypted field queries require P2P
     check_encrypted_fields(&state, &request.query)?;
@@ -228,18 +241,24 @@ pub async fn graphql_transactional(
     headers: HeaderMap,
     Json(request): Json<TransactionalQueryRequest>,
 ) -> Result<axum::response::Response, HttpError> {
-    // NAC check: Determine required permission based on operation type
-    let required_permission = permission_for_query(&request.query);
-    require_permission(&state, &identity, required_permission).await?;
+    // NAC check: Only parse for permission type when NAC is enabled
+    if state.nac.is_some() {
+        let required_permission = permission_for_query(&request.query);
+        require_permission(&state, &identity, required_permission).await?;
+    }
 
     // Validate encrypted field queries require P2P
     check_encrypted_fields(&state, &request.query)?;
 
-    // Check if this is a subscription query
-    if matches!(
-        parse_request(&request.query),
-        Ok(ParsedOperation::Subscription { .. })
-    ) {
+    // Check if this is a subscription query.
+    // Fast path: skip the full GraphQL parse for mutations/queries (the common case).
+    // Only do the full parse when the query might be a subscription.
+    if might_be_subscription(&request.query)
+        && matches!(
+            parse_request(&request.query),
+            Ok(ParsedOperation::Subscription { .. })
+        )
+    {
         if !wants_sse(&headers) {
             return Err(HttpError::NotAcceptable(
                 "invalid subscription transport".to_string(),

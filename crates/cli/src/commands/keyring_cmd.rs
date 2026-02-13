@@ -1,7 +1,6 @@
 //! Keyring command implementation
 
 use std::io::{self, BufRead, IsTerminal, Read, Write};
-use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 
@@ -61,7 +60,7 @@ impl GenerateArgs {
     pub fn execute(self, config: Config) -> Result<()> {
         use crypto::Key;
 
-        let keyring = open_keyring(&config)?;
+        let keyring = super::open_keyring(&config)?;
 
         let (key, description) = match self.key_type.to_lowercase().as_str() {
             "ed25519" => {
@@ -112,7 +111,7 @@ pub struct ExportArgs {
 
 impl ExportArgs {
     pub fn execute(self, config: Config) -> Result<()> {
-        let keyring = open_keyring(&config)?;
+        let keyring = super::open_keyring(&config)?;
 
         let key = keyring
             .get(&self.name)
@@ -142,7 +141,7 @@ pub struct ImportArgs {
 
 impl ImportArgs {
     pub fn execute(self, config: Config) -> Result<()> {
-        let keyring = open_keyring(&config)?;
+        let keyring = super::open_keyring(&config)?;
 
         // Read from stdin
         let stdin = io::stdin();
@@ -180,7 +179,7 @@ pub struct DeleteArgs {
 
 impl DeleteArgs {
     pub fn execute(self, config: Config) -> Result<()> {
-        let keyring = open_keyring(&config)?;
+        let keyring = super::open_keyring(&config)?;
 
         keyring
             .delete(&self.name)
@@ -197,7 +196,7 @@ pub struct ListArgs {}
 
 impl ListArgs {
     pub fn execute(self, config: Config) -> Result<()> {
-        let keyring = open_keyring(&config)?;
+        let keyring = super::open_keyring(&config)?;
 
         let keys = keyring.list().map_err(|e| Error::Keyring(e.to_string()))?;
 
@@ -210,40 +209,6 @@ impl ListArgs {
         }
 
         Ok(())
-    }
-}
-
-/// Open the appropriate keyring based on config
-fn open_keyring(config: &Config) -> Result<Box<dyn keyring::Keyring>> {
-    use crate::config::KeyringBackend;
-
-    if config.keyring.disabled {
-        return Err(Error::Keyring("keyring is disabled".to_string()));
-    }
-
-    match config.keyring.backend {
-        KeyringBackend::File => {
-            let path = resolve_keyring_path(config)?;
-            let secret =
-                keyring::load_secret_from_env().map_err(|e| Error::Keyring(e.to_string()))?;
-            let kr = keyring::FileKeyring::open(&path, secret)
-                .map_err(|e| Error::Keyring(e.to_string()))?;
-            Ok(Box::new(kr))
-        }
-        KeyringBackend::System => {
-            let kr = keyring::SystemKeyring::open(&config.keyring.namespace);
-            Ok(Box::new(kr))
-        }
-    }
-}
-
-/// Resolve the keyring path, using rootdir if path is relative
-fn resolve_keyring_path(config: &Config) -> Result<PathBuf> {
-    let path = PathBuf::from(&config.keyring.path);
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        Ok(config.rootdir.join(path))
     }
 }
 

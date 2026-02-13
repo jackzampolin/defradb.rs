@@ -88,7 +88,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         variables: Option<&std::collections::HashMap<String, JsonValue>>,
     ) -> Result<JsonValue> {
         let mutations = parse_mutations_with_variables(mutation_str, variables)?;
+        self.execute_parsed_mutations(mutations, mutator, caller_identity)
+            .await
+    }
 
+    /// Execute pre-parsed mutations, skipping redundant GraphQL parsing.
+    pub(crate) async fn execute_parsed_mutations(
+        &self,
+        mutations: Vec<Mutation>,
+        mutator: Arc<dyn DocMutator>,
+        caller_identity: Option<Did>,
+    ) -> Result<JsonValue> {
         // Compute request time once for all mutations in this request.
         // This ensures UTC_NOW resolves to the same timestamp across all mutations,
         // matching Go DefraDB's behavior.

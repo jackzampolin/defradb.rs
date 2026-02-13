@@ -41,12 +41,17 @@ pub async fn write_document_blocks(
     let mut field_cids: Vec<Cid> = Vec::new();
 
     // For creates (modified_fields=None), priority is always 1 and no heads exist.
-    // For updates, scan headstore for max priority (matches Go behavior).
+    // For updates, load all heads in a single scan to avoid M+2 overlapping scans.
     let is_create = modified_fields.is_none();
+    let snapshot = if is_create {
+        None
+    } else {
+        Some(DocHeadsSnapshot::load(headstore, &doc_id_str).await?)
+    };
     let priority: u64 = if is_create {
         1
     } else {
-        get_max_priority(headstore, &doc_id_str).await? + 1
+        snapshot.as_ref().unwrap().max_priority() + 1
     };
 
     // Create LWW blocks for each field
@@ -65,11 +70,11 @@ pub async fn write_document_blocks(
             Some(fields) => fields.contains(field_name), // Update: only modified fields
         };
 
-        // For creates, no heads exist yet — skip the headstore scan.
+        // For creates, no heads exist yet. For updates, use the pre-loaded snapshot.
         let field_head_entries = if is_create {
             Vec::new()
         } else {
-            get_all_field_heads(headstore, &doc_id_str, field_name).await?
+            snapshot.as_ref().unwrap().field_heads(field_name)
         };
 
         if should_create_block {
@@ -110,12 +115,11 @@ pub async fn write_document_blocks(
                         },
                         key: key.to_vec(),
                     };
-                    let enc_cid = enc_block
-                        .generate_cid()
-                        .map_err(|e| format!("Failed to generate encryption CID: {}", e))?;
                     let enc_bytes = enc_block
                         .to_dag_cbor()
                         .map_err(|e| format!("Failed to encode encryption block: {}", e))?;
+                    let enc_cid = generate_cid_from_bytes(&enc_bytes)
+                        .map_err(|e| format!("Failed to generate encryption CID: {}", e))?;
                     blockstore
                         .set(&enc_cid.to_bytes(), &enc_bytes)
                         .await
@@ -201,8 +205,7 @@ pub async fn write_document_blocks(
             let field_block_bytes = field_block
                 .to_dag_cbor()
                 .map_err(|e| format!("Failed to encode field block: {}", e))?;
-            let field_cid = field_block
-                .generate_cid()
+            let field_cid = generate_cid_from_bytes(&field_block_bytes)
                 .map_err(|e| format!("Failed to generate field CID: {}", e))?;
 
             // Debug: verify roundtrip of signature through serialization
@@ -258,11 +261,11 @@ pub async fn write_document_blocks(
         // Go only includes newly created field blocks in the composite's links array.
     }
 
-    // For creates, no composite heads exist yet — skip the headstore scan.
+    // For creates, no composite heads exist yet. For updates, use the snapshot.
     let (composite_head_entries, composite_heads) = if is_create {
         (Vec::new(), Vec::new())
     } else {
-        let entries = get_all_field_heads(headstore, &doc_id_str, "C").await?;
+        let entries = snapshot.as_ref().unwrap().field_heads("C");
         let heads: Vec<Cid> = entries.iter().map(|h| h.cid).collect();
         (entries, heads)
     };
@@ -288,12 +291,11 @@ pub async fn write_document_blocks(
                 field_name: None,
                 key: key.to_vec(),
             };
-            let enc_cid = enc_block
-                .generate_cid()
-                .map_err(|e| format!("Failed to generate composite encryption CID: {}", e))?;
             let enc_bytes = enc_block
                 .to_dag_cbor()
                 .map_err(|e| format!("Failed to encode composite encryption block: {}", e))?;
+            let enc_cid = generate_cid_from_bytes(&enc_bytes)
+                .map_err(|e| format!("Failed to generate composite encryption CID: {}", e))?;
             blockstore
                 .set(&enc_cid.to_bytes(), &enc_bytes)
                 .await
@@ -326,8 +328,7 @@ pub async fn write_document_blocks(
     let composite_bytes = composite_block
         .to_dag_cbor()
         .map_err(|e| format!("Failed to encode composite block: {}", e))?;
-    let composite_cid = composite_block
-        .generate_cid()
+    let composite_cid = generate_cid_from_bytes(&composite_bytes)
         .map_err(|e| format!("Failed to generate composite CID: {}", e))?;
 
     // Store the composite block in blockstore
@@ -352,7 +353,7 @@ pub async fn write_document_blocks(
         .await
         .map_err(|e| format!("Failed to write composite head: {}", e))?;
 
-    tracing::info!(
+    tracing::debug!(
         doc_id = %doc_id_str,
         cid = %composite_cid,
         field_count = field_cids.len(),
@@ -382,12 +383,11 @@ pub async fn write_delete_block(
 ) -> Result<BlockResult, String> {
     let doc_id_bytes = doc_id.as_bytes().to_vec();
 
-    // Get max existing priority and increment by 1
-    let max_priority = get_max_priority(headstore, doc_id).await?;
-    let priority: u64 = max_priority + 1;
+    // Load all heads in a single scan (replaces separate priority + composite scans).
+    let snapshot = DocHeadsSnapshot::load(headstore, doc_id).await?;
+    let priority: u64 = snapshot.max_priority() + 1;
 
-    // Get all existing composite heads to build proper DAG links
-    let composite_head_entries = get_all_field_heads(headstore, doc_id, "C").await?;
+    let composite_head_entries = snapshot.field_heads("C");
     let composite_heads: Vec<Cid> = composite_head_entries.iter().map(|h| h.cid).collect();
 
     // Create the Composite delta payload with status=2 (deleted)
@@ -416,8 +416,7 @@ pub async fn write_delete_block(
     let composite_bytes = composite_block
         .to_dag_cbor()
         .map_err(|e| format!("Failed to encode delete composite block: {}", e))?;
-    let composite_cid = composite_block
-        .generate_cid()
+    let composite_cid = generate_cid_from_bytes(&composite_bytes)
         .map_err(|e| format!("Failed to generate delete composite CID: {}", e))?;
 
     // Store the composite block in blockstore
@@ -442,7 +441,7 @@ pub async fn write_delete_block(
         .await
         .map_err(|e| format!("Failed to write delete composite head: {}", e))?;
 
-    tracing::info!(
+    tracing::debug!(
         doc_id = %doc_id,
         cid = %composite_cid,
         priority = priority,

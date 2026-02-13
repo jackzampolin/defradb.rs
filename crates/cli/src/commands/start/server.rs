@@ -393,14 +393,12 @@ impl Node {
 
                 // Restore document subscriptions from peerstore
                 let mut restored_doc_ids = std::collections::HashSet::new();
-                if let Ok(Some(data)) = restore_peerstore.get_p2p_documents().await {
-                    if let Ok(doc_ids) = serde_json::from_slice::<Vec<String>>(&data) {
-                        for doc_id in &doc_ids {
-                            let _ = p2p_handle
-                                .subscribe(p2p::topics::DefraTopic::document(doc_id))
-                                .await;
-                            restored_doc_ids.insert(doc_id.clone());
-                        }
+                if let Ok(doc_ids) = restore_peerstore.load_documents().await {
+                    for doc_id in &doc_ids {
+                        let _ = p2p_handle
+                            .subscribe(p2p::topics::DefraTopic::document(doc_id))
+                            .await;
+                        restored_doc_ids.insert(doc_id.clone());
                     }
                 }
 

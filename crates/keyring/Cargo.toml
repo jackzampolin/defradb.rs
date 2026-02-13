@@ -10,6 +10,7 @@ description = "Keyring and key management for DefraDB"
 
 [dependencies]
 thiserror.workspace = true
+tracing.workspace = true
 base64 = "0.22"
 zeroize = "1.8"
 

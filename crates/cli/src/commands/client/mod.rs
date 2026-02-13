@@ -221,36 +221,10 @@ pub fn generate_auth_token(identity_hex: &str, audience: &str) -> Result<String>
 
 /// Generate a JWT auth token from a named key in the keyring.
 fn generate_auth_token_from_keyring(config: &Config, name: &str, audience: &str) -> Result<String> {
-    use crate::config::KeyringBackend;
     use crypto::KeyType;
     use identity::{new_token, RawIdentity};
-    use std::path::PathBuf;
 
-    if config.keyring.disabled {
-        return Err(Error::Keyring("keyring is disabled".to_string()));
-    }
-
-    let keyring: Box<dyn keyring::Keyring> = match config.keyring.backend {
-        KeyringBackend::File => {
-            let path = {
-                let p = PathBuf::from(&config.keyring.path);
-                if p.is_absolute() {
-                    p
-                } else {
-                    config.rootdir.join(p)
-                }
-            };
-            let secret =
-                keyring::load_secret_from_env().map_err(|e| Error::Keyring(e.to_string()))?;
-            let kr = keyring::FileKeyring::open(&path, secret)
-                .map_err(|e| Error::Keyring(e.to_string()))?;
-            Box::new(kr)
-        }
-        KeyringBackend::System => {
-            let kr = keyring::SystemKeyring::open(&config.keyring.namespace);
-            Box::new(kr)
-        }
-    };
+    let keyring = super::open_keyring(config)?;
 
     let key_bytes = keyring
         .get(name)

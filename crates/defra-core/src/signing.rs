@@ -62,6 +62,20 @@ pub fn get_identity(did: &str) -> Option<SigningConfig> {
         .and_then(|store| store.get(did).cloned())
 }
 
+/// Resolve signing config for a request identity with node-identity fallback.
+///
+/// - If `identity_did` is `Some(non-empty)`, look up that DID's signing config.
+/// - Otherwise, fall back to `node_identity_did` (the node's default identity).
+pub fn resolve_signing_config(
+    identity_did: Option<&str>,
+    node_identity_did: Option<&str>,
+) -> Option<SigningConfig> {
+    match identity_did {
+        Some(did) if !did.is_empty() => get_identity(did),
+        _ => node_identity_did.and_then(get_identity),
+    }
+}
+
 /// Clear all stored identities (for node cleanup).
 pub fn clear_identity_store() {
     if let Ok(mut store) = identity_store().lock() {

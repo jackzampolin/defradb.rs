@@ -69,9 +69,14 @@ fn doc_encryption_store() -> &'static Mutex<HashMap<String, EncryptionConfig>> {
     DOC_ENCRYPTION_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+const MAX_DOC_ENCRYPTION_ENTRIES: usize = 10_000;
+
 /// Store encryption config for a document.
 pub fn store_doc_encryption(doc_id: &str, config: EncryptionConfig) {
     if let Ok(mut store) = doc_encryption_store().lock() {
+        if store.len() >= MAX_DOC_ENCRYPTION_ENTRIES {
+            store.clear();
+        }
         store.insert(doc_id.to_string(), config);
     }
 }

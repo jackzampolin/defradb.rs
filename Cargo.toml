@@ -24,6 +24,7 @@ members = [
     "crates/wasm",
     "tools/ffi-test",
     "tools/integration-test",
+    "tools/shinzo-bench",
 ]
 
 [workspace.package]
@@ -50,13 +51,15 @@ ciborium = "0.2"
 
 # P2P networking
 # Note: Using 0.53 to match iroh-bitswap's dependency
-libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify"] }
+libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "identify", "relay"] }
 iroh-bitswap = { git = "https://github.com/sourcenetwork/beetle", branch = "main" }
 libp2p-stream = "0.1.0-alpha.1"
 multiaddr = "0.18"
 
 # Storage
 redb = "2.4"
+fjall = "3"
+rocksdb = "0.22"
 
 # Cryptography
 ed25519-dalek = { version = "2.1", features = ["serde"] }
@@ -98,6 +101,9 @@ proptest = "1.4"
 # Synchronization (non-poisoning locks)
 parking_lot = "0.12"
 
+# Caching
+lru = "0.12"
+
 # Async streams
 tokio-stream = "0.1"
 
@@ -110,6 +116,7 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+panic = "abort"
 
 [profile.test]
 opt-level = 1

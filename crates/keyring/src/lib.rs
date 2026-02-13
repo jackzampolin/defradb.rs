@@ -3,6 +3,7 @@
 //! Provides secure storage for cryptographic keys with support for multiple backends:
 //! - File-based storage with JWE encryption (PBES2-HS512-A256KW)
 //! - System keyring (OS-provided key management)
+//! - systemd-creds encryption (Linux, requires systemd 250+)
 
 mod error;
 mod file;
@@ -10,6 +11,8 @@ mod key_name;
 mod keyring;
 mod signer;
 mod system;
+#[cfg(target_os = "linux")]
+mod systemd_creds;
 
 pub use error::{Error, Result};
 pub use file::FileKeyring;
@@ -19,6 +22,8 @@ pub use keyring::Keyring;
 pub use signer::KeyringSigner;
 pub use signer::{KeyHandle, KeyType};
 pub use system::SystemKeyring;
+#[cfg(target_os = "linux")]
+pub use systemd_creds::{systemd_creds_available, SystemdCredsKeyring};
 
 /// Environment variable name for the keyring secret
 pub const KEYRING_SECRET_ENV: &str = "DEFRA_KEYRING_SECRET";

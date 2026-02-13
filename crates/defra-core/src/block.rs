@@ -334,7 +334,7 @@ pub struct LwwDeltaPayload {
     pub priority: u64,
 
     /// Collection version identifier
-    #[serde(rename = "schemaVersionID")]
+    #[serde(rename = "collectionVersionID")]
     pub schema_version_id: String,
 
     /// The value data (empty = deletion/tombstone)
@@ -362,7 +362,7 @@ pub struct CounterDeltaPayload {
     pub nonce: i64,
 
     /// Collection version identifier
-    #[serde(rename = "schemaVersionID")]
+    #[serde(rename = "collectionVersionID")]
     pub schema_version_id: String,
 
     /// Increment/decrement value (encoded)
@@ -380,7 +380,7 @@ pub struct CompositeDeltaPayload {
     pub doc_id: Vec<u8>,
 
     /// Collection version identifier
-    #[serde(rename = "schemaVersionID")]
+    #[serde(rename = "collectionVersionID")]
     pub schema_version_id: String,
 
     /// Priority
@@ -398,7 +398,7 @@ pub struct CompositeDeltaPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CollectionDeltaPayload {
     /// Collection version identifier
-    #[serde(rename = "schemaVersionID")]
+    #[serde(rename = "collectionVersionID")]
     pub schema_version_id: String,
 
     /// Priority
@@ -703,8 +703,11 @@ pub enum SignatureType {
 // Helper Functions
 // ============================================================================
 
-/// Generate CID from raw bytes using DAG-CBOR codec and SHA2-256
-fn generate_cid_from_bytes(bytes: &[u8]) -> Result<Cid> {
+/// Generate CID from raw DAG-CBOR bytes using SHA2-256.
+///
+/// Use this when you already have the serialized bytes to avoid
+/// double-serializing (e.g., when you called `to_dag_cbor()` separately).
+pub fn generate_cid_from_bytes(bytes: &[u8]) -> Result<Cid> {
     // Hash with SHA2-256
     let mut hasher = Sha256::new();
     hasher.update(bytes);

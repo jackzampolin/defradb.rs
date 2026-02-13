@@ -37,9 +37,8 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
     ) -> Result<IndexInfo, String> {
         let col = self
             .database
-            .get_collection(collection)
-            .map_err(|e| format!("{}", e))?
-            .ok_or_else(|| format!("collection '{}' not found", collection))?;
+            .require_collection(collection)
+            .map_err(|e| format!("{}", e))?;
 
         let schema = col.schema().clone();
         let short_id = if schema.root_id > 0 {
@@ -124,9 +123,8 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
         let collections = if let Some(name) = collection {
             let col = self
                 .database
-                .get_collection(name)
-                .map_err(|e| format!("{}", e))?
-                .ok_or_else(|| format!("collection '{}' not found", name))?;
+                .require_collection(name)
+                .map_err(|e| format!("{}", e))?;
             vec![col]
         } else {
             let names = self
@@ -175,9 +173,8 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
     async fn drop_index(&self, collection: &str, name: &str) -> Result<(), String> {
         let col = self
             .database
-            .get_collection(collection)
-            .map_err(|e| format!("{}", e))?
-            .ok_or_else(|| format!("collection '{}' not found", collection))?;
+            .require_collection(collection)
+            .map_err(|e| format!("{}", e))?;
 
         let schema = col.schema().clone();
         let short_id = if schema.root_id > 0 {

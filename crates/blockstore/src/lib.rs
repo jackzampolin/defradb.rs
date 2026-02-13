@@ -46,7 +46,10 @@ pub use traits::Blockstore;
 
 use async_trait::async_trait;
 use cid::Cid;
+use lru::LruCache;
+use parking_lot::Mutex;
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use storage::corekv::{IterOptions, Key, Store};
@@ -54,14 +57,22 @@ use storage::keys::blockstore::{BlockstoreKey, ToMergeIndexKey};
 use storage::stores::blockstore::BlockstoreTxn;
 use storage::stores::Blockstore as InternalBlockstore;
 
+/// Default number of entries in the block cache (matches Go's 1M entry LRU).
+const DEFAULT_BLOCK_CACHE_SIZE: usize = 1_000_000;
+
 /// DefraDB blockstore implementation
 ///
 /// Wraps the internal storage::stores::Blockstore with a clean public API.
 /// Supports both P2P mode (with merge tracking) and local mode (no tracking).
+///
+/// Includes a process-wide LRU cache for recently accessed blocks, reducing
+/// storage reads during merge, query, and P2P sync operations.
 pub struct DefraBlockstore<S: Store> {
     store: InternalBlockstore<S>,
     /// Whether to verify hash on read
     rehash: AtomicBool,
+    /// LRU cache for recently accessed blocks (CID → block bytes)
+    cache: Mutex<LruCache<Cid, Vec<u8>>>,
 }
 
 impl<S: Store> fmt::Debug for DefraBlockstore<S> {
@@ -85,6 +96,9 @@ impl<S: Store + 'static> DefraBlockstore<S> {
         Self {
             store: InternalBlockstore::new(store, is_p2p),
             rehash: AtomicBool::new(false),
+            cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(DEFAULT_BLOCK_CACHE_SIZE).unwrap(),
+            )),
         }
     }
 
@@ -152,6 +166,15 @@ impl<S: Store + 'static> DefraBlockstore<S> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     async fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>> {
+        // Check LRU cache first (skip cache when hash verification is enabled,
+        // since cached data may not have been verified yet)
+        if !self.rehash.load(Ordering::Relaxed) {
+            let mut cache = self.cache.lock();
+            if let Some(data) = cache.get(cid) {
+                return Ok(Some(data.clone()));
+            }
+        }
+
         let txn = self.store.new_txn(true).await?;
         let bs_txn = txn
             .as_any()
@@ -166,12 +189,21 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
             }
         }
 
+        // Populate cache on miss
+        if let Some(ref data) = result {
+            self.cache.lock().put(*cid, data.clone());
+        }
+
         Ok(result)
     }
 
     async fn put(&self, cid: &Cid, data: &[u8]) -> Result<()> {
-        // Optimization: Has is cheaper than Set, so check if we already have it
-        // This matches the Go implementation behavior
+        // Check cache for existence (avoids storage read for recently-written blocks)
+        if self.cache.lock().contains(cid) {
+            return Ok(());
+        }
+
+        // Fallback: check storage
         if self.has(cid).await? {
             return Ok(());
         }
@@ -185,6 +217,9 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
             bs_txn.put_block(cid, data).await?;
         }
         txn.commit().await?;
+
+        // Write-through: populate cache
+        self.cache.lock().put(*cid, data.to_vec());
         Ok(())
     }
 
@@ -194,24 +229,40 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
         }
 
         let mut txn = self.store.new_txn(false).await?;
+        let mut written: Vec<(Cid, Vec<u8>)> = Vec::new();
         {
             let bs_txn = txn
                 .as_any_mut()
                 .downcast_mut::<BlockstoreTxn>()
                 .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
             for (cid, data) in blocks {
-                // Optimization: skip if already exists (matches Go behavior)
+                // Check cache first, then storage
+                if self.cache.lock().contains(cid) {
+                    continue;
+                }
                 if bs_txn.has_block(cid).await? {
                     continue;
                 }
                 bs_txn.put_block(cid, data).await?;
+                written.push((**cid, data.to_vec()));
             }
         }
         txn.commit().await?;
+
+        // Write-through: populate cache for all written blocks
+        let mut cache = self.cache.lock();
+        for (cid, data) in written {
+            cache.put(cid, data);
+        }
         Ok(())
     }
 
     async fn has(&self, cid: &Cid) -> Result<bool> {
+        // Check cache first
+        if self.cache.lock().contains(cid) {
+            return Ok(true);
+        }
+
         let txn = self.store.new_txn(true).await?;
         let bs_txn = txn
             .as_any()
@@ -222,6 +273,9 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     }
 
     async fn delete(&self, cid: &Cid) -> Result<()> {
+        // Evict from cache
+        self.cache.lock().pop(cid);
+
         let mut txn = self.store.new_txn(false).await?;
         {
             let bs_txn = txn

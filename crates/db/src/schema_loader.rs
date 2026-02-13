@@ -201,7 +201,7 @@ pub async fn get_collections_by_collection_id(
     // Get all version IDs for this collection
     let version_ids = get_collection_version_ids(systemstore, collection_id).await?;
 
-    tracing::info!(
+    tracing::debug!(
         collection_id = %collection_id,
         version_ids = ?version_ids,
         "Loading collection versions from systemstore"
@@ -222,7 +222,7 @@ pub async fn get_collections_by_collection_id(
                 })?;
 
                 // Log the version with transform information
-                tracing::info!(
+                tracing::debug!(
                     version_id = %collection.version_id,
                     collection_id = %collection.collection_id,
                     name = %collection.name,
@@ -247,7 +247,7 @@ pub async fn get_collections_by_collection_id(
         }
     }
 
-    tracing::info!(
+    tracing::debug!(
         collection_id = %collection_id,
         loaded_count = collections.len(),
         "Finished loading collection versions"

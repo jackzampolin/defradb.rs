@@ -87,8 +87,10 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         let (collection, datastore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
 
-        // Generate document ID if not present
-        if doc.id().is_none() {
+        // Generate document ID if not present.
+        // Track whether ID was just generated for blind create optimization.
+        let id_was_generated = doc.id().is_none();
+        if id_was_generated {
             doc.generate_and_set_doc_id().map_err(|e| {
                 query::error::QueryError::execution(format!("failed to generate DocID: {}", e))
             })?;
@@ -98,9 +100,10 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             query::error::QueryError::execution("document should have ID after generation")
         })?;
 
-        // Use create_with_indexes to enforce unique constraints and maintain indexes
+        // Use create_with_indexes to enforce unique constraints and maintain indexes.
+        // Blind create skips existence check for content-addressed (generated) IDs.
         collection
-            .create_with_indexes(&datastore, &doc, &index_manager)
+            .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
             .await
             .map_err(|e| {
                 let msg = e.to_string();

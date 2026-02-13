@@ -115,6 +115,28 @@ impl UniqueIndex {
             .collect()
     }
 
+    /// Save a document to the index without checking uniqueness.
+    ///
+    /// Used for blind creates where uniqueness is guaranteed by construction
+    /// (e.g., content-addressed document IDs with blockchain-derived values).
+    pub async fn save_blind<T: Reader + Writer + MaybeSend>(
+        &self,
+        txn: &mut T,
+        doc_id: &str,
+        values: &[NormalValue],
+    ) -> Result<()> {
+        validate_doc_id(doc_id, &self.desc.name)?;
+        self.validate_field_count(values, doc_id)?;
+
+        if Self::has_nil_field(values) {
+            let key = self.build_key_with_doc_id(values, doc_id)?;
+            return txn.set(&key, &[]).await;
+        }
+
+        let key = self.build_key(values)?;
+        txn.set(&key, doc_id.as_bytes()).await
+    }
+
     /// Get the entry with exact field values.
     ///
     /// Returns an iterator that yields at most one document (uniqueness constraint).

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use super::config::{DurabilityMode, RedbStoreOptions};
+use super::group_commit::GroupCommitBuffer;
 use super::transaction::RedbTxn;
 use super::KV_TABLE;
 use crate::backends::shared::{CallbackManager, ConflictTracker};
@@ -35,6 +36,8 @@ pub struct RedbStore {
     conflict_tracker: Arc<ConflictTracker>,
     /// Durability mode for write transactions
     durability: DurabilityMode,
+    /// Group commit buffer for coalescing write transactions
+    group_commit: Option<Arc<GroupCommitBuffer>>,
 }
 
 impl RedbStore {
@@ -142,14 +145,28 @@ impl RedbStore {
             write_txn.commit()?;
         }
 
+        let db = Arc::new(db);
+        let conflict_tracker = Arc::new(ConflictTracker::new());
+
+        // Create group commit buffer if a tokio runtime is available.
+        // This coalesces multiple transaction commits into single redb writes.
+        let group_commit = tokio::runtime::Handle::try_current().ok().map(|_| {
+            Arc::new(GroupCommitBuffer::new(
+                Arc::clone(&db),
+                opts.durability(),
+                Arc::clone(&conflict_tracker),
+            ))
+        });
+
         Ok(Self {
-            db: Arc::new(db),
+            db,
             closed: Arc::new(RwLock::new(false)),
             active_txn_count: Arc::new(AtomicUsize::new(0)),
             close_timeout: opts.close_timeout(),
             db_path,
-            conflict_tracker: Arc::new(ConflictTracker::new()),
+            conflict_tracker,
             durability: opts.durability(),
+            group_commit,
         })
     }
 
@@ -305,6 +322,7 @@ impl Store for RedbStore {
             discarded: Mutex::new(false),
             committed: Mutex::new(false),
             callbacks: CallbackManager::new(),
+            group_commit: self.group_commit.clone(),
         }))
     }
 
@@ -352,6 +370,11 @@ impl Store for RedbStore {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
+        }
+
+        // Shut down group commit flush loop so it releases its Arc<Database>
+        if let Some(ref gc) = self.group_commit {
+            gc.shutdown().await;
         }
 
         Ok(())

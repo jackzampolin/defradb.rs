@@ -51,19 +51,11 @@ pub unsafe extern "C" fn p2p_create_collections(
             let db = &state.database;
 
             rt.block_on(async {
-                // Validate all collection names exist and collect their schema root CIDs
-                let mut name_to_id = Vec::new();
-                for name in &collections {
-                    let col = db
-                        .get_collection(name)
-                        .map_err(|e| format!("failed to get collection: {}", e))?
-                        .ok_or_else(|| "collection not found".to_string())?;
-                    name_to_id.push((name.clone(), col.collection_id().to_string()));
-                }
+                let name_to_id = db
+                    .resolve_collection_ids(&collections)
+                    .map_err(|e| format!("{}", e))?;
 
                 for (name, collection_id) in &name_to_id {
-                    // Subscribe to the GossipSub topic using the schema root CID
-                    // (matches Go behavior which uses col.CollectionID())
                     let topic = DefraTopic::collection(collection_id);
                     if let Err(e) = p2p.handle.subscribe(topic).await {
                         tracing::warn!(collection = %name, collection_id = %collection_id, error = %e, "Failed to subscribe to GossipSub topic");
@@ -127,18 +119,11 @@ pub unsafe extern "C" fn p2p_delete_collections(
             let db = &state.database;
 
             rt.block_on(async {
-                // Validate all collection names exist and collect their schema root CIDs
-                let mut name_to_id = Vec::new();
-                for name in &collections {
-                    let col = db
-                        .get_collection(name)
-                        .map_err(|e| format!("failed to get collection: {}", e))?
-                        .ok_or_else(|| "collection not found".to_string())?;
-                    name_to_id.push((name.clone(), col.collection_id().to_string()));
-                }
+                let name_to_id = db
+                    .resolve_collection_ids(&collections)
+                    .map_err(|e| format!("{}", e))?;
 
                 for (name, collection_id) in &name_to_id {
-                    // Unsubscribe from the GossipSub topic using the schema root CID
                     let topic = DefraTopic::collection(collection_id);
                     if let Err(e) = p2p.handle.unsubscribe(topic).await {
                         tracing::warn!(collection = %name, collection_id = %collection_id, error = %e, "Failed to unsubscribe from GossipSub topic");

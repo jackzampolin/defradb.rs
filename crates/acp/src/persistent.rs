@@ -445,10 +445,19 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        txn.commit()
+        // Write a sentinel key so concurrent registrations for the same doc conflict.
+        // Without this, two owners writing different keys would both succeed under
+        // snapshot isolation (the conflict tracker only detects write-write conflicts
+        // on the same key).
+        let sentinel = format!("/acp-reg/{}/{}", collection_id, doc_id);
+        txn.set(sentinel.as_bytes(), &[1])
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        Ok(true)
+        match txn.commit().await {
+            Ok(()) => Ok(true),
+            Err(e) if e.is_txn_conflict() => Ok(false),
+            Err(e) => Err(Error::Storage(e.to_string())),
+        }
     }
 }

@@ -1,13 +1,12 @@
 use std::ffi::c_char;
 
-use acp::nac::NodePermission;
-
-use super::normalize_auth_error;
 use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, ffi_async_ok, try_ffi, ERR_INVALID_NODE_HANDLE};
+use acp::nac::{is_valid_nac_relation, NodePermission};
+use acp::normalize_auth_error;
 
 /// Get the current NAC status.
 ///
@@ -181,14 +180,6 @@ pub unsafe extern "C" fn enable_nac(node_ptr: usize, owner_did: *const c_char) -
 
         Ok(())
     })
-}
-
-/// Valid NAC relation names (from the NAC policy).
-const VALID_NAC_RELATIONS: &[&str] = &["owner", "admin"];
-
-/// Check if a relation name is valid in the NAC policy.
-fn is_valid_nac_relation(relation: &str) -> bool {
-    VALID_NAC_RELATIONS.contains(&relation) || NodePermission::parse(relation).is_some()
 }
 
 /// Add a NAC actor relationship.

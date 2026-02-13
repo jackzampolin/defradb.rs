@@ -7,7 +7,7 @@ use lens::{
     build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink, DOC_ID_FIELD,
 };
 use storage::corekv::Store;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 use crate::collection::Collection;
 use crate::schema_loader::get_collections_by_collection_id;
@@ -15,56 +15,39 @@ use crate::schema_loader::get_collections_by_collection_id;
 use super::LensedAutoCommitFetcher;
 
 impl<S: Store> LensedAutoCommitFetcher<S> {
-    /// Load migration context for a collection: checks full version history for transforms.
+    /// Load migration context for a collection, using cache when available.
+    ///
+    /// The result is cached per collection_id since schema migrations don't
+    /// change during normal runtime. This eliminates a read transaction +
+    /// systemstore scan on every fetch operation.
     pub(super) async fn load_migration_context(
         &self,
         collection: &Collection,
     ) -> query::error::Result<(bool, Option<HashMap<String, TargetedHistoryLink>>)> {
-        let collection_id = &collection.schema().collection_id;
-        let target_version_id = &collection.schema().version_id;
+        let collection_id = collection.schema().collection_id.clone();
 
-        info!(
-            collection_name = %collection.name(),
-            collection_id = %collection_id,
-            target_version_id = %target_version_id,
-            "Loading migration context"
-        );
-
-        let history = self.load_collection_history(collection).await.ok();
-
-        if let Some(ref h) = history {
-            info!(
-                collection_name = %collection.name(),
-                version_count = h.len(),
-                "Loaded version history"
-            );
-            for (version_id, link) in h.iter() {
-                info!(
-                    version_id = %version_id,
-                    transform = ?link.transform,
-                    previous = ?link.previous,
-                    next = ?link.next,
-                    "Version history link"
-                );
+        // Fast path: return cached result
+        if let Ok(cache) = self.migration_cache.lock() {
+            if let Some(cached) = cache.get(&collection_id) {
+                return Ok(cached.clone());
             }
-        } else {
-            warn!(
-                collection_name = %collection.name(),
-                "Failed to load collection history"
-            );
         }
+
+        // Slow path: compute migration context
+        let history = self.load_collection_history(collection).await.ok();
 
         let has_migrations = history
             .as_ref()
             .is_some_and(|h| h.values().any(|link| link.transform.is_some()));
 
-        info!(
-            collection_name = %collection.name(),
-            has_migrations = has_migrations,
-            "Migration context loaded"
-        );
+        let result = (has_migrations, if has_migrations { history } else { None });
 
-        Ok((has_migrations, if has_migrations { history } else { None }))
+        // Store in cache
+        if let Ok(mut cache) = self.migration_cache.lock() {
+            cache.insert(collection_id, result.clone());
+        }
+
+        Ok(result)
     }
 
     /// Check if a document needs migration.
@@ -73,23 +56,10 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         target_version_id: &str,
         has_migrations: bool,
     ) -> bool {
-        let doc_version = doc.schema_version_id();
-        let needs = if !has_migrations {
-            false
-        } else {
-            doc.needs_migration(target_version_id)
-        };
-
-        debug!(
-            doc_id = ?doc.id(),
-            doc_version = ?doc_version,
-            target_version = %target_version_id,
-            has_migrations = has_migrations,
-            needs_migration = needs,
-            "Checking if document needs migration"
-        );
-
-        needs
+        if !has_migrations {
+            return false;
+        }
+        doc.needs_migration(target_version_id)
     }
 
     /// Convert a Document to a LensDoc.
@@ -138,7 +108,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         versions: &[schema::CollectionVersion],
         target_version_id: &str,
     ) -> Option<HashMap<String, TargetedHistoryLink>> {
-        info!(
+        debug!(
             version_count = versions.len(),
             target_version_id = %target_version_id,
             "Building collection history"
@@ -153,7 +123,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         for version in versions {
             let mut link = CollectionHistoryLink::new(&version.version_id, &version.collection_id);
             if let Some(ref prev) = version.previous_version {
-                info!(
+                debug!(
                     version_id = %version.version_id,
                     previous_source_collection_id = %prev.source_collection_id,
                     transform = ?prev.transform,
@@ -172,7 +142,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
             full_history.insert(version.version_id.clone(), link);
         }
 
-        info!(
+        debug!(
             full_history_size = full_history.len(),
             "Built initial history graph"
         );
@@ -187,7 +157,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
             })
             .collect();
 
-        info!(
+        debug!(
             reverse_links_count = reverse_links.len(),
             "Building reverse links"
         );
@@ -211,7 +181,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         }
 
         for (vid, link) in &full_history {
-            info!(
+            debug!(
                 version_id = %vid,
                 transform = ?link.transform,
                 previous = ?link.previous,
@@ -228,7 +198,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
                 "build_targeted_history returned None"
             );
         } else {
-            info!(
+            debug!(
                 target_version_id = %target_version_id,
                 targeted_history_size = result.as_ref().map_or(0, |h| h.len()),
                 "Successfully built targeted history"
@@ -297,7 +267,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
 
         let doc_version = doc.schema_version_id().unwrap_or("unknown").to_string();
         let doc_id_str = doc.id().map(|id| id.to_string()).unwrap_or_default();
-        info!(
+        debug!(
             doc_id = %doc_id_str,
             from_version = %doc_version,
             to_version = %target_version_id,
