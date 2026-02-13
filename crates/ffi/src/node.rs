@@ -55,7 +55,7 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
             };
 
             match effective_backend {
-                "redb" | "badger" => {
+                "redb" => {
                     let redb = storage::RedbStore::open(&path)
                         .map_err(|e| format!("failed to open redb store at '{}': {}", path, e))?;
                     Arc::new(FfiStore::Redb(redb))

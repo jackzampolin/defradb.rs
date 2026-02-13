@@ -144,7 +144,7 @@ impl<S: Store> crate::database::DB<S> {
         drop(query_runner);
 
         // Explicitly discard the read transaction before starting write transaction
-        // This releases all references to the underlying badger transaction
+        // This releases all references to the underlying read transaction
         if let Some(read_txn) = txn_handle.lock().await.take() {
             let _ = read_txn.force_discard();
         }

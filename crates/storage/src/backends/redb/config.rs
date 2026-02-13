@@ -86,8 +86,7 @@ impl RedbStoreOptions {
 
     /// Set the durability mode.
     ///
-    /// `DurabilityMode::Eventual` (default) defers flushing to the OS,
-    /// matching Go DefraDB's BadgerDB defaults.
+    /// `DurabilityMode::Eventual` (default) defers flushing to the OS.
     /// `DurabilityMode::Immediate` flushes to disk on every commit.
     pub fn with_durability(mut self, mode: DurabilityMode) -> Self {
         self.durability = mode;

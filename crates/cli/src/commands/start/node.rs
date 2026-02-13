@@ -90,7 +90,7 @@ impl Node {
                 )
                 .await?
             }
-            DatastoreType::Badger => {
+            DatastoreType::Redb => {
                 info!("Using Redb datastore at {}", config.data_path().display());
                 let opts = RedbStoreOptions::new()
                     .with_durability(config.datastore.durability)

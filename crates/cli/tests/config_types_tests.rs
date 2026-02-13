@@ -97,33 +97,15 @@ fn test_log_output_display_roundtrip() {
 #[test]
 fn test_datastore_type_from_str_valid() {
     assert_eq!(
-        "badger".parse::<DatastoreType>().unwrap(),
-        DatastoreType::Badger
+        "redb".parse::<DatastoreType>().unwrap(),
+        DatastoreType::Redb
     );
     assert_eq!(
         "memory".parse::<DatastoreType>().unwrap(),
         DatastoreType::Memory
     );
     assert_eq!(
-        "BADGER".parse::<DatastoreType>().unwrap(),
-        DatastoreType::Badger
-    );
-}
-
-#[test]
-fn test_datastore_type_accepts_storage_aliases() {
-    // redb is an alias for badger (Rust impl uses Redb)
-    assert_eq!(
-        "redb".parse::<DatastoreType>().unwrap(),
-        DatastoreType::Badger
-    );
-    // rocksdb is its own backend
-    assert_eq!(
         "rocksdb".parse::<DatastoreType>().unwrap(),
-        DatastoreType::RocksDb
-    );
-    assert_eq!(
-        "RocksDB".parse::<DatastoreType>().unwrap(),
         DatastoreType::RocksDb
     );
 }
@@ -136,13 +118,13 @@ fn test_datastore_type_from_str_invalid() {
     let result: Result<DatastoreType, _> = "sqlite".parse();
     assert!(matches!(result, Err(Error::InvalidDatastore(s)) if s == "sqlite"));
 
-    let result: Result<DatastoreType, _> = "bader".parse(); // typo
-    assert!(matches!(result, Err(Error::InvalidDatastore(s)) if s == "bader"));
+    let result: Result<DatastoreType, _> = "badger".parse();
+    assert!(matches!(result, Err(Error::InvalidDatastore(s)) if s == "badger"));
 }
 
 #[test]
 fn test_datastore_type_display_roundtrip() {
-    for store in [DatastoreType::Badger, DatastoreType::Memory] {
+    for store in [DatastoreType::Redb, DatastoreType::Memory] {
         let display = store.to_string();
         let parsed: DatastoreType = display.parse().unwrap();
         assert_eq!(store, parsed);

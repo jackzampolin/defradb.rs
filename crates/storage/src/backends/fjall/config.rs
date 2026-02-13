@@ -109,8 +109,7 @@ impl FjallStoreOptions {
 
     /// Set the durability mode.
     ///
-    /// `DurabilityMode::Eventual` (default) flushes to OS buffers,
-    /// matching Go DefraDB's BadgerDB defaults.
+    /// `DurabilityMode::Eventual` (default) flushes to OS buffers.
     /// `DurabilityMode::Immediate` fsyncs on every commit.
     pub fn with_durability(mut self, mode: DurabilityMode) -> Self {
         self.durability = mode;

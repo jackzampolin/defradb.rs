@@ -44,7 +44,7 @@ PIDS_FILE="${BASE_DIR}/pids"
 CONCURRENCY="${CONCURRENCY:-4}"
 RECEIPT_WORKERS="${RECEIPT_WORKERS:-4}"
 START_HEIGHT="${START_HEIGHT_OVERRIDE:-23700000}"
-STORE="${STORE:-badger}"
+STORE="${STORE:-redb}"
 # Set RUST_FFI=1 to use embedded Rust DefraDB via FFI (no separate defra process)
 RUST_FFI="${RUST_FFI:-0}"
 # Watchdog limits (override with env vars)
@@ -526,7 +526,7 @@ YAML
   # ---- Start indexer (no separate defra needed) ----
   echo "Starting indexer with embedded Rust DefraDB..."
   cd "$INDEXER_DIR"
-  ./block_poster -config "$indexer_config" > "$INDEXER_LOG" 2>&1 &
+  STORE="${FFI_STORE}" ./block_poster -config "$indexer_config" > "$INDEXER_LOG" 2>&1 &
   INDEXER_PID=$!
   echo "  PID: ${INDEXER_PID}"
   cd "$DEFRA_ROOT"
