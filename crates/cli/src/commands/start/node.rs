@@ -152,7 +152,8 @@ impl Node {
                     "Using RocksDB datastore at {}",
                     config.data_path().display()
                 );
-                let opts = RocksDbStoreOptions::new().with_durability(config.datastore.durability);
+                let opts =
+                    RocksDbStoreOptions::from_env().with_durability(config.datastore.durability);
                 let store = Arc::new(storage::RocksDbStore::open_with_options(
                     config.data_path(),
                     opts,

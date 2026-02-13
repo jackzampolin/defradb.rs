@@ -525,10 +525,40 @@ YAML
     die "No .env file at ${INDEXER_DIR}/.env (need GETH_RPC_URL, GETH_WS_URL, GETH_API_KEY)"
   fi
 
+  # ---- Log RocksDB tuning if applicable ----
+  if [ "${FFI_STORE}" = "rocksdb" ]; then
+    echo "  RocksDB tuning (env overrides):"
+    for var in ROCKS_BLOCK_CACHE_MB ROCKS_WRITE_BUFFER_MB ROCKS_MAX_WRITE_BUFFERS \
+               ROCKS_COMPACTIONS ROCKS_FLUSHES ROCKS_L0_SLOWDOWN ROCKS_L0_STOP \
+               ROCKS_TARGET_FILE_MB ROCKS_LEVEL_BASE_MB ROCKS_BLOCK_SIZE_KB \
+               ROCKS_COMPRESSION ROCKS_COMPACTION_STYLE ROCKS_BLOB_FILES ROCKS_MIN_BLOB_SIZE; do
+      val="${!var:-}"
+      if [ -n "$val" ]; then
+        echo "    ${var}=${val}"
+      fi
+    done
+    echo "    (unset vars use defaults: cache=512MB, wbuf=64MB, wbufs=4, compact=4, flush=2)"
+    echo ""
+  fi
+
   # ---- Start indexer (no separate defra needed) ----
   echo "Starting indexer with embedded Rust DefraDB..."
   cd "$INDEXER_DIR"
   STORE="${FFI_STORE}" \
+    ROCKS_BLOCK_CACHE_MB="${ROCKS_BLOCK_CACHE_MB:-}" \
+    ROCKS_WRITE_BUFFER_MB="${ROCKS_WRITE_BUFFER_MB:-}" \
+    ROCKS_MAX_WRITE_BUFFERS="${ROCKS_MAX_WRITE_BUFFERS:-}" \
+    ROCKS_COMPACTIONS="${ROCKS_COMPACTIONS:-}" \
+    ROCKS_FLUSHES="${ROCKS_FLUSHES:-}" \
+    ROCKS_L0_SLOWDOWN="${ROCKS_L0_SLOWDOWN:-}" \
+    ROCKS_L0_STOP="${ROCKS_L0_STOP:-}" \
+    ROCKS_TARGET_FILE_MB="${ROCKS_TARGET_FILE_MB:-}" \
+    ROCKS_LEVEL_BASE_MB="${ROCKS_LEVEL_BASE_MB:-}" \
+    ROCKS_BLOCK_SIZE_KB="${ROCKS_BLOCK_SIZE_KB:-}" \
+    ROCKS_COMPRESSION="${ROCKS_COMPRESSION:-}" \
+    ROCKS_COMPACTION_STYLE="${ROCKS_COMPACTION_STYLE:-}" \
+    ROCKS_BLOB_FILES="${ROCKS_BLOB_FILES:-}" \
+    ROCKS_MIN_BLOB_SIZE="${ROCKS_MIN_BLOB_SIZE:-}" \
     HTTPS_PROXY="${HTTPS_PROXY:-${ALL_PROXY:-}}" \
     HTTP_PROXY="${HTTP_PROXY:-${ALL_PROXY:-}}" \
     ./block_poster -config "$indexer_config" > "$INDEXER_LOG" 2>&1 &

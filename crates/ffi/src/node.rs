@@ -72,9 +72,11 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
                 }
                 #[cfg(feature = "rocksdb")]
                 "rocksdb" => {
-                    let rocks = storage::RocksDbStore::open(&path).map_err(|e| {
-                        format!("failed to open rocksdb store at '{}': {}", path, e)
-                    })?;
+                    let opts = storage::RocksDbStoreOptions::from_env();
+                    let rocks =
+                        storage::RocksDbStore::open_with_options(&path, opts).map_err(|e| {
+                            format!("failed to open rocksdb store at '{}': {}", path, e)
+                        })?;
                     Arc::new(FfiStore::RocksDb(rocks))
                 }
                 #[cfg(not(feature = "rocksdb"))]
