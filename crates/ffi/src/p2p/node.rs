@@ -348,6 +348,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
 
         let retry_store = store.clone();
         let retry_handle = handle.clone();
+        let retry_db = database.clone();
         let retry_loop_task = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -371,7 +372,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
                     tracing::debug!(doc_count = docs.len(), peer_id = %peer_id_str, "retry loop: retrying docs");
                     let mut all_succeeded = true;
                     for (doc_id, collection_id) in &docs {
-                        match super::push::retry_doc(&retry_handle, &retry_store, peer_id, doc_id, collection_id).await {
+                        match db::retry_doc(&retry_handle, &retry_db, peer_id, doc_id, collection_id).await {
                             Ok(()) => { tracing::debug!(doc_id = %doc_id, peer_id = %peer_id_str, "retry loop: doc push succeeded"); let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await; }
                             Err(e) => { tracing::warn!(doc_id = %doc_id, peer_id = %peer_id_str, error = %e, "retry loop: doc push failed"); all_succeeded = false; }
                         }
@@ -420,16 +421,14 @@ pub unsafe extern "C" fn new_node_with_p2p(
 
         {
             let peerstore = Peerstore::new(store.clone());
-            if let Ok(Some(data)) = peerstore.get_p2p_collections().await {
-                if let Ok(collections) = serde_json::from_slice::<Vec<String>>(&data) {
-                    tracing::debug!(count = collections.len(), "restoring collection subscriptions");
-                    for name in &collections {
-                        if let Ok(Some(col)) = database.get_collection(name) {
-                            let collection_id = col.collection_id().to_string();
-                            let topic = DefraTopic::collection(&collection_id);
-                            if let Err(e) = handle.subscribe(topic).await {
-                                tracing::warn!(collection = %name, error = %e, "failed to restore collection subscription");
-                            }
+            if let Ok(collections) = peerstore.load_collections().await {
+                tracing::debug!(count = collections.len(), "restoring collection subscriptions");
+                for name in &collections {
+                    if let Ok(Some(col)) = database.get_collection(name) {
+                        let collection_id = col.collection_id().to_string();
+                        let topic = DefraTopic::collection(&collection_id);
+                        if let Err(e) = handle.subscribe(topic).await {
+                            tracing::warn!(collection = %name, error = %e, "failed to restore collection subscription");
                         }
                     }
                 }
@@ -438,14 +437,12 @@ pub unsafe extern "C" fn new_node_with_p2p(
 
         {
             let peerstore = Peerstore::new(store.clone());
-            if let Ok(Some(data)) = peerstore.get_p2p_documents().await {
-                if let Ok(doc_ids) = serde_json::from_slice::<Vec<String>>(&data) {
-                    tracing::debug!(count = doc_ids.len(), "restoring document subscriptions");
-                    for doc_id in &doc_ids {
-                        let topic = DefraTopic::document(doc_id);
-                        if let Err(e) = handle.subscribe(topic).await {
-                            tracing::warn!(doc_id = %doc_id, error = %e, "failed to restore document subscription");
-                        }
+            if let Ok(doc_ids) = peerstore.load_documents().await {
+                tracing::debug!(count = doc_ids.len(), "restoring document subscriptions");
+                for doc_id in &doc_ids {
+                    let topic = DefraTopic::document(doc_id);
+                    if let Err(e) = handle.subscribe(topic).await {
+                        tracing::warn!(doc_id = %doc_id, error = %e, "failed to restore document subscription");
                     }
                 }
             }

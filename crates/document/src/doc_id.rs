@@ -150,6 +150,17 @@ impl std::fmt::Display for DocID {
     }
 }
 
+/// Validate that all document IDs have valid format.
+///
+/// Returns an error on the first invalid ID, matching Go's atomic
+/// validation behavior (all or nothing).
+pub fn validate_doc_ids(doc_ids: &[String]) -> Result<()> {
+    for doc_id in doc_ids {
+        DocID::from_string(doc_id)?;
+    }
+    Ok(())
+}
+
 impl std::str::FromStr for DocID {
     type Err = Error;
 

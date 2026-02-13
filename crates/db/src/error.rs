@@ -15,7 +15,7 @@ pub enum Error {
     #[error("document error: {0}")]
     Document(#[from] document::Error),
 
-    #[error("collection not found: {0}")]
+    #[error("collection '{0}' not found")]
     CollectionNotFound(String),
 
     #[error("key not found. collection version: {0}")]

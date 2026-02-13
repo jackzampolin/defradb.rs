@@ -110,6 +110,42 @@ impl<S: Store> Peerstore<S> {
         txn.get(b"/p2p/documents").await
     }
 
+    /// Persist a list of P2P collection subscriptions as JSON.
+    pub async fn persist_collections(&self, collections: &[String]) -> Result<()> {
+        let data = serde_json::to_vec(collections).map_err(|e| {
+            crate::corekv::Error::Other(format!("failed to serialize P2P collections: {}", e))
+        })?;
+        self.set_p2p_collections(&data).await
+    }
+
+    /// Load the persisted P2P collection subscription list.
+    pub async fn load_collections(&self) -> Result<Vec<String>> {
+        match self.get_p2p_collections().await? {
+            Some(data) => serde_json::from_slice(&data).map_err(|e| {
+                crate::corekv::Error::Other(format!("failed to deserialize P2P collections: {}", e))
+            }),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Persist a list of P2P document subscriptions as JSON.
+    pub async fn persist_documents(&self, documents: &[String]) -> Result<()> {
+        let data = serde_json::to_vec(documents).map_err(|e| {
+            crate::corekv::Error::Other(format!("failed to serialize P2P documents: {}", e))
+        })?;
+        self.set_p2p_documents(&data).await
+    }
+
+    /// Load the persisted P2P document subscription list.
+    pub async fn load_documents(&self) -> Result<Vec<String>> {
+        match self.get_p2p_documents().await? {
+            Some(data) => serde_json::from_slice(&data).map_err(|e| {
+                crate::corekv::Error::Other(format!("failed to deserialize P2P documents: {}", e))
+            }),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Record a push failure for a specific peer/doc pair.
     ///
     /// Writes the retry info at `/rep/retry/id/{peer}` and the collection_id

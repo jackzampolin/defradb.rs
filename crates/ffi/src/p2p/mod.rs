@@ -25,45 +25,7 @@ pub use version_sync::p2p_sync_collection_versions;
 
 use storage::stores::Peerstore;
 
-/// Parsed multiaddr containing peer ID and transport address.
-pub(crate) struct ParsedMultiaddr {
-    /// The peer ID extracted from the multiaddr.
-    pub(crate) peer_id: libp2p::PeerId,
-    /// The transport address (multiaddr without the /p2p component).
-    pub(crate) transport_addr: libp2p::Multiaddr,
-}
-
-/// Parse a full multiaddr string that includes a peer ID.
-///
-/// Expects format like: `/ip4/127.0.0.1/tcp/9171/p2p/12D3KooW...`
-///
-/// Returns the peer ID and the transport address (without /p2p component).
-pub(crate) fn parse_multiaddr_with_peer_id(addr_str: &str) -> Result<ParsedMultiaddr, String> {
-    let full_addr: libp2p::Multiaddr = addr_str
-        .parse()
-        .map_err(|e| format!("invalid multiaddr '{}': {}", addr_str, e))?;
-
-    let peer_id = full_addr
-        .iter()
-        .find_map(|p| {
-            if let libp2p::multiaddr::Protocol::P2p(peer_id) = p {
-                Some(peer_id)
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| format!("multiaddr '{}' does not contain peer ID", addr_str))?;
-
-    let transport_addr: libp2p::Multiaddr = full_addr
-        .iter()
-        .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
-        .collect();
-
-    Ok(ParsedMultiaddr {
-        peer_id,
-        transport_addr,
-    })
-}
+pub(crate) use p2p::address::parse_multiaddr_with_peer_id;
 
 /// Parse a JSON array of collection names.
 ///
@@ -86,30 +48,16 @@ pub(crate) async fn persist_p2p_collections(
     db: &crate::state::FfiDatabase,
     collections: &[String],
 ) {
-    let data = match serde_json::to_vec(collections) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to serialize P2P collections");
-            return;
-        }
-    };
     let peerstore = Peerstore::new(db.store().clone());
-    if let Err(e) = peerstore.set_p2p_collections(&data).await {
+    if let Err(e) = peerstore.persist_collections(collections).await {
         tracing::warn!(error = %e, "failed to persist P2P collections");
     }
 }
 
 /// Persist the current P2P document subscription list to the Peerstore.
 pub(crate) async fn persist_p2p_documents(db: &crate::state::FfiDatabase, documents: &[String]) {
-    let data = match serde_json::to_vec(documents) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to serialize P2P documents");
-            return;
-        }
-    };
     let peerstore = Peerstore::new(db.store().clone());
-    if let Err(e) = peerstore.set_p2p_documents(&data).await {
+    if let Err(e) = peerstore.persist_documents(documents).await {
         tracing::warn!(error = %e, "failed to persist P2P documents");
     }
 }

@@ -70,6 +70,14 @@ pub fn create_node_policy() -> Policy {
     Policy::new(NODE_POLICY_ID, "Node Access Control Policy").with_resource(resource)
 }
 
+/// Valid NAC relation names (from the NAC policy).
+pub const VALID_NAC_RELATIONS: &[&str] = &["owner", "admin"];
+
+/// Check if a relation name is valid in the NAC policy.
+pub fn is_valid_nac_relation(relation: &str) -> bool {
+    VALID_NAC_RELATIONS.contains(&relation) || NodePermission::parse(relation).is_some()
+}
+
 /// Validate the NAC policy is correctly configured.
 ///
 /// This is a sanity check to ensure the policy has all expected relations.
