@@ -123,7 +123,7 @@ pub async fn build_blocks_from_document<B: Blockstore>(
         .await
         .map_err(|e| format!("Failed to store composite block: {}", e))?;
 
-    tracing::info!(
+    tracing::debug!(
         doc_id = %doc_id_str,
         cid = %composite_cid,
         field_count = field_cids.len(),

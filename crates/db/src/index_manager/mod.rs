@@ -336,6 +336,35 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Update indexes when a document is created, skipping unique constraint checks.
+    ///
+    /// Used for blind creates where uniqueness is guaranteed by construction.
+    pub async fn on_document_create_blind(
+        &self,
+        datastore: &NamespaceView,
+        doc: &Document,
+        schema: &CollectionVersion,
+    ) -> Result<()> {
+        let doc_id = doc
+            .id()
+            .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
+            .to_string();
+
+        let mut mutable_datastore = datastore.clone();
+
+        for index in self.indexes.values() {
+            let value_sets = self.extract_index_values(doc, index.description(), schema)?;
+            for values in &value_sets {
+                index
+                    .save_blind(&mut mutable_datastore, &doc_id, values)
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Update indexes when a document is updated.
     ///
     /// For array fields, this deletes all old index entries and creates new ones.

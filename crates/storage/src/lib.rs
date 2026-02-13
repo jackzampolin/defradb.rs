@@ -115,6 +115,12 @@ pub use backends::MemoryStore;
 #[cfg(all(feature = "redb", not(target_arch = "wasm32")))]
 pub use backends::RedbStore;
 
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+pub use backends::{FjallStore, FjallStoreOptions};
+
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+pub use backends::{RocksDbStore, RocksDbStoreOptions};
+
 #[cfg(all(target_arch = "wasm32", feature = "leveldb"))]
 pub use backends::LevelDbStore;
 

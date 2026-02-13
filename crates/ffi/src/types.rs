@@ -139,6 +139,9 @@ pub struct NodeInitOptions {
     pub db_path: *const c_char,
     /// Use in-memory storage (1=true, 0=false).
     pub in_memory: c_int,
+    /// Storage backend name: "redb" (default), "fjall", "rocksdb", "memory".
+    /// Null uses "redb" for persistent or "memory" for in-memory.
+    pub datastore_backend: *const c_char,
     /// Enable block signing (1=true, 0=false).
     /// When enabled, the node uses a signing key for block signatures.
     /// If signing_private_key is provided, that key is used.
@@ -169,6 +172,7 @@ impl Default for NodeInitOptions {
         Self {
             db_path: ptr::null(),
             in_memory: 1, // Default to in-memory
+            datastore_backend: ptr::null(),
             enable_signing: 0,
             signing_key_type: ptr::null(),
             signing_private_key: ptr::null(),

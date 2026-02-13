@@ -1,5 +1,6 @@
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+pub use crate::backends::shared::DurabilityMode;
 
 /// Default close timeout in seconds.
 pub const DEFAULT_CLOSE_TIMEOUT_SECS: u64 = 5;
@@ -27,22 +28,6 @@ pub struct RedbStoreOptions {
     cache_size: Option<usize>,
     close_timeout: Duration,
     durability: DurabilityMode,
-}
-
-/// Controls when data is flushed to disk after a commit.
-///
-/// Default is `Eventual`, matching Go DefraDB's BadgerDB behavior
-/// (`SyncWrites = false`). Process crashes are safe due to redb's WAL;
-/// only OS crashes risk data loss.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DurabilityMode {
-    /// Flush to disk on every commit. Safe against process and OS crashes.
-    Immediate,
-    /// Rely on the OS to flush eventually (default). Matches Go DefraDB's
-    /// BadgerDB defaults. Process crash is still safe due to redb's WAL.
-    #[default]
-    Eventual,
 }
 
 impl Default for RedbStoreOptions {

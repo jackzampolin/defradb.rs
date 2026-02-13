@@ -7,10 +7,12 @@ mod fetcher;
 mod index_scan;
 mod migration;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use document::Document;
+use lens::TargetedHistoryLink;
 use query::fetcher::CommitsQueryOptions;
 use query::planner::index_selection::IndexScanParams;
 use query::runner::{DocFetcher, FetchByIdsResult};
@@ -18,18 +20,28 @@ use storage::corekv::Store;
 
 use crate::database::DB;
 
+/// Cached migration context for a collection.
+type MigrationContext = (bool, Option<HashMap<String, TargetedHistoryLink>>);
+
 /// Document fetcher that auto-commits and applies lens migrations.
 ///
 /// Combines the auto-commit behavior of AutoCommitFetcher with lens
 /// migration support from LensedDocFetcher.
 pub struct LensedAutoCommitFetcher<S: Store> {
     db: Arc<DB<S>>,
+    /// Cache of migration contexts keyed by collection_id.
+    /// Populated on first access per collection; never invalidated since
+    /// schema migrations don't change during normal runtime.
+    migration_cache: Mutex<HashMap<String, MigrationContext>>,
 }
 
 impl<S: Store> LensedAutoCommitFetcher<S> {
     /// Create a new lensed auto-committing fetcher.
     pub fn new(db: Arc<DB<S>>) -> Self {
-        Self { db }
+        Self {
+            db,
+            migration_cache: Mutex::new(HashMap::new()),
+        }
     }
 }
 

@@ -21,6 +21,13 @@ pub async fn execute_with_context(
     request: QueryRequest,
 ) -> QueryResponse {
     let signing_config = resolve_signing_config(state, identity);
+
+    // Fast path: when no signing and no NAC, skip spawn_blocking entirely.
+    // Thread-local defaults are None/false, matching what we'd set.
+    if signing_config.is_none() && state.nac.is_none() {
+        return state.executor.execute(request).await;
+    }
+
     let dac_bypass = resolve_dac_bypass(state, identity).await;
     let executor = state.executor.clone();
     let handle = tokio::runtime::Handle::current();
@@ -42,7 +49,14 @@ pub async fn execute_in_txn_with_context(
     txn_handle: TransactionHandle,
 ) -> QueryResponse {
     let signing_config = resolve_signing_config(state, identity);
+
+    // Fast path: when no signing and no NAC, skip spawn_blocking entirely.
+    if signing_config.is_none() && state.nac.is_none() {
+        return state.executor.execute_in_txn(request, &txn_handle).await;
+    }
+
     let dac_bypass = resolve_dac_bypass(state, identity).await;
+
     let executor = state.executor.clone();
     let handle = tokio::runtime::Handle::current();
 

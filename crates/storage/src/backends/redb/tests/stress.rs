@@ -87,13 +87,19 @@ async fn test_redb_high_contention_100_concurrent_txns() {
         let completed = std::sync::Arc::clone(&completed);
 
         handles.push(tokio::spawn(async move {
-            let mut txn = store.new_txn(false).await.unwrap();
-            // Write and read contended key
-            txn.set(b"contended", format!("{}", i).as_bytes())
-                .await
-                .unwrap();
-            let _ = txn.get(b"contended").await.unwrap();
-            txn.commit().await.unwrap();
+            // Retry on TxnConflict since all writers target the same key
+            loop {
+                let mut txn = store.new_txn(false).await.unwrap();
+                txn.set(b"contended", format!("{}", i).as_bytes())
+                    .await
+                    .unwrap();
+                let _ = txn.get(b"contended").await.unwrap();
+                match txn.commit().await {
+                    Ok(()) => break,
+                    Err(crate::corekv::Error::TxnConflict) => continue,
+                    Err(e) => panic!("Unexpected error: {:?}", e),
+                }
+            }
             completed.fetch_add(1, Ordering::SeqCst);
         }));
     }
@@ -253,11 +259,18 @@ async fn test_redb_mixed_read_write_high_contention() {
 
         handles.push(tokio::spawn(async move {
             for cycle in 0..10 {
-                let mut txn = store.new_txn(false).await.unwrap();
-                let key = format!("key_{}", cycle % 10);
-                let value = format!("writer_{}_{}", writer_id, cycle);
-                txn.set(key.as_bytes(), value.as_bytes()).await.unwrap();
-                txn.commit().await.unwrap();
+                // Retry on TxnConflict since writers target overlapping keys
+                loop {
+                    let mut txn = store.new_txn(false).await.unwrap();
+                    let key = format!("key_{}", cycle % 10);
+                    let value = format!("writer_{}_{}", writer_id, cycle);
+                    txn.set(key.as_bytes(), value.as_bytes()).await.unwrap();
+                    match txn.commit().await {
+                        Ok(()) => break,
+                        Err(crate::corekv::Error::TxnConflict) => continue,
+                        Err(e) => panic!("Unexpected error: {:?}", e),
+                    }
+                }
                 writes.fetch_add(1, Ordering::SeqCst);
             }
         }));

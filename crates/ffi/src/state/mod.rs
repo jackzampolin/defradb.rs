@@ -24,11 +24,15 @@ pub use registry::{
 
 /// Storage backend enum for FFI nodes.
 ///
-/// Wraps both MemoryStore and RedbStore so that `DB<FfiStore>` works for
-/// either backend without requiring separate type aliases or code paths.
+/// Wraps all backend implementations so that `DB<FfiStore>` works for
+/// any backend without requiring separate type aliases or code paths.
 pub enum FfiStore {
     Memory(MemoryStore),
     Redb(storage::RedbStore),
+    #[cfg(feature = "fjall")]
+    Fjall(storage::FjallStore),
+    #[cfg(feature = "rocksdb")]
+    RocksDb(storage::RocksDbStore),
 }
 
 #[async_trait]
@@ -37,6 +41,10 @@ impl storage::Store for FfiStore {
         match self {
             FfiStore::Memory(s) => s.new_txn(readonly).await,
             FfiStore::Redb(s) => s.new_txn(readonly).await,
+            #[cfg(feature = "fjall")]
+            FfiStore::Fjall(s) => s.new_txn(readonly).await,
+            #[cfg(feature = "rocksdb")]
+            FfiStore::RocksDb(s) => s.new_txn(readonly).await,
         }
     }
 
@@ -44,6 +52,10 @@ impl storage::Store for FfiStore {
         match self {
             FfiStore::Memory(s) => s.close().await,
             FfiStore::Redb(s) => s.close().await,
+            #[cfg(feature = "fjall")]
+            FfiStore::Fjall(s) => s.close().await,
+            #[cfg(feature = "rocksdb")]
+            FfiStore::RocksDb(s) => s.close().await,
         }
     }
 }

@@ -31,6 +31,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let schema_version_id = collection.version_id();
         let sign_config = get_signing_config();
 
+        // Build IndexManager once for the entire batch (schema is identical for all docs)
+        let index_manager =
+            IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to create index manager for collection '{}': {}",
+                    collection_name, e
+                ))
+            })?;
+
         let mut results: Vec<(
             DocID,
             Document,
@@ -49,8 +58,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
 
-            // Generate document ID
-            if doc.id().is_none() {
+            // Generate document ID.
+            // Track whether ID was just generated for blind create optimization.
+            let id_was_generated = doc.id().is_none();
+            if id_was_generated {
                 doc.generate_and_set_doc_id().map_err(|e| {
                     query::error::QueryError::execution(format!("failed to generate DocID: {}", e))
                 })?;
@@ -69,16 +80,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     ))
                 })?;
 
-                let index_manager = IndexManager::from_collection(short_id, collection.schema())
-                    .map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to create index manager for collection '{}': {}",
-                            collection_name, e
-                        ))
-                    })?;
-
                 collection
-                    .create_with_indexes(&datastore, &doc, &index_manager)
+                    .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
                     .await
                     .map_err(|e| {
                         let msg = e.to_string();
@@ -178,11 +181,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // Emit events and build results
         let mut create_results = Vec::with_capacity(results.len());
         for (doc_id, doc, commit_result) in results {
-            let (cid, block) = commit_result
+            let cid = commit_result
                 .as_ref()
-                .map(|(c, b, _)| (*c, b.clone()))
+                .map(|(c, _, _)| *c)
                 .unwrap_or_default();
-            self.emit_update_events(&collection, &doc_id.to_string(), cid, block);
+            self.emit_update_events(&collection, &doc_id.to_string(), cid);
 
             match commit_result {
                 Some((cid, block, col_data)) => {

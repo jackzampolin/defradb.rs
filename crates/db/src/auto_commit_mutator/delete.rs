@@ -122,11 +122,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 }
 
                 // Emit update event for subscriptions (deletes are also "updates")
-                let (cid, block) = commit_result
-                    .as_ref()
-                    .map(|(c, b)| (*c, b.clone()))
-                    .unwrap_or_default();
-                self.emit_update_events(&collection, &doc_id.to_string(), cid, block);
+                let cid = commit_result.as_ref().map(|(c, _)| *c).unwrap_or_default();
+                self.emit_update_events(&collection, &doc_id.to_string(), cid);
 
                 Ok(DeleteResult::new(doc_id.clone(), existed))
             }

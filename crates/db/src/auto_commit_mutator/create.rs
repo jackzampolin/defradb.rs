@@ -24,8 +24,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         .await
         .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
 
-        // Generate document ID if not present
-        if doc.id().is_none() {
+        // Generate document ID if not present.
+        // Track whether ID was just generated — if so, it's content-addressed and
+        // guaranteed unique, so we can skip the existence check (blind create).
+        let id_was_generated = doc.id().is_none();
+        if id_was_generated {
             doc.generate_and_set_doc_id().map_err(|e| {
                 query::error::QueryError::execution(format!("failed to generate DocID: {}", e))
             })?;
@@ -54,9 +57,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     ))
                 })?;
 
-            // Use create_with_indexes to enforce unique constraints and maintain indexes
+            // Use create_with_indexes to enforce unique constraints and maintain indexes.
+            // Blind create skips existence check for content-addressed (generated) IDs.
             collection
-                .create_with_indexes(&datastore, &doc, &index_manager)
+                .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
                 .await
                 .map_err(|e| {
                     let msg = e.to_string();
@@ -179,11 +183,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 }
 
                 // Emit update event for subscriptions
-                let (cid, block) = commit_result
+                let cid = commit_result
                     .as_ref()
-                    .map(|(c, b, _)| (*c, b.clone()))
+                    .map(|(c, _, _)| *c)
                     .unwrap_or_default();
-                self.emit_update_events(&collection, &doc_id.to_string(), cid, block);
+                self.emit_update_events(&collection, &doc_id.to_string(), cid);
 
                 // Return result with commit CID and block if available
                 match commit_result {
