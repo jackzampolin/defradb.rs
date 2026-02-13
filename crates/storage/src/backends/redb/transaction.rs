@@ -75,6 +75,7 @@ impl Drop for RedbTxn {
         let was_committed = *self.committed.lock();
         let was_discarded = *self.discarded.lock();
         if !was_committed && !was_discarded {
+            let has_pending = !self.pending.lock().is_empty();
             // Count skipped callbacks to include in warning
             let total_skipped =
                 self.callbacks.counts().on_discard + self.callbacks.counts().on_discard_async;
@@ -87,7 +88,7 @@ impl Drop for RedbTxn {
                      {} registered discard callback(s) were NOT executed.",
                     total_skipped
                 );
-            } else {
+            } else if has_pending {
                 tracing::warn!(
                     "Transaction dropped without commit() or discard() - \
                      this may indicate a bug. Pending changes were lost."

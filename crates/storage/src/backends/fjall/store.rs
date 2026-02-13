@@ -56,22 +56,45 @@ impl FjallStore {
             })?;
         }
 
-        let db = fjall::Database::builder(&db_path)
+        let mut builder = fjall::Database::builder(&db_path)
             .cache_size(opts.cache_size())
-            .max_journaling_size(opts.max_journal_size())
-            .open()
-            .map_err(|e| {
-                tracing::error!(
-                    db_path = %db_path.display(),
-                    error = %e,
-                    "Failed to open fjall database"
-                );
-                let err: Error = e.into();
-                err
-            })?;
+            .max_journaling_size(opts.max_journal_size());
 
+        if opts.worker_threads() > 0 {
+            builder = builder.worker_threads(opts.worker_threads());
+        }
+
+        let db = builder.open().map_err(|e| {
+            tracing::error!(
+                db_path = %db_path.display(),
+                error = %e,
+                "Failed to open fjall database"
+            );
+            let err: Error = e.into();
+            err
+        })?;
+
+        let l0_threshold = opts.l0_threshold();
+        let max_memtable_size = opts.max_memtable_size();
+        let kv_separation = opts.kv_separation();
         let keyspace = db
-            .keyspace("kv", fjall::KeyspaceCreateOptions::default)
+            .keyspace("kv", move || {
+                let mut ks_opts = fjall::KeyspaceCreateOptions::default()
+                    .max_memtable_size(max_memtable_size)
+                    .compaction_strategy(Arc::new(
+                        fjall::compaction::Leveled::default()
+                            .with_l0_threshold(l0_threshold),
+                    ));
+
+                if kv_separation {
+                    ks_opts = ks_opts.with_kv_separation(Some(
+                        fjall::KvSeparationOptions::default()
+                            .separation_threshold(256),
+                    ));
+                }
+
+                ks_opts
+            })
             .map_err(|e| {
                 tracing::error!(error = %e, "Failed to create/open fjall keyspace");
                 let err: Error = e.into();

@@ -35,10 +35,19 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
         let store: Arc<FfiStore> = if options.in_memory == 0 && !options.db_path.is_null() {
             let path = unsafe { c_str_to_string(options.db_path) }
                 .ok_or_else(|| "db_path is not valid UTF-8".to_string())?;
-            let redb = storage::RedbStore::open(&path)
-                .map_err(|e| format!("failed to open redb store at '{}': {}", path, e))?;
-            db_path_opt = Some(path);
-            Arc::new(FfiStore::Redb(redb))
+            db_path_opt = Some(path.clone());
+            #[cfg(feature = "fjall")]
+            {
+                let fjall = storage::FjallStore::open(&path)
+                    .map_err(|e| format!("failed to open fjall store at '{}': {}", path, e))?;
+                Arc::new(FfiStore::Fjall(fjall))
+            }
+            #[cfg(not(feature = "fjall"))]
+            {
+                let redb = storage::RedbStore::open(&path)
+                    .map_err(|e| format!("failed to open redb store at '{}': {}", path, e))?;
+                Arc::new(FfiStore::Redb(redb))
+            }
         } else {
             db_path_opt = None;
             Arc::new(FfiStore::Memory(storage::MemoryStore::new()))

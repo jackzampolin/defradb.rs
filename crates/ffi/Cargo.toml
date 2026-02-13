@@ -13,6 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 default = []
+fjall = ["storage/fjall"]
 
 [dependencies]
 # Async runtime

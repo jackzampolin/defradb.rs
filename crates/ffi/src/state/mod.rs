@@ -29,6 +29,8 @@ pub use registry::{
 pub enum FfiStore {
     Memory(MemoryStore),
     Redb(storage::RedbStore),
+    #[cfg(feature = "fjall")]
+    Fjall(storage::FjallStore),
 }
 
 #[async_trait]
@@ -37,6 +39,8 @@ impl storage::Store for FfiStore {
         match self {
             FfiStore::Memory(s) => s.new_txn(readonly).await,
             FfiStore::Redb(s) => s.new_txn(readonly).await,
+            #[cfg(feature = "fjall")]
+            FfiStore::Fjall(s) => s.new_txn(readonly).await,
         }
     }
 
@@ -44,6 +48,8 @@ impl storage::Store for FfiStore {
         match self {
             FfiStore::Memory(s) => s.close().await,
             FfiStore::Redb(s) => s.close().await,
+            #[cfg(feature = "fjall")]
+            FfiStore::Fjall(s) => s.close().await,
         }
     }
 }
