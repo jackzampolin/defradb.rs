@@ -108,12 +108,11 @@ impl FjallStore {
         );
 
         if kv_separation && !is_separated {
-            tracing::warn!(
-                db_path = %db_path.display(),
-                "KV separation was requested but keyspace is NOT kv-separated. \
-                 This happens when the keyspace was created before KV separation was enabled. \
-                 Delete the data directory and restart to enable KV separation."
-            );
+            return Err(Error::Backend(format!(
+                "KV separation requested but keyspace at '{}' was created without it. \
+                 Delete the data directory and restart, or set kv_separation=false.",
+                db_path.display()
+            )));
         }
 
         Ok(Self {
