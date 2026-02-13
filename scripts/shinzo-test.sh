@@ -425,7 +425,9 @@ YAML
   echo ""
   echo "Starting indexer..."
   cd "$INDEXER_DIR"
-  ./block_poster -config "$indexer_config" > "$INDEXER_LOG" 2>&1 &
+  HTTPS_PROXY="${HTTPS_PROXY:-${ALL_PROXY:-}}" \
+    HTTP_PROXY="${HTTP_PROXY:-${ALL_PROXY:-}}" \
+    ./block_poster -config "$indexer_config" > "$INDEXER_LOG" 2>&1 &
   INDEXER_PID=$!
   echo "  PID: ${INDEXER_PID}"
   cd "$DEFRA_ROOT"
@@ -526,7 +528,10 @@ YAML
   # ---- Start indexer (no separate defra needed) ----
   echo "Starting indexer with embedded Rust DefraDB..."
   cd "$INDEXER_DIR"
-  STORE="${FFI_STORE}" ./block_poster -config "$indexer_config" > "$INDEXER_LOG" 2>&1 &
+  STORE="${FFI_STORE}" \
+    HTTPS_PROXY="${HTTPS_PROXY:-${ALL_PROXY:-}}" \
+    HTTP_PROXY="${HTTP_PROXY:-${ALL_PROXY:-}}" \
+    ./block_poster -config "$indexer_config" > "$INDEXER_LOG" 2>&1 &
   INDEXER_PID=$!
   echo "  PID: ${INDEXER_PID}"
   cd "$DEFRA_ROOT"
