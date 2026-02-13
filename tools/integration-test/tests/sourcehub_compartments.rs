@@ -1,3 +1,6 @@
+use std::time::Duration;
+
+use integration_test::node::{DefraNode, RustNode};
 use integration_test::{
     generate_identity, interaction_schema_with_policy, peak_schema_with_policy,
     secret_schema_with_policy, tweet_schema_with_policy, workout_schema_with_policy, TestCluster,
@@ -24,31 +27,40 @@ fn add_policy(node: &integration_test::DefraClient, policy: &str, identity: &str
 ///
 /// Identities:
 ///   Jack (owner), Agent-XArchive (writer), Agent-Hiking (writer),
-///   Vanessa (reader), Anonymous (none)
+///   Vanessa (reader), Outsider (none)
+///
+/// The node is started with Jack's identity so SourceHub transactions work.
 #[tokio::test]
 #[ignore]
 async fn rust_sourcehub_compartments() {
+    let binary = RustNode::from_workspace().binary_path().to_path_buf();
+    RustNode::build().expect("build rust binary");
+    let jack = generate_identity(&binary).expect("Jack identity");
+
     let cluster = TestCluster::builder()
         .rust_nodes(1)
+        .skip_build()
         .with_source_hub()
+        .with_identity(&jack.private_key_hex)
         .build()
         .await
         .expect("failed to build source hub cluster");
 
     let node = cluster.client(0);
-    let binary = node.binary_path().to_path_buf();
 
-    // Generate identities
-    let jack = generate_identity(&binary).expect("Jack identity");
+    // Generate other identities
     let agent_xarchive = generate_identity(&binary).expect("Agent-XArchive identity");
     let _agent_hiking = generate_identity(&binary).expect("Agent-Hiking identity");
     let vanessa = generate_identity(&binary).expect("Vanessa identity");
     let outsider = generate_identity(&binary).expect("Outsider identity");
 
-    // Create policies on Source Hub
+    // Create policies on Source Hub (one at a time to avoid account sequence issues)
     let xarchive_policy_id = add_policy(&node, XARCHIVE_ACP_POLICY, &jack.private_key_hex);
+    tokio::time::sleep(Duration::from_secs(2)).await;
     let hiking_policy_id = add_policy(&node, HIKING_ACP_POLICY, &jack.private_key_hex);
+    tokio::time::sleep(Duration::from_secs(2)).await;
     let secret_policy_id = add_policy(&node, SECRET_ACP_POLICY, &jack.private_key_hex);
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Deploy schemas
     node.schema_add_with_identity(
@@ -123,14 +135,13 @@ async fn rust_sourcehub_compartments() {
     );
 
     // --- Scenario 3: Cross-compartment isolation ---
-    // Create a workout as Jack in hiking compartment
     let workout_data = node
         .query_with_identity(
             r#"mutation { create_Workout(input: {activity: "Trail Run", duration_min: 45}) { _docID } }"#,
             &jack.private_key_hex,
         )
         .expect("Jack create Workout");
-    let _workout_id = workout_data["create_Workout"][0]["_docID"]
+    let workout_id = workout_data["create_Workout"][0]["_docID"]
         .as_str()
         .expect("workout _docID");
 
@@ -148,10 +159,9 @@ async fn rust_sourcehub_compartments() {
     );
 
     // --- Scenario 4: Reader access grant ---
-    // Grant Vanessa reader on hiking workout
     node.acp_relationship_add(
         "Workout",
-        _workout_id,
+        workout_id,
         "reader",
         &vanessa.did,
         &jack.private_key_hex,
@@ -205,7 +215,6 @@ async fn rust_sourcehub_compartments() {
     );
 
     // --- Scenario 6: Agent scoping (writer can read+write, NOT delete) ---
-    // Agent-XArchive tries to delete Jack's tweet — should fail
     let delete_result = node.query_with_identity(
         &format!(
             r#"mutation {{ delete_Tweet(docID: "{}") {{ _docID }} }}"#,

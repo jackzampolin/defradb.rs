@@ -112,6 +112,9 @@ pub fn typed_schema(type_name: &str, policy_id: &str, resource: &str, fields: &s
 }
 
 /// ACP policy for x-archive compartment (tweets, interactions).
+/// Note: `owner` is a reserved relation auto-injected by the system.
+/// The implicit owner always has all permissions. `admin` is declared but
+/// never granted, making delete effectively owner-only.
 pub const XARCHIVE_ACP_POLICY: &str = r#"name: xarchive-policy
 description: X-archive compartment policy for tweets and interactions
 
@@ -119,13 +122,13 @@ resources:
   - name: tweets
     permissions:
       - name: read
-        expr: owner + writer + reader
+        expr: admin + writer + reader
       - name: update
-        expr: owner + writer
+        expr: admin + writer
       - name: delete
-        expr: owner
+        expr: admin
     relations:
-      - name: owner
+      - name: admin
         types:
           - actor
       - name: writer
@@ -137,13 +140,13 @@ resources:
   - name: interactions
     permissions:
       - name: read
-        expr: owner + writer + reader
+        expr: admin + writer + reader
       - name: update
-        expr: owner + writer
+        expr: admin + writer
       - name: delete
-        expr: owner
+        expr: admin
     relations:
-      - name: owner
+      - name: admin
         types:
           - actor
       - name: writer
@@ -154,6 +157,7 @@ resources:
           - actor"#;
 
 /// ACP policy for hiking compartment (workouts, peaks).
+/// Note: `owner` is a reserved relation auto-injected by the system.
 pub const HIKING_ACP_POLICY: &str = r#"name: hiking-policy
 description: Hiking compartment policy for workouts and peaks
 
@@ -161,13 +165,13 @@ resources:
   - name: workouts
     permissions:
       - name: read
-        expr: owner + writer + reader
+        expr: admin + writer + reader
       - name: update
-        expr: owner + writer
+        expr: admin + writer
       - name: delete
-        expr: owner
+        expr: admin
     relations:
-      - name: owner
+      - name: admin
         types:
           - actor
       - name: writer
@@ -179,13 +183,13 @@ resources:
   - name: peaks
     permissions:
       - name: read
-        expr: owner + writer + reader
+        expr: admin + writer + reader
       - name: update
-        expr: owner + writer
+        expr: admin + writer
       - name: delete
-        expr: owner
+        expr: admin
     relations:
-      - name: owner
+      - name: admin
         types:
           - actor
       - name: writer
@@ -196,6 +200,8 @@ resources:
           - actor"#;
 
 /// Strict owner-only ACP policy for secrets.
+/// Uses an `admin` relation that nobody is ever granted, so only the
+/// implicit owner has access to anything.
 pub const SECRET_ACP_POLICY: &str = r#"name: secret-policy
 description: Owner-only policy for secret collections
 
@@ -203,13 +209,13 @@ resources:
   - name: secrets
     permissions:
       - name: read
-        expr: owner
+        expr: admin
       - name: update
-        expr: owner
+        expr: admin
       - name: delete
-        expr: owner
+        expr: admin
     relations:
-      - name: owner
+      - name: admin
         types:
           - actor"#;
 

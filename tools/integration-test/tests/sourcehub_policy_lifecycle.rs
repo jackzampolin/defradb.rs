@@ -1,3 +1,4 @@
+use integration_test::node::{DefraNode, RustNode};
 use integration_test::{generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY};
 
 /// Full on-chain policy lifecycle test.
@@ -8,21 +9,27 @@ use integration_test::{generate_identity, users_schema_with_policy, TestCluster,
 /// 4. Create documents governed by policy
 /// 5. Grant/revoke relationships (on-chain transactions)
 /// 6. Verify access changes propagate
+///
+/// The node is started with Alice's identity so SourceHub transactions work.
 #[tokio::test]
 #[ignore]
 async fn rust_sourcehub_policy_lifecycle() {
+    let binary = RustNode::from_workspace().binary_path().to_path_buf();
+    RustNode::build().expect("build rust binary");
+    let alice = generate_identity(&binary).expect("Alice identity");
+
     let cluster = TestCluster::builder()
         .rust_nodes(1)
+        .skip_build()
         .with_source_hub()
+        .with_identity(&alice.private_key_hex)
         .build()
         .await
         .expect("failed to build cluster");
 
     let node = cluster.client(0);
-    let binary = node.binary_path().to_path_buf();
     let sh = cluster.source_hub().expect("source hub not available");
 
-    let alice = generate_identity(&binary).expect("Alice identity");
     let bob = generate_identity(&binary).expect("Bob identity");
 
     // Step 1: Create policy on-chain
@@ -37,7 +44,10 @@ async fn rust_sourcehub_policy_lifecycle() {
 
     // Step 2: Verify policy exists on Source Hub via LCD
     let client = reqwest::Client::new();
-    let policy_url = format!("{}/sourcehub/acp/policy/{}", sh.lcd_url, policy_id);
+    let policy_url = format!(
+        "{}/sourcenetwork/sourcehub/acp/policy/{}",
+        sh.lcd_url, policy_id
+    );
     let resp = client
         .get(&policy_url)
         .send()

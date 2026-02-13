@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use integration_test::node::{DefraNode, RustNode};
 use integration_test::{generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY};
 
 /// P2P replication preserving Source Hub ACP.
@@ -7,12 +8,20 @@ use integration_test::{generate_identity, users_schema_with_policy, TestCluster,
 /// Two Rust DefraDB nodes connected to the same Source Hub.
 /// A document created on node 0 replicates to node 1.
 /// The owner can read on both nodes; anonymous cannot read on either.
+///
+/// The cluster is started with Jack's identity so SourceHub transactions work.
 #[tokio::test]
 #[ignore]
 async fn rust_sourcehub_p2p_acp() {
+    let binary = RustNode::from_workspace().binary_path().to_path_buf();
+    RustNode::build().expect("build rust binary");
+    let jack = generate_identity(&binary).expect("Jack identity");
+
     let cluster = TestCluster::builder()
         .rust_nodes(2)
+        .skip_build()
         .with_source_hub()
+        .with_identity(&jack.private_key_hex)
         .with_p2p()
         .build()
         .await
@@ -20,9 +29,6 @@ async fn rust_sourcehub_p2p_acp() {
 
     let node0 = cluster.client(0);
     let node1 = cluster.client(1);
-    let binary = node0.binary_path().to_path_buf();
-
-    let jack = generate_identity(&binary).expect("Jack identity");
 
     // Add policy on Source Hub via node 0
     let policy_result = node0
@@ -33,41 +39,42 @@ async fn rust_sourcehub_p2p_acp() {
         .or_else(|| policy_result["policyID"].as_str())
         .expect("PolicyID");
 
-    // Deploy schema on both nodes
+    // Deploy schema on both nodes (node1 also needs the policy stored locally)
     let schema = users_schema_with_policy(policy_id);
     node0
         .schema_add_with_identity(&schema, &jack.private_key_hex)
         .expect("schema on node0");
+
+    // Node 1 needs the policy in its local store for ACP evaluation.
+    // We can't create a second on-chain policy (same content = same ID),
+    // but adding it via the API caches it locally on node1.
+    node1
+        .acp_policy_add(USER_ACP_POLICY, &jack.private_key_hex)
+        .expect("add policy on node1");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
     node1
         .schema_add_with_identity(&schema, &jack.private_key_hex)
         .expect("schema on node1");
 
-    // Connect nodes for P2P
-    let info0 = node0.p2p_info().expect("p2p info node0");
-    let peer_addrs: Vec<String> = info0["addresses"]
+    // Get node1 multiaddr and connect
+    let info1 = node1.p2p_info().expect("p2p info node1");
+    let addr1 = info1
         .as_array()
-        .expect("p2p addresses")
-        .iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .expect("node1 has no P2P address");
 
-    for addr in &peer_addrs {
-        let _ = node1.p2p_connect(&[addr]);
-    }
-
-    // Set up replication
+    node0.p2p_connect(&[addr1]).expect("p2p connect");
     node0
         .p2p_collection_add(&["User"])
         .expect("p2p collection add node0");
     node1
         .p2p_collection_add(&["User"])
         .expect("p2p collection add node1");
-
-    // Wait for peers to connect
-    cluster
-        .wait_for_log(0, "peer_connected", Duration::from_secs(15))
-        .await
-        .expect("peer connection");
+    node0
+        .p2p_replicator_set(&["User"], addr1)
+        .expect("set replicator");
 
     // Create document as Jack on node 0
     node0
