@@ -67,6 +67,9 @@ pub unsafe extern "C" fn exec_request(
         .flatten();
     let signing =
         defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
+    defra_core::batch_signing::set_batch_session_key(
+        signing.as_ref().map(|s| s.public_key_hex.clone()),
+    );
     defra_core::signing::set_signing_config(signing);
 
     // Check if identity has DAC bypass (NAC admin/owner can read all documents)

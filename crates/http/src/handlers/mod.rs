@@ -11,6 +11,7 @@
 
 pub mod acp;
 pub mod backup;
+pub mod batch;
 pub mod block;
 pub mod collections;
 pub mod documents;

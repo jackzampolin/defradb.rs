@@ -12,6 +12,7 @@
 //! All implementations prioritize security and compatibility with the Go
 //! implementation of DefraDB.
 
+pub mod batch;
 pub mod did;
 pub mod encryption;
 pub mod error;

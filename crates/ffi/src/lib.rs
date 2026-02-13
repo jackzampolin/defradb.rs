@@ -35,6 +35,7 @@
 
 pub mod acp;
 pub mod backup;
+pub mod batch;
 pub mod block;
 pub mod collection;
 pub mod document;
@@ -105,6 +106,7 @@ pub use acp::{
     RegisterIdentity,
 };
 pub use backup::{basic_export, basic_import};
+pub use batch::{batch_sign, batch_start};
 pub use block::block_verify_signature;
 pub use collection::{
     add_view, delete_collection, delete_collection_versions, find_collection_by_id,

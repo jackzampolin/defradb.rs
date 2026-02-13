@@ -113,5 +113,10 @@ pub async fn write_collection_block(
         "Built collection block for branchable collection"
     );
 
+    // Collect collection CID for batch signing if a session is active.
+    if let Some(session_key) = defra_core::batch_signing::get_batch_session_key() {
+        defra_core::batch_signing::batch_collect_cid(&session_key, collection_cid);
+    }
+
     Ok((collection_cid, collection_bytes))
 }
