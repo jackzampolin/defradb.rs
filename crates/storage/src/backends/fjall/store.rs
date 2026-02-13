@@ -99,6 +99,22 @@ impl FjallStore {
                 err
             })?;
 
+        let is_separated = keyspace.is_kv_separated();
+        tracing::info!(
+            kv_separated = is_separated,
+            kv_separation_requested = kv_separation,
+            db_path = %db_path.display(),
+            "Fjall keyspace opened"
+        );
+
+        if kv_separation && !is_separated {
+            return Err(Error::Backend(format!(
+                "KV separation requested but keyspace at '{}' was created without it. \
+                 Delete the data directory and restart, or set kv_separation=false.",
+                db_path.display()
+            )));
+        }
+
         Ok(Self {
             db,
             keyspace,
@@ -119,6 +135,11 @@ impl FjallStore {
     /// Get the current count of active transactions.
     pub fn active_transaction_count(&self) -> usize {
         self.active_txn_count.load(Ordering::SeqCst)
+    }
+
+    /// Returns true if the underlying keyspace uses KV separation (blob storage).
+    pub fn is_kv_separated(&self) -> bool {
+        self.keyspace.is_kv_separated()
     }
 
     async fn is_closed(&self) -> bool {
