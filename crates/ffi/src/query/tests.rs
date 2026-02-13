@@ -32,6 +32,7 @@ fn test_exec_request() {
             query_str.as_ptr(),
             ptr::null(),
             ptr::null(),
+            ptr::null(),
         )
     };
     assert_eq!(result.status, 0, "exec_request should succeed");
@@ -71,6 +72,7 @@ fn test_exec_mutation() {
             mutation.as_ptr(),
             ptr::null(),
             ptr::null(),
+            ptr::null(),
         )
     };
     assert_eq!(result.status, 0, "mutation should succeed");
@@ -88,6 +90,7 @@ fn test_exec_mutation() {
             node,
             ptr::null(),
             query_str.as_ptr(),
+            ptr::null(),
             ptr::null(),
             ptr::null(),
         )
@@ -115,7 +118,16 @@ fn test_exec_request_null_query() {
     let node = result.node_ptr;
 
     // Null query should return error
-    let result = unsafe { exec_request(node, ptr::null(), ptr::null(), ptr::null(), ptr::null()) };
+    let result = unsafe {
+        exec_request(
+            node,
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+        )
+    };
     assert_eq!(result.status, 1, "null query should fail");
     assert!(!result.error.is_null());
 
@@ -132,8 +144,16 @@ fn test_exec_request_invalid_handle() {
 
     // Query with invalid handle should return error
     let query_str = CString::new("{ User { name } }").unwrap();
-    let result =
-        unsafe { exec_request(0, ptr::null(), query_str.as_ptr(), ptr::null(), ptr::null()) };
+    let result = unsafe {
+        exec_request(
+            0,
+            ptr::null(),
+            query_str.as_ptr(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+        )
+    };
     assert_eq!(result.status, 1, "invalid handle should fail");
     assert!(!result.error.is_null());
 
@@ -168,6 +188,7 @@ fn test_exec_request_invalid_variables_json() {
             query_str.as_ptr(),
             ptr::null(),
             invalid_json.as_ptr(),
+            ptr::null(),
         )
     };
     assert_eq!(result.status, 1, "invalid JSON should fail");

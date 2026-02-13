@@ -9,20 +9,27 @@ use crate::state::NODES;
 use crate::try_ffi;
 use crate::types::{c_str_to_string, FfiResult};
 
-/// Start (or reset) batch CID collection for the node's signing identity.
+/// Start (or reset) batch CID collection.
 ///
 /// # Arguments
 ///
 /// * `node_ptr` - Handle to the node
 /// * `identity_did` - Optional DID string (null to use node identity)
+/// * `session_id` - Optional unique session ID for concurrent batches.
+///   If null, falls back to the node's public key hex (single-session mode).
 ///
 /// # Safety
 ///
 /// String pointers must be either null or valid null-terminated UTF-8 strings.
 #[no_mangle]
-pub unsafe extern "C" fn batch_start(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
+pub unsafe extern "C" fn batch_start(
+    node_ptr: usize,
+    identity_did: *const c_char,
+    session_id: *const c_char,
+) -> FfiResult {
     let _rt = try_ffi!(get_rt());
     let identity_str = c_str_to_string(identity_did);
+    let session_str = c_str_to_string(session_id);
 
     let node_did = NODES
         .get(node_ptr, |state| state.node_identity_did.clone())
@@ -33,7 +40,8 @@ pub unsafe extern "C" fn batch_start(node_ptr: usize, identity_did: *const c_cha
 
     match signing {
         Some(config) => {
-            defra_core::batch_signing::batch_start(&config.public_key_hex);
+            let key = session_str.unwrap_or_else(|| config.public_key_hex.clone());
+            defra_core::batch_signing::batch_start(&key);
             FfiResult::ok()
         }
         None => FfiResult::error("no signing identity available"),
@@ -48,14 +56,21 @@ pub unsafe extern "C" fn batch_start(node_ptr: usize, identity_did: *const c_cha
 ///
 /// * `node_ptr` - Handle to the node
 /// * `identity_did` - Optional DID string (null to use node identity)
+/// * `session_id` - Optional unique session ID (must match the one passed to `batch_start`).
+///   If null, falls back to the node's public key hex.
 ///
 /// # Safety
 ///
 /// String pointers must be either null or valid null-terminated UTF-8 strings.
 #[no_mangle]
-pub unsafe extern "C" fn batch_sign(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
+pub unsafe extern "C" fn batch_sign(
+    node_ptr: usize,
+    identity_did: *const c_char,
+    session_id: *const c_char,
+) -> FfiResult {
     let _rt = try_ffi!(get_rt());
     let identity_str = c_str_to_string(identity_did);
+    let session_str = c_str_to_string(session_id);
 
     let node_did = NODES
         .get(node_ptr, |state| state.node_identity_did.clone())
@@ -69,7 +84,8 @@ pub unsafe extern "C" fn batch_sign(node_ptr: usize, identity_did: *const c_char
         None => return FfiResult::error("no signing identity available"),
     };
 
-    let cids = match defra_core::batch_signing::batch_take_cids(&config.public_key_hex) {
+    let key = session_str.unwrap_or_else(|| config.public_key_hex.clone());
+    let cids = match defra_core::batch_signing::batch_take_cids(&key) {
         Some(c) => c,
         None => return FfiResult::error("no batch session active"),
     };

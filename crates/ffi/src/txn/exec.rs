@@ -20,6 +20,7 @@ use crate::{ffi_async, try_ffi};
 /// * `request_query` - GraphQL query string (required)
 /// * `operation_name` - Optional operation name (null if not used)
 /// * `variables` - Optional JSON string of variables (null if not used)
+/// * `batch_session_id` - Optional batch session ID for CID collection (null if not in batch mode)
 ///
 /// # Safety
 ///
@@ -32,6 +33,7 @@ pub unsafe extern "C" fn exec_request_in_txn(
     request_query: *const c_char,
     operation_name: *const c_char,
     variables: *const c_char,
+    batch_session_id: *const c_char,
 ) -> FfiResult {
     let rt = try_ffi!(get_rt());
     let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
@@ -43,6 +45,7 @@ pub unsafe extern "C" fn exec_request_in_txn(
     let identity_str = c_str_to_string(identity_did);
     let op_name = c_str_to_string(operation_name);
     let vars_str = c_str_to_string(variables);
+    let batch_session = c_str_to_string(batch_session_id);
 
     // Parse identity DID if provided
     let did = match identity_str {
@@ -58,9 +61,8 @@ pub unsafe extern "C" fn exec_request_in_txn(
         .flatten();
     let signing =
         defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
-    defra_core::batch_signing::set_batch_session_key(
-        signing.as_ref().map(|s| s.public_key_hex.clone()),
-    );
+    let session_key = batch_session.or_else(|| signing.as_ref().map(|s| s.public_key_hex.clone()));
+    defra_core::batch_signing::set_batch_session_key(session_key);
     defra_core::signing::set_signing_config(signing);
 
     // Check if identity has DAC bypass (NAC admin/owner can read all documents)
@@ -143,6 +145,7 @@ mod tests {
                 mutation.as_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
+                std::ptr::null(),
             )
         };
         assert_eq!(result.status, 0, "exec_request_in_txn should succeed");
@@ -186,6 +189,7 @@ mod tests {
                 mutation.as_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
+                std::ptr::null(),
             )
         };
         assert_eq!(result.status, 0);
@@ -225,6 +229,7 @@ mod tests {
                 txn_id_cstr.as_ptr(),
                 std::ptr::null(),
                 query.as_ptr(),
+                std::ptr::null(),
                 std::ptr::null(),
                 std::ptr::null(),
             )

@@ -228,6 +228,7 @@ mod tests {
                 mutation.as_ptr(),
                 ptr::null(),
                 ptr::null(),
+                ptr::null(),
             )
         };
         assert_eq!(result.status, 0, "mutation failed");
@@ -242,6 +243,7 @@ mod tests {
                 node,
                 ptr::null(),
                 query_str.as_ptr(),
+                ptr::null(),
                 ptr::null(),
                 ptr::null(),
             )

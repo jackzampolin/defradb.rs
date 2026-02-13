@@ -5,7 +5,8 @@ use serde_json::Value as JsonValue;
 
 use crate::helpers::{get_node_runner, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
-use crate::types::FfiResult;
+use crate::state::NODES;
+use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, try_ffi};
 
 /// Convert a JSON value to GraphQL input syntax.
@@ -73,6 +74,7 @@ pub unsafe extern "C" fn collection_create(
     identity_did: *const c_char,
     collection_name: *const c_char,
     json_data: *const c_char,
+    batch_session_id: *const c_char,
 ) -> FfiResult {
     let rt = try_ffi!(get_rt());
     try_ffi!(check_nac_for_node(
@@ -83,6 +85,18 @@ pub unsafe extern "C" fn collection_create(
     ));
     let collection = try_ffi!(require_c_str(collection_name, "collection_name"));
     let json_str = try_ffi!(require_c_str(json_data, "json_data"));
+
+    // Set up thread-local signing config and batch session key (same as exec_request)
+    let identity_str = c_str_to_string(identity_did);
+    let batch_session = c_str_to_string(batch_session_id);
+    let node_did = NODES
+        .get(node_ptr, |state| state.node_identity_did.clone())
+        .flatten();
+    let signing =
+        defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
+    let session_key = batch_session.or_else(|| signing.as_ref().map(|s| s.public_key_hex.clone()));
+    defra_core::batch_signing::set_batch_session_key(session_key);
+    defra_core::signing::set_signing_config(signing);
 
     // Parse JSON to detect array vs object
     let parsed: JsonValue = match serde_json::from_str(&json_str) {
