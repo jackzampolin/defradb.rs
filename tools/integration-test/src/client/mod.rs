@@ -455,4 +455,187 @@ impl DefraClient {
         }
         self.exec(&args)
     }
+
+    // -- ACP Document extensions --
+
+    /// Delete an ACP document relationship.
+    pub fn acp_relationship_delete(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        relation: &str,
+        actor_did: &str,
+        hex_key: &str,
+    ) -> Result<Value> {
+        let out = self.exec(&[
+            "client",
+            "-i",
+            hex_key,
+            "acp",
+            "document",
+            "relationship",
+            "delete",
+            "-c",
+            collection,
+            "--docID",
+            doc_id,
+            "-r",
+            relation,
+            "-a",
+            actor_did,
+        ])?;
+        serde_json::from_str(&out).context("failed to parse acp_relationship_delete output")
+    }
+
+    // -- ACP Node (NAC) operations --
+
+    /// Add an ACP node relationship via `client acp node relationship add`.
+    pub fn acp_node_relationship_add(&self, relation: &str, actor_did: &str) -> Result<Value> {
+        let out = self.exec(&[
+            "client",
+            "acp",
+            "node",
+            "relationship",
+            "add",
+            "-r",
+            relation,
+            "-a",
+            actor_did,
+        ])?;
+        serde_json::from_str(&out).context("failed to parse acp_node_relationship_add output")
+    }
+
+    /// Delete an ACP node relationship via `client acp node relationship delete`.
+    pub fn acp_node_relationship_delete(&self, relation: &str, actor_did: &str) -> Result<Value> {
+        let out = self.exec(&[
+            "client",
+            "acp",
+            "node",
+            "relationship",
+            "delete",
+            "-r",
+            relation,
+            "-a",
+            actor_did,
+        ])?;
+        serde_json::from_str(&out).context("failed to parse acp_node_relationship_delete output")
+    }
+
+    /// Get ACP node status via `client acp node status`.
+    pub fn acp_node_status(&self) -> Result<Value> {
+        let out = self.exec(&["client", "acp", "node", "status"])?;
+        serde_json::from_str(&out).context("failed to parse acp_node_status output")
+    }
+
+    /// Disable ACP node via `client acp node disable`.
+    pub fn acp_node_disable(&self) -> Result<Value> {
+        let out = self.exec(&["client", "acp", "node", "disable"])?;
+        serde_json::from_str(&out).context("failed to parse acp_node_disable output")
+    }
+
+    /// Re-enable ACP node via `client acp node re-enable`.
+    pub fn acp_node_reenable(&self) -> Result<Value> {
+        let out = self.exec(&["client", "acp", "node", "re-enable"])?;
+        serde_json::from_str(&out).context("failed to parse acp_node_reenable output")
+    }
+
+    // -- Encrypted Index operations --
+
+    /// Create an encrypted index via `client encrypted-index create <collection> <field>`.
+    pub fn encrypted_index_create(&self, collection: &str, field: &str) -> Result<Value> {
+        let out = self
+            .exec(&["client", "encrypted-index", "create", collection, field])
+            .or_else(|_| {
+                self.exec(&[
+                    "client",
+                    "encrypted-index",
+                    "create",
+                    "--collection",
+                    collection,
+                    "--fields",
+                    field,
+                ])
+            })?;
+        serde_json::from_str(&out).context("failed to parse encrypted_index_create output")
+    }
+
+    /// Delete an encrypted index via `client encrypted-index delete <collection> <field>`.
+    pub fn encrypted_index_delete(&self, collection: &str, field: &str) -> Result<String> {
+        self.exec(&["client", "encrypted-index", "delete", collection, field])
+            .or_else(|_| {
+                self.exec(&[
+                    "client",
+                    "encrypted-index",
+                    "delete",
+                    "--collection",
+                    collection,
+                    "--fields",
+                    field,
+                ])
+            })
+    }
+
+    /// List encrypted indexes via `client encrypted-index list <collection>`.
+    pub fn encrypted_index_list(&self, collection: &str) -> Result<Value> {
+        let out = self
+            .exec(&["client", "encrypted-index", "list", collection])
+            .or_else(|_| {
+                self.exec(&[
+                    "client",
+                    "encrypted-index",
+                    "list",
+                    "--collection",
+                    collection,
+                ])
+            })?;
+        serde_json::from_str(&out).context("failed to parse encrypted_index_list output")
+    }
+
+    // -- Node/Block operations --
+
+    /// Get node identity via `client node-identity`.
+    pub fn node_identity(&self) -> Result<Value> {
+        let out = self.exec(&["client", "node-identity"])?;
+        serde_json::from_str(&out).context("failed to parse node_identity output")
+    }
+
+    /// Verify a block signature via `client block verify-signature <public_key> <cid>`.
+    pub fn block_verify_signature(
+        &self,
+        public_key: &str,
+        cid: &str,
+        key_type: Option<&str>,
+    ) -> Result<String> {
+        let mut args = vec!["client", "block", "verify-signature", public_key, cid];
+        if let Some(kt) = key_type {
+            args.push("--key-type");
+            args.push(kt);
+        }
+        self.exec(&args)
+    }
+
+    // -- Lens operations --
+
+    /// Add a lens migration via `client lens add '<config>'`.
+    pub fn lens_add(&self, config: &str) -> Result<Value> {
+        let out = self.exec(&["client", "lens", "add", config])?;
+        serde_json::from_str(&out).context("failed to parse lens_add output")
+    }
+
+    /// List lens migrations via `client lens list`.
+    pub fn lens_list(&self) -> Result<Value> {
+        let out = self.exec(&["client", "lens", "list"])?;
+        serde_json::from_str(&out).context("failed to parse lens_list output")
+    }
+
+    /// Set a lens migration between schema versions.
+    pub fn lens_set(&self, src: &str, dst: &str, config: &str) -> Result<Value> {
+        let out = self.exec(&["client", "lens", "set", src, dst, config])?;
+        serde_json::from_str(&out).context("failed to parse lens_set output")
+    }
+
+    /// Reload lens migrations via `client lens reload`.
+    pub fn lens_reload(&self) -> Result<String> {
+        self.exec(&["client", "lens", "reload"])
+    }
 }

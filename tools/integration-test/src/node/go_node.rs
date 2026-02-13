@@ -47,9 +47,14 @@ impl DefraNode for GoNode {
         cmd.arg("start");
         cmd.arg("--store").arg("memory");
         cmd.arg("--no-telemetry");
-        cmd.arg("--no-encryption");
-        cmd.arg("--no-signing");
-        cmd.arg("--no-searchable-encryption");
+
+        if !config.encryption_enabled {
+            cmd.arg("--no-encryption");
+            cmd.arg("--no-searchable-encryption");
+        }
+        if !config.signing_enabled {
+            cmd.arg("--no-signing");
+        }
 
         if config.p2p_enabled {
             if let Some(ref addr) = config.p2p_addr {

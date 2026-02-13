@@ -21,6 +21,8 @@ pub struct TestClusterBuilder {
     build_rust: bool,
     acp_document_type: Option<String>,
     node_identity: Option<String>,
+    encryption_enabled: bool,
+    signing_enabled: bool,
 }
 
 impl Default for TestClusterBuilder {
@@ -39,6 +41,8 @@ impl TestClusterBuilder {
             build_rust: true,
             acp_document_type: None,
             node_identity: None,
+            encryption_enabled: false,
+            signing_enabled: false,
         }
     }
 
@@ -74,6 +78,16 @@ impl TestClusterBuilder {
 
     pub fn with_identity(mut self, key: impl Into<String>) -> Self {
         self.node_identity = Some(key.into());
+        self
+    }
+
+    pub fn with_encryption(mut self) -> Self {
+        self.encryption_enabled = true;
+        self
+    }
+
+    pub fn with_signing(mut self) -> Self {
+        self.signing_enabled = true;
         self
     }
 
@@ -114,6 +128,8 @@ impl TestClusterBuilder {
                 patterns::rust_patterns(),
                 self.acp_document_type.clone(),
                 self.node_identity.clone(),
+                self.encryption_enabled,
+                self.signing_enabled,
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -135,6 +151,8 @@ impl TestClusterBuilder {
                 patterns::go_patterns(),
                 self.acp_document_type.clone(),
                 self.node_identity.clone(),
+                self.encryption_enabled,
+                self.signing_enabled,
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -164,6 +182,8 @@ async fn spawn_node(
     named_patterns: Vec<NamedPattern>,
     acp_document_type: Option<String>,
     node_identity: Option<String>,
+    encryption_enabled: bool,
+    signing_enabled: bool,
 ) -> Result<RunningNode> {
     let node_dir = run_dir.node_dir(name)?;
     let log_dir = node_dir.join("logs");
@@ -187,6 +207,8 @@ async fn spawn_node(
         peers: vec![],
         identity: node_identity,
         acp_document_type,
+        encryption_enabled,
+        signing_enabled,
     };
 
     let cmd = node.command(&config);

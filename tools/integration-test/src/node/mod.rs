@@ -18,6 +18,8 @@ pub struct NodeConfig {
     pub peers: Vec<String>,
     pub identity: Option<String>,
     pub acp_document_type: Option<String>,
+    pub encryption_enabled: bool,
+    pub signing_enabled: bool,
 }
 
 /// Trait for building a DefraDB command from config.

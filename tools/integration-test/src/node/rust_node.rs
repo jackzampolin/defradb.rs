@@ -45,9 +45,14 @@ impl DefraNode for RustNode {
         cmd.arg("start");
         cmd.arg("--store").arg("memory");
         cmd.arg("--no-telemetry").arg("true");
-        cmd.arg("--no-encryption").arg("true");
-        cmd.arg("--no-signing").arg("true");
-        cmd.arg("--no-searchable-encryption").arg("true");
+
+        if !config.encryption_enabled {
+            cmd.arg("--no-encryption").arg("true");
+            cmd.arg("--no-searchable-encryption").arg("true");
+        }
+        if !config.signing_enabled {
+            cmd.arg("--no-signing").arg("true");
+        }
 
         if config.p2p_enabled {
             if let Some(ref addr) = config.p2p_addr {
