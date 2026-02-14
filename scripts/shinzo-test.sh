@@ -512,6 +512,13 @@ indexer:
   pprof_port: 0
   open_browser_on_start: false
 
+pruner:
+  enabled: true
+  max_blocks: 10000
+  prune_threshold: 100
+  interval_seconds: 60
+  prune_history: false
+
 logger:
   development: false
 YAML
