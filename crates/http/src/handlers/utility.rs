@@ -6,7 +6,9 @@
 //!
 //! These endpoints match Go DefraDB's utility endpoints for compatibility.
 
-use axum::{extract::State, Json};
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::Json;
 use serde::Serialize;
 
 use crate::error::HttpError;
@@ -52,8 +54,14 @@ pub async fn get_node_identity(
 pub async fn purge(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-) -> Result<Json<()>, HttpError> {
+) -> Result<StatusCode, HttpError> {
     require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
+
+    if !state.dev_mode {
+        return Err(HttpError::BadRequest(
+            "cannot purge database when development mode is disabled".into(),
+        ));
+    }
 
     state
         .require_collection_mgmt()?
@@ -61,7 +69,7 @@ pub async fn purge(
         .await
         .map_err(HttpError::Internal)?;
 
-    Ok(Json(()))
+    Ok(StatusCode::OK)
 }
 
 #[cfg(test)]

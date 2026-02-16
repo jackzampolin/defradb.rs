@@ -41,8 +41,8 @@ pub struct IdentityNewArgs {
     #[arg(long = "output-key")]
     pub output_key: bool,
 
-    /// Output format: text or json
-    #[arg(long, default_value = "text")]
+    /// Output format: json (default, Go-compatible) or text (Rust extension)
+    #[arg(long, default_value = "json")]
     pub output: String,
 }
 
@@ -155,17 +155,21 @@ impl IdentityNewArgs {
             }
         } else {
             let private_key_hex = hex::encode(&raw_bytes);
+            let public_key_hex = hex::encode(identity.public_key_bytes());
+            let key_type_str = identity.identity_key_type().to_string();
             match self.output.to_lowercase().as_str() {
-                "json" => {
-                    let output = serde_json::json!({
-                        "private_key": private_key_hex,
-                        "did": did.to_string(),
-                    });
-                    println!("{}", serde_json::to_string_pretty(&output)?);
-                }
-                _ => {
+                "text" => {
                     println!("Private key: {}", private_key_hex);
                     println!("DID: {}", did);
+                }
+                _ => {
+                    let output = serde_json::json!({
+                        "PrivateKey": private_key_hex,
+                        "PublicKey": public_key_hex,
+                        "DID": did.to_string(),
+                        "KeyType": key_type_str,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
                 }
             }
         }

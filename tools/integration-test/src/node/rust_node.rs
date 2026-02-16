@@ -87,6 +87,10 @@ impl DefraNode for RustNode {
             cmd.arg("--source-hub-chain-id").arg(chain_id);
         }
 
+        if config.development {
+            cmd.arg("--development");
+        }
+
         cmd
     }
 

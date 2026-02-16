@@ -7,6 +7,7 @@
 
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
     Json,
 };
 use serde::Serialize;
@@ -83,23 +84,19 @@ pub async fn get_collection_doc_ids(
     }
 }
 
-/// Request body for patching a collection schema.
+/// Go-compatible request body for patching a collection schema.
 #[derive(Debug, serde::Deserialize)]
 pub struct PatchCollectionRequest {
-    /// Collection name (or version ID) to patch.
-    #[serde(rename = "Name", alias = "name")]
-    pub name: String,
-    /// JSON Patch (RFC 6902) as a JSON string or array.
     #[serde(rename = "Patch", alias = "patch")]
     pub patch: serde_json::Value,
-}
-
-/// Request body for setting the active collection version.
-#[derive(Debug, serde::Deserialize)]
-pub struct SetActiveRequest {
-    /// The version ID to activate.
-    #[serde(rename = "VersionID", alias = "version_id")]
-    pub version_id: String,
+    #[serde(rename = "Migration", default)]
+    pub migration: Option<serde_json::Value>,
+    #[serde(
+        rename = "SetAsDefaultVersion",
+        alias = "set_as_default_version",
+        default
+    )]
+    pub set_as_default_version: Option<bool>,
 }
 
 /// Patch a collection schema.
@@ -114,11 +111,12 @@ pub async fn patch_collection(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Json(body): Json<PatchCollectionRequest>,
-) -> Result<Json<serde_json::Value>, HttpError> {
+) -> Result<StatusCode, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
 
     let collection_mgmt = state.require_collection_mgmt()?;
 
+    // The Patch field may be a JSON string containing patch ops, or a JSON array directly
     let patch_str = if body.patch.is_string() {
         body.patch.as_str().unwrap().to_string()
     } else {
@@ -126,18 +124,50 @@ pub async fn patch_collection(
             .map_err(|e| HttpError::BadRequest(format!("invalid patch: {}", e)))?
     };
 
-    let result = collection_mgmt
-        .patch_collection(&body.name, &patch_str)
+    // Parse the patch ops to extract the collection name from the first op's path
+    let patch_ops: serde_json::Value = serde_json::from_str(&patch_str)
+        .map_err(|e| HttpError::BadRequest(format!("invalid patch JSON: {}", e)))?;
+
+    let name = extract_collection_name_from_patch(&patch_ops)?;
+
+    collection_mgmt
+        .patch_collection(&name, &patch_str)
         .await
         .map_err(HttpError::BadRequest)?;
 
-    Ok(Json(result))
+    Ok(StatusCode::OK)
+}
+
+/// Extract the collection name from the first patch operation's path.
+/// Go patches use paths like "/Users/Fields/-" where "Users" is the collection name.
+fn extract_collection_name_from_patch(patch_ops: &serde_json::Value) -> Result<String, HttpError> {
+    let ops = patch_ops
+        .as_array()
+        .ok_or_else(|| HttpError::BadRequest("patch must be a JSON array".into()))?;
+
+    let first_op = ops
+        .first()
+        .ok_or_else(|| HttpError::BadRequest("patch array is empty".into()))?;
+
+    let path = first_op
+        .get("path")
+        .and_then(|p| p.as_str())
+        .ok_or_else(|| HttpError::BadRequest("first patch op missing 'path' field".into()))?;
+
+    // Path format: "/<CollectionName>/Fields/-" or "/<CollectionName>/..."
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let name = segments
+        .first()
+        .ok_or_else(|| HttpError::BadRequest("patch path has no collection name".into()))?;
+
+    Ok(name.to_string())
 }
 
 /// Set the active collection version.
 ///
-/// POST /api/v0/collections/set-active
+/// POST /api/v0/collections/default
 ///
+/// Accepts a plain text body containing the version ID to activate.
 /// Activates the specified version and deactivates other versions
 /// of the same collection.
 ///
@@ -145,18 +175,21 @@ pub async fn patch_collection(
 pub async fn set_active(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Json(body): Json<SetActiveRequest>,
-) -> Result<Json<()>, HttpError> {
+    body: axum::body::Bytes,
+) -> Result<StatusCode, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
+
+    let version_id = String::from_utf8(body.to_vec())
+        .map_err(|_| HttpError::BadRequest("invalid UTF-8".into()))?;
 
     let collection_mgmt = state.require_collection_mgmt()?;
 
     collection_mgmt
-        .set_active_version(&body.version_id)
+        .set_active_version(version_id.trim())
         .await
         .map_err(HttpError::BadRequest)?;
 
-    Ok(Json(()))
+    Ok(StatusCode::OK)
 }
 
 /// Truncate all documents in a collection.

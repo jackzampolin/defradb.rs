@@ -711,4 +711,47 @@ impl DefraClient {
             collection_id,
         ])
     }
+
+    // -- Collection management operations --
+
+    /// Patch a collection schema via `client collection patch '<patch>'`.
+    pub fn collection_patch(&self, patch: &str) -> Result<String> {
+        self.exec(&["client", "collection", "patch", patch])
+    }
+
+    /// Set active collection version via `client collection set-active '<version_id>'`.
+    pub fn collection_set_active(&self, version_id: &str) -> Result<String> {
+        self.exec(&["client", "collection", "set-active", version_id])
+    }
+
+    /// Purge the database via `client purge --force`.
+    pub fn purge(&self) -> Result<String> {
+        self.exec(&["client", "purge", "--force"])
+    }
+
+    /// Get collection version info including VersionID.
+    ///
+    /// Tries the Rust REST endpoint first (`/collections/{name}/describe`),
+    /// then falls back to the CLI `collection describe` (works for Go nodes).
+    pub fn collection_describe_version(&self, name: &str) -> Result<Value> {
+        // Try Rust REST endpoint first
+        let url = format!("{}/api/v0/collections/{}/describe", self.url, name);
+        let output = Command::new("curl")
+            .arg("-s")
+            .arg("-f")
+            .arg(&url)
+            .output()
+            .with_context(|| format!("failed to curl {}", url))?;
+
+        if output.status.success() {
+            let body = String::from_utf8_lossy(&output.stdout);
+            if let Ok(val) = serde_json::from_str::<Value>(body.trim()) {
+                return Ok(val);
+            }
+        }
+
+        // Fall back to CLI describe (Go CLI returns full CollectionVersion JSON)
+        let out = self.exec(&["client", "collection", "describe", "--name", name])?;
+        serde_json::from_str(&out).context("failed to parse collection describe output")
+    }
 }

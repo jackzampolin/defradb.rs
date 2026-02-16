@@ -60,7 +60,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
     let collection_routes = Router::new()
         .route("/", get(handlers::list_collections))
         .route("/", patch(handlers::patch_collection))
-        .route("/set-active", post(handlers::set_active))
+        .route("/default", post(handlers::set_active))
         .route(
             "/versions",
             get(handlers::get_all_collections).delete(handlers::delete_collection_versions),

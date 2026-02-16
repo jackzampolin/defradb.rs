@@ -185,8 +185,7 @@ impl CollectionPatchArgs {
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        let result = client.collection_patch(&patch).await?;
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        client.collection_patch(&patch).await?;
         Ok(())
     }
 }
@@ -197,10 +196,9 @@ impl SetActiveArgs {
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        let result = client
+        client
             .collection_set_active(self.version_id.as_deref())
             .await?;
-        println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }
 }

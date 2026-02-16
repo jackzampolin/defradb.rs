@@ -26,6 +26,7 @@ pub struct TestClusterBuilder {
     signing_enabled: bool,
     nac_enabled: bool,
     source_hub_enabled: bool,
+    development: bool,
 }
 
 impl Default for TestClusterBuilder {
@@ -48,6 +49,7 @@ impl TestClusterBuilder {
             signing_enabled: false,
             nac_enabled: false,
             source_hub_enabled: false,
+            development: false,
         }
     }
 
@@ -104,6 +106,11 @@ impl TestClusterBuilder {
     pub fn with_source_hub(mut self) -> Self {
         self.source_hub_enabled = true;
         self.acp_document_type = Some("source-hub".to_string());
+        self
+    }
+
+    pub fn with_development(mut self) -> Self {
+        self.development = true;
         self
     }
 
@@ -196,6 +203,7 @@ impl TestClusterBuilder {
                 sh_lcd.clone(),
                 sh_comet.clone(),
                 sh_chain_id.clone(),
+                self.development,
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -223,6 +231,7 @@ impl TestClusterBuilder {
                 sh_lcd.clone(),
                 sh_comet.clone(),
                 sh_chain_id.clone(),
+                self.development,
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -263,6 +272,7 @@ async fn spawn_node(
     source_hub_address: Option<String>,
     source_hub_comet_address: Option<String>,
     source_hub_chain_id: Option<String>,
+    development: bool,
 ) -> Result<RunningNode> {
     let node_dir = run_dir.node_dir(name)?;
     let log_dir = node_dir.join("logs");
@@ -292,6 +302,7 @@ async fn spawn_node(
         source_hub_address,
         source_hub_comet_address,
         source_hub_chain_id,
+        development,
     };
 
     let cmd = node.command(&config);

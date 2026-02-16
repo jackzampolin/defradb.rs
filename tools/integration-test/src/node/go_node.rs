@@ -79,6 +79,10 @@ impl DefraNode for GoNode {
             cmd.arg("--node-acp-enable");
         }
 
+        if config.development {
+            cmd.arg("--development");
+        }
+
         cmd
     }
 

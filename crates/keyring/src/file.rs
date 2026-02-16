@@ -14,14 +14,20 @@ use crate::error::{Error, Result};
 use crate::key_name::KeyName;
 use crate::keyring::Keyring;
 
-/// Content encryption algorithm - matches Go jwx default for PBES2_HS512_A256KW
-const CONTENT_ENCRYPTION: &str = "A128CBC-HS256";
+/// Content encryption algorithm — matches Go jwx default (A256GCM).
+const CONTENT_ENCRYPTION: &str = "A256GCM";
+
+/// PBKDF2 iteration count — matches Go jwx default (10000).
+const PBKDF2_ITER_COUNT: usize = 10000;
+
+/// PBKDF2 salt length — matches Go jwx default (32 bytes = AES-256-KW key length).
+const PBKDF2_SALT_LEN: usize = 32;
 
 /// File-based keyring that stores keys in encrypted files using JWE.
 ///
 /// Each key is stored as a separate file in the directory, encrypted using
 /// PBES2-HS512-A256KW (Password-Based Encryption Scheme 2 with HMAC-SHA-512
-/// and AES-256-KW for key wrapping) with A128CBC-HS256 content encryption.
+/// and AES-256-KW for key wrapping) with A256GCM content encryption.
 ///
 /// The file format is compatible with Go DefraDB's file keyring.
 pub struct FileKeyring {
@@ -61,9 +67,11 @@ impl FileKeyring {
         let mut header = JweHeader::new();
         header.set_content_encryption(CONTENT_ENCRYPTION);
 
-        let encrypter = PBES2_HS512_A256KW
+        let mut encrypter = PBES2_HS512_A256KW
             .encrypter_from_bytes(&self.password)
             .map_err(|e| Error::Encryption(format!("failed to create encrypter: {}", e)))?;
+        encrypter.set_iter_count(PBKDF2_ITER_COUNT);
+        encrypter.set_salt_len(PBKDF2_SALT_LEN);
 
         let token = jwe::serialize_compact(data, &header, &encrypter)
             .map_err(|e| Error::Encryption(format!("failed to encrypt: {}", e)))?;
