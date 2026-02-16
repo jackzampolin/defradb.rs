@@ -19,46 +19,16 @@ use query::subscription::{
     extract_doc_id_from_query, is_commits_subscription, response_has_data,
     subscription_to_commits_query_with_cid, subscription_to_query_with_doc_id,
 };
-use query::{parse_request, MutationType, ParsedOperation};
+use query::{parse_request, ParsedOperation};
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
-use crate::nac_guard::require_permission;
 use crate::query_context::{
     execute_in_txn_with_context, execute_with_context, execute_with_resolved_context,
 };
-use crate::router::{AppState, NodePermission};
+use crate::router::AppState;
 
 use super::TX_HEADER_NAME;
-
-/// Determine the required NAC permission based on GraphQL operation type.
-///
-/// - Query operations require `DocumentRead` permission
-/// - Delete mutations require `DocumentDelete` permission
-/// - Other mutations require `DocumentUpdate` permission
-/// - Parse failures default to `DocumentUpdate` (fail-secure)
-///
-/// This matches Go DefraDB's per-operation permission model where different
-/// operation types have different permission requirements.
-pub(crate) fn permission_for_query(query: &str) -> NodePermission {
-    match parse_request(query) {
-        Ok(ParsedOperation::Query { .. }) => NodePermission::DocumentRead,
-        Ok(ParsedOperation::Subscription { .. }) => NodePermission::DocumentRead,
-        Ok(ParsedOperation::Introspection { .. }) => NodePermission::DocumentRead,
-        Ok(ParsedOperation::Mutation { mutations, .. }) => {
-            if mutations
-                .iter()
-                .any(|m| m.mutation_type == MutationType::Delete)
-            {
-                NodePermission::DocumentDelete
-            } else {
-                NodePermission::DocumentUpdate
-            }
-        }
-        // Parse failures default to the more restrictive permission
-        Err(_) => NodePermission::DocumentUpdate,
-    }
-}
 
 /// Check if a query references `encrypted_` fields and P2P is disabled.
 ///
@@ -128,12 +98,6 @@ pub async fn graphql(
     identity: ExtractIdentity,
     Json(mut request): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, HttpError> {
-    // NAC check: Only parse for permission type when NAC is enabled
-    if state.nac.is_some() {
-        let required_permission = permission_for_query(&request.query);
-        require_permission(&state, &identity, required_permission).await?;
-    }
-
     // Validate encrypted field queries require P2P
     check_encrypted_fields(&state, &request.query)?;
 
@@ -166,9 +130,6 @@ pub async fn graphql_get(
     identity: ExtractIdentity,
     Query(params): Query<GraphqlQueryParams>,
 ) -> Result<Json<QueryResponse>, HttpError> {
-    // NAC check: GET is read-only queries, so require DocumentRead permission
-    require_permission(&state, &identity, NodePermission::DocumentRead).await?;
-
     // Validate encrypted field queries require P2P
     check_encrypted_fields(&state, &params.query)?;
 
@@ -241,12 +202,6 @@ pub async fn graphql_transactional(
     headers: HeaderMap,
     Json(request): Json<TransactionalQueryRequest>,
 ) -> Result<axum::response::Response, HttpError> {
-    // NAC check: Only parse for permission type when NAC is enabled
-    if state.nac.is_some() {
-        let required_permission = permission_for_query(&request.query);
-        require_permission(&state, &identity, required_permission).await?;
-    }
-
     // Validate encrypted field queries require P2P
     check_encrypted_fields(&state, &request.query)?;
 

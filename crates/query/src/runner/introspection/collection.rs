@@ -224,34 +224,59 @@ pub(super) fn build_collection_type(
     obj
 }
 
-/// Build the Commit object type (used by _version virtual field).
+/// Build the Commit object type (used by _version and _commits fields).
+///
+/// Fields match Go's CommitObject() in commits.go, sorted alphabetically.
 pub(super) fn build_commit_type() -> Object {
-    let mut obj = Object::new("Commit");
-    obj = obj.field(Field::new("cid", TypeRef::named("String"), |_| {
-        FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-    }));
-    obj = obj.field(Field::new("height", TypeRef::named("Int"), |_| {
-        FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-    }));
-    obj = obj.field(Field::new("delta", TypeRef::named("String"), |_| {
-        FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-    }));
-    obj = obj.field(Field::new("docID", TypeRef::named("String"), |_| {
-        FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-    }));
-    obj = obj.field(Field::new("collectionID", TypeRef::named("Int"), |_| {
-        FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-    }));
-    obj = obj.field(Field::new("fieldName", TypeRef::named("String"), |_| {
-        FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-    }));
-    obj = obj.field(Field::new("fieldID", TypeRef::named("String"), |_| {
-        FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-    }));
-    obj = obj.field(Field::new("links", TypeRef::named_list("Commit"), |_| {
-        FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-    }));
-    obj
+    macro_rules! null_field {
+        ($name:expr, $ty:expr) => {
+            Field::new($name, $ty, |_| {
+                FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
+            })
+        };
+    }
+
+    fn with_commit_link_args(field: Field) -> Field {
+        field
+            .argument(InputValue::new("cid", TypeRef::named("ID")))
+            .argument(InputValue::new("docID", TypeRef::named("ID")))
+            .argument(InputValue::new(
+                "filter",
+                TypeRef::named("CommitsFilterArg"),
+            ))
+            .argument(InputValue::new(
+                "groupBy",
+                TypeRef::named_nn_list("commitFields"),
+            ))
+            .argument(InputValue::new(
+                "order",
+                TypeRef::named_list("commitsOrderArg"),
+            ))
+    }
+
+    Object::new("Commit")
+        .field(
+            null_field!("_count", TypeRef::named("Int")).argument(InputValue::new(
+                "field",
+                TypeRef::named("commitCountFieldArg"),
+            )),
+        )
+        .field(null_field!("_group", TypeRef::named_list("Commit")))
+        .field(null_field!("cid", TypeRef::named("String")))
+        .field(null_field!("collectionVersionId", TypeRef::named("String")))
+        .field(null_field!("delta", TypeRef::named("String")))
+        .field(null_field!("docID", TypeRef::named("String")))
+        .field(null_field!("fieldName", TypeRef::named("String")))
+        .field(with_commit_link_args(null_field!(
+            "heads",
+            TypeRef::named_list("Commit")
+        )))
+        .field(null_field!("height", TypeRef::named("Int")))
+        .field(with_commit_link_args(null_field!(
+            "links",
+            TypeRef::named_list("Commit")
+        )))
+        .field(null_field!("signature", TypeRef::named("Signature")))
 }
 
 /// Convert field kind to async-graphql TypeRef.

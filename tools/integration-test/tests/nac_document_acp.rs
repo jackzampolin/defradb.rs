@@ -4,11 +4,9 @@ use integration_test::{generate_identity, users_schema_with_policy, TestCluster,
 /// - NAC (Node Access Control): who can use the DefraDB instance
 /// - Document ACP: who can access specific documents
 ///
-/// With NAC enabled in Go, ALL operations require NAC "admin" relation.
+/// With NAC enabled, ALL operations require NAC "admin" relation.
 /// The node's startup identity gets automatic admin access.
-///
-/// Rust's NAC enforcement is incomplete — it doesn't block at query level.
-async fn nac_document_acp_test(cluster: TestCluster, is_go: bool) {
+async fn nac_document_acp_test(cluster: TestCluster) {
     let node = cluster.client(0);
     let binary = node.binary_path().to_path_buf();
 
@@ -57,8 +55,7 @@ async fn nac_document_acp_test(cluster: TestCluster, is_go: bool) {
     );
 
     // --- Test 2: regular_user WITHOUT NAC admin ---
-    // Go: NAC blocks before document ACP (sees 0)
-    // Rust: NAC enforcement is incomplete (sees 0 due to document ACP)
+    // NAC blocks before document ACP (sees 0)
     node.acp_relationship_add("User", &doc_id, "reader", &regular_user.did, &jack_key)
         .expect("grant regular_user document reader");
 
@@ -70,20 +67,10 @@ async fn nac_document_acp_test(cluster: TestCluster, is_go: bool) {
         .map(|a| a.len())
         .unwrap_or(0);
 
-    if is_go {
-        // Go: NAC blocks ALL queries for users without NAC admin
-        assert_eq!(
-            regular_no_nac_count, 0,
-            "Go: regular_user without NAC admin should see 0"
-        );
-    } else {
-        // Rust: NAC enforcement incomplete, document ACP still works
-        // regular_user has document reader → sees doc via document ACP
-        assert_eq!(
-            regular_no_nac_count, 1,
-            "Rust: NAC enforcement incomplete, user sees doc via document ACP"
-        );
-    }
+    assert_eq!(
+        regular_no_nac_count, 0,
+        "regular_user without NAC admin should see 0"
+    );
 
     // --- Test 3: Grant regular_user NAC admin -> they can read ---
     let nac_grant = node.acp_node_relationship_add("admin", &regular_user.did, &jack_key);
@@ -194,7 +181,7 @@ async fn rust_nac_document_acp() {
         .build()
         .await
         .unwrap();
-    nac_document_acp_test(cluster, false).await;
+    nac_document_acp_test(cluster).await;
 }
 
 #[tokio::test]
@@ -207,5 +194,5 @@ async fn go_nac_document_acp() {
         .build()
         .await
         .unwrap();
-    nac_document_acp_test(cluster, true).await;
+    nac_document_acp_test(cluster).await;
 }

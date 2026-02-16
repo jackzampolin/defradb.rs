@@ -5,12 +5,56 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use tracing::instrument;
 
+use acp::nac::NodePermission;
+use identity::Did;
+
 use crate::error::{Result, TransactionError};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
 use crate::query_parse::{parse_request_with_variables, ParsedOperation};
 use crate::txn::{GetTransactionResult, TransactionHandle, TransactionRegistry};
 
 use super::{DocFetcher, QueryRunner};
+
+/// Map a parsed operation to the required NAC permission.
+fn permission_for_operation(parsed: &ParsedOperation) -> NodePermission {
+    match parsed {
+        ParsedOperation::Query { .. } => NodePermission::DocumentRead,
+        ParsedOperation::Subscription { .. } => NodePermission::DocumentRead,
+        ParsedOperation::Introspection { .. } => NodePermission::DocumentRead,
+        ParsedOperation::Mutation { mutations, .. } => {
+            if mutations
+                .iter()
+                .any(|m| m.mutation_type == crate::mapper::MutationType::Delete)
+            {
+                NodePermission::DocumentDelete
+            } else {
+                NodePermission::DocumentUpdate
+            }
+        }
+    }
+}
+
+/// Check NAC permission and return a denial response if not authorized.
+///
+/// Go enforces NAC at the data layer — denied queries return HTTP 200 with
+/// empty data (not a GraphQL error). We match that by returning an empty
+/// JSON object as data when NAC denies a request.
+async fn check_nac<F: DocFetcher + 'static, R: crate::txn::TransactionRegistry>(
+    runner: &QueryRunner<F, R>,
+    identity: &Option<Did>,
+    parsed: &ParsedOperation,
+) -> Option<QueryResponse> {
+    let nac = runner.nac.as_ref()?;
+    let did = match identity {
+        Some(d) => d.clone(),
+        None => Did::wildcard(),
+    };
+    let permission = permission_for_operation(parsed);
+    if !nac.check_permission(&did, permission).await {
+        return Some(QueryResponse::success(serde_json::json!({})));
+    }
+    None
+}
 
 /// Convert JSON variables from request format to parser format.
 /// Variables in requests are `Option<JsonValue>` (a JSON object), but the
@@ -58,6 +102,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
 
         // Resolve effective identity: request identity takes precedence over default
         let identity = self.resolve_identity(request.identity);
+
+        // NAC check: enforce at query level (returns GraphQL error, not HTTP 401)
+        if let Some(denial) = check_nac(self, &identity, &parsed).await {
+            return denial;
+        }
 
         // Route to appropriate handler based on operation type
         // Pass identity and variables through for ACP permission checks and variable substitution
@@ -184,6 +233,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
 
         // Resolve effective identity: request identity takes precedence over default
         let identity = self.resolve_identity(request.identity);
+
+        // NAC check: enforce at query level (returns GraphQL error, not HTTP 401)
+        if let Some(denial) = check_nac(self, &identity, &parsed).await {
+            return denial;
+        }
 
         // Route to appropriate handler based on operation type
         let result = match parsed {
