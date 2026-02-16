@@ -928,6 +928,11 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             return Ok(());
         }
 
+        // Validate all CIDs upfront before attempting sync (matches Go behavior).
+        for vid in &version_ids {
+            cid::Cid::try_from(vid.as_str()).map_err(|e| format!("invalid cid: {}", e))?;
+        }
+
         let connected_peers = self
             .handle
             .connected_peers()

@@ -156,13 +156,8 @@ impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static> VersionSyncer
         use p2p::sync::MergeHandler;
 
         for version_id_str in &version_ids {
-            let version_cid = match cid::Cid::try_from(version_id_str.as_str()) {
-                Ok(cid) => cid,
-                Err(e) => {
-                    tracing::warn!(version_id = %version_id_str, error = %e, "invalid CID, skipping");
-                    continue;
-                }
-            };
+            let version_cid = cid::Cid::try_from(version_id_str.as_str())
+                .map_err(|e| format!("invalid cid: {}", e))?;
 
             // Start Bitswap sync for the version CID
             if let Err(e) = handle
