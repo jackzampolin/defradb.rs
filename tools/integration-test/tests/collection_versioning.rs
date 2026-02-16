@@ -8,13 +8,23 @@ async fn collection_versioning_test(cluster: TestCluster) {
         .schema_add("type Item { name: String }")
         .expect("failed to add schema");
 
-    // 2. Get version ID from collection describe
-    let desc = client.collection_describe("Item").expect("describe failed");
+    // 2. Get version ID from REST API describe endpoint
+    let desc = client
+        .collection_describe_version("Item")
+        .expect("describe version failed");
 
-    // Extract version ID - Go uses "VersionID", check both
-    let version_id = desc
+    // Extract version ID from describe output.
+    // Go CLI returns an array of collection versions; Rust REST returns a single object.
+    let version_obj = if desc.is_array() {
+        desc.as_array()
+            .and_then(|arr| arr.first())
+            .expect("empty collection describe array")
+    } else {
+        &desc
+    };
+    let version_id = version_obj
         .get("VersionID")
-        .or_else(|| desc.get("version_id"))
+        .or_else(|| version_obj.get("version_id"))
         .and_then(|v| v.as_str())
         .expect("missing VersionID in collection describe");
 
