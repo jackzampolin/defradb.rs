@@ -271,9 +271,13 @@ impl DefraClient {
 
     // -- Schema extensions --
 
-    /// Describe the full schema via `client schema describe`.
+    /// List schema type names via GraphQL introspection.
+    ///
+    /// Works on both Go and Rust binaries (Go lacks `client schema describe`,
+    /// Rust's `client collection describe` requires `--name`).
     pub fn schema_describe(&self) -> Result<String> {
-        self.exec(&["client", "schema", "describe"])
+        let result = self.query(r#"{ __schema { types { name } } }"#)?;
+        Ok(result.to_string())
     }
 
     // -- Index operations --
