@@ -24,6 +24,7 @@ pub struct NodeConfig {
     pub source_hub_address: Option<String>,
     pub source_hub_comet_address: Option<String>,
     pub source_hub_chain_id: Option<String>,
+    pub development: bool,
 }
 
 /// Trait for building a DefraDB command from config.
