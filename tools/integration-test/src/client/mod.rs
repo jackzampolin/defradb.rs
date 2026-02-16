@@ -686,4 +686,21 @@ impl DefraClient {
     pub fn lens_reload(&self) -> Result<String> {
         self.exec(&["client", "lens", "reload"])
     }
+
+    // -- Collection management operations --
+
+    /// Patch a collection schema via `client collection patch '<patch>'`.
+    pub fn collection_patch(&self, patch: &str) -> Result<String> {
+        self.exec(&["client", "collection", "patch", patch])
+    }
+
+    /// Set active collection version via `client collection set-active '<version_id>'`.
+    pub fn collection_set_active(&self, version_id: &str) -> Result<String> {
+        self.exec(&["client", "collection", "set-active", version_id])
+    }
+
+    /// Purge the database via `client purge --force`.
+    pub fn purge(&self) -> Result<String> {
+        self.exec(&["client", "purge", "--force"])
+    }
 }

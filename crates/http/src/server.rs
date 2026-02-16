@@ -60,6 +60,7 @@ pub struct Server {
     txn_ops: Option<Arc<dyn TransactionOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
     node_identity_did: Option<String>,
+    dev_mode: bool,
 }
 
 impl Server {
@@ -84,6 +85,7 @@ impl Server {
             txn_ops: None,
             event_bus: None,
             node_identity_did: None,
+            dev_mode: false,
         }
     }
 
@@ -108,6 +110,7 @@ impl Server {
             txn_ops: None,
             event_bus: None,
             node_identity_did: None,
+            dev_mode: false,
         }
     }
 
@@ -132,6 +135,7 @@ impl Server {
             txn_ops: None,
             event_bus: None,
             node_identity_did: None,
+            dev_mode: false,
         }
     }
 
@@ -156,6 +160,7 @@ impl Server {
             txn_ops: None,
             event_bus: None,
             node_identity_did: None,
+            dev_mode: false,
         }
     }
 
@@ -310,6 +315,12 @@ impl Server {
         self
     }
 
+    /// Enable development mode (allows purge and other dev-only operations).
+    pub fn with_dev_mode(mut self, dev_mode: bool) -> Self {
+        self.dev_mode = dev_mode;
+        self
+    }
+
     /// Build the router with all routes and middleware.
     ///
     /// CORS configuration matches Go DefraDB behavior:
@@ -371,6 +382,7 @@ impl Server {
         if let Some(ref did) = self.node_identity_did {
             builder = builder.with_node_identity_did(did.clone());
         }
+        builder = builder.with_dev_mode(self.dev_mode);
         let state = builder.build();
         let router = create_router_with_state(state);
 

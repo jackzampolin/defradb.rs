@@ -31,6 +31,7 @@ pub struct AppState {
     pub txn_ops: Option<Arc<dyn TransactionOperations>>,
     pub event_bus: Option<Arc<dyn events::Bus>>,
     pub node_identity_did: Option<String>,
+    pub dev_mode: bool,
 }
 
 impl std::fmt::Debug for AppState {
@@ -77,6 +78,7 @@ impl std::fmt::Debug for AppState {
             )
             .field("event_bus", &self.event_bus.as_ref().map(|_| "<EventBus>"))
             .field("node_identity_did", &self.node_identity_did)
+            .field("dev_mode", &self.dev_mode)
             .finish()
     }
 }
@@ -223,6 +225,7 @@ pub struct AppStateBuilder {
     txn_ops: Option<Arc<dyn TransactionOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
     node_identity_did: Option<String>,
+    dev_mode: bool,
 }
 
 impl AppStateBuilder {
@@ -246,6 +249,7 @@ impl AppStateBuilder {
             txn_ops: None,
             event_bus: None,
             node_identity_did: None,
+            dev_mode: false,
         }
     }
 
@@ -351,6 +355,12 @@ impl AppStateBuilder {
         self
     }
 
+    /// Enable development mode (allows purge and other dev-only operations).
+    pub fn with_dev_mode(mut self, dev_mode: bool) -> Self {
+        self.dev_mode = dev_mode;
+        self
+    }
+
     /// Build the AppState.
     pub fn build(self) -> AppState {
         AppState {
@@ -371,6 +381,7 @@ impl AppStateBuilder {
             txn_ops: self.txn_ops,
             event_bus: self.event_bus,
             node_identity_did: self.node_identity_did,
+            dev_mode: self.dev_mode,
         }
     }
 }

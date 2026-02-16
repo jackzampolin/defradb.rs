@@ -556,7 +556,8 @@ impl Node {
             // Cast the Arc<QueryRunner> to Arc<dyn QueryExecutor> for the server
             let executor: Arc<dyn query::executor::QueryExecutor> = runner;
             let mut server = defra_http::Server::from_arc_with_config(executor, server_config)
-                .with_rest(rest_ops);
+                .with_rest(rest_ops)
+                .with_dev_mode(config.development);
 
             // Wire node identity DID for signing config fallback in HTTP handlers
             if let Some(did) = node_identity_did {
