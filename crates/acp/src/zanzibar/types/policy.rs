@@ -1,7 +1,6 @@
 //! Zanzibar policy type and validation.
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 use super::relationship::Relationship;
@@ -47,135 +46,12 @@ impl Policy {
         self
     }
 
-    /// Parse a policy from YAML content.
+    /// Build a Policy from an already-parsed ParsedPolicy.
     ///
-    /// The YAML format matches Go DefraDB's ACP policy format:
-    /// ```yaml
-    /// name: policy-name
-    /// description: optional description
-    /// resources:
-    ///   resource_name:
-    ///     relations:
-    ///       owner:
-    ///         types: [actor]
-    ///       reader:
-    ///         types: [actor]
-    ///     permissions:
-    ///       read:
-    ///         expr: owner + reader
-    /// ```
-    ///
-    /// The policy ID is generated as the SHA256 hex hash of the YAML content.
-    pub fn from_yaml(yaml: &str) -> Result<Self> {
-        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml)
-            .map_err(|e| Error::InvalidPolicy(format!("invalid YAML: {}", e)))?;
-
-        // Generate policy ID from content hash
-        let mut hasher = Sha256::new();
-        hasher.update(yaml.as_bytes());
-        let hash = hasher.finalize();
-        let id = hash
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<String>();
-
-        let name = parsed
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let description = parsed
-            .get("description")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        let mut attributes = HashMap::new();
-        if let Some(desc) = description {
-            attributes.insert("description".to_string(), desc);
-        }
-
-        let mut resources = Vec::new();
-
-        if let Some(res_map) = parsed.get("resources").and_then(|v| v.as_mapping()) {
-            for (res_name, res_value) in res_map {
-                let resource_name = res_name.as_str().ok_or_else(|| {
-                    Error::InvalidPolicy("resource name must be a string".to_string())
-                })?;
-
-                let mut relations = Vec::new();
-
-                // Parse relations (direct)
-                if let Some(rels) = res_value.get("relations").and_then(|v| v.as_mapping()) {
-                    for (rel_name, rel_value) in rels {
-                        let rname = rel_name.as_str().ok_or_else(|| {
-                            Error::InvalidPolicy("relation name must be a string".to_string())
-                        })?;
-
-                        let mut relation = Relation::direct(rname);
-
-                        // Parse manages list
-                        if let Some(manages) =
-                            rel_value.get("manages").and_then(|v| v.as_sequence())
-                        {
-                            let manages_list: Vec<String> = manages
-                                .iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect();
-                            relation = relation.with_manages(manages_list);
-                        }
-
-                        relations.push(relation);
-                    }
-                }
-
-                // Parse permissions (computed)
-                if let Some(perms) = res_value.get("permissions").and_then(|v| v.as_mapping()) {
-                    for (perm_name, perm_value) in perms {
-                        let pname = perm_name.as_str().ok_or_else(|| {
-                            Error::InvalidPolicy("permission name must be a string".to_string())
-                        })?;
-
-                        let expr_str =
-                            perm_value
-                                .get("expr")
-                                .and_then(|v| v.as_str())
-                                .ok_or_else(|| {
-                                    Error::InvalidPolicy(format!(
-                                        "permission '{}' must have an 'expr' field",
-                                        pname
-                                    ))
-                                })?;
-
-                        let expression = RelationExpression::parse(expr_str)?;
-                        relations.push(Relation::computed(pname, expression));
-                    }
-                }
-
-                resources.push(Resource {
-                    name: resource_name.to_string(),
-                    relations,
-                });
-            }
-        }
-
-        Ok(Self {
-            id,
-            name,
-            resources,
-            attributes,
-        })
-    }
-
-    /// Build a Policy from an already-parsed ParsedPolicy and raw YAML (for ID hashing).
-    pub fn from_parsed(yaml: &str, parsed: &crate::policy_yaml::ParsedPolicy) -> Result<Self> {
-        let mut hasher = Sha256::new();
-        hasher.update(yaml.as_bytes());
-        let hash = hasher.finalize();
-        let id = hash
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<String>();
+    /// The `counter` parameter is a monotonic sequence number used together with
+    /// the parsed policy fields to generate Go-compatible policy IDs.
+    pub fn from_parsed(parsed: &crate::policy_yaml::ParsedPolicy, counter: u64) -> Result<Self> {
+        let id = crate::policy_yaml::generate_policy_id(parsed, counter);
 
         let mut attributes = HashMap::new();
         if !parsed.description.is_empty() {

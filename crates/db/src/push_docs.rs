@@ -96,7 +96,10 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
             .await
             .map_err(|e| format!("datastore close error: {}", e))?;
 
-        // For each document, push composite head blocks to the replicator.
+        // For each document, send field blocks before composite heads.
+        // Go needs linked field (LWW) blocks in its blockstore before it
+        // processes the composite block, otherwise it tries Bitswap which
+        // doesn't work reliably cross-platform.
         for doc_id in &doc_ids {
             let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
             let opts = IterOptions::new().with_prefix(prefix);
@@ -104,6 +107,9 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                 .iterator(opts)
                 .await
                 .map_err(|e| format!("failed to iterate headstore: {}", e))?;
+
+            // Collect phase: pre-load all block data before spawning tasks.
+            let mut heads = Vec::new();
 
             while let Some(pair) = iter
                 .next()
@@ -121,37 +127,74 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                     Err(_) => continue,
                 };
 
-                // Read block data from blockstore
                 let block_key = head_cid.to_bytes();
                 let block_data = match blockstore_view.get(&block_key).await {
                     Ok(Some(data)) => data,
                     _ => continue,
                 };
 
-                let mut request = PushLogRequest::new(
-                    doc_id.clone(),
-                    head_cid.to_bytes(),
-                    collection.collection_id().to_string(),
-                    local_peer_id.to_string(),
-                    block_data,
-                );
-
-                if let Err(e) = p2p::signing::sign_message(handle.keypair(), &mut request) {
-                    tracing::warn!(error = %e, "Failed to sign PushLog request");
-                    continue;
+                // Parse composite block to extract linked field block CIDs.
+                let mut field_blocks = Vec::new();
+                if let Ok(parsed) = defra_core::Block::from_dag_cbor(&block_data) {
+                    if let Some(ref links) = parsed.links {
+                        for link in links {
+                            if let Ok(Some(field_data)) =
+                                blockstore_view.get(&link.link.to_bytes()).await
+                            {
+                                field_blocks.push((link.link.to_bytes(), field_data));
+                            }
+                        }
+                    }
                 }
 
-                // Spawn each push concurrently but track the handle so we can
-                // await completion before emitting ReplicatorCompleted.
-                let push_h = handle.clone();
-                push_handles.push(tokio::spawn(async move {
-                    let _ = push_h.send_two_stream_request(peer_id, request).await;
-                }));
+                heads.push((head_cid.to_bytes(), block_data, field_blocks));
             }
 
             iter.close()
                 .await
                 .map_err(|e| format!("headstore close error: {}", e))?;
+
+            // Send phase: build signed requests (field blocks first, composite last),
+            // then spawn a task to send them sequentially so ordering is preserved.
+            let mut requests = Vec::new();
+            for (composite_cid, composite_data, field_blocks) in heads {
+                for (field_cid, field_data) in field_blocks {
+                    let mut field_req = PushLogRequest::new(
+                        doc_id.clone(),
+                        field_cid,
+                        collection.collection_id().to_string(),
+                        local_peer_id.to_string(),
+                        field_data,
+                    );
+                    if let Err(e) = p2p::signing::sign_message(handle.keypair(), &mut field_req) {
+                        tracing::warn!(error = %e, "Failed to sign field block PushLog request");
+                        continue;
+                    }
+                    requests.push(field_req);
+                }
+
+                let mut request = PushLogRequest::new(
+                    doc_id.clone(),
+                    composite_cid,
+                    collection.collection_id().to_string(),
+                    local_peer_id.to_string(),
+                    composite_data,
+                );
+                if let Err(e) = p2p::signing::sign_message(handle.keypair(), &mut request) {
+                    tracing::warn!(error = %e, "Failed to sign PushLog request");
+                    continue;
+                }
+                requests.push(request);
+            }
+
+            if !requests.is_empty() {
+                let push_h = handle.clone();
+                push_handles.push(tokio::spawn(async move {
+                    for req in requests {
+                        let _ = push_h.send_two_stream_request(peer_id, req).await;
+                    }
+                }));
+            }
         }
     }
 

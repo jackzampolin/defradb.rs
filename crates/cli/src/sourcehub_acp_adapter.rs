@@ -3,6 +3,7 @@
 //! Policies are created on-chain via SourceHub transactions, then cached locally
 //! in the ZanzibarStore for reads (list/get). This matches the FFI pattern.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -14,6 +15,7 @@ use defra_http::router::{AcpOperations, PolicyInfo};
 pub struct SourceHubAcpAdapter {
     sourcehub_acp: Arc<sourcehub::SourceHubDocumentACP>,
     local_store: Arc<dyn ZanzibarStore>,
+    counter: AtomicU64,
 }
 
 impl SourceHubAcpAdapter {
@@ -24,6 +26,7 @@ impl SourceHubAcpAdapter {
         Self {
             sourcehub_acp,
             local_store,
+            counter: AtomicU64::new(1),
         }
     }
 
@@ -59,8 +62,9 @@ impl AcpOperations for SourceHubAcpAdapter {
         }
         acp::policy_yaml::validate_policy_expressions(&parsed)?;
 
+        let counter = self.counter.fetch_add(1, Ordering::SeqCst);
         let policy =
-            Policy::from_parsed(yaml, &parsed).map_err(|e| format!("invalid policy: {}", e))?;
+            Policy::from_parsed(&parsed, counter).map_err(|e| format!("invalid policy: {}", e))?;
 
         let options = StorePolicyOptions::new()
             .with_validation()
