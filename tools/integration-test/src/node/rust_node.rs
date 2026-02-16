@@ -38,20 +38,20 @@ impl DefraNode for RustNode {
 
         cmd.arg("--rootdir").arg(&config.rootdir);
         cmd.arg("--url").arg(&config.http_addr);
-        cmd.arg("--no-log-color").arg("true");
+        cmd.arg("--no-log-color");
         cmd.arg("--log-output").arg("stdout");
-        cmd.arg("--no-keyring").arg("true");
+        cmd.arg("--no-keyring");
 
         cmd.arg("start");
         cmd.arg("--store").arg("memory");
-        cmd.arg("--no-telemetry").arg("true");
+        cmd.arg("--no-telemetry");
 
         if !config.encryption_enabled {
-            cmd.arg("--no-encryption").arg("true");
-            cmd.arg("--no-searchable-encryption").arg("true");
+            cmd.arg("--no-encryption");
+            cmd.arg("--no-searchable-encryption");
         }
         if !config.signing_enabled {
-            cmd.arg("--no-signing").arg("true");
+            cmd.arg("--no-signing");
         }
 
         if config.p2p_enabled {
@@ -62,7 +62,7 @@ impl DefraNode for RustNode {
                 cmd.arg("--peers").arg(peer);
             }
         } else {
-            cmd.arg("--no-p2p").arg("true");
+            cmd.arg("--no-p2p");
         }
 
         if let Some(ref identity) = config.identity {
@@ -74,7 +74,7 @@ impl DefraNode for RustNode {
         }
 
         if config.nac_enabled {
-            cmd.arg("--acp-node-enable").arg("true");
+            cmd.arg("--acp-node-enable");
         }
 
         if let Some(ref addr) = config.source_hub_address {
