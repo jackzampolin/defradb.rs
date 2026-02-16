@@ -144,25 +144,19 @@ impl HttpClient {
         self.request_void("POST", &url, Some(&body)).await
     }
 
-    pub async fn p2p_document_add(&self, doc_ids: &[String], schema_ids: &[String]) -> Result<()> {
+    pub async fn p2p_document_add(&self, doc_ids: &[String], _schema_ids: &[String]) -> Result<()> {
         let url = format!("{}/api/v0/p2p/documents", self.base_url);
-        let body = serde_json::to_string(&P2pDocumentRequest {
-            doc_ids: doc_ids.to_vec(),
-            schema_ids: schema_ids.to_vec(),
-        })?;
+        let body = serde_json::to_string(&doc_ids)?;
         self.request_void("POST", &url, Some(&body)).await
     }
 
     pub async fn p2p_document_remove(
         &self,
         doc_ids: &[String],
-        schema_ids: &[String],
+        _schema_ids: &[String],
     ) -> Result<()> {
         let url = format!("{}/api/v0/p2p/documents", self.base_url);
-        let body = serde_json::to_string(&P2pDocumentRequest {
-            doc_ids: doc_ids.to_vec(),
-            schema_ids: schema_ids.to_vec(),
-        })?;
+        let body = serde_json::to_string(&doc_ids)?;
         self.request_void("DELETE", &url, Some(&body)).await
     }
 
