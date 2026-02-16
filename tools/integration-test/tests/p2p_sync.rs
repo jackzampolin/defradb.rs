@@ -52,9 +52,17 @@ async fn p2p_collection_sync_branchable_test(cluster: TestCluster) {
         .await
         .expect("P2P listener did not start");
 
-    // sync-branchable with a dummy collection ID — should not error on the CLI/HTTP layer
-    node.p2p_collection_sync_branchable("1")
-        .expect("p2p_collection_sync_branchable should succeed");
+    // sync-branchable with a dummy collection ID — wire format accepted,
+    // fails at collection lookup (not JSON parsing)
+    let err = node
+        .p2p_collection_sync_branchable("1")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("not found") || err.contains("collection"),
+        "sync-branchable should fail at collection lookup, got: {}",
+        err
+    );
 }
 
 #[tokio::test]
