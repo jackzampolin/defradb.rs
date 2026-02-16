@@ -66,6 +66,24 @@ fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).to_string()
 }
 
+/// Extract DID from either JSON ({"did":"..."}) or text ("DID: ...") output.
+fn extract_did_from_output(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') {
+        let val: serde_json::Value = serde_json::from_str(trimmed).expect("not valid JSON");
+        val.get("did")
+            .or_else(|| val.get("DID"))
+            .and_then(|v| v.as_str())
+            .expect("missing did field in JSON")
+            .to_string()
+    } else {
+        trimmed
+            .strip_prefix("DID: ")
+            .expect("unexpected output format")
+            .to_string()
+    }
+}
+
 /// Extract the "did" field from a JWK JSON printed on stdout.
 fn did_from_jwk_stdout(output: &std::process::Output) -> String {
     let text = stdout(output);
@@ -139,15 +157,11 @@ fn export_delete_reimport_preserves_did() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
 
-    // new --name c
+    // new --name c (default output is now JSON)
     let out = defra_identity(kr, &["new", "--name", "c"]);
     assert!(out.status.success(), "new failed: {}", stderr(&out));
     let did1_text = stdout(&out);
-    // DID: did:key:z...
-    let did1 = did1_text
-        .trim()
-        .strip_prefix("DID: ")
-        .expect("unexpected output format");
+    let did1 = extract_did_from_output(&did1_text);
 
     // export --name c
     let out = defra_identity(kr, &["export", "--name", "c"]);
@@ -165,7 +179,7 @@ fn export_delete_reimport_preserves_did() {
     assert!(out.status.success(), "import failed: {}", stderr(&out));
     let did2_text = stdout(&out);
     assert!(
-        did2_text.contains(did1),
+        did2_text.contains(&did1),
         "DID mismatch: got '{}', expected '{}'",
         did2_text.trim(),
         did1
@@ -228,4 +242,84 @@ fn import_rejects_wrong_curve() {
     let out = defra_identity_stdin(kr, &["import", "--name", "x", "--stdin"], jwk);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("unsupported JWK curve"));
+}
+
+#[test]
+#[ignore]
+fn identity_new_json_format_rust() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kr = tmp.path();
+
+    let out = defra_identity(kr, &["new"]);
+    assert!(
+        out.status.success(),
+        "identity new failed: {}",
+        stderr(&out)
+    );
+    let text = stdout(&out);
+    let val: serde_json::Value =
+        serde_json::from_str(text.trim()).expect("default output should be JSON");
+    assert!(
+        val.get("PrivateKey").and_then(|v| v.as_str()).is_some(),
+        "missing PrivateKey"
+    );
+    assert!(
+        val.get("PublicKey").and_then(|v| v.as_str()).is_some(),
+        "missing PublicKey"
+    );
+    assert!(
+        val.get("DID")
+            .and_then(|v| v.as_str())
+            .is_some_and(|d| d.starts_with("did:key:z")),
+        "missing or invalid DID"
+    );
+    assert_eq!(
+        val.get("KeyType").and_then(|v| v.as_str()),
+        Some("secp256k1"),
+        "expected KeyType secp256k1"
+    );
+}
+
+#[test]
+#[ignore]
+fn identity_new_ed25519_json_rust() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kr = tmp.path();
+
+    let out = defra_identity(kr, &["new", "--type", "ed25519"]);
+    assert!(
+        out.status.success(),
+        "identity new failed: {}",
+        stderr(&out)
+    );
+    let text = stdout(&out);
+    let val: serde_json::Value =
+        serde_json::from_str(text.trim()).expect("default output should be JSON");
+    assert_eq!(
+        val.get("KeyType").and_then(|v| v.as_str()),
+        Some("ed25519"),
+        "expected KeyType ed25519"
+    );
+    assert!(
+        val.get("PublicKey").and_then(|v| v.as_str()).is_some(),
+        "missing PublicKey"
+    );
+}
+
+#[test]
+#[ignore]
+fn identity_new_default_is_json_rust() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kr = tmp.path();
+
+    // No --output flag at all — should default to JSON
+    let out = defra_identity(kr, &["new"]);
+    assert!(out.status.success());
+    let text = stdout(&out);
+    let trimmed = text.trim();
+    assert!(
+        trimmed.starts_with('{') && trimmed.ends_with('}'),
+        "expected JSON object, got: '{}'",
+        trimmed
+    );
 }
