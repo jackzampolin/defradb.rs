@@ -32,7 +32,9 @@ mod plan;
 mod query;
 mod version;
 
+use acp::nac::NodePermission;
 use acp::DocumentACP;
+use async_trait::async_trait;
 use identity::Did;
 use schema::CollectionVersion;
 use serde_json::Value as JsonValue;
@@ -48,6 +50,13 @@ use crate::txn::{NoOpTransactionRegistry, TransactionRegistry};
 
 // Re-export for backwards compatibility
 pub use crate::fetcher::{DocFetcher, FetchByIdsResult, IndexScanResult};
+
+/// Minimal NAC checker for query-level enforcement.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait NacChecker: Send + Sync {
+    async fn check_permission(&self, identity: &Did, permission: NodePermission) -> bool;
+}
 
 /// Query runner that executes GraphQL queries against storage.
 pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRegistry> {
@@ -70,6 +79,8 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     pub(crate) encryption_key: Option<Vec<u8>>,
     /// Optional lens transform store for view queries with transforms
     pub(crate) lens_store: Option<Arc<dyn lens::TransformStore>>,
+    /// Optional NAC checker for query-level enforcement.
+    pub(crate) nac: Option<Arc<dyn NacChecker>>,
 }
 
 impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
@@ -87,6 +98,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             default_identity: None,
             encryption_key: None,
             lens_store: None,
+            nac: None,
         }
     }
 
@@ -104,6 +116,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             default_identity: None,
             encryption_key: None,
             lens_store: None,
+            nac: None,
         }
     }
 }
@@ -123,6 +136,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             default_identity: None,
             encryption_key: None,
             lens_store: None,
+            nac: None,
         }
     }
 
@@ -145,6 +159,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             default_identity: None,
             encryption_key: None,
             lens_store: None,
+            nac: None,
         }
     }
 
@@ -166,6 +181,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             default_identity: None,
             encryption_key: None,
             lens_store: None,
+            nac: None,
         }
     }
 
@@ -189,6 +205,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Set the lens transform store for view queries with transforms.
     pub fn with_lens_store(mut self, store: Arc<dyn lens::TransformStore>) -> Self {
         self.lens_store = Some(store);
+        self
+    }
+
+    /// Set the NAC checker for query-level permission enforcement.
+    ///
+    /// When set, queries will be checked against NAC permissions before execution.
+    /// Denied operations return a GraphQL error (HTTP 200) matching Go behavior.
+    pub fn with_nac(mut self, nac: Arc<dyn NacChecker>) -> Self {
+        self.nac = Some(nac);
         self
     }
 

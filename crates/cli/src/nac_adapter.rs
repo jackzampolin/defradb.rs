@@ -9,7 +9,7 @@ use db::NacManagerApi;
 use defra_http::router::{NacStatusInfo, NodeAcpOperations};
 use identity::Did;
 
-/// Adapter that implements NodeAcpOperations using NacManagerApi.
+/// Adapter that implements NodeAcpOperations and NacChecker using NacManagerApi.
 pub struct NacAdapter {
     nac: Arc<dyn NacManagerApi>,
 }
@@ -136,5 +136,15 @@ impl NodeAcpOperations for NacAdapter {
             dev_mode: info.dev_mode,
             owner: info.owner,
         }
+    }
+}
+
+#[async_trait]
+impl query::NacChecker for NacAdapter {
+    async fn check_permission(&self, identity: &Did, permission: NodePermission) -> bool {
+        self.nac
+            .check_permission(identity, permission)
+            .await
+            .unwrap_or(false)
     }
 }

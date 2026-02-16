@@ -51,7 +51,9 @@ pub struct AcpPolicy {
 /// NAC relationship request
 #[derive(Debug, Serialize)]
 pub struct NacRelationshipRequest {
+    #[serde(rename = "Relation")]
     pub relation: String,
+    #[serde(rename = "TargetActor")]
     pub actor: String,
 }
 

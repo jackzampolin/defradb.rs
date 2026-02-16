@@ -6,6 +6,7 @@
 
 mod aggregates;
 mod collection;
+mod commits;
 mod input_types;
 mod mutations;
 mod operators;
@@ -19,6 +20,10 @@ use crate::error::{QueryError, Result};
 
 use aggregates::{build_aggregate_types_for_collection, build_numeric_fields_enum};
 use collection::{build_collection_type, build_commit_type};
+use commits::{
+    build_commit_count_field_arg, build_commit_fields_enum, build_commits_field_name_filter_arg,
+    build_commits_filter_arg, build_commits_order_arg, build_signature_type,
+};
 use input_types::{
     build_field_enum, build_filter_input_type, build_mutation_input_type, build_order_input_type,
 };
@@ -136,8 +141,39 @@ pub fn build_introspection_schema(
         );
     }
 
-    // Register Commit type (used by _version virtual field)
-    schema_builder = schema_builder.register(build_commit_type());
+    // Register Commit type and supporting types
+    schema_builder = schema_builder
+        .register(build_commit_type())
+        .register(build_signature_type())
+        .register(build_commits_filter_arg())
+        .register(build_commits_field_name_filter_arg())
+        .register(build_commits_order_arg())
+        .register(build_commit_fields_enum())
+        .register(build_commit_count_field_arg());
+
+    // Add _commits query field (unconditionally, like Go)
+    query_type = query_type.field(
+        Field::new("_commits", TypeRef::named_list("Commit"), |_| {
+            FieldFuture::new(async { Ok(Some(GqlValue::List(vec![]))) })
+        })
+        .argument(InputValue::new("cid", TypeRef::named("ID")))
+        .argument(InputValue::new("depth", TypeRef::named("Int")))
+        .argument(InputValue::new("docID", TypeRef::named("ID")))
+        .argument(InputValue::new(
+            "filter",
+            TypeRef::named("CommitsFilterArg"),
+        ))
+        .argument(InputValue::new(
+            "groupBy",
+            TypeRef::named_nn_list("commitFields"),
+        ))
+        .argument(InputValue::new("limit", TypeRef::named("Int")))
+        .argument(InputValue::new("offset", TypeRef::named("Int")))
+        .argument(InputValue::new(
+            "order",
+            TypeRef::named_list("commitsOrderArg"),
+        )),
+    );
 
     // Register standard scalars and filter types
     schema_builder = schema_builder

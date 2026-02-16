@@ -51,7 +51,7 @@ pub use plan::{
 pub use planner::{Doc, DocStatus, ExecInfo, PlanNode, Planner};
 pub use query_parse::{parse_mutations, parse_query, parse_request, ExplainType, ParsedOperation};
 pub use rest::{RestError, RestOperations, RestOperationsImpl, RestResult};
-pub use runner::{DocFetcher, FetchByIdsResult, QueryRunner};
+pub use runner::{DocFetcher, FetchByIdsResult, NacChecker, QueryRunner};
 pub use sdl_parse::{parse_sdl, parse_sdl_with_known_types};
 pub use select_convert::select_to_go_json;
 pub use txn::{

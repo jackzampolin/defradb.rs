@@ -512,6 +512,25 @@ impl Node {
                 info!("CRDT delta encryption enabled");
             }
 
+            // Create NAC adapter early so it can serve both QueryRunner and HTTP server.
+            // Must be before user_did is consumed by with_default_identity().
+            let nac_adapter: Option<Arc<crate::nac_adapter::NacAdapter>> = if config.acp.node_enable
+            {
+                let nac_config = db::NacConfig::new().with_enabled();
+                let nac_manager: Arc<dyn db::NacManagerApi> =
+                    Arc::new(db::create_memory_nac_manager(nac_config));
+                // Initialize NAC: transitions from NotConfigured to Enabled with owner
+                nac_manager
+                    .initialize(user_did.as_ref())
+                    .await
+                    .map_err(|e| {
+                        Error::InvalidConfig(format!("failed to initialize NAC: {}", e))
+                    })?;
+                Some(Arc::new(crate::nac_adapter::NacAdapter::new(nac_manager)))
+            } else {
+                None
+            };
+
             // Wire default identity for ACP permission checks (from --identity CLI flag).
             // Skip for SourceHub ACP: identity must come from bearer tokens, not defaults.
             // Anonymous requests should be truly anonymous for on-chain policy evaluation.
@@ -520,6 +539,11 @@ impl Node {
                     info!("Query runner configured with default identity for ACP");
                     query_runner = query_runner.with_default_identity(did);
                 }
+            }
+
+            // Wire NAC into QueryRunner for query-level enforcement
+            if let Some(ref adapter) = nac_adapter {
+                query_runner = query_runner.with_nac(adapter.clone() as Arc<dyn query::NacChecker>);
             }
 
             let runner = Arc::new(query_runner);
@@ -572,13 +596,12 @@ impl Node {
             server = server.with_lens_arc(lens_adapter);
             info!("Lens HTTP endpoint enabled");
 
-            // Wire NAC (Node Access Control) to HTTP server only when enabled
-            if config.acp.node_enable {
-                let nac_config = db::NacConfig::new().with_enabled();
-                let nac_manager: std::sync::Arc<dyn db::NacManagerApi> =
-                    std::sync::Arc::new(db::create_memory_nac_manager(nac_config));
-                let nac_adapter = crate::nac_adapter::NacAdapter::new_arc(nac_manager);
-                server = server.with_nac_arc(nac_adapter);
+            // Wire NAC (Node Access Control) to HTTP server (adapter already created above)
+            if let Some(ref adapter) = nac_adapter {
+                server =
+                    server.with_nac_arc(
+                        adapter.clone() as Arc<dyn defra_http::router::NodeAcpOperations>
+                    );
                 info!("NAC HTTP endpoints enabled");
             } else {
                 info!("NAC disabled (use --acp-node-enable to enable)");
