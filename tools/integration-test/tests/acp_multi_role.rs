@@ -1,5 +1,6 @@
 use integration_test::{
-    documents_schema_with_policy, generate_identity, TestCluster, MULTI_ROLE_ACP_POLICY,
+    documents_schema_with_policy, for_each_runtime, generate_identity, TestCluster,
+    MULTI_ROLE_ACP_POLICY,
 };
 
 async fn acp_multi_role_test(cluster: TestCluster) {
@@ -154,26 +155,4 @@ async fn acp_multi_role_test(cluster: TestCluster) {
     );
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_acp_multi_role() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    acp_multi_role_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_acp_multi_role() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    acp_multi_role_test(cluster).await;
-}
+for_each_runtime!(acp_multi_role, acp_multi_role_test, .with_acp_local());

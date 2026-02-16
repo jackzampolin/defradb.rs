@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use integration_test::{
-    generate_identity, poll_until, users_schema_with_policy, TestCluster, USER_ACP_POLICY,
+    for_each_p2p_topology, generate_identity, poll_until, users_schema_with_policy, TestCluster,
+    USER_ACP_POLICY,
 };
 
 /// Test ACP-protected documents replicate correctly across P2P nodes.
@@ -141,42 +142,4 @@ async fn acp_p2p_test(cluster: TestCluster) {
     assert!(names.contains(&"Protected"));
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_rust_acp_p2p() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(2)
-        .with_p2p()
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    acp_p2p_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_go_acp_p2p() {
-    let cluster = TestCluster::builder()
-        .go_nodes(2)
-        .with_p2p()
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    acp_p2p_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_rust_acp_p2p() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .go_nodes(1)
-        .with_p2p()
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    acp_p2p_test(cluster).await;
-}
+for_each_p2p_topology!(acp_p2p, acp_p2p_test, .with_p2p().with_acp_local());

@@ -1,4 +1,6 @@
-use integration_test::{generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY};
+use integration_test::{
+    for_each_runtime, generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY,
+};
 
 async fn encrypted_acp_test(cluster: TestCluster) {
     let node = cluster.client(0);
@@ -145,28 +147,4 @@ async fn encrypted_acp_test(cluster: TestCluster) {
     assert_eq!(jack_result3["User"][0]["name"], "Updated Secret");
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_encrypted_acp() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_acp_local()
-        .with_encryption()
-        .build()
-        .await
-        .unwrap();
-    encrypted_acp_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_encrypted_acp() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_acp_local()
-        .with_encryption()
-        .build()
-        .await
-        .unwrap();
-    encrypted_acp_test(cluster).await;
-}
+for_each_runtime!(encrypted_acp, encrypted_acp_test, .with_acp_local().with_encryption());

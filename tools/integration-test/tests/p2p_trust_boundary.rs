@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use integration_test::{
-    generate_identity, poll_until, users_schema_with_policy, TestCluster, USER_ACP_POLICY,
+    for_each_p2p_topology, generate_identity, poll_until, users_schema_with_policy, TestCluster,
+    USER_ACP_POLICY,
 };
 
 /// Trust ring boundaries: Core (node0) ↔ Near (node1) with asymmetric trust.
@@ -161,42 +162,4 @@ async fn p2p_trust_boundary_test(cluster: TestCluster) {
     );
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_rust_p2p_trust_boundary() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(2)
-        .with_p2p()
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    p2p_trust_boundary_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_go_p2p_trust_boundary() {
-    let cluster = TestCluster::builder()
-        .go_nodes(2)
-        .with_p2p()
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    p2p_trust_boundary_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_rust_p2p_trust_boundary() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .go_nodes(1)
-        .with_p2p()
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    p2p_trust_boundary_test(cluster).await;
-}
+for_each_p2p_topology!(p2p_trust_boundary, p2p_trust_boundary_test, .with_p2p().with_acp_local());

@@ -642,6 +642,11 @@ impl Node {
             server = server.with_view_arc(view_adapter);
             info!("View HTTP endpoints enabled");
 
+            // Wire dump operations to HTTP server
+            let dump_adapter = crate::dump_adapter::DumpAdapter::new_arc(database.clone());
+            server = server.with_dump_arc(dump_adapter);
+            info!("Dump HTTP endpoint enabled");
+
             // Wire collection management operations to HTTP server
             let collection_mgmt_adapter =
                 crate::collection_mgmt_adapter::CollectionManagementAdapter::new_arc(

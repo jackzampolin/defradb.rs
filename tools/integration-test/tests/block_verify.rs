@@ -1,4 +1,4 @@
-use integration_test::{generate_identity, TestCluster};
+use integration_test::{for_each_runtime, generate_identity, TestCluster};
 
 async fn block_verify_test(cluster: TestCluster) {
     let node = cluster.client(0);
@@ -104,26 +104,4 @@ async fn block_verify_test(cluster: TestCluster) {
     }
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_block_verify() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_signing()
-        .build()
-        .await
-        .unwrap();
-    block_verify_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_block_verify() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_signing()
-        .build()
-        .await
-        .unwrap();
-    block_verify_test(cluster).await;
-}
+for_each_runtime!(block_verify, block_verify_test, .with_signing());

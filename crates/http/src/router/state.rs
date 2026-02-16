@@ -7,8 +7,9 @@ use query::rest::RestOperations;
 
 use super::{
     AcpOperations, BackupOperations, BlockOperations, CollectionManagementOperations,
-    DocumentAcpOperations, EncryptedIndexOperations, IndexOperations, LensOperations,
-    NodeAcpOperations, P2POperations, SchemaOperations, TransactionOperations, ViewOperations,
+    DocumentAcpOperations, DumpOperations, EncryptedIndexOperations, IndexOperations,
+    LensOperations, NodeAcpOperations, P2POperations, SchemaOperations, TransactionOperations,
+    ViewOperations,
 };
 
 /// Application state shared across handlers.
@@ -28,6 +29,7 @@ pub struct AppState {
     pub collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
     pub doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
     pub view: Option<Arc<dyn ViewOperations>>,
+    pub dump: Option<Arc<dyn DumpOperations>>,
     pub txn_ops: Option<Arc<dyn TransactionOperations>>,
     pub event_bus: Option<Arc<dyn events::Bus>>,
     pub node_identity_did: Option<String>,
@@ -72,6 +74,7 @@ impl std::fmt::Debug for AppState {
                 &self.doc_acp.as_ref().map(|_| "<DocumentAcpOperations>"),
             )
             .field("view", &self.view.as_ref().map(|_| "<ViewOperations>"))
+            .field("dump", &self.dump.as_ref().map(|_| "<DumpOperations>"))
             .field(
                 "txn_ops",
                 &self.txn_ops.as_ref().map(|_| "<TransactionOperations>"),
@@ -178,6 +181,13 @@ impl AppState {
         })
     }
 
+    /// Get dump operations or return ServiceUnavailable error.
+    pub fn require_dump(&self) -> Result<&Arc<dyn DumpOperations>, crate::error::HttpError> {
+        self.dump.as_ref().ok_or_else(|| {
+            crate::error::HttpError::ServiceUnavailable("Dump operations are not enabled.".into())
+        })
+    }
+
     /// Get view operations or return ServiceUnavailable error.
     pub fn require_view(&self) -> Result<&Arc<dyn ViewOperations>, crate::error::HttpError> {
         self.view.as_ref().ok_or_else(|| {
@@ -222,6 +232,7 @@ pub struct AppStateBuilder {
     collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
     doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
     view: Option<Arc<dyn ViewOperations>>,
+    dump: Option<Arc<dyn DumpOperations>>,
     txn_ops: Option<Arc<dyn TransactionOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
     node_identity_did: Option<String>,
@@ -246,6 +257,7 @@ impl AppStateBuilder {
             collection_mgmt: None,
             doc_acp: None,
             view: None,
+            dump: None,
             txn_ops: None,
             event_bus: None,
             node_identity_did: None,
@@ -337,6 +349,12 @@ impl AppStateBuilder {
         self
     }
 
+    /// Set dump operations.
+    pub fn with_dump(mut self, dump: Arc<dyn DumpOperations>) -> Self {
+        self.dump = Some(dump);
+        self
+    }
+
     /// Set transaction operations.
     pub fn with_txn_ops(mut self, txn_ops: Arc<dyn TransactionOperations>) -> Self {
         self.txn_ops = Some(txn_ops);
@@ -378,6 +396,7 @@ impl AppStateBuilder {
             collection_mgmt: self.collection_mgmt,
             doc_acp: self.doc_acp,
             view: self.view,
+            dump: self.dump,
             txn_ops: self.txn_ops,
             event_bus: self.event_bus,
             node_identity_did: self.node_identity_did,

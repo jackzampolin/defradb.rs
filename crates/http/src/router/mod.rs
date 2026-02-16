@@ -8,9 +8,9 @@ pub use routes::{create_router, create_router_with_rest, create_router_with_stat
 pub use state::{AppState, AppStateBuilder};
 pub use traits::{
     AcpOperations, BackupOperations, BlockOperations, CollectionManagementOperations,
-    DocumentAcpOperations, EncryptedIndexInfo, EncryptedIndexOperations, ImportResult,
-    IndexFieldInfo, IndexInfo, IndexOperations, LensOperations, NacStatus, NacStatusInfo,
-    NodeAcpOperations, NodePermission, P2POperations, P2pDocumentInfo, P2pDocumentRequest,
-    PolicyInfo, ReplicatorInfo, SchemaOperations, SyncBranchableRequest, SyncDocumentsRequest,
-    SyncVersionsRequest, TransactionOperations, ViewOperations,
+    DocumentAcpOperations, DumpOperations, EncryptedIndexInfo, EncryptedIndexOperations,
+    ImportResult, IndexFieldInfo, IndexInfo, IndexOperations, LensOperations, NacStatus,
+    NacStatusInfo, NodeAcpOperations, NodePermission, P2POperations, P2pDocumentInfo,
+    P2pDocumentRequest, PolicyInfo, ReplicatorInfo, SchemaOperations, SyncBranchableRequest,
+    SyncDocumentsRequest, SyncVersionsRequest, TransactionOperations, ViewOperations,
 };

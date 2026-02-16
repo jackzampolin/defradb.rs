@@ -1,4 +1,4 @@
-use integration_test::{generate_identity, TestCluster};
+use integration_test::{for_each_runtime, generate_identity, TestCluster};
 
 async fn acp_node_access_test(cluster: TestCluster) {
     let node = cluster.client(0);
@@ -67,28 +67,4 @@ async fn acp_node_access_test(cluster: TestCluster) {
     }
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_acp_node_access() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_acp_local()
-        .with_nac()
-        .build()
-        .await
-        .unwrap();
-    acp_node_access_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_acp_node_access() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_acp_local()
-        .with_nac()
-        .build()
-        .await
-        .unwrap();
-    acp_node_access_test(cluster).await;
-}
+for_each_runtime!(acp_node_access, acp_node_access_test, .with_acp_local().with_nac());

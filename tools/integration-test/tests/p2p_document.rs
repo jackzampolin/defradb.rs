@@ -1,4 +1,4 @@
-use integration_test::TestCluster;
+use integration_test::{for_each_runtime, TestCluster};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -94,26 +94,4 @@ async fn p2p_document_test(cluster: TestCluster) {
     );
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_p2p_document() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    p2p_document_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_p2p_document() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    p2p_document_test(cluster).await;
-}
+for_each_runtime!(p2p_document, p2p_document_test, .with_p2p());

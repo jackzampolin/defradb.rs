@@ -1,4 +1,4 @@
-use integration_test::TestCluster;
+use integration_test::{for_each_runtime, TestCluster};
 use std::time::Duration;
 
 async fn p2p_document_sync_test(cluster: TestCluster) {
@@ -65,74 +65,6 @@ async fn p2p_collection_sync_branchable_test(cluster: TestCluster) {
     );
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_p2p_sync_document() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    p2p_document_sync_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_p2p_sync_document() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    p2p_document_sync_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn rust_p2p_sync_versions() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    p2p_collection_sync_versions_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_p2p_sync_versions() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    p2p_collection_sync_versions_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn rust_p2p_sync_branchable() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    p2p_collection_sync_branchable_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_p2p_sync_branchable() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    p2p_collection_sync_branchable_test(cluster).await;
-}
+for_each_runtime!(p2p_sync_document, p2p_document_sync_test, .with_p2p());
+for_each_runtime!(p2p_sync_versions, p2p_collection_sync_versions_test, .with_p2p());
+for_each_runtime!(p2p_sync_branchable, p2p_collection_sync_branchable_test, .with_p2p());

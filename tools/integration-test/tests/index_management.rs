@@ -1,4 +1,4 @@
-use integration_test::{TestCluster, PRODUCT_SCHEMA};
+use integration_test::{for_each_runtime, TestCluster, PRODUCT_SCHEMA};
 use serde_json::Value;
 
 /// Extract indexes from list output, handling both flat array `[...]`
@@ -104,16 +104,4 @@ async fn index_management_test(cluster: TestCluster) {
     assert_eq!(arr.len(), 1, "should still have 1 product");
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_index_management() {
-    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
-    index_management_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_index_management() {
-    let cluster = TestCluster::builder().go_nodes(1).build().await.unwrap();
-    index_management_test(cluster).await;
-}
+for_each_runtime!(index_management, index_management_test);

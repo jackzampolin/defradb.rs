@@ -1,5 +1,6 @@
 use integration_test::{
-    generate_identity, multi_resource_policy, typed_schema, TestCluster, STANDARD_FIELDS,
+    for_each_runtime, generate_identity, multi_resource_policy, typed_schema, TestCluster,
+    STANDARD_FIELDS,
 };
 
 async fn cross_compartment_isolation_test(cluster: TestCluster) {
@@ -293,26 +294,4 @@ async fn cross_compartment_isolation_test(cluster: TestCluster) {
     }
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_cross_compartment_isolation() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    cross_compartment_isolation_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_cross_compartment_isolation() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    cross_compartment_isolation_test(cluster).await;
-}
+for_each_runtime!(cross_compartment_isolation, cross_compartment_isolation_test, .with_acp_local());

@@ -1,7 +1,6 @@
-//! Dump command implementation
-
 use clap::Args;
 
+use super::http_client::HttpClient;
 use super::ClientContext;
 use crate::error::Result;
 
@@ -10,9 +9,13 @@ use crate::error::Result;
 pub struct DumpArgs {}
 
 impl DumpArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        Err(crate::error::Error::Server(
-            "dump requires debug dump infrastructure (not yet implemented)".to_string(),
-        ))
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.dump().await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        Ok(())
     }
 }

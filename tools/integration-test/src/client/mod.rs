@@ -729,6 +729,32 @@ impl DefraClient {
         self.exec(&["client", "purge", "--force"])
     }
 
+    // -- View operations --
+
+    /// Add a view via `client view add --query '<query>' --sdl '<sdl>'`.
+    pub fn view_add(&self, gql_query: &str, sdl: &str) -> Result<Value> {
+        let out = self.exec(&["client", "view", "add", "--query", gql_query, "--sdl", sdl])?;
+        serde_json::from_str(&out).context("failed to parse view_add output")
+    }
+
+    /// Refresh views via `client view refresh`.
+    pub fn view_refresh(&self, name: Option<&str>) -> Result<Value> {
+        let out = if let Some(n) = name {
+            self.exec(&["client", "view", "refresh", "--name", n])?
+        } else {
+            self.exec(&["client", "view", "refresh"])?
+        };
+        serde_json::from_str(&out).context("failed to parse view_refresh output")
+    }
+
+    // -- Dump operations --
+
+    /// Dump database contents via `client dump`.
+    pub fn dump(&self) -> Result<Value> {
+        let out = self.exec(&["client", "dump"])?;
+        serde_json::from_str(&out).context("failed to parse dump output")
+    }
+
     /// Get collection version info including VersionID.
     ///
     /// Tries the Rust REST endpoint first (`/collections/{name}/describe`),

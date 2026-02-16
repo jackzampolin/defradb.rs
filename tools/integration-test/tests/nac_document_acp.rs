@@ -1,4 +1,6 @@
-use integration_test::{generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY};
+use integration_test::{
+    for_each_runtime, generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY,
+};
 
 /// Tests the two-layer access control model:
 /// - NAC (Node Access Control): who can use the DefraDB instance
@@ -171,28 +173,4 @@ async fn nac_document_acp_test(cluster: TestCluster) {
     );
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_nac_document_acp() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_acp_local()
-        .with_nac()
-        .build()
-        .await
-        .unwrap();
-    nac_document_acp_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_nac_document_acp() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_acp_local()
-        .with_nac()
-        .build()
-        .await
-        .unwrap();
-    nac_document_acp_test(cluster).await;
-}
+for_each_runtime!(nac_document_acp, nac_document_acp_test, .with_acp_local().with_nac());

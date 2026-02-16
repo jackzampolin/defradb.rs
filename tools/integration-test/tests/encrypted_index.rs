@@ -1,4 +1,4 @@
-use integration_test::{TestCluster, PRODUCT_SCHEMA};
+use integration_test::{for_each_runtime, TestCluster, PRODUCT_SCHEMA};
 use serde_json::Value;
 
 /// Extract array length from encrypted-index list output.
@@ -84,26 +84,4 @@ async fn encrypted_index_test(cluster: TestCluster) {
     assert_eq!(index_count(&list3), 0, "expected 0 encrypted indexes");
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_encrypted_index() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_encryption()
-        .build()
-        .await
-        .unwrap();
-    encrypted_index_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_encrypted_index() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_encryption()
-        .build()
-        .await
-        .unwrap();
-    encrypted_index_test(cluster).await;
-}
+for_each_runtime!(encrypted_index, encrypted_index_test, .with_encryption());

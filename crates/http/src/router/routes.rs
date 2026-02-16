@@ -239,6 +239,8 @@ pub fn create_router_with_state(state: AppState) -> Router {
             "/encrypted-indexes",
             get(handlers::encrypted_index::go_list_all_encrypted_indexes),
         )
+        // Debug endpoints
+        .route("/debug/dump", get(handlers::utility::dump))
         // Utility endpoints (Go-compatible)
         .route("/purge", post(handlers::utility::purge))
         .route("/node/identity", get(handlers::utility::get_node_identity))

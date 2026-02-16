@@ -591,3 +591,10 @@ pub trait ViewOperations: Send + Sync {
     /// materialized views are refreshed.
     async fn refresh_views(&self, names: Option<Vec<String>>) -> Result<(), String>;
 }
+
+/// Trait for debug dump operations.
+#[async_trait::async_trait]
+pub trait DumpOperations: Send + Sync {
+    /// Dump all database key/value pairs as a list of human-readable strings.
+    async fn print_dump(&self) -> Result<Vec<String>, String>;
+}

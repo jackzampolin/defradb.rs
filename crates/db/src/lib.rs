@@ -64,6 +64,7 @@ pub mod database;
 pub mod definition_validation;
 pub mod doc_fetcher;
 pub mod doc_mutator;
+pub mod dump;
 pub mod embedding;
 pub mod error;
 #[cfg(feature = "p2p")]

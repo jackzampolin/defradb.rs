@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use integration_test::{poll_until, TestCluster};
+use integration_test::{for_each_p2p_topology, poll_until, TestCluster};
 
 async fn replication_crud_test(cluster: TestCluster) {
     let node0 = cluster.client(0);
@@ -158,39 +158,4 @@ async fn replication_crud_test(cluster: TestCluster) {
     assert!(!remaining_names.contains(&"Bob"));
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_rust_replication_crud() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(2)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    replication_crud_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_go_replication_crud() {
-    let cluster = TestCluster::builder()
-        .go_nodes(2)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    replication_crud_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_rust_replication_crud() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .go_nodes(1)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    replication_crud_test(cluster).await;
-}
+for_each_p2p_topology!(replication_crud, replication_crud_test, .with_p2p());

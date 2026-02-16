@@ -1,6 +1,6 @@
 use integration_test::{
-    generate_ed25519_identity, generate_identity, users_schema_with_policy, TestCluster,
-    USER_ACP_POLICY,
+    for_each_runtime, generate_ed25519_identity, generate_identity, users_schema_with_policy,
+    TestCluster, USER_ACP_POLICY,
 };
 
 async fn identity_types_test(cluster: TestCluster) {
@@ -94,26 +94,4 @@ async fn identity_types_test(cluster: TestCluster) {
     }
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_identity_types() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    identity_types_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_identity_types() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    identity_types_test(cluster).await;
-}
+for_each_runtime!(identity_types, identity_types_test, .with_acp_local());

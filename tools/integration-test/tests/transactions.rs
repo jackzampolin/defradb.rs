@@ -1,4 +1,4 @@
-use integration_test::TestCluster;
+use integration_test::{for_each_runtime, TestCluster};
 
 async fn transactions_test(cluster: TestCluster) {
     let client = cluster.client(0);
@@ -120,16 +120,4 @@ async fn transactions_test(cluster: TestCluster) {
     );
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_transactions() {
-    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
-    transactions_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_transactions() {
-    let cluster = TestCluster::builder().go_nodes(1).build().await.unwrap();
-    transactions_test(cluster).await;
-}
+for_each_runtime!(transactions, transactions_test);

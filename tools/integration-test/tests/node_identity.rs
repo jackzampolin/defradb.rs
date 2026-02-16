@@ -1,4 +1,4 @@
-use integration_test::TestCluster;
+use integration_test::{for_each_runtime, TestCluster};
 
 async fn node_identity_test(cluster: TestCluster) {
     let node = cluster.client(0);
@@ -21,16 +21,4 @@ async fn node_identity_test(cluster: TestCluster) {
     );
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_node_identity() {
-    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
-    node_identity_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_node_identity() {
-    let cluster = TestCluster::builder().go_nodes(1).build().await.unwrap();
-    node_identity_test(cluster).await;
-}
+for_each_runtime!(node_identity, node_identity_test);

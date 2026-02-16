@@ -16,9 +16,9 @@ use query::rest::RestOperations;
 use crate::error::Result;
 use crate::router::{
     create_router_with_state, AcpOperations, AppStateBuilder, BackupOperations, BlockOperations,
-    CollectionManagementOperations, DocumentAcpOperations, EncryptedIndexOperations,
-    IndexOperations, LensOperations, NodeAcpOperations, P2POperations, SchemaOperations,
-    TransactionOperations, ViewOperations,
+    CollectionManagementOperations, DocumentAcpOperations, DumpOperations,
+    EncryptedIndexOperations, IndexOperations, LensOperations, NodeAcpOperations, P2POperations,
+    SchemaOperations, TransactionOperations, ViewOperations,
 };
 
 /// Server configuration options.
@@ -57,6 +57,7 @@ pub struct Server {
     collection_mgmt: Option<Arc<dyn CollectionManagementOperations>>,
     doc_acp: Option<Arc<dyn DocumentAcpOperations>>,
     view: Option<Arc<dyn ViewOperations>>,
+    dump: Option<Arc<dyn DumpOperations>>,
     txn_ops: Option<Arc<dyn TransactionOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
     node_identity_did: Option<String>,
@@ -82,6 +83,7 @@ impl Server {
             collection_mgmt: None,
             doc_acp: None,
             view: None,
+            dump: None,
             txn_ops: None,
             event_bus: None,
             node_identity_did: None,
@@ -107,6 +109,7 @@ impl Server {
             collection_mgmt: None,
             doc_acp: None,
             view: None,
+            dump: None,
             txn_ops: None,
             event_bus: None,
             node_identity_did: None,
@@ -132,6 +135,7 @@ impl Server {
             collection_mgmt: None,
             doc_acp: None,
             view: None,
+            dump: None,
             txn_ops: None,
             event_bus: None,
             node_identity_did: None,
@@ -157,6 +161,7 @@ impl Server {
             collection_mgmt: None,
             doc_acp: None,
             view: None,
+            dump: None,
             txn_ops: None,
             event_bus: None,
             node_identity_did: None,
@@ -293,6 +298,12 @@ impl Server {
         self
     }
 
+    /// Set dump operations from an Arc.
+    pub fn with_dump_arc(mut self, dump: Arc<dyn DumpOperations>) -> Self {
+        self.dump = Some(dump);
+        self
+    }
+
     /// Set transaction operations from an Arc.
     pub fn with_txn_ops_arc(mut self, txn_ops: Arc<dyn TransactionOperations>) -> Self {
         self.txn_ops = Some(txn_ops);
@@ -372,6 +383,9 @@ impl Server {
         }
         if let Some(ref view) = self.view {
             builder = builder.with_view(Arc::clone(view));
+        }
+        if let Some(ref dump) = self.dump {
+            builder = builder.with_dump(Arc::clone(dump));
         }
         if let Some(ref txn_ops) = self.txn_ops {
             builder = builder.with_txn_ops(Arc::clone(txn_ops));

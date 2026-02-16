@@ -1,4 +1,4 @@
-use integration_test::TestCluster;
+use integration_test::{for_each_runtime, TestCluster};
 use serde_json::Value;
 
 /// Extract indexes array from index_list output.
@@ -167,16 +167,4 @@ async fn document_lifecycle_test(cluster: TestCluster) {
     );
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_document_lifecycle() {
-    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
-    document_lifecycle_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_document_lifecycle() {
-    let cluster = TestCluster::builder().go_nodes(1).build().await.unwrap();
-    document_lifecycle_test(cluster).await;
-}
+for_each_runtime!(document_lifecycle, document_lifecycle_test);

@@ -1,4 +1,6 @@
-use integration_test::{generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY};
+use integration_test::{
+    for_each_runtime, generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY,
+};
 
 /// Tests what happens when ACP policies change after documents already exist.
 ///
@@ -231,26 +233,4 @@ async fn policy_evolution_test(cluster: TestCluster) {
     assert_eq!(jack_final, 6, "jack still sees all 6 docs");
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_policy_evolution() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    policy_evolution_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_policy_evolution() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    policy_evolution_test(cluster).await;
-}
+for_each_runtime!(policy_evolution, policy_evolution_test, .with_acp_local());

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use integration_test::TestCluster;
+use integration_test::{for_each_p2p_topology, TestCluster};
 
 async fn replication_test(cluster: TestCluster) {
     let node0 = cluster.client(0);
@@ -70,39 +70,4 @@ async fn replication_test(cluster: TestCluster) {
     }
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_rust_replication() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(2)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    replication_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_rust_replication() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .go_nodes(1)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    replication_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_go_replication() {
-    let cluster = TestCluster::builder()
-        .go_nodes(2)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    replication_test(cluster).await;
-}
+for_each_p2p_topology!(replication, replication_test, .with_p2p());

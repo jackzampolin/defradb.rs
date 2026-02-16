@@ -44,6 +44,15 @@ pub async fn get_node_identity(
     Ok(Json(NodeIdentityResponse { peer_id }))
 }
 
+/// GET /api/v0/debug/dump
+///
+/// Dumps all database key/value pairs for debugging.
+pub async fn dump(State(state): State<AppState>) -> Result<Json<Vec<String>>, HttpError> {
+    let dump_ops = state.require_dump()?;
+    let lines = dump_ops.print_dump().await.map_err(HttpError::Internal)?;
+    Ok(Json(lines))
+}
+
 /// POST /api/v0/purge
 ///
 /// Purges all data from the database.

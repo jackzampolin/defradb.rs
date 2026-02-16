@@ -32,3 +32,77 @@ pub fn workspace_root() -> PathBuf {
         .canonicalize()
         .expect("failed to canonicalize workspace root")
 }
+
+/// Generate `rust_<name>` and `go_<name>` test wrappers for a single-node test.
+///
+/// Usage: `for_each_runtime!(name, inner_fn);` (bare builder)
+///        `for_each_runtime!(name, inner_fn, .with_acp_local());` (with modifiers)
+#[macro_export]
+macro_rules! for_each_runtime {
+    ($name:ident, $inner:ident) => {
+        ::paste::paste! {
+            #[tokio::test]
+            #[ignore]
+            async fn [<rust_ $name>]() {
+                let cluster = $crate::TestCluster::builder().rust_nodes(1).build().await.unwrap();
+                $inner(cluster).await;
+            }
+
+            #[tokio::test]
+            #[ignore]
+            async fn [<go_ $name>]() {
+                let cluster = $crate::TestCluster::builder().go_nodes(1).build().await.unwrap();
+                $inner(cluster).await;
+            }
+        }
+    };
+    ($name:ident, $inner:ident, $($modifier:tt)+) => {
+        ::paste::paste! {
+            #[tokio::test]
+            #[ignore]
+            async fn [<rust_ $name>]() {
+                let cluster = $crate::TestCluster::builder().rust_nodes(1) $($modifier)+ .build().await.unwrap();
+                $inner(cluster).await;
+            }
+
+            #[tokio::test]
+            #[ignore]
+            async fn [<go_ $name>]() {
+                let cluster = $crate::TestCluster::builder().go_nodes(1) $($modifier)+ .build().await.unwrap();
+                $inner(cluster).await;
+            }
+        }
+    };
+}
+
+/// Generate `rust_rust_<name>`, `go_go_<name>`, and `go_rust_<name>` test wrappers
+/// for a multi-node P2P test.
+///
+/// Usage: `for_each_p2p_topology!(name, inner_fn, .with_p2p());`
+#[macro_export]
+macro_rules! for_each_p2p_topology {
+    ($name:ident, $inner:ident, $($modifier:tt)+) => {
+        ::paste::paste! {
+            #[tokio::test]
+            #[ignore]
+            async fn [<rust_rust_ $name>]() {
+                let cluster = $crate::TestCluster::builder().rust_nodes(2) $($modifier)+ .build().await.unwrap();
+                $inner(cluster).await;
+            }
+
+            #[tokio::test]
+            #[ignore]
+            async fn [<go_go_ $name>]() {
+                let cluster = $crate::TestCluster::builder().go_nodes(2) $($modifier)+ .build().await.unwrap();
+                $inner(cluster).await;
+            }
+
+            #[tokio::test]
+            #[ignore]
+            async fn [<go_rust_ $name>]() {
+                let cluster = $crate::TestCluster::builder().rust_nodes(1).go_nodes(1) $($modifier)+ .build().await.unwrap();
+                $inner(cluster).await;
+            }
+        }
+    };
+}

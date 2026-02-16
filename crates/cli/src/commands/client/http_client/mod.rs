@@ -14,6 +14,7 @@ mod acp;
 mod backup;
 mod block;
 mod collection;
+mod dump;
 mod encrypted_index;
 mod graphql;
 mod index;
@@ -21,6 +22,7 @@ mod lens;
 mod p2p;
 mod transaction;
 mod types;
+mod view;
 
 pub use acp::{AcpAddPolicyRequest, AcpAddPolicyResponse, AcpPolicy, NacRelationshipRequest};
 pub use encrypted_index::EncryptedIndexInfo;

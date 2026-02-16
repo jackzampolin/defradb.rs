@@ -1,5 +1,6 @@
 use integration_test::{
-    generate_identity, multi_resource_policy, typed_schema, TestCluster, STANDARD_FIELDS,
+    for_each_runtime, generate_identity, multi_resource_policy, typed_schema, TestCluster,
+    STANDARD_FIELDS,
 };
 
 const RESOURCES: &[(&str, &str)] = &[
@@ -264,26 +265,4 @@ async fn xarchive_access_matrix_test(cluster: TestCluster) {
     );
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_xarchive_access_matrix() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    xarchive_access_matrix_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_xarchive_access_matrix() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    xarchive_access_matrix_test(cluster).await;
-}
+for_each_runtime!(xarchive_access_matrix, xarchive_access_matrix_test, .with_acp_local());

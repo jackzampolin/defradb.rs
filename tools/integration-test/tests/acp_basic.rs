@@ -1,4 +1,6 @@
-use integration_test::{generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY};
+use integration_test::{
+    for_each_runtime, generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY,
+};
 
 async fn acp_basic_test(cluster: TestCluster) {
     let node = cluster.client(0);
@@ -74,26 +76,4 @@ async fn acp_basic_test(cluster: TestCluster) {
     assert_eq!(bob_users2[0]["name"], "Secret");
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_acp_basic() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    acp_basic_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_acp_basic() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_acp_local()
-        .build()
-        .await
-        .unwrap();
-    acp_basic_test(cluster).await;
-}
+for_each_runtime!(acp_basic, acp_basic_test, .with_acp_local());

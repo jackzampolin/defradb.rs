@@ -1,4 +1,4 @@
-use integration_test::TestCluster;
+use integration_test::{for_each_runtime, TestCluster};
 
 async fn backup_restore_test(cluster: TestCluster) {
     let client = cluster.client(0);
@@ -156,16 +156,4 @@ async fn backup_restore_test(cluster: TestCluster) {
     );
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_backup_restore() {
-    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
-    backup_restore_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_backup_restore() {
-    let cluster = TestCluster::builder().go_nodes(1).build().await.unwrap();
-    backup_restore_test(cluster).await;
-}
+for_each_runtime!(backup_restore, backup_restore_test);

@@ -135,7 +135,7 @@ impl Cli {
             Command::Client(args) => args.execute(config, self.url).await,
             Command::Identity(args) => args.execute(config),
             Command::Sdl(args) => args.execute(),
-            Command::ServerDump(args) => args.execute(),
+            Command::ServerDump(args) => args.execute(&config).await,
         }
     }
 }

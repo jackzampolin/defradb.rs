@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use integration_test::{poll_until, TestCluster};
+use integration_test::{for_each_p2p_topology, poll_until, TestCluster};
 
 async fn p2p_management_test(cluster: TestCluster) {
     let node0 = cluster.client(0);
@@ -168,26 +168,4 @@ async fn p2p_management_test(cluster: TestCluster) {
         .expect("p2p_collection_list after delete");
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_rust_p2p_management() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(2)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    p2p_management_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_go_p2p_management() {
-    let cluster = TestCluster::builder()
-        .go_nodes(2)
-        .with_p2p()
-        .build()
-        .await
-        .unwrap();
-    p2p_management_test(cluster).await;
-}
+for_each_p2p_topology!(p2p_management, p2p_management_test, .with_p2p());

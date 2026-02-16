@@ -1,4 +1,4 @@
-use integration_test::TestCluster;
+use integration_test::{for_each_runtime, TestCluster};
 
 async fn purge_dev_mode_test(cluster: TestCluster) {
     let client = cluster.client(0);
@@ -44,40 +44,5 @@ async fn purge_non_dev_mode_test(cluster: TestCluster) {
     );
 }
 
-#[tokio::test]
-#[ignore]
-async fn rust_purge_dev_mode() {
-    let cluster = TestCluster::builder()
-        .rust_nodes(1)
-        .with_development()
-        .build()
-        .await
-        .unwrap();
-    purge_dev_mode_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_purge_dev_mode() {
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_development()
-        .build()
-        .await
-        .unwrap();
-    purge_dev_mode_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn rust_purge_non_dev_mode() {
-    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
-    purge_non_dev_mode_test(cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn go_purge_non_dev_mode() {
-    let cluster = TestCluster::builder().go_nodes(1).build().await.unwrap();
-    purge_non_dev_mode_test(cluster).await;
-}
+for_each_runtime!(purge_dev_mode, purge_dev_mode_test, .with_development());
+for_each_runtime!(purge_non_dev_mode, purge_non_dev_mode_test);
