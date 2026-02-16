@@ -112,14 +112,19 @@ fn test_datastore_type_from_str_valid() {
 
 #[test]
 fn test_datastore_type_accepts_storage_aliases() {
-    // rocksdb and redb are aliases for badger (Rust impl uses Redb)
+    // redb is an alias for badger (Rust impl uses Redb)
+    assert_eq!(
+        "redb".parse::<DatastoreType>().unwrap(),
+        DatastoreType::Badger
+    );
+    // rocksdb is its own backend
     assert_eq!(
         "rocksdb".parse::<DatastoreType>().unwrap(),
-        DatastoreType::Badger
+        DatastoreType::RocksDb
     );
     assert_eq!(
         "RocksDB".parse::<DatastoreType>().unwrap(),
-        DatastoreType::Badger
+        DatastoreType::RocksDb
     );
 }
 
