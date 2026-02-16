@@ -20,17 +20,25 @@ async fn lens_migration_test(cluster: TestCluster) {
         "schema describe should mention Article"
     );
 
-    // List lens migrations (may be empty initially)
-    let list_result = node.lens_list();
-    if let Err(e) = &list_result {
-        eprintln!("lens list not supported: {}", e);
-    }
+    // lens_list should succeed on fresh node (empty result)
+    let list_result = node.lens_list().expect("lens_list should succeed");
+    let is_empty = list_result.is_null()
+        || list_result
+            .as_object()
+            .map(|o| o.is_empty())
+            .unwrap_or(false)
+        || list_result
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false);
+    assert!(
+        is_empty,
+        "lens_list on fresh node should be empty, got: {}",
+        list_result
+    );
 
-    // Try lens reload
-    let reload_result = node.lens_reload();
-    if let Err(e) = &reload_result {
-        eprintln!("lens reload not supported: {}", e);
-    }
+    // lens_reload should succeed
+    node.lens_reload().expect("lens_reload should succeed");
 
     // Verify articles still queryable
     let articles = node

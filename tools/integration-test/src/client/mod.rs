@@ -456,6 +456,28 @@ impl DefraClient {
         self.exec(&args)
     }
 
+    // -- P2P Document operations --
+
+    /// Add documents to P2P subscription via `client p2p document create <id1> <id2>`.
+    pub fn p2p_document_create(&self, doc_ids: &[&str]) -> Result<String> {
+        let mut args = vec!["client", "p2p", "document", "create"];
+        args.extend(doc_ids);
+        self.exec(&args)
+    }
+
+    /// Remove documents from P2P subscription via `client p2p document delete <id1> <id2>`.
+    pub fn p2p_document_delete(&self, doc_ids: &[&str]) -> Result<String> {
+        let mut args = vec!["client", "p2p", "document", "delete"];
+        args.extend(doc_ids);
+        self.exec(&args)
+    }
+
+    /// List P2P document subscriptions via `client p2p document list`.
+    pub fn p2p_document_list(&self) -> Result<Value> {
+        let out = self.exec(&["client", "p2p", "document", "list"])?;
+        serde_json::from_str(&out).context("failed to parse p2p_document_list output")
+    }
+
     // -- ACP Document extensions --
 
     /// Delete an ACP document relationship.
