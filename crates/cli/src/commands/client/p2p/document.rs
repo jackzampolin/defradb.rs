@@ -57,13 +57,13 @@ pub struct P2pDocumentListArgs {}
 /// Arguments for p2p document sync command
 #[derive(Args, Debug)]
 pub struct P2pDocumentSyncArgs {
-    /// Document ID
-    #[arg(long = "docID")]
-    pub doc_id: Option<String>,
+    /// Collection name
+    #[arg(value_name = "collection-name")]
+    pub collection_name: String,
 
-    /// Schema ID
-    #[arg(long = "schemaID")]
-    pub schema_id: Option<String>,
+    /// Document IDs to sync
+    #[arg(value_name = "docID")]
+    pub doc_ids: Vec<String>,
 }
 
 impl P2pDocumentArgs {
@@ -126,7 +126,7 @@ impl P2pDocumentSyncArgs {
             .with_verbose(ctx.verbose);
 
         client
-            .p2p_document_sync(self.doc_id.as_deref(), self.schema_id.as_deref())
+            .p2p_document_sync(&self.collection_name, &self.doc_ids)
             .await?;
         println!("Document sync initiated");
         Ok(())

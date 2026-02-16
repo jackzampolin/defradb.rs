@@ -50,11 +50,19 @@ pub struct P2pCollectionDeleteArgs {
 
 /// Arguments for collection sync-versions command
 #[derive(Args, Debug)]
-pub struct P2pCollectionSyncVersionsArgs {}
+pub struct P2pCollectionSyncVersionsArgs {
+    /// Version IDs to sync
+    #[arg(value_name = "versionID")]
+    pub version_ids: Vec<String>,
+}
 
 /// Arguments for collection sync-branchable command
 #[derive(Args, Debug)]
-pub struct P2pCollectionSyncBranchableArgs {}
+pub struct P2pCollectionSyncBranchableArgs {
+    /// Collection ID
+    #[arg(value_name = "collection-id")]
+    pub collection_id: String,
+}
 
 impl P2pCollectionArgs {
     /// Execute the collection subcommand
@@ -132,16 +140,24 @@ impl P2pCollectionSyncVersionsArgs {
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        client.p2p_collection_sync().await?;
-        println!("Collection sync initiated");
+        client
+            .p2p_collection_sync_versions(&self.version_ids)
+            .await?;
+        println!("Collection sync-versions initiated");
         Ok(())
     }
 }
 
 impl P2pCollectionSyncBranchableArgs {
-    pub async fn execute(&self, _ctx: &ClientContext) -> Result<()> {
-        Err(crate::error::Error::Server(
-            "p2p collection sync-branchable requires branchable sync protocol (not yet implemented)".to_string(),
-        ))
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        client
+            .p2p_collection_sync_branchable(&self.collection_id)
+            .await?;
+        println!("Collection sync-branchable initiated");
+        Ok(())
     }
 }

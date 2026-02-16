@@ -81,15 +81,6 @@ pub struct P2pDocumentRequest {
     pub schema_ids: Vec<String>,
 }
 
-/// P2P document sync request
-#[derive(Debug, Serialize)]
-pub struct P2pDocumentSyncRequest {
-    #[serde(rename = "docID", skip_serializing_if = "Option::is_none")]
-    pub doc_id: Option<String>,
-    #[serde(rename = "schemaID", skip_serializing_if = "Option::is_none")]
-    pub schema_id: Option<String>,
-}
-
 impl HttpClient {
     pub async fn p2p_peers_add(&self, address: &str) -> Result<()> {
         let url = format!("{}/api/v0/p2p/peers", self.base_url);
@@ -160,16 +151,28 @@ impl HttpClient {
         self.request_void("DELETE", &url, Some(&body)).await
     }
 
-    pub async fn p2p_document_sync(
-        &self,
-        doc_id: Option<&str>,
-        schema_id: Option<&str>,
-    ) -> Result<()> {
+    pub async fn p2p_document_sync(&self, collection_name: &str, doc_ids: &[String]) -> Result<()> {
         let url = format!("{}/api/v0/p2p/documents/sync", self.base_url);
-        let body = serde_json::to_string(&P2pDocumentSyncRequest {
-            doc_id: doc_id.map(|s| s.to_string()),
-            schema_id: schema_id.map(|s| s.to_string()),
-        })?;
+        let body = serde_json::to_string(&serde_json::json!({
+            "collectionName": collection_name,
+            "docIDs": doc_ids,
+        }))?;
+        self.request_void("POST", &url, Some(&body)).await
+    }
+
+    pub async fn p2p_collection_sync_versions(&self, version_ids: &[String]) -> Result<()> {
+        let url = format!("{}/api/v0/p2p/collections/sync-versions", self.base_url);
+        let body = serde_json::to_string(&serde_json::json!({
+            "versionIDs": version_ids,
+        }))?;
+        self.request_void("POST", &url, Some(&body)).await
+    }
+
+    pub async fn p2p_collection_sync_branchable(&self, collection_id: &str) -> Result<()> {
+        let url = format!("{}/api/v0/p2p/collections/sync-branchable", self.base_url);
+        let body = serde_json::to_string(&serde_json::json!({
+            "collectionID": collection_id,
+        }))?;
         self.request_void("POST", &url, Some(&body)).await
     }
 }

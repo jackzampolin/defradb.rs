@@ -65,6 +65,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
             "/versions",
             get(handlers::get_all_collections).delete(handlers::delete_collection_versions),
         )
+        .route("/migrations", post(handlers::lens::set_migration))
         .route("/by-id/:id", get(handlers::find_collection_by_id))
         .route(
             "/by-version/:id",
