@@ -18,8 +18,8 @@ use crate::router::{AppState, NodePermission};
 /// Response for setting a migration.
 #[derive(Debug, Clone, Serialize)]
 pub struct SetMigrationResponse {
-    #[serde(rename = "transformId")]
-    pub transform_id: String,
+    #[serde(rename = "lensId")]
+    pub lens_id: String,
 }
 
 /// Set a lens migration between schema versions.
@@ -57,12 +57,12 @@ pub async fn set_migration(
         ));
     }
 
-    let transform_id = lens
+    let lens_id = lens
         .set_migration(&body)
         .await
         .map_err(HttpError::BadRequest)?;
 
-    Ok(Json(SetMigrationResponse { transform_id }))
+    Ok(Json(SetMigrationResponse { lens_id }))
 }
 
 /// Reload all lens modules.
@@ -90,7 +90,7 @@ pub async fn reload(
 ///
 /// POST /api/v0/lens
 ///
-/// Accepts lens configuration in JSON format in the request body.
+/// Accepts lens configuration wrapped as `{"lens": <config>}`.
 ///
 /// Requires `CollectionPatch` permission when NAC is enabled.
 pub async fn add_lens(
@@ -108,9 +108,17 @@ pub async fn add_lens(
         ));
     }
 
-    let transform_id = lens.add(&body).await.map_err(HttpError::BadRequest)?;
+    let parsed: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| HttpError::BadRequest(format!("invalid JSON: {}", e)))?;
+    let inner = parsed
+        .get("lens")
+        .ok_or_else(|| HttpError::BadRequest("missing \"lens\" wrapper".into()))?;
+    let config_str = serde_json::to_string(inner)
+        .map_err(|e| HttpError::BadRequest(format!("failed to serialize lens config: {}", e)))?;
 
-    Ok(Json(SetMigrationResponse { transform_id }))
+    let lens_id = lens.add(&config_str).await.map_err(HttpError::BadRequest)?;
+
+    Ok(Json(SetMigrationResponse { lens_id }))
 }
 
 /// List lens migrations.
@@ -128,7 +136,7 @@ pub async fn list_lenses(
 
     let modules = lens.list().await.map_err(HttpError::Internal)?;
 
-    Ok(Json(modules))
+    Ok(Json(serde_json::json!({"lenses": modules})))
 }
 
 #[cfg(test)]
@@ -138,10 +146,10 @@ mod tests {
     #[test]
     fn test_set_migration_response_serialize() {
         let response = SetMigrationResponse {
-            transform_id: "transform-123".to_string(),
+            lens_id: "lens-123".to_string(),
         };
         let json = serde_json::to_string(&response).unwrap();
-        assert!(json.contains("transformId"));
-        assert!(json.contains("transform-123"));
+        assert!(json.contains("lensId"));
+        assert!(json.contains("lens-123"));
     }
 }

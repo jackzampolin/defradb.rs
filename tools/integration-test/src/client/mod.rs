@@ -687,6 +687,31 @@ impl DefraClient {
         self.exec(&["client", "lens", "reload"])
     }
 
+    /// Sync documents via `client p2p document sync <collection> <docIDs...>`.
+    pub fn p2p_document_sync(&self, collection: &str, doc_ids: &[&str]) -> Result<String> {
+        let mut args = vec!["client", "p2p", "document", "sync", collection];
+        args.extend(doc_ids);
+        self.exec(&args)
+    }
+
+    /// Sync collection versions via `client p2p collection sync-versions <versionIDs...>`.
+    pub fn p2p_collection_sync_versions(&self, version_ids: &[&str]) -> Result<String> {
+        let mut args = vec!["client", "p2p", "collection", "sync-versions"];
+        args.extend(version_ids);
+        self.exec(&args)
+    }
+
+    /// Sync branchable collection via `client p2p collection sync-branchable <id>`.
+    pub fn p2p_collection_sync_branchable(&self, collection_id: &str) -> Result<String> {
+        self.exec(&[
+            "client",
+            "p2p",
+            "collection",
+            "sync-branchable",
+            collection_id,
+        ])
+    }
+
     // -- Collection management operations --
 
     /// Patch a collection schema via `client collection patch '<patch>'`.

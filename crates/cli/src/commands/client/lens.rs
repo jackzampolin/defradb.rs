@@ -88,8 +88,8 @@ impl LensAddArgs {
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        let result = client.lens_add(&config).await?;
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        let response = client.lens_add(&config).await?;
+        println!("{}", serde_json::to_string_pretty(&response)?);
         Ok(())
     }
 }
@@ -101,21 +101,44 @@ impl LensListArgs {
             .with_verbose(ctx.verbose);
 
         let result = client.lens_list().await?;
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        let lenses = result.get("lenses").unwrap_or(&result);
+        println!("{}", serde_json::to_string_pretty(lenses)?);
         Ok(())
     }
 }
 
 impl LensSetArgs {
-    /// Execute the lens set command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let src = self.src.as_ref().ok_or_else(|| {
+            crate::error::Error::MissingInput("source schema version ID (SRC) is required".into())
+        })?;
+        let dst = self.dst.as_ref().ok_or_else(|| {
+            crate::error::Error::MissingInput(
+                "destination schema version ID (DST) is required".into(),
+            )
+        })?;
         let config = get_data_from_args(&self.config, &self.file)?;
+
+        let parsed: serde_json::Value = serde_json::from_str(&config)
+            .map_err(|e| crate::error::Error::Server(format!("invalid JSON config: {}", e)))?;
+
+        let lenses = parsed
+            .get("Lenses")
+            .or_else(|| parsed.get("lenses"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+
+        let body = serde_json::json!({
+            "SourceSchemaVersionID": src,
+            "DestinationSchemaVersionID": dst,
+            "Lenses": lenses,
+        });
 
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        let response = client.lens_set_migration(&config).await?;
+        let response = client.lens_set_migration(&body.to_string()).await?;
         println!("{}", serde_json::to_string_pretty(&response)?);
         Ok(())
     }

@@ -27,8 +27,8 @@ pub use encrypted_index::EncryptedIndexInfo;
 pub use index::{IndexCreateRequest, IndexFieldInfo, IndexInfo};
 pub use lens::LensSetMigrationResponse;
 pub use p2p::{
-    P2pCollectionRequest, P2pConnectRequest, P2pDocumentRequest, P2pDocumentSyncRequest, P2pInfo,
-    P2pPeerAddRequest, P2pPeerInfo, P2pReplicatorInfo, P2pReplicatorRequest,
+    P2pCollectionRequest, P2pConnectRequest, P2pDocumentRequest, P2pInfo, P2pPeerAddRequest,
+    P2pPeerInfo, P2pReplicatorInfo, P2pReplicatorRequest,
 };
 pub use types::{ErrorResponse, GraphQLError, GraphQLRequest, GraphQLResponse, TxBeginResponse};
 
@@ -362,8 +362,6 @@ impl HttpClient {
     endpoint!(p2p_collection_list, GET  "/api/v0/p2p/collections"    => Vec<String>);
     endpoint!(p2p_active_peers,    GET  "/api/v0/p2p/active-peers"   => JsonValue);
     endpoint!(p2p_document_list,   GET  "/api/v0/p2p/documents"      => JsonValue);
-    endpoint!(p2p_collection_sync, POST "/api/v0/p2p/collections/sync");
-
     // ACP / NAC
     endpoint!(acp_list_policies,   GET  "/api/v0/acp/policy"         => Vec<AcpPolicy>);
     endpoint!(nac_status,          GET  "/api/v0/acp/node/status"    => JsonValue);

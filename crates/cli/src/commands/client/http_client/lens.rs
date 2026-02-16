@@ -9,19 +9,22 @@ use crate::error::Result;
 /// Response for setting a lens migration
 #[derive(Debug, Deserialize, Serialize)]
 pub struct LensSetMigrationResponse {
-    /// The transform ID assigned to this migration
-    #[serde(rename = "transformId", alias = "TransformID", alias = "transform_id")]
-    pub transform_id: String,
+    #[serde(rename = "lensId", alias = "transformId")]
+    pub lens_id: String,
 }
 
 impl HttpClient {
     pub async fn lens_set_migration(&self, config: &str) -> Result<LensSetMigrationResponse> {
-        let url = format!("{}/api/v0/lens/set", self.base_url);
+        let url = format!("{}/api/v0/collections/migrations", self.base_url);
         self.request_json("POST", &url, Some(config)).await
     }
 
-    pub async fn lens_add(&self, config: &str) -> Result<JsonValue> {
+    pub async fn lens_add(&self, config: &str) -> Result<LensSetMigrationResponse> {
         let url = format!("{}/api/v0/lens", self.base_url);
-        self.request_json("POST", &url, Some(config)).await
+        let parsed: JsonValue = serde_json::from_str(config)
+            .map_err(|e| crate::error::Error::Server(format!("invalid JSON config: {}", e)))?;
+        let wrapped = serde_json::json!({"lens": parsed});
+        let body = serde_json::to_string(&wrapped)?;
+        self.request_json("POST", &url, Some(&body)).await
     }
 }

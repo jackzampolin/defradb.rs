@@ -54,7 +54,7 @@ pub async fn set_migration_in_txn(
         .await
         .map_err(HttpError::BadRequest)?;
 
-    Ok(Json(serde_json::json!({ "transformId": transform_id })))
+    Ok(Json(serde_json::json!({ "lensId": transform_id })))
 }
 
 /// Get all collection versions visible within a transaction.
