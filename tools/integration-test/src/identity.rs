@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 pub struct TestIdentity {
     pub private_key_hex: String,
     pub did: String,
+    pub public_key_hex: Option<String>,
+    pub key_type: Option<String>,
 }
 
 /// Generate a new identity using the given DefraDB binary.
@@ -57,8 +59,9 @@ fn parse_identity_output(output: &str) -> Result<TestIdentity> {
         let val: serde_json::Value =
             serde_json::from_str(trimmed).context("failed to parse identity JSON")?;
 
-        // Rust JSON: {"private_key": ..., "did": ...}
-        // Go JSON:   {"PrivateKey": ..., "DID": ...}
+        // Rust JSON (new): {"PrivateKey": ..., "PublicKey": ..., "DID": ..., "KeyType": ...}
+        // Rust JSON (old): {"private_key": ..., "did": ...}
+        // Go JSON:         {"PrivateKey": ..., "PublicKey": ..., "DID": ..., "KeyType": ...}
         let private_key = val
             .get("private_key")
             .or_else(|| val.get("PrivateKey"))
@@ -71,9 +74,23 @@ fn parse_identity_output(output: &str) -> Result<TestIdentity> {
             .and_then(|v| v.as_str())
             .context("missing did in identity JSON")?;
 
+        let public_key = val
+            .get("PublicKey")
+            .or_else(|| val.get("public_key"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let key_type = val
+            .get("KeyType")
+            .or_else(|| val.get("key_type"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         return Ok(TestIdentity {
             private_key_hex: private_key.to_string(),
             did: did.to_string(),
+            public_key_hex: public_key,
+            key_type,
         });
     }
 
@@ -92,6 +109,8 @@ fn parse_identity_output(output: &str) -> Result<TestIdentity> {
     Ok(TestIdentity {
         private_key_hex: private_key.context("missing 'Private key:' in identity output")?,
         did: did.context("missing 'DID:' in identity output")?,
+        public_key_hex: None,
+        key_type: None,
     })
 }
 
@@ -105,10 +124,12 @@ mod tests {
         let id = parse_identity_output(output).unwrap();
         assert_eq!(id.private_key_hex, "abcdef0123456789");
         assert_eq!(id.did, "did:key:z6Mk...");
+        assert!(id.public_key_hex.is_none());
+        assert!(id.key_type.is_none());
     }
 
     #[test]
-    fn parse_rust_json_format() {
+    fn parse_rust_json_format_legacy() {
         let output = r#"{"private_key":"abcdef","did":"did:key:z6Mk"}"#;
         let id = parse_identity_output(output).unwrap();
         assert_eq!(id.private_key_hex, "abcdef");
@@ -117,9 +138,11 @@ mod tests {
 
     #[test]
     fn parse_go_json_format() {
-        let output = r#"{"PrivateKey":"abcdef","DID":"did:key:z6Mk"}"#;
+        let output = r#"{"PrivateKey":"abcdef","PublicKey":"012345","DID":"did:key:z6Mk","KeyType":"secp256k1"}"#;
         let id = parse_identity_output(output).unwrap();
         assert_eq!(id.private_key_hex, "abcdef");
         assert_eq!(id.did, "did:key:z6Mk");
+        assert_eq!(id.public_key_hex.as_deref(), Some("012345"));
+        assert_eq!(id.key_type.as_deref(), Some("secp256k1"));
     }
 }

@@ -115,5 +115,13 @@ fn test_jwe_format_go_compatible() {
     let header: serde_json::Value = serde_json::from_slice(&header_bytes).unwrap();
 
     assert_eq!(header["alg"], "PBES2-HS512+A256KW");
-    assert_eq!(header["enc"], "A128CBC-HS256");
+    assert_eq!(header["enc"], "A256GCM");
+    assert_eq!(header["p2c"], 10000);
+
+    // Verify salt is 32 bytes (encoded as base64url)
+    let p2s = header["p2s"].as_str().unwrap();
+    let salt_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(p2s)
+        .unwrap();
+    assert_eq!(salt_bytes.len(), 32, "salt should be 32 bytes");
 }

@@ -1,6 +1,6 @@
 //! Keyring command implementation
 
-use std::io::{self, BufRead, IsTerminal, Read, Write};
+use std::io::{self, BufRead, Write};
 
 use clap::{Args, Subcommand};
 
@@ -48,12 +48,24 @@ impl KeyringArgs {
 /// Generate a new cryptographic key
 #[derive(Args, Debug)]
 pub struct GenerateArgs {
-    /// Name of the key to generate
-    pub name: String,
+    /// Name of the key to generate (omit for Go-compatible mode: generates peer-key + encryption-key)
+    pub name: Option<String>,
 
-    /// Key type to generate (ed25519, secp256k1, aes256)
-    #[arg(short = 't', long, default_value = "ed25519")]
+    /// Key type to generate (ed25519, secp256k1, aes256) — only used with a named key
+    #[arg(short = 't', long = "key-type", default_value = "ed25519")]
     pub key_type: String,
+
+    /// Skip generating the encryption key (Go-compatible mode only)
+    #[arg(long = "no-encryption")]
+    pub no_encryption: bool,
+
+    /// Skip generating the peer key (Go-compatible mode only)
+    #[arg(long = "no-peer-key")]
+    pub no_peer_key: bool,
+
+    /// Overwrite existing keys without error
+    #[arg(long)]
+    pub force: bool,
 }
 
 impl GenerateArgs {
@@ -62,39 +74,85 @@ impl GenerateArgs {
 
         let keyring = super::open_keyring(&config)?;
 
-        let (key, description) = match self.key_type.to_lowercase().as_str() {
-            "ed25519" => {
+        if let Some(name) = self.name {
+            // Rust extension mode: generate a single named key
+            if !self.force && key_exists(keyring.as_ref(), &name)? {
+                return Err(Error::Keyring(format!(
+                    "key {} already exists, use --force to overwrite",
+                    name
+                )));
+            }
+
+            let key = generate_key_bytes(&self.key_type)?;
+            keyring
+                .set(&name, &key)
+                .map_err(|e| Error::Keyring(e.to_string()))?;
+        } else {
+            // Go-compatible mode: generate peer-key and/or encryption-key
+            if !self.no_peer_key {
+                if !self.force && key_exists(keyring.as_ref(), "peer-key")? {
+                    return Err(Error::Keyring(
+                        "key peer-key already exists, use --force to overwrite".to_string(),
+                    ));
+                }
                 let private_key = crypto::generate_ed25519().map_err(|e| {
                     Error::Keyring(format!("failed to generate Ed25519 key: {}", e))
                 })?;
-                (private_key.raw().to_vec(), "64-byte Ed25519")
+                keyring
+                    .set("peer-key", &private_key.raw())
+                    .map_err(|e| Error::Keyring(e.to_string()))?;
             }
-            "secp256k1" => {
-                let private_key = crypto::generate_secp256k1().map_err(|e| {
-                    Error::Keyring(format!("failed to generate secp256k1 key: {}", e))
-                })?;
-                (private_key.raw().to_vec(), "32-byte secp256k1")
-            }
-            "aes256" | "aes" => {
+
+            if !self.no_encryption {
+                if !self.force && key_exists(keyring.as_ref(), "encryption-key")? {
+                    return Err(Error::Keyring(
+                        "key encryption-key already exists, use --force to overwrite".to_string(),
+                    ));
+                }
                 let key = crypto::generate_aes256().map_err(|e| {
                     Error::Keyring(format!("failed to generate AES-256 key: {}", e))
                 })?;
-                (key, "32-byte AES-256")
+                keyring
+                    .set("encryption-key", &key)
+                    .map_err(|e| Error::Keyring(e.to_string()))?;
             }
-            _ => {
-                return Err(Error::Keyring(format!(
-                    "unknown key type: '{}'. Valid types: ed25519, secp256k1, aes256",
-                    self.key_type
-                )));
-            }
-        };
+        }
 
-        keyring
-            .set(&self.name, &key)
-            .map_err(|e| Error::Keyring(e.to_string()))?;
-
-        println!("Generated {} key: {}", description, self.name);
         Ok(())
+    }
+}
+
+fn key_exists(keyring: &dyn keyring::Keyring, name: &str) -> Result<bool> {
+    match keyring.get(name) {
+        Ok(_) => Ok(true),
+        Err(keyring::Error::NotFound(_)) => Ok(false),
+        Err(e) => Err(Error::Keyring(e.to_string())),
+    }
+}
+
+fn generate_key_bytes(key_type: &str) -> Result<Vec<u8>> {
+    use crypto::Key;
+
+    match key_type.to_lowercase().as_str() {
+        "ed25519" => {
+            let private_key = crypto::generate_ed25519()
+                .map_err(|e| Error::Keyring(format!("failed to generate Ed25519 key: {}", e)))?;
+            Ok(private_key.raw().to_vec())
+        }
+        "secp256k1" => {
+            let private_key = crypto::generate_secp256k1()
+                .map_err(|e| Error::Keyring(format!("failed to generate secp256k1 key: {}", e)))?;
+            Ok(private_key.raw().to_vec())
+        }
+        "aes256" | "aes" => {
+            let key = crypto::generate_aes256()
+                .map_err(|e| Error::Keyring(format!("failed to generate AES-256 key: {}", e)))?;
+            Ok(key)
+        }
+        _ => Err(Error::Keyring(format!(
+            "unknown key type: '{}'. Valid types: ed25519, secp256k1, aes256",
+            key_type
+        ))),
     }
 }
 
@@ -104,9 +162,9 @@ pub struct ExportArgs {
     /// Name of the key to export
     pub name: String,
 
-    /// Output as hex instead of raw bytes
+    /// Output raw bytes instead of hex (Rust extension)
     #[arg(long)]
-    pub hex: bool,
+    pub raw: bool,
 }
 
 impl ExportArgs {
@@ -117,11 +175,10 @@ impl ExportArgs {
             .get(&self.name)
             .map_err(|e| Error::Keyring(e.to_string()))?;
 
-        if self.hex {
-            println!("{}", hex_encode(&key));
-        } else {
-            // Write raw bytes to stdout
+        if self.raw {
             io::stdout().write_all(&key)?;
+        } else {
+            println!("{}", hex_encode(&key));
         }
 
         Ok(())
@@ -134,38 +191,34 @@ pub struct ImportArgs {
     /// Name for the imported key
     pub name: String,
 
-    /// Input is hex encoded
+    /// Hex-encoded private key (Go-compatible positional argument)
+    pub key_hex: Option<String>,
+
+    /// Read hex-encoded key from stdin (Rust extension)
     #[arg(long)]
-    pub hex: bool,
+    pub stdin: bool,
 }
 
 impl ImportArgs {
     pub fn execute(self, config: Config) -> Result<()> {
         let keyring = super::open_keyring(&config)?;
 
-        // Read from stdin
-        let stdin = io::stdin();
-        let is_terminal = stdin.is_terminal();
-        let key = if self.hex {
+        let key = if let Some(ref hex_str) = self.key_hex {
+            hex_decode(hex_str).map_err(|e| Error::Keyring(format!("invalid hex: {}", e)))?
+        } else if self.stdin {
             let mut line = String::new();
-            stdin.lock().read_line(&mut line)?;
+            io::stdin().lock().read_line(&mut line)?;
             hex_decode(line.trim()).map_err(|e| Error::Keyring(format!("invalid hex: {}", e)))?
         } else {
-            let mut buf = Vec::new();
-            stdin.lock().read_to_end(&mut buf)?;
-            // Only strip trailing newline for terminal input to avoid corrupting binary keys
-            // that legitimately end with 0x0A when piped from files
-            if is_terminal && buf.last() == Some(&b'\n') {
-                buf.pop();
-            }
-            buf
+            return Err(Error::MissingInput(
+                "provide hex key as argument or use --stdin".to_string(),
+            ));
         };
 
         keyring
             .set(&self.name, &key)
             .map_err(|e| Error::Keyring(e.to_string()))?;
 
-        println!("Imported key: {}", self.name);
         Ok(())
     }
 }
@@ -201,10 +254,11 @@ impl ListArgs {
         let keys = keyring.list().map_err(|e| Error::Keyring(e.to_string()))?;
 
         if keys.is_empty() {
-            println!("No keys found");
+            println!("No keys found in the keyring.");
         } else {
+            println!("Keys in the keyring:");
             for key in keys {
-                println!("{}", key);
+                println!("- {}", key);
             }
         }
 
