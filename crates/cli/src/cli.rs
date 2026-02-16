@@ -33,11 +33,11 @@ pub struct Cli {
     pub log_format: Option<String>,
 
     /// Include stacktrace in error and fatal logs
-    #[arg(long, global = true, env = "DEFRA_LOG_STACKTRACE")]
+    #[arg(long, global = true, env = "DEFRA_LOG_STACKTRACE", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub log_stacktrace: Option<bool>,
 
     /// Include source location in logs
-    #[arg(long, global = true, env = "DEFRA_LOG_SOURCE")]
+    #[arg(long, global = true, env = "DEFRA_LOG_SOURCE", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub log_source: Option<bool>,
 
     /// Logger config overrides. Format <name>,<key>=<val>,...;<name>,...
@@ -45,7 +45,7 @@ pub struct Cli {
     pub log_overrides: Option<String>,
 
     /// Disable colored log output
-    #[arg(long, global = true, env = "DEFRA_NO_LOG_COLOR")]
+    #[arg(long, global = true, env = "DEFRA_NO_LOG_COLOR", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub no_log_color: Option<bool>,
 
     /// URL of HTTP endpoint to listen on or connect to
@@ -65,7 +65,7 @@ pub struct Cli {
     pub keyring_path: Option<String>,
 
     /// Disable the keyring and generate ephemeral keys
-    #[arg(long, global = true, env = "DEFRA_NO_KEYRING")]
+    #[arg(long, global = true, env = "DEFRA_NO_KEYRING", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub no_keyring: Option<bool>,
 
     /// The SourceHub address authorized by the client to make SourceHub transactions
@@ -88,7 +88,7 @@ pub struct Cli {
     ///
     /// When enabled, node operations require authentication and authorization
     /// based on the node's identity from the keyring.
-    #[arg(long, global = true, env = "DEFRA_ACP_NODE_ENABLE")]
+    #[arg(long, global = true, env = "DEFRA_ACP_NODE_ENABLE", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub acp_node_enable: Option<bool>,
 
     /// Document ACP type. Options are none, local, or source-hub

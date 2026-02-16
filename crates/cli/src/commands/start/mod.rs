@@ -48,7 +48,7 @@ pub struct StartArgs {
     pub p2paddr: Option<Vec<String>>,
 
     /// Disable the peer-to-peer network synchronization system
-    #[arg(long)]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub no_p2p: Option<bool>,
 
     /// List of origins to allow for CORS requests
@@ -64,19 +64,19 @@ pub struct StartArgs {
     pub privkeypath: Option<String>,
 
     /// Enables development mode features
-    #[arg(long)]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub development: Option<bool>,
 
     /// Skip generating an encryption key. Encryption at rest will be disabled.
-    #[arg(long)]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub no_encryption: Option<bool>,
 
     /// Disable telemetry reporting
-    #[arg(long)]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub no_telemetry: Option<bool>,
 
     /// Disable signing of commits
-    #[arg(long)]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub no_signing: Option<bool>,
 
     /// Default key type to generate new node identity
@@ -84,7 +84,7 @@ pub struct StartArgs {
     pub default_key_type: Option<String>,
 
     /// Skip generating a searchable encryption key
-    #[arg(long)]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub no_searchable_encryption: Option<bool>,
 
     /// Hex formatted private key used to authenticate with ACP.
