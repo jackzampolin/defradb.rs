@@ -46,6 +46,17 @@ async fn nac_document_acp_test(cluster: TestCluster) {
 
     let query = "query { User { _docID name age } }";
 
+    // --- Test 0: Anonymous (no identity) query -> DENY ---
+    let anon_result = node.query(query);
+    let anon_sees_nothing = match &anon_result {
+        Err(_) => true,
+        Ok(val) => val["User"].as_array().map(|a| a.is_empty()).unwrap_or(true),
+    };
+    assert!(
+        anon_sees_nothing,
+        "anonymous (no identity) should see no data under NAC"
+    );
+
     // --- Test 1: Jack (NAC admin + doc owner) reads -> ALLOW ---
     let jack_result = node
         .query_with_identity(query, &jack_key)

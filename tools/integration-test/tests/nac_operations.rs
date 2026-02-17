@@ -38,8 +38,12 @@ async fn nac_operations_gate_test(cluster: TestCluster) {
     .expect("create product");
 
     // =========================================================================
-    // Encrypted index create — outsider rejected, admin accepted
+    // Encrypted index create — anonymous rejected, outsider rejected, admin accepted
     // =========================================================================
+    assert!(
+        node.encrypted_index_create("Product", "name").is_err(),
+        "anonymous should be rejected from encrypted index create"
+    );
     assert!(
         node.encrypted_index_create_with_identity("Product", "name", outsider_key)
             .is_err(),
@@ -49,8 +53,12 @@ async fn nac_operations_gate_test(cluster: TestCluster) {
         .expect("admin should create encrypted index");
 
     // =========================================================================
-    // Lens list — outsider rejected, admin accepted
+    // Lens list — anonymous rejected, outsider rejected, admin accepted
     // =========================================================================
+    assert!(
+        node.lens_list().is_err(),
+        "anonymous should be rejected from lens list"
+    );
     assert!(
         node.lens_list_with_identity(outsider_key).is_err(),
         "outsider should be rejected from lens list"
@@ -59,9 +67,14 @@ async fn nac_operations_gate_test(cluster: TestCluster) {
         .expect("admin should list lenses");
 
     // =========================================================================
-    // View add — outsider rejected, admin accepted
+    // View add — anonymous rejected, outsider rejected, admin accepted
     // Note: query must NOT include the "query" keyword prefix.
     // =========================================================================
+    assert!(
+        node.view_add("Product { name }", "type ProductView { name: String }")
+            .is_err(),
+        "anonymous should be rejected from view add"
+    );
     assert!(
         node.view_add_with_identity(
             "Product { name }",
@@ -79,8 +92,12 @@ async fn nac_operations_gate_test(cluster: TestCluster) {
     .expect("admin should add view");
 
     // =========================================================================
-    // View refresh — outsider rejected, admin accepted
+    // View refresh — anonymous rejected, outsider rejected, admin accepted
     // =========================================================================
+    assert!(
+        node.view_refresh(None).is_err(),
+        "anonymous should be rejected from view refresh"
+    );
     assert!(
         node.view_refresh_with_identity(None, outsider_key).is_err(),
         "outsider should be rejected from view refresh"
@@ -111,8 +128,12 @@ async fn nac_p2p_operations_gate_test(cluster: TestCluster) {
     let outsider_key = &outsider.private_key_hex;
 
     // =========================================================================
-    // P2P peer info — outsider rejected, admin accepted
+    // P2P peer info — anonymous rejected, outsider rejected, admin accepted
     // =========================================================================
+    assert!(
+        node.p2p_info().is_err(),
+        "anonymous should be rejected from p2p info"
+    );
     assert!(
         node.p2p_info_with_identity(outsider_key).is_err(),
         "outsider should be rejected from p2p info"
@@ -121,8 +142,12 @@ async fn nac_p2p_operations_gate_test(cluster: TestCluster) {
         .expect("admin should access p2p info");
 
     // =========================================================================
-    // P2P active peers — outsider rejected, admin accepted
+    // P2P active peers — anonymous rejected, outsider rejected, admin accepted
     // =========================================================================
+    assert!(
+        node.p2p_active_peers().is_err(),
+        "anonymous should be rejected from active peers"
+    );
     assert!(
         node.p2p_active_peers_with_identity(outsider_key).is_err(),
         "outsider should be rejected from active peers"
