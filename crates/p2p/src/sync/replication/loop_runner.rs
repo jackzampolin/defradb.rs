@@ -24,7 +24,7 @@ use blockstore::Blockstore;
 use tokio::sync::mpsc;
 
 use super::config::ReplicationConfig;
-use super::handlers::process_event;
+use super::handlers::{is_mergeable_event, process_event, process_merge_batch};
 use super::result::ReplicationResult;
 use crate::sync::coordinator::SyncCoordinator;
 use crate::sync::manager::SyncEvent;
@@ -48,11 +48,11 @@ use crate::sync::merge::MergeHandler;
 pub struct ReplicationLoop;
 
 impl ReplicationLoop {
-    /// Run the replication loop.
+    /// Run the replication loop with batch processing.
     ///
     /// This method runs until the event channel is closed or a fatal error occurs.
-    /// It processes SyncEvents, delegates merges to the handler, and marks blocks
-    /// as merged.
+    /// It batches merge-eligible events together for efficient processing with
+    /// shared transactions, reducing fsync overhead during P2P catch-up.
     pub async fn run<B, H>(
         coordinator: Arc<SyncCoordinator<B>>,
         mut events: mpsc::Receiver<SyncEvent>,
@@ -62,59 +62,66 @@ impl ReplicationLoop {
         B: Blockstore + 'static,
         H: MergeHandler + 'static,
     {
-        tracing::info!("Starting replication loop");
+        tracing::info!(batch_size = config.batch_size, "Starting replication loop");
 
         loop {
-            let result =
-                Self::process_next(&coordinator, &mut events, handler.as_ref(), &config).await;
+            let results =
+                Self::process_next_batch(&coordinator, &mut events, handler.as_ref(), &config)
+                    .await;
 
-            match &result {
-                ReplicationResult::Merged { cid, doc_id, .. } => {
-                    tracing::info!(cid = %cid, doc_id = %doc_id, "Block merged successfully");
-                }
-                ReplicationResult::MergedButBroadcastFailed {
-                    cid,
-                    doc_id,
-                    broadcast_error,
-                    ..
-                } => {
-                    tracing::error!(
-                        cid = %cid,
-                        doc_id = %doc_id,
-                        error = %broadcast_error,
-                        "Block merged but re-broadcast failed - other nodes may not receive this update"
-                    );
-                    // Continue processing - the local merge succeeded
-                }
-                ReplicationResult::Skipped { cid, reason } => {
-                    tracing::debug!(cid = %cid, reason = %reason, "Block skipped");
-                }
-                ReplicationResult::Failed { cid, error } => {
-                    tracing::error!(cid = %cid, error = %error, "Block merge failed");
-                    if !config.continue_on_error {
-                        tracing::error!("Stopping replication loop due to error");
+            let mut should_break = false;
+            for result in &results {
+                match result {
+                    ReplicationResult::Merged { cid, doc_id, .. } => {
+                        tracing::info!(cid = %cid, doc_id = %doc_id, "Block merged successfully");
+                    }
+                    ReplicationResult::MergedButBroadcastFailed {
+                        cid,
+                        doc_id,
+                        broadcast_error,
+                        ..
+                    } => {
+                        tracing::error!(
+                            cid = %cid,
+                            doc_id = %doc_id,
+                            error = %broadcast_error,
+                            "Block merged but re-broadcast failed"
+                        );
+                    }
+                    ReplicationResult::Skipped { cid, reason } => {
+                        tracing::debug!(cid = %cid, reason = %reason, "Block skipped");
+                    }
+                    ReplicationResult::Failed { cid, error } => {
+                        tracing::error!(cid = %cid, error = %error, "Block merge failed");
+                        if !config.continue_on_error {
+                            tracing::error!("Stopping replication loop due to error");
+                            should_break = true;
+                            break;
+                        }
+                    }
+                    ReplicationResult::MergedButNotMarked { cid, error } => {
+                        tracing::error!(
+                            cid = %cid,
+                            error = %error,
+                            "Block merged but failed to mark - will be reprocessed on restart"
+                        );
+                    }
+                    ReplicationResult::ChannelClosed => {
+                        tracing::info!("Event channel closed, stopping replication loop");
+                        should_break = true;
                         break;
                     }
+                    ReplicationResult::BitswapFetchStarted { root_cid, query_id } => {
+                        tracing::debug!(
+                            cid = %root_cid,
+                            query_id = ?query_id,
+                            "Bitswap fetch started for missing blocks"
+                        );
+                    }
                 }
-                ReplicationResult::MergedButNotMarked { cid, error } => {
-                    tracing::error!(
-                        cid = %cid,
-                        error = %error,
-                        "Block merged but failed to mark - will be reprocessed on restart"
-                    );
-                    // Continue processing - the merge succeeded, just the bookkeeping failed
-                }
-                ReplicationResult::ChannelClosed => {
-                    tracing::info!("Event channel closed, stopping replication loop");
-                    break;
-                }
-                ReplicationResult::BitswapFetchStarted { root_cid, query_id } => {
-                    tracing::debug!(
-                        cid = %root_cid,
-                        query_id = ?query_id,
-                        "Bitswap fetch started for missing blocks"
-                    );
-                }
+            }
+            if should_break {
+                break;
             }
         }
 
@@ -142,6 +149,66 @@ impl ReplicationLoop {
         };
 
         process_event(coordinator, event, handler, config).await
+    }
+
+    /// Process the next batch of sync events.
+    ///
+    /// Waits for at least one event (blocking), then drains up to
+    /// `config.batch_size - 1` more events using `try_recv()`.
+    /// Merge-eligible events are batched together for efficient processing;
+    /// other events (errors, already-merged, Bitswap) are processed individually.
+    pub async fn process_next_batch<B, H>(
+        coordinator: &SyncCoordinator<B>,
+        events: &mut mpsc::Receiver<SyncEvent>,
+        handler: &H,
+        config: &ReplicationConfig,
+    ) -> Vec<ReplicationResult>
+    where
+        B: Blockstore + 'static,
+        H: MergeHandler + ?Sized + 'static,
+    {
+        // Wait for first event (blocking)
+        let first = match events.recv().await {
+            Some(e) => e,
+            None => return vec![ReplicationResult::ChannelClosed],
+        };
+
+        // Drain more events non-blocking
+        let mut batch = vec![first];
+        while batch.len() < config.batch_size {
+            match events.try_recv() {
+                Ok(e) => batch.push(e),
+                Err(_) => break,
+            }
+        }
+
+        // Separate merge-worthy events from immediate-action events
+        let mut immediate = Vec::new();
+        let mut merge_events = Vec::new();
+        for event in batch {
+            if is_mergeable_event(&event) {
+                merge_events.push(event);
+            } else {
+                immediate.push(event);
+            }
+        }
+
+        let mut results = Vec::new();
+
+        // Process immediate events normally
+        for event in immediate {
+            results.push(process_event(coordinator, event, handler, config).await);
+        }
+
+        // Batch-process merge events
+        if !merge_events.is_empty() {
+            tracing::debug!(batch_size = merge_events.len(), "Processing merge batch");
+            let batch_results =
+                process_merge_batch(coordinator, merge_events, handler, config).await;
+            results.extend(batch_results);
+        }
+
+        results
     }
 
     /// Process all pending events without blocking.

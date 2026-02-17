@@ -362,6 +362,24 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
         Ok(())
     }
 
+    async fn mark_batch_as_merged(&self, cids: &[Cid]) -> Result<()> {
+        if cids.is_empty() {
+            return Ok(());
+        }
+        let mut txn = self.store.new_txn(false).await?;
+        {
+            let bs_txn = txn
+                .as_any_mut()
+                .downcast_mut::<BlockstoreTxn>()
+                .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
+            for cid in cids {
+                bs_txn.mark_as_merged(cid).await?;
+            }
+        }
+        txn.commit().await?;
+        Ok(())
+    }
+
     async fn get_unmerged(&self) -> Result<Vec<Cid>> {
         let txn = self.store.new_txn(true).await?;
         let bs_txn = txn

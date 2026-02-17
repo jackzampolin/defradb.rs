@@ -8,7 +8,7 @@ use super::config::ReplicationConfig;
 use super::result::ReplicationResult;
 use crate::sync::coordinator::SyncCoordinator;
 use crate::sync::manager::SyncEvent;
-use crate::sync::merge::{BlockMetadata, MergeHandler, MergeOutcome};
+use crate::sync::merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
 
 /// Handle a DagNeedsFetch event by initiating a Bitswap sync.
 pub(super) async fn handle_dag_needs_fetch<B>(
@@ -173,6 +173,144 @@ where
             error: e.to_string(),
         },
     }
+}
+
+/// Returns true if this event type can be batch-merged.
+pub(super) fn is_mergeable_event(event: &SyncEvent) -> bool {
+    matches!(
+        event,
+        SyncEvent::BlockReceived { .. } | SyncEvent::DagReady { .. }
+    )
+}
+
+/// Extract merge block metadata from a SyncEvent.
+fn event_to_merge_metadata(event: &SyncEvent) -> (Cid, String, String, String) {
+    match event {
+        SyncEvent::BlockReceived {
+            cid,
+            doc_id,
+            collection_id,
+            creator,
+        } => (*cid, doc_id.clone(), collection_id.clone(), creator.clone()),
+        SyncEvent::DagReady {
+            root_cid,
+            doc_id,
+            collection_id,
+            schema_version_id,
+        } => (
+            *root_cid,
+            doc_id.clone(),
+            collection_id.clone(),
+            schema_version_id.clone(),
+        ),
+        _ => unreachable!("is_mergeable_event should have filtered this"),
+    }
+}
+
+/// Process a batch of merge-eligible events using handle_block_batch().
+///
+/// Loads block data from the blockstore, delegates batch merge to the handler,
+/// then batch-marks successful merges in a single transaction.
+pub(super) async fn process_merge_batch<B, H>(
+    coordinator: &SyncCoordinator<B>,
+    events: Vec<SyncEvent>,
+    handler: &H,
+    _config: &ReplicationConfig,
+) -> Vec<ReplicationResult>
+where
+    B: Blockstore + 'static,
+    H: MergeHandler + ?Sized + 'static,
+{
+    let mut merge_blocks = Vec::with_capacity(events.len());
+    let mut results = Vec::new();
+
+    // Load block data for each event from blockstore
+    for event in &events {
+        let (cid, doc_id, collection_id, creator) = event_to_merge_metadata(event);
+
+        match coordinator.blockstore().get(&cid).await {
+            Ok(Some(data)) => {
+                merge_blocks.push(MergeBlock {
+                    cid,
+                    block_data: data,
+                    doc_id,
+                    collection_id,
+                    creator,
+                });
+            }
+            Ok(None) => {
+                results.push(ReplicationResult::Failed {
+                    cid,
+                    error: "Block not found in blockstore".to_string(),
+                });
+            }
+            Err(e) => {
+                results.push(ReplicationResult::Failed {
+                    cid,
+                    error: format!("Failed to load block: {}", e),
+                });
+            }
+        }
+    }
+
+    if merge_blocks.is_empty() {
+        return results;
+    }
+
+    // Call handler.handle_block_batch()
+    let batch_results = handler.handle_block_batch(&merge_blocks).await;
+
+    // Collect CIDs to mark as merged
+    let mut merged_cids = Vec::new();
+    for (block, result) in merge_blocks.iter().zip(batch_results.into_iter()) {
+        match result {
+            Ok(MergeOutcome::Merged) => {
+                merged_cids.push(block.cid);
+                results.push(ReplicationResult::Merged {
+                    cid: block.cid,
+                    doc_id: block.doc_id.clone(),
+                    collection_id: block.collection_id.clone(),
+                });
+            }
+            Ok(MergeOutcome::Skipped { reason }) => {
+                merged_cids.push(block.cid); // Still mark skipped blocks
+                results.push(ReplicationResult::Skipped {
+                    cid: block.cid,
+                    reason,
+                });
+            }
+            Err(e) => {
+                results.push(ReplicationResult::Failed {
+                    cid: block.cid,
+                    error: e.to_string(),
+                });
+            }
+        }
+    }
+
+    // Batch mark_as_merged in one txn
+    if !merged_cids.is_empty() {
+        if let Err(e) = coordinator.mark_batch_as_merged(&merged_cids).await {
+            tracing::error!(
+                error = %e,
+                count = merged_cids.len(),
+                "Failed to batch mark_as_merged"
+            );
+            // Downgrade affected Merged results to MergedButNotMarked
+            for result in &mut results {
+                if let ReplicationResult::Merged { cid, .. } = result {
+                    if merged_cids.contains(cid) {
+                        *result = ReplicationResult::MergedButNotMarked {
+                            cid: *cid,
+                            error: e.to_string(),
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    results
 }
 
 /// Process a sync event and return the result.

@@ -169,6 +169,11 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         self.manager.mark_as_merged(cid).await
     }
 
+    /// Mark multiple blocks as merged in a single transaction.
+    pub async fn mark_batch_as_merged(&self, cids: &[Cid]) -> Result<()> {
+        self.manager.mark_batch_as_merged(cids).await
+    }
+
     /// Check if a block is merged.
     pub async fn is_merged(&self, cid: &Cid) -> Result<bool> {
         self.manager.is_merged(cid).await

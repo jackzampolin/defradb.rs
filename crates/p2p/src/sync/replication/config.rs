@@ -7,6 +7,8 @@ pub struct ReplicationConfig {
     pub continue_on_error: bool,
     /// Whether to re-broadcast successfully merged blocks
     pub rebroadcast_on_merge: bool,
+    /// Max blocks per batch (matches Go's MergeBatchWithTxn batch size)
+    pub batch_size: usize,
 }
 
 impl Default for ReplicationConfig {
@@ -14,6 +16,7 @@ impl Default for ReplicationConfig {
         Self {
             continue_on_error: true,
             rebroadcast_on_merge: false,
+            batch_size: 50,
         }
     }
 }

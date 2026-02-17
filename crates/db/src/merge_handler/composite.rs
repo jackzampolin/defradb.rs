@@ -1,3 +1,4 @@
+use super::batch::PendingMergeEvent;
 use super::*;
 
 /// Check whether the merge handler should skip decryption for an encrypted block.
@@ -714,6 +715,483 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 }
                 Err(e)
             }
+        }
+    }
+
+    /// Process a Composite delta within a shared transaction (batch mode).
+    ///
+    /// Same logic as `process_composite_delta` but:
+    /// - Uses a shared transaction (no create/commit/discard)
+    /// - Checks both `self.merged_composites` and `batch_merged` for dedup
+    /// - Inserts into `batch_merged` on success
+    /// - Collects events into `pending_events` instead of publishing
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn process_composite_delta_in_txn(
+        &self,
+        datastore: &NamespaceView,
+        headstore: &NamespaceView,
+        cid: &Cid,
+        block: &Block,
+        payload: &defra_core::block::CompositeDeltaPayload,
+        metadata: &BlockMetadata<'_>,
+        from_collection: bool,
+        batch_merged: &std::sync::Mutex<HashSet<Cid>>,
+        pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
+    ) -> std::result::Result<MergeOutcome, MergeError> {
+        let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
+
+        tracing::info!(
+            cid = %cid,
+            doc_id = %doc_id_str,
+            priority = payload.priority,
+            "Processing Composite delta in batch txn"
+        );
+
+        // Recursively merge parent composites (using batch dedup)
+        if let Some(heads) = &block.heads {
+            for head_cid in heads {
+                // Check both permanent and batch-local dedup sets
+                {
+                    let merged = self.merged_composites.lock().unwrap();
+                    if merged.contains(head_cid) {
+                        continue;
+                    }
+                }
+                {
+                    let bm = batch_merged.lock().unwrap();
+                    if bm.contains(head_cid) {
+                        continue;
+                    }
+                }
+
+                let head_data = match self.blockstore.get(head_cid).await {
+                    Ok(Some(data)) => data,
+                    _ => continue,
+                };
+
+                let head_block = match Block::from_dag_cbor(&head_data) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+
+                if let CrdtDelta::Composite(head_payload) = &head_block.delta {
+                    let _ = Box::pin(self.process_composite_delta_in_txn(
+                        datastore,
+                        headstore,
+                        head_cid,
+                        &head_block,
+                        head_payload,
+                        metadata,
+                        from_collection,
+                        batch_merged,
+                        pending_events,
+                    ))
+                    .await;
+                }
+            }
+        }
+
+        // ACP pre-lookup
+        let collection_for_acp = self
+            .db
+            .find_collection_by_id(&payload.schema_version_id)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                metadata
+                    .collection_id
+                    .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
+            });
+
+        let skip_encrypted = should_skip_encrypted_merge(
+            self.document_acp.get(),
+            collection_for_acp.as_ref().map(|c| c.schema()),
+            &doc_id_str,
+        )
+        .await;
+
+        // Process field links within the shared transaction
+        let mut field_values: HashMap<String, NormalValue> = HashMap::new();
+        let mut _any_field_applied = false;
+        let mut process_error: Option<MergeError> = None;
+        let mut is_branchable = false;
+        let mut field_block_heads: HashMap<String, Vec<Cid>> = HashMap::new();
+
+        {
+            let mut datastore = datastore.clone();
+
+            if let Some(links) = &block.links {
+                for dag_link in links {
+                    let link_name = &dag_link.name;
+                    let link_cid = &dag_link.link;
+
+                    let linked_block_data = match self.blockstore.get(link_cid).await {
+                        Ok(Some(data)) => data,
+                        Ok(None) => {
+                            process_error = Some(MergeError::Storage(format!(
+                                "Linked block {} not found in blockstore",
+                                link_cid
+                            )));
+                            break;
+                        }
+                        Err(e) => {
+                            process_error = Some(MergeError::Storage(e.to_string()));
+                            break;
+                        }
+                    };
+
+                    let linked_block = match Block::from_dag_cbor(&linked_block_data) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            process_error = Some(MergeError::BlockDecode(e.to_string()));
+                            break;
+                        }
+                    };
+
+                    if let Some(heads) = &linked_block.heads {
+                        field_block_heads.insert(link_name.clone(), heads.clone());
+                    }
+
+                    if skip_encrypted && linked_block.encryption.is_some() {
+                        continue;
+                    }
+
+                    // Decrypt linked block data if encrypted
+                    let effective_linked_delta = match &linked_block.delta {
+                        CrdtDelta::Lww(p) if linked_block.encryption.is_some() => {
+                            match self
+                                .decrypt_block_data(&p.data, linked_block.encryption.as_ref())
+                                .await
+                            {
+                                Ok(decrypted) => {
+                                    let mut dp = p.clone();
+                                    dp.data = decrypted;
+                                    CrdtDelta::Lww(dp)
+                                }
+                                Err(_) => linked_block.delta.clone(),
+                            }
+                        }
+                        CrdtDelta::Counter(p) if linked_block.encryption.is_some() => {
+                            match self
+                                .decrypt_block_data(&p.data, linked_block.encryption.as_ref())
+                                .await
+                            {
+                                Ok(decrypted) => {
+                                    let mut dp = p.clone();
+                                    dp.data = decrypted;
+                                    CrdtDelta::Counter(dp)
+                                }
+                                Err(_) => linked_block.delta.clone(),
+                            }
+                        }
+                        other => other.clone(),
+                    };
+
+                    match &effective_linked_delta {
+                        CrdtDelta::Lww(lww_payload) => {
+                            match self
+                                .process_lww_delta_in_txn(&mut datastore, link_cid, lww_payload)
+                                .await
+                            {
+                                Ok(result) => {
+                                    if result.applied {
+                                        _any_field_applied = true;
+                                    }
+                                    if let Some(value) = result.value {
+                                        field_values.insert(lww_payload.field_name.clone(), value);
+                                    }
+                                }
+                                Err(e) => {
+                                    process_error = Some(e);
+                                    break;
+                                }
+                            }
+                        }
+                        CrdtDelta::Counter(counter_payload) => {
+                            match self
+                                .process_counter_delta_in_txn(
+                                    &mut datastore,
+                                    link_cid,
+                                    counter_payload,
+                                    metadata.collection_id,
+                                )
+                                .await
+                            {
+                                Ok(result) => {
+                                    if result.applied {
+                                        _any_field_applied = true;
+                                    }
+                                    if let Some(value) = result.value {
+                                        field_values
+                                            .insert(counter_payload.field_name.clone(), value);
+                                    }
+                                }
+                                Err(e) => {
+                                    process_error = Some(e);
+                                    break;
+                                }
+                            }
+                        }
+                        other => {
+                            process_error = Some(MergeError::UnsupportedDelta(format!(
+                                "Unexpected delta type in linked block: {:?}",
+                                std::mem::discriminant(other)
+                            )));
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Store document if no errors
+            if process_error.is_none() {
+                let collection_lookup = self
+                    .db
+                    .find_collection_by_id(&payload.schema_version_id)
+                    .ok()
+                    .flatten()
+                    .or_else(|| {
+                        metadata
+                            .collection_id
+                            .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
+                    });
+
+                let is_delete = payload.status == 2;
+
+                match collection_lookup {
+                    Some(collection) => {
+                        is_branchable = collection.schema().is_branchable;
+                        if is_delete {
+                            if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
+                                if let Ok(Some(old_doc)) =
+                                    collection.get_with_datastore(&datastore, &doc_id).await
+                                {
+                                    let short_id = collection_short_id(collection.collection_id());
+                                    if let Ok(index_manager) =
+                                        IndexManager::from_collection(short_id, collection.schema())
+                                    {
+                                        let _ = index_manager
+                                            .on_document_delete(
+                                                &datastore,
+                                                &old_doc,
+                                                collection.schema(),
+                                            )
+                                            .await;
+                                    }
+                                }
+                            }
+
+                            let deleted_key =
+                                build_deleted_key(collection.collection_id(), &doc_id_str);
+                            if let Err(e) = datastore.set(&deleted_key, &[DELETED_MARKER]).await {
+                                process_error =
+                                    Some(MergeError::Database(crate::error::Error::Storage(e)));
+                            }
+                        } else if !field_values.is_empty() {
+                            match DocID::from_string(&doc_id_str) {
+                                Ok(doc_id) => {
+                                    let (mut doc, old_doc) = match collection
+                                        .get_with_datastore(&datastore, &doc_id)
+                                        .await
+                                    {
+                                        Ok(Some(existing)) => {
+                                            let old = existing.clone();
+                                            (existing, Some(old))
+                                        }
+                                        _ => {
+                                            let mut new_doc = Document::new();
+                                            new_doc.set_id(doc_id.clone());
+                                            (new_doc, None)
+                                        }
+                                    };
+
+                                    doc.set_schema_version_id(&payload.schema_version_id);
+                                    for (field_name, value) in &field_values {
+                                        doc.set(field_name, value.clone());
+                                    }
+
+                                    let known_fields: std::collections::HashSet<&str> = collection
+                                        .schema()
+                                        .fields
+                                        .iter()
+                                        .map(|f| f.name.as_str())
+                                        .collect();
+                                    let all_field_names: Vec<String> =
+                                        doc.field_names().map(|s| s.to_string()).collect();
+                                    for fname in &all_field_names {
+                                        if !known_fields.contains(fname.as_str()) {
+                                            doc.remove(fname);
+                                        }
+                                    }
+
+                                    if let Err(e) =
+                                        collection.save_with_datastore(&datastore, &doc).await
+                                    {
+                                        process_error = Some(MergeError::Database(e));
+                                    } else {
+                                        let short_id =
+                                            collection_short_id(collection.collection_id());
+                                        if let Ok(index_manager) = IndexManager::from_collection(
+                                            short_id,
+                                            collection.schema(),
+                                        ) {
+                                            let index_result = match &old_doc {
+                                                Some(old) => {
+                                                    index_manager
+                                                        .on_document_update(
+                                                            &datastore,
+                                                            old,
+                                                            &doc,
+                                                            collection.schema(),
+                                                        )
+                                                        .await
+                                                }
+                                                None => {
+                                                    index_manager
+                                                        .on_document_create(
+                                                            &datastore,
+                                                            &doc,
+                                                            collection.schema(),
+                                                        )
+                                                        .await
+                                                }
+                                            };
+                                            if let Err(e) = index_result {
+                                                tracing::warn!(
+                                                    doc_id = %doc_id_str,
+                                                    error = %e,
+                                                    "Failed to update indexes after batch merge"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    process_error = Some(MergeError::MergeFailed(format!(
+                                        "Invalid doc_id: {}",
+                                        e
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        process_error = Some(MergeError::MissingMetadata(format!(
+                            "Collection not found for schema_version_id: {}",
+                            payload.schema_version_id
+                        )));
+                    }
+                }
+            }
+        } // datastore dropped here
+
+        // Write headstore entries using the shared headstore view
+        if process_error.is_none() && !skip_encrypted {
+            {
+                let priority_bytes = encode_priority_varint(payload.priority);
+
+                if let Some(heads) = &block.heads {
+                    for parent_cid in heads {
+                        let parent_key = storage::keys::headstore::HeadstoreDocKey::new(
+                            &doc_id_str,
+                            "C",
+                            *parent_cid,
+                        );
+                        let _ = headstore
+                            .delete(
+                                &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&parent_key),
+                            )
+                            .await;
+                    }
+                }
+
+                let composite_head_key =
+                    storage::keys::headstore::HeadstoreDocKey::new(&doc_id_str, "C", *cid);
+                let _ = headstore
+                    .set(
+                        &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(
+                            &composite_head_key,
+                        ),
+                        &priority_bytes,
+                    )
+                    .await;
+
+                if let Some(links) = &block.links {
+                    for dag_link in links {
+                        if let Some(parent_cids) = field_block_heads.get(&dag_link.name) {
+                            for parent_cid in parent_cids {
+                                let parent_key = storage::keys::headstore::HeadstoreDocKey::new(
+                                    &doc_id_str,
+                                    &dag_link.name,
+                                    *parent_cid,
+                                );
+                                let _ = headstore
+                                    .delete(
+                                        &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&parent_key),
+                                    )
+                                    .await;
+                            }
+                        }
+                        let field_head_key = storage::keys::headstore::HeadstoreDocKey::new(
+                            &doc_id_str,
+                            &dag_link.name,
+                            dag_link.link,
+                        );
+                        let _ = headstore
+                            .set(
+                                &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&field_head_key),
+                                &priority_bytes,
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
+
+        // Handle result (NO commit/discard — caller manages transaction)
+        match process_error {
+            None => {
+                // Mark as merged in batch-local set
+                {
+                    let mut bm = batch_merged.lock().unwrap();
+                    bm.insert(*cid);
+                }
+
+                // Collect events for deferred publishing
+                {
+                    let mut pe = pending_events.lock().unwrap();
+                    let update = Update::new(
+                        doc_id_str.clone(),
+                        *cid,
+                        payload.schema_version_id.clone(),
+                        vec![],
+                        false,
+                        true,
+                    );
+                    pe.push(PendingMergeEvent {
+                        message: Message::update(update),
+                    });
+
+                    if is_branchable {
+                        let by_peer = metadata.creator.unwrap_or("").to_string();
+                        let mc = MergeCompleteData {
+                            doc_id: String::new(),
+                            cid: *cid,
+                            collection_id: metadata
+                                .collection_id
+                                .unwrap_or(&payload.schema_version_id)
+                                .to_string(),
+                            by_peer,
+                        };
+                        pe.push(PendingMergeEvent {
+                            message: Message::merge_complete(mc),
+                        });
+                    }
+                }
+
+                Ok(MergeOutcome::Merged)
+            }
+            Some(e) => Err(e),
         }
     }
 }

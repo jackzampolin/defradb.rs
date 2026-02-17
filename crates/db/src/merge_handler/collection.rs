@@ -1,3 +1,4 @@
+use super::batch::PendingMergeEvent;
 use super::*;
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
@@ -234,6 +235,153 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             any_merged = any_merged,
             "Collection delta processed"
         );
+
+        if any_merged {
+            Ok(MergeOutcome::Merged)
+        } else {
+            Ok(MergeOutcome::skipped("no linked composites needed merging"))
+        }
+    }
+
+    /// Process a Collection delta within a shared transaction (batch mode).
+    ///
+    /// Same logic as `process_collection_delta` but uses a shared transaction
+    /// and delegates to `process_composite_delta_in_txn` for linked composites.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn process_collection_delta_in_txn(
+        &self,
+        datastore: &NamespaceView,
+        headstore: &NamespaceView,
+        cid: &Cid,
+        block: &Block,
+        payload: &defra_core::block::CollectionDeltaPayload,
+        metadata: &BlockMetadata<'_>,
+        batch_merged: &std::sync::Mutex<HashSet<Cid>>,
+        pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
+    ) -> std::result::Result<MergeOutcome, MergeError> {
+        tracing::debug!(
+            cid = %cid,
+            schema_version = %payload.schema_version_id,
+            "Processing Collection delta in batch txn"
+        );
+
+        // Recursively process parent collection blocks
+        if let Some(heads) = &block.heads {
+            for head_cid in heads {
+                let head_data = match self.blockstore.get(head_cid).await {
+                    Ok(Some(data)) => data,
+                    _ => continue,
+                };
+
+                let head_block = match Block::from_dag_cbor(&head_data) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+
+                if let CrdtDelta::Collection(head_payload) = &head_block.delta {
+                    let _ = Box::pin(self.process_collection_delta_in_txn(
+                        datastore,
+                        headstore,
+                        head_cid,
+                        &head_block,
+                        head_payload,
+                        metadata,
+                        batch_merged,
+                        pending_events,
+                    ))
+                    .await;
+                }
+            }
+        }
+
+        // Process linked document composites
+        let mut any_merged = false;
+        if let Some(links) = &block.links {
+            for dag_link in links {
+                let link_cid = &dag_link.link;
+
+                let linked_data = match self.blockstore.get(link_cid).await {
+                    Ok(Some(data)) => data,
+                    _ => continue,
+                };
+
+                let linked_block = match Block::from_dag_cbor(&linked_data) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+
+                if let CrdtDelta::Composite(composite_payload) = &linked_block.delta {
+                    let doc_id_str = String::from_utf8_lossy(&composite_payload.doc_id).to_string();
+                    match self
+                        .process_composite_delta_in_txn(
+                            datastore,
+                            headstore,
+                            link_cid,
+                            &linked_block,
+                            composite_payload,
+                            metadata,
+                            true,
+                            batch_merged,
+                            pending_events,
+                        )
+                        .await
+                    {
+                        Ok(MergeOutcome::Merged) => {
+                            any_merged = true;
+                            // Collect per-document MergeComplete event
+                            let col_id = metadata
+                                .collection_id
+                                .unwrap_or(&payload.schema_version_id)
+                                .to_string();
+                            let mut pe = pending_events.lock().unwrap();
+                            pe.push(PendingMergeEvent {
+                                message: Message::merge_complete(MergeCompleteData {
+                                    doc_id: doc_id_str,
+                                    cid: *link_cid,
+                                    collection_id: col_id,
+                                    by_peer: String::new(),
+                                }),
+                            });
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::debug!(link_cid = %link_cid, error = %e, "Composite merge failed in batch");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update collection headstore using the shared headstore view
+        let collection_id = metadata.collection_id.unwrap_or(&payload.schema_version_id);
+        let short_id = collection_short_id(collection_id);
+
+        {
+            if let Some(heads) = &block.heads {
+                for parent_cid in heads {
+                    let parent_key =
+                        storage::keys::headstore::HeadstoreColKey::new(short_id, *parent_cid);
+                    let _ = headstore
+                        .delete(
+                            &<storage::keys::headstore::HeadstoreColKey as storage::corekv::Key>::bytes(
+                                &parent_key,
+                            ),
+                        )
+                        .await;
+                }
+            }
+
+            let col_key = storage::keys::headstore::HeadstoreColKey::new(short_id, *cid);
+            let priority_bytes = encode_priority_varint(payload.priority);
+            let _ = headstore
+                .set(
+                    &<storage::keys::headstore::HeadstoreColKey as storage::corekv::Key>::bytes(
+                        &col_key,
+                    ),
+                    &priority_bytes,
+                )
+                .await;
+        }
 
         if any_merged {
             Ok(MergeOutcome::Merged)

@@ -117,6 +117,17 @@ pub trait Blockstore: MaybeSendSync {
     /// will no longer appear in `get_unmerged` results.
     async fn mark_as_merged(&self, cid: &Cid) -> Result<()>;
 
+    /// Mark multiple blocks as merged in a single transaction.
+    ///
+    /// Default implementation calls `mark_as_merged` per CID. Implementations
+    /// can override to batch into a single transaction for better performance.
+    async fn mark_batch_as_merged(&self, cids: &[Cid]) -> Result<()> {
+        for cid in cids {
+            self.mark_as_merged(cid).await?;
+        }
+        Ok(())
+    }
+
     /// Get all unmerged block CIDs
     ///
     /// Returns CIDs of blocks that have been received via P2P but not yet

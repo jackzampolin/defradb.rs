@@ -127,6 +127,14 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))
     }
 
+    /// Mark multiple blocks as merged in a single transaction.
+    pub async fn mark_batch_as_merged(&self, cids: &[Cid]) -> crate::error::Result<()> {
+        self.blockstore
+            .mark_batch_as_merged(cids)
+            .await
+            .map_err(|e| crate::error::Error::BlockstoreError(e.to_string()))
+    }
+
     /// Get all unmerged block CIDs.
     pub async fn get_unmerged(&self) -> crate::error::Result<Vec<Cid>> {
         self.blockstore

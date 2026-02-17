@@ -201,6 +201,7 @@ impl Node {
                 let replication_config = p2p::sync::ReplicationConfig {
                     continue_on_error: true,
                     rebroadcast_on_merge: false, // Don't re-broadcast during initial sync
+                    batch_size: 50,
                 };
                 let replication_task = tokio::spawn(async move {
                     info!("Starting replication loop for P2P sync");
