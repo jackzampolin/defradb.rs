@@ -158,6 +158,20 @@ impl<S: Store> P2PHost<S> {
                     debug!(peer_id = %peer_id, "GetReplicator command response dropped - caller cancelled");
                 }
             }
+            HostCommand::SendCarRequest {
+                peer_id,
+                root_cid,
+                response,
+            } => {
+                self.handle_send_car_request(peer_id, root_cid, response);
+            }
+            HostCommand::SendCarResponse {
+                peer_id,
+                car_data,
+                response,
+            } => {
+                self.handle_send_car_response(peer_id, car_data, response);
+            }
             HostCommand::BitswapSync {
                 cid,
                 providers,

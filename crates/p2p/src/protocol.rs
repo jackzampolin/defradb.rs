@@ -49,6 +49,12 @@ pub const SE_REQUEST_PROTOCOL: &str = "/defradb/rep_se_req/0.0.1";
 /// Go uses "rep_se" as the channel name: `/defradb/rep_se_resp/0.0.1`
 pub const SE_RESPONSE_PROTOCOL: &str = "/defradb/rep_se_resp/0.0.1";
 
+/// CAR (Content ARchive) request protocol ID.
+pub const CAR_REQUEST_PROTOCOL: &str = "/defradb/car_req/0.0.1";
+
+/// CAR (Content ARchive) response protocol ID.
+pub const CAR_RESPONSE_PROTOCOL: &str = "/defradb/car_resp/0.0.1";
+
 /// StreamProtocol for the SE request protocol.
 pub fn se_request_protocol() -> StreamProtocol {
     StreamProtocol::new(SE_REQUEST_PROTOCOL)
@@ -57,6 +63,16 @@ pub fn se_request_protocol() -> StreamProtocol {
 /// StreamProtocol for the SE response protocol.
 pub fn se_response_protocol() -> StreamProtocol {
     StreamProtocol::new(SE_RESPONSE_PROTOCOL)
+}
+
+/// StreamProtocol for the CAR request protocol.
+pub fn car_request_protocol() -> StreamProtocol {
+    StreamProtocol::new(CAR_REQUEST_PROTOCOL)
+}
+
+/// StreamProtocol for the CAR response protocol.
+pub fn car_response_protocol() -> StreamProtocol {
+    StreamProtocol::new(CAR_RESPONSE_PROTOCOL)
 }
 
 // Legacy aliases for backwards compatibility with existing code

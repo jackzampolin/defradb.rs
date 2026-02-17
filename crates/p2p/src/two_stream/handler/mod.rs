@@ -8,6 +8,7 @@
 //! This module implements Go's pattern for interoperability using libp2p-stream.
 
 mod branchable_se;
+mod car;
 mod doc_sync;
 mod inbound;
 mod pushlog;
@@ -23,7 +24,8 @@ use tokio::sync::oneshot;
 
 use crate::message::{PushLogReply, PushLogRequest};
 use crate::protocol::{
-    REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL, SE_REQUEST_PROTOCOL, SE_RESPONSE_PROTOCOL,
+    CAR_REQUEST_PROTOCOL, CAR_RESPONSE_PROTOCOL, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
+    SE_REQUEST_PROTOCOL, SE_RESPONSE_PROTOCOL,
 };
 
 /// Timeout for waiting for a response.
@@ -81,6 +83,16 @@ impl TwoStreamHandler {
     /// Get the SE response protocol.
     pub fn se_response_protocol() -> StreamProtocol {
         StreamProtocol::new(SE_RESPONSE_PROTOCOL)
+    }
+
+    /// Get the CAR request protocol.
+    pub fn car_request_protocol() -> StreamProtocol {
+        StreamProtocol::new(CAR_REQUEST_PROTOCOL)
+    }
+
+    /// Get the CAR response protocol.
+    pub fn car_response_protocol() -> StreamProtocol {
+        StreamProtocol::new(CAR_RESPONSE_PROTOCOL)
     }
 
     /// Clean up a pending response channel (used on timeout or cancellation).

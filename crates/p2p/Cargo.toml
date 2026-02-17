@@ -49,6 +49,9 @@ tracing = { workspace = true }
 # Bytes
 bytes = { workspace = true }
 
+# Varint encoding for CARv1 format
+unsigned-varint = "0.8"
+
 # Synchronization (non-poisoning locks)
 parking_lot = { workspace = true }
 

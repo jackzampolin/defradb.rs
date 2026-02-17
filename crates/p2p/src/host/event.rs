@@ -94,4 +94,14 @@ pub enum HostEvent {
         peer_id: PeerId,
         reply: crate::message::BranchableSyncReply,
     },
+
+    /// Received a CAR fetch request (peer wants a DAG packaged as CARv1).
+    CarFetchRequest { peer_id: PeerId, root_cid: Cid },
+
+    /// Received a CAR fetch response (CARv1 bytes containing a DAG).
+    CarFetchResponse {
+        peer_id: PeerId,
+        root_cid: Cid,
+        car_data: Vec<u8>,
+    },
 }

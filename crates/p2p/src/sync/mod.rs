@@ -34,6 +34,7 @@
 //! ```
 
 mod broadcaster;
+pub(crate) mod car;
 mod collection_store;
 mod coordinator;
 mod dag_sync;

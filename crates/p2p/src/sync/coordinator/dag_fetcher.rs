@@ -1,8 +1,7 @@
 //! Poll-based DAG fetcher for DocSync and BranchableSync.
 //!
-//! Uses bitswap_sync + blockstore polling instead of the event-driven
-//! pending DAG + BitswapComplete + retry mechanism. The poll-based approach
-//! is more reliable for multi-level DAG fetching.
+//! Tries CAR fetch first (single round-trip for entire DAG), then falls back
+//! to bitswap_sync + blockstore polling for any remaining blocks.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,10 +16,9 @@ use crate::host::P2PHostHandle;
 use crate::sync::manager::links::find_all_missing_links;
 use crate::sync::manager::SyncEvent;
 
-/// Fetch an entire DAG rooted at `root_cid` using poll-based Bitswap.
+/// Fetch an entire DAG rooted at `root_cid`.
 ///
-/// Walks the DAG level by level, fetching missing blocks via Bitswap
-/// and polling the blockstore until they appear. Emits DagReady when complete.
+/// Strategy: try CAR fetch first (one round-trip), then Bitswap for any missing blocks.
 #[allow(clippy::too_many_arguments)]
 pub async fn poll_fetch_dag<B: Blockstore + 'static>(
     host: P2PHostHandle,
@@ -36,10 +34,37 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static>(
         root_cid = %root_cid,
         doc_id = %doc_id,
         source_peer = %source_peer,
-        "Starting poll-based DAG fetch"
+        "Starting DAG fetch (CAR-first, Bitswap fallback)"
     );
 
-    // Fetch root block
+    // Try CAR fetch first — single round-trip for the entire DAG
+    if try_car_fetch(&host, &blockstore, &root_cid, source_peer).await {
+        // Verify completeness
+        if let Ok(Some(root_data)) = blockstore.get(&root_cid).await {
+            let missing = find_all_missing_links(blockstore.as_ref(), &root_data)
+                .await
+                .unwrap_or_default();
+            if missing.is_empty() {
+                info!(root_cid = %root_cid, doc_id = %doc_id, "DAG fetch complete via CAR");
+                let _ = event_tx
+                    .send(SyncEvent::DagReady {
+                        root_cid,
+                        doc_id,
+                        collection_id,
+                        schema_version_id,
+                    })
+                    .await;
+                return;
+            }
+            debug!(
+                root_cid = %root_cid,
+                missing_count = missing.len(),
+                "CAR fetch was partial, falling through to Bitswap"
+            );
+        }
+    }
+
+    // Bitswap fallback: fetch root block
     if !poll_fetch_block(&root_cid, &host, &blockstore, source_peer).await {
         warn!(root_cid = %root_cid, "Failed to fetch root block");
         return;
@@ -71,7 +96,7 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static>(
             root_cid = %root_cid,
             iteration = iteration,
             missing_count = missing.len(),
-            "Fetching missing DAG blocks"
+            "Fetching missing DAG blocks via Bitswap"
         );
 
         for cid in &missing {
@@ -112,6 +137,36 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static>(
             "DAG fetch incomplete"
         );
     }
+}
+
+/// Try to fetch an entire DAG via a single CAR request.
+///
+/// Sends a CAR request to the source peer, waits for the response
+/// (which arrives via the event pipeline and is stored by the coordinator),
+/// then checks if the root block appeared in the blockstore.
+async fn try_car_fetch<B: Blockstore>(
+    host: &P2PHostHandle,
+    blockstore: &Arc<B>,
+    root_cid: &Cid,
+    source_peer: PeerId,
+) -> bool {
+    if let Err(e) = host.send_car_request(source_peer, *root_cid).await {
+        debug!(root_cid = %root_cid, error = %e, "CAR request failed, will use Bitswap");
+        return false;
+    }
+
+    // Poll blockstore for the root block (CAR response is stored by coordinator)
+    let timeout = Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(true) = blockstore.has(root_cid).await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    debug!(root_cid = %root_cid, "CAR fetch timed out (10s), falling back to Bitswap");
+    false
 }
 
 /// Fetch a single block via Bitswap + blockstore polling.

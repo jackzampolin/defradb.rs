@@ -503,6 +503,34 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Send a CAR request to a peer (request DAG as CARv1).
+    pub async fn send_car_request(&self, peer_id: PeerId, root_cid: Cid) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendCarRequest {
+                peer_id,
+                root_cid,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
+    /// Send a CAR response to a peer (CARv1 bytes).
+    pub async fn send_car_response(&self, peer_id: PeerId, car_data: Vec<u8>) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::SendCarResponse {
+                peer_id,
+                car_data,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
     /// Poll until a peer is connected or timeout expires.
     ///
     /// Uses 50ms polling interval (matches Go behavior).

@@ -1,5 +1,6 @@
 //! PushLog, TwoStream, DocSync, BranchableSync, and SE messaging commands.
 
+use cid::Cid;
 use iroh_bitswap::Store;
 use libp2p::PeerId;
 use tracing::debug;
@@ -188,6 +189,38 @@ impl<S: Store> P2PHost<S> {
             let result = h.send_se_artifacts_fire_and_forget(peer_id, request).await;
             if response.send(result).is_err() {
                 debug!(peer_id = %peer_id, "SendSEArtifacts command response dropped - caller cancelled");
+            }
+        });
+    }
+
+    pub(super) fn handle_send_car_request(
+        &mut self,
+        peer_id: PeerId,
+        root_cid: Cid,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        let handler = self.two_stream_handler.clone();
+        self.spawned_tasks.spawn(async move {
+            let mut h = handler.lock().await;
+            let result = h.send_car_request(peer_id, root_cid).await;
+            if response.send(result).is_err() {
+                debug!(peer_id = %peer_id, "SendCarRequest command response dropped");
+            }
+        });
+    }
+
+    pub(super) fn handle_send_car_response(
+        &mut self,
+        peer_id: PeerId,
+        car_data: Vec<u8>,
+        response: tokio::sync::oneshot::Sender<Result<()>>,
+    ) {
+        let handler = self.two_stream_handler.clone();
+        self.spawned_tasks.spawn(async move {
+            let mut h = handler.lock().await;
+            let result = h.send_car_response(peer_id, car_data).await;
+            if response.send(result).is_err() {
+                debug!(peer_id = %peer_id, "SendCarResponse command response dropped");
             }
         });
     }

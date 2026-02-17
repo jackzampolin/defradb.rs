@@ -29,18 +29,25 @@ pub struct TwoStreamRunner {
     se_request_streams: stream::IncomingStreams,
     /// Incoming SE response streams.
     se_response_streams: stream::IncomingStreams,
+    /// Incoming CAR request streams.
+    car_request_streams: stream::IncomingStreams,
+    /// Incoming CAR response streams.
+    car_response_streams: stream::IncomingStreams,
     /// Channel to send events.
     event_tx: mpsc::Sender<TwoStreamEvent>,
 }
 
 impl TwoStreamRunner {
     /// Create a new runner.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         pending: Arc<Mutex<PendingResponses>>,
         request_streams: stream::IncomingStreams,
         response_streams: stream::IncomingStreams,
         se_request_streams: stream::IncomingStreams,
         se_response_streams: stream::IncomingStreams,
+        car_request_streams: stream::IncomingStreams,
+        car_response_streams: stream::IncomingStreams,
         event_tx: mpsc::Sender<TwoStreamEvent>,
     ) -> Self {
         Self {
@@ -49,6 +56,8 @@ impl TwoStreamRunner {
             response_streams,
             se_request_streams,
             se_response_streams,
+            car_request_streams,
+            car_response_streams,
             event_tx,
         }
     }
@@ -162,6 +171,38 @@ impl TwoStreamRunner {
                             buf_len = buf.len(),
                             "Received SE response (acknowledgement)"
                         );
+                    });
+                }
+                // Handle incoming CAR request streams
+                Some((peer_id, stream)) = self.car_request_streams.next() => {
+                    let event_tx = self.event_tx.clone();
+                    tokio::spawn(async move {
+                        match TwoStreamHandler::handle_car_request_stream(peer_id, stream).await {
+                            Ok(event) => {
+                                if event_tx.send(event).await.is_err() {
+                                    tracing::warn!(peer_id = %peer_id, "Failed to send CAR request event");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(peer_id = %peer_id, error = %e, "Failed to handle CAR request stream");
+                            }
+                        }
+                    });
+                }
+                // Handle incoming CAR response streams
+                Some((peer_id, stream)) = self.car_response_streams.next() => {
+                    let event_tx = self.event_tx.clone();
+                    tokio::spawn(async move {
+                        match TwoStreamHandler::handle_car_response_stream(peer_id, stream).await {
+                            Ok(event) => {
+                                if event_tx.send(event).await.is_err() {
+                                    tracing::warn!(peer_id = %peer_id, "Failed to send CAR response event");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(peer_id = %peer_id, error = %e, "Failed to handle CAR response stream");
+                            }
+                        }
                     });
                 }
                 else => {
