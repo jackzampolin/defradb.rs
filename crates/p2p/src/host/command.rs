@@ -184,6 +184,20 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<()>>,
     },
 
+    /// Send a CAR request to a peer (request DAG as CARv1).
+    SendCarRequest {
+        peer_id: PeerId,
+        root_cid: Cid,
+        response: oneshot::Sender<Result<()>>,
+    },
+
+    /// Send a CAR response to a peer (CARv1 bytes).
+    SendCarResponse {
+        peer_id: PeerId,
+        car_data: Vec<u8>,
+        response: oneshot::Sender<Result<()>>,
+    },
+
     /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
     PeerAddresses {
         response: oneshot::Sender<Vec<String>>,

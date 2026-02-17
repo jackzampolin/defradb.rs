@@ -2,6 +2,7 @@
 
 mod bitswap;
 mod branchable_sync;
+pub(crate) mod car;
 mod doc_sync;
 mod gossip;
 mod pushlog;
@@ -82,6 +83,17 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             }
             HostEvent::BranchableSyncReply { peer_id, reply } => {
                 self.handle_branchable_sync_reply(peer_id, reply).await?;
+            }
+            HostEvent::CarFetchRequest { peer_id, root_cid } => {
+                self.handle_car_fetch_request(peer_id, root_cid).await?;
+            }
+            HostEvent::CarFetchResponse {
+                peer_id,
+                root_cid,
+                car_data,
+            } => {
+                self.handle_car_fetch_response(peer_id, root_cid, car_data)
+                    .await?;
             }
             other => {
                 // Other events (peer discovery, listening, etc.) don't need sync handling

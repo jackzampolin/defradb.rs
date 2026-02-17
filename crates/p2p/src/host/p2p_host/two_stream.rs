@@ -114,6 +114,45 @@ impl<S: Store> P2PHost<S> {
                     );
                 }
             }
+            TwoStreamEvent::CarFetchRequest { peer_id, root_cid } => {
+                debug!(
+                    peer_id = %peer_id,
+                    root_cid = %root_cid,
+                    "Host received CAR fetch request"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::CarFetchRequest { peer_id, root_cid })
+                    .await
+                    .is_err()
+                {
+                    error!(peer_id = %peer_id, "Failed to send CarFetchRequest event");
+                }
+            }
+            TwoStreamEvent::CarFetchResponse {
+                peer_id,
+                root_cid,
+                car_data,
+            } => {
+                debug!(
+                    peer_id = %peer_id,
+                    root_cid = %root_cid,
+                    car_bytes = car_data.len(),
+                    "Host received CAR fetch response"
+                );
+                if self
+                    .event_tx
+                    .send(HostEvent::CarFetchResponse {
+                        peer_id,
+                        root_cid,
+                        car_data,
+                    })
+                    .await
+                    .is_err()
+                {
+                    error!(peer_id = %peer_id, "Failed to send CarFetchResponse event");
+                }
+            }
             TwoStreamEvent::DecodeError { peer_id, error } => {
                 warn!(
                     peer_id = %peer_id,
