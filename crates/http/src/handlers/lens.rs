@@ -41,13 +41,13 @@ pub struct SetMigrationResponse {
 /// }
 /// ```
 ///
-/// Requires `CollectionPatch` permission when NAC is enabled.
+/// Requires `MigrationSet` permission when NAC is enabled.
 pub async fn set_migration(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     body: String,
 ) -> Result<Json<SetMigrationResponse>, HttpError> {
-    require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
+    require_permission(&state, &identity, NodePermission::MigrationSet).await?;
 
     let lens = state.require_lens()?;
 
@@ -92,13 +92,13 @@ pub async fn reload(
 ///
 /// Accepts lens configuration wrapped as `{"lens": <config>}`.
 ///
-/// Requires `CollectionPatch` permission when NAC is enabled.
+/// Requires `LensCreate` permission when NAC is enabled.
 pub async fn add_lens(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     body: String,
 ) -> Result<Json<SetMigrationResponse>, HttpError> {
-    require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
+    require_permission(&state, &identity, NodePermission::LensCreate).await?;
 
     let lens = state.require_lens()?;
 
@@ -125,12 +125,12 @@ pub async fn add_lens(
 ///
 /// GET /api/v0/lens
 ///
-/// Requires `CollectionGet` permission when NAC is enabled.
+/// Requires `LensList` permission when NAC is enabled.
 pub async fn list_lenses(
     State(state): State<AppState>,
     identity: ExtractIdentity,
 ) -> Result<Json<serde_json::Value>, HttpError> {
-    require_permission(&state, &identity, NodePermission::CollectionGet).await?;
+    require_permission(&state, &identity, NodePermission::LensList).await?;
 
     let lens = state.require_lens()?;
 

@@ -1,35 +1,14 @@
 //! Node-level permission types for NAC.
 //!
-//! Defines the 36 node-level permissions that control access to
+//! Defines the 48 node-level permissions that control access to
 //! database operations when Node Access Control is enabled.
 
 use serde::{Deserialize, Serialize};
 
-/// Node-level permissions (matches Go DefraDB's 36 node permissions).
+/// Node-level permissions (matches Go DefraDB's 48 node permissions).
 ///
 /// These permissions control access to node-level operations when NAC is enabled.
 /// By default (NAC disabled), all operations are allowed without authentication.
-///
-/// # Implementation Status
-///
-/// **Currently implemented (20 permissions):**
-/// - Collection: `CollectionGet`, `CollectionPatch`
-/// - Document: `DocumentRead`, `DocumentUpdate`, `DocumentDelete`
-/// - Index: `IndexList`, `IndexCreate`, `IndexDrop`
-/// - P2P: `P2pPeerConnect`, `P2pReplicatorCreate`, `P2pReplicatorDelete`, `P2pReplicatorList`,
-///   `P2pCollectionCreate`, `P2pCollectionDelete`, `P2pCollectionList`
-/// - ACP: `DacPolicyAdd`, `DacStatus`
-/// - NAC: `NacStatus`, `NacRelationAdd`, `NacRelationDelete`
-///
-/// **Not yet implemented (13 permissions):**
-/// - DAC management: `DacBypass`, `DacEnable`, `DacDisable`, `DacPurge`,
-///   `DacRelationAdd`, `DacRelationDelete`
-/// - NAC management: `NacReEnable`, `NacDisable`, `NacPurge`
-/// - P2P document replication: `P2pDocumentCreate`, `P2pDocumentDelete`, `P2pDocumentList`
-/// - Other: `SignatureVerify`, `LensList`
-///
-/// These permissions are defined for Go DefraDB compatibility but do not yet have
-/// corresponding HTTP endpoints in the Rust implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum NodePermission {
@@ -37,30 +16,24 @@ pub enum NodePermission {
     // DAC (Document Access Control) Operations
     // =========================================================================
     /// Bypass DAC checks entirely (super-admin only)
-    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     DacBypass,
 
     /// Enable DAC on the node
-    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     DacEnable,
 
     /// Disable DAC on the node
-    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     DacDisable,
 
     /// Purge all DAC data (dev mode only)
-    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     DacPurge,
 
     /// View DAC status (used by GET /api/v0/acp/policy and GET /api/v0/acp/policy/:id)
     DacStatus,
 
     /// Add DAC relation on a document
-    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     DacRelationAdd,
 
     /// Delete DAC relation on a document
-    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     DacRelationDelete,
 
     /// Add a new DAC policy (used by POST /api/v0/acp/policy)
@@ -70,15 +43,12 @@ pub enum NodePermission {
     // NAC (Node Access Control) Operations
     // =========================================================================
     /// Re-enable NAC after temporary disable
-    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     NacReEnable,
 
     /// Temporarily disable NAC
-    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     NacDisable,
 
     /// Purge all NAC data (dev mode only)
-    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     NacPurge,
 
     /// View NAC status (used by GET /api/v0/nac/status)
@@ -109,7 +79,6 @@ pub enum NodePermission {
     DocumentRead,
 
     /// Update documents (used by POST/PATCH document endpoints, POST /api/v0/graphql, transaction endpoints)
-    /// Note: This permission covers both create and update operations.
     DocumentUpdate,
 
     /// Delete documents (used by DELETE /api/v0/collections/:name/:doc_id)
@@ -127,11 +96,29 @@ pub enum NodePermission {
     /// Drop an index (used by DELETE /api/v0/collections/:name/indexes/:index)
     IndexDrop,
 
+    /// Create an encrypted index (used by POST /api/v0/collections/:name/encrypted-indexes)
+    EncryptedIndexCreate,
+
+    /// List encrypted indexes for a collection (used by GET /api/v0/collections/:name/encrypted-indexes)
+    EncryptedIndexList,
+
+    /// List all encrypted indexes across collections (used by GET /api/v0/encrypted-indexes)
+    EncryptedIndexListAll,
+
+    /// Delete an encrypted index (used by DELETE /api/v0/collections/:name/encrypted-indexes/:field)
+    EncryptedIndexDelete,
+
     // =========================================================================
     // P2P Operations
     // =========================================================================
-    /// Connect to a peer (used by P2P info, list, and connect endpoints)
+    /// Get P2P peer info (used by GET /api/v0/p2p/info)
+    P2pPeerInfo,
+
+    /// Connect to a peer (used by P2P connect and list endpoints)
     P2pPeerConnect,
+
+    /// List active peers (used by GET /api/v0/p2p/active-peers)
+    P2pPeerActive,
 
     /// Create a replicator (used by POST /api/v0/p2p/replicators)
     P2pReplicatorCreate,
@@ -151,33 +138,53 @@ pub enum NodePermission {
     /// List P2P collections (used by GET /api/v0/p2p/collections)
     P2pCollectionList,
 
-    /// Get P2P peer info (used by GET /api/v0/p2p/info)
-    P2pPeerInfo,
-
-    /// Add document to P2P replication
-    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
+    /// Add document to P2P replication (used by POST /api/v0/p2p/documents)
     P2pDocumentCreate,
 
-    /// Remove document from P2P replication
-    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
+    /// Remove document from P2P replication (used by DELETE /api/v0/p2p/documents)
     P2pDocumentDelete,
 
-    /// List P2P replicated documents
-    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
+    /// List P2P replicated documents (used by GET /api/v0/p2p/documents)
     P2pDocumentList,
+
+    /// Sync specific documents from peers (used by POST /api/v0/p2p/documents/sync)
+    P2pSyncDocuments,
+
+    /// Sync collection versions from peers (used by POST /api/v0/p2p/collections/sync-versions)
+    P2pSyncCollectionVersions,
+
+    /// Sync branchable collection from peers (used by POST /api/v0/p2p/collections/sync-branchable)
+    P2pSyncBranchableCollection,
 
     // =========================================================================
     // Other Operations
     // =========================================================================
     /// Verify signatures
-    /// **NOT YET IMPLEMENTED** - No HTTP endpoint exists
     SignatureVerify,
 
     // =========================================================================
     // Lens Operations
     // =========================================================================
+    /// Create a lens migration (used by POST /api/v0/lens)
+    LensCreate,
+
     /// List lens transforms (used by GET /api/v0/lens)
     LensList,
+
+    // =========================================================================
+    // View Operations
+    // =========================================================================
+    /// Refresh materialized views (used by POST /api/v0/views/refresh)
+    ViewRefresh,
+
+    /// Add a view (used by POST /api/v0/views)
+    ViewAdd,
+
+    // =========================================================================
+    // Migration Operations
+    // =========================================================================
+    /// Set a lens migration between schema versions (used by POST /api/v0/lens/set)
+    MigrationSet,
 }
 
 impl NodePermission {
@@ -216,29 +223,45 @@ impl NodePermission {
             Self::IndexList => "index-list",
             Self::IndexCreate => "index-create",
             Self::IndexDrop => "index-drop",
+            Self::EncryptedIndexCreate => "encrypted-index-create",
+            Self::EncryptedIndexList => "encrypted-index-list",
+            Self::EncryptedIndexListAll => "encrypted-index-list-all",
+            Self::EncryptedIndexDelete => "encrypted-index-delete",
 
             // P2P operations
+            Self::P2pPeerInfo => "p2p-peer-info",
             Self::P2pPeerConnect => "p2p-peer-connect",
+            Self::P2pPeerActive => "p2p-peer-active",
             Self::P2pReplicatorCreate => "p2p-replicator-create",
             Self::P2pReplicatorDelete => "p2p-replicator-delete",
             Self::P2pReplicatorList => "p2p-replicator-list",
             Self::P2pCollectionCreate => "p2p-collection-create",
             Self::P2pCollectionDelete => "p2p-collection-delete",
             Self::P2pCollectionList => "p2p-collection-list",
-            Self::P2pPeerInfo => "p2p-peer-info",
             Self::P2pDocumentCreate => "p2p-document-create",
             Self::P2pDocumentDelete => "p2p-document-delete",
             Self::P2pDocumentList => "p2p-document-list",
+            Self::P2pSyncDocuments => "p2p-sync-documents",
+            Self::P2pSyncCollectionVersions => "p2p-sync-collection-versions",
+            Self::P2pSyncBranchableCollection => "p2p-sync-branchable-collection",
 
             // Other
             Self::SignatureVerify => "signature-verify",
 
             // Lens
+            Self::LensCreate => "lens-create",
             Self::LensList => "lens-list",
+
+            // View
+            Self::ViewRefresh => "view-refresh",
+            Self::ViewAdd => "view-add",
+
+            // Migration
+            Self::MigrationSet => "migration-set",
         }
     }
 
-    /// Returns all 36 node permissions.
+    /// Returns all 48 node permissions.
     pub fn all() -> &'static [NodePermission] {
         &[
             // DAC
@@ -269,22 +292,36 @@ impl NodePermission {
             Self::IndexList,
             Self::IndexCreate,
             Self::IndexDrop,
+            Self::EncryptedIndexCreate,
+            Self::EncryptedIndexList,
+            Self::EncryptedIndexListAll,
+            Self::EncryptedIndexDelete,
             // P2P
+            Self::P2pPeerInfo,
             Self::P2pPeerConnect,
+            Self::P2pPeerActive,
             Self::P2pReplicatorCreate,
             Self::P2pReplicatorDelete,
             Self::P2pReplicatorList,
             Self::P2pCollectionCreate,
             Self::P2pCollectionDelete,
             Self::P2pCollectionList,
-            Self::P2pPeerInfo,
             Self::P2pDocumentCreate,
             Self::P2pDocumentDelete,
             Self::P2pDocumentList,
+            Self::P2pSyncDocuments,
+            Self::P2pSyncCollectionVersions,
+            Self::P2pSyncBranchableCollection,
             // Other
             Self::SignatureVerify,
             // Lens
+            Self::LensCreate,
             Self::LensList,
+            // View
+            Self::ViewRefresh,
+            Self::ViewAdd,
+            // Migration
+            Self::MigrationSet,
         ]
     }
 
@@ -319,33 +356,45 @@ impl NodePermission {
             "index-list" => Self::IndexList,
             "index-create" => Self::IndexCreate,
             "index-drop" => Self::IndexDrop,
+            "encrypted-index-create" => Self::EncryptedIndexCreate,
+            "encrypted-index-list" => Self::EncryptedIndexList,
+            "encrypted-index-list-all" => Self::EncryptedIndexListAll,
+            "encrypted-index-delete" => Self::EncryptedIndexDelete,
             // P2P
+            "p2p-peer-info" => Self::P2pPeerInfo,
             "p2p-peer-connect" => Self::P2pPeerConnect,
+            "p2p-peer-active" => Self::P2pPeerActive,
             "p2p-replicator-create" => Self::P2pReplicatorCreate,
             "p2p-replicator-delete" => Self::P2pReplicatorDelete,
             "p2p-replicator-list" => Self::P2pReplicatorList,
             "p2p-collection-create" => Self::P2pCollectionCreate,
             "p2p-collection-delete" => Self::P2pCollectionDelete,
             "p2p-collection-list" => Self::P2pCollectionList,
-            "p2p-peer-info" => Self::P2pPeerInfo,
             "p2p-document-create" => Self::P2pDocumentCreate,
             "p2p-document-delete" => Self::P2pDocumentDelete,
             "p2p-document-list" => Self::P2pDocumentList,
+            "p2p-sync-documents" => Self::P2pSyncDocuments,
+            "p2p-sync-collection-versions" => Self::P2pSyncCollectionVersions,
+            "p2p-sync-branchable-collection" => Self::P2pSyncBranchableCollection,
             // Other
             "signature-verify" => Self::SignatureVerify,
             // Lens
+            "lens-create" => Self::LensCreate,
             "lens-list" => Self::LensList,
+            // View
+            "view-refresh" => Self::ViewRefresh,
+            "view-add" => Self::ViewAdd,
+            // Migration
+            "migration-set" => Self::MigrationSet,
             _ => return None,
         })
     }
 
     /// Check if this permission is admin-only (requires owner or admin relation).
     ///
-    /// In Go DefraDB, all 36 node permissions are defined with `expr: owner + admin`,
+    /// In Go DefraDB, all 48 node permissions are defined with `expr: owner + admin`,
     /// meaning they all require either the owner or admin relation to be granted.
-    /// This matches that behavior.
     pub fn is_admin_only(&self) -> bool {
-        // All node permissions require owner or admin relation per Go implementation
         true
     }
 }
@@ -362,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_all_permissions_count() {
-        assert_eq!(NodePermission::all().len(), 36);
+        assert_eq!(NodePermission::all().len(), 48);
     }
 
     #[test]
@@ -385,7 +434,6 @@ mod tests {
 
     #[test]
     fn test_admin_only_permissions() {
-        // All 36 permissions require owner or admin relation (matches Go behavior)
         for perm in NodePermission::all() {
             assert!(
                 perm.is_admin_only(),

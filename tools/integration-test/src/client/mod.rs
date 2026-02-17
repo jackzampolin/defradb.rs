@@ -53,6 +53,18 @@ impl DefraClient {
         }
     }
 
+    fn exec_with_identity(&self, hex_key: &str, args: &[&str]) -> Result<String> {
+        let mut full_args = vec!["client", "-i", hex_key];
+        // Skip the leading "client" in args if present
+        let skip = if args.first() == Some(&"client") {
+            1
+        } else {
+            0
+        };
+        full_args.extend(&args[skip..]);
+        self.exec(&full_args)
+    }
+
     /// Deploy a schema via `client schema add '<sdl>'`.
     pub fn schema_add(&self, sdl: &str) -> Result<Value> {
         let out = self.exec(&["client", "schema", "add", sdl])?;
@@ -779,5 +791,488 @@ impl DefraClient {
         // Fall back to CLI describe (Go CLI returns full CollectionVersion JSON)
         let out = self.exec(&["client", "collection", "describe", "--name", name])?;
         serde_json::from_str(&out).context("failed to parse collection describe output")
+    }
+
+    // -- Identity-aware variants for NAC testing --
+
+    /// Get P2P node info with identity.
+    pub fn p2p_info_with_identity(&self, hex_key: &str) -> Result<Value> {
+        let out = self.exec_with_identity(hex_key, &["client", "p2p", "info"])?;
+        serde_json::from_str(&out).context("failed to parse p2p_info output")
+    }
+
+    /// List active peers with identity.
+    pub fn p2p_active_peers_with_identity(&self, hex_key: &str) -> Result<Value> {
+        let out = self.exec_with_identity(hex_key, &["client", "p2p", "active-peers"])?;
+        serde_json::from_str(&out).context("failed to parse p2p_active_peers output")
+    }
+
+    /// Create an encrypted index with identity.
+    pub fn encrypted_index_create_with_identity(
+        &self,
+        collection: &str,
+        field: &str,
+        hex_key: &str,
+    ) -> Result<Value> {
+        let out = self
+            .exec_with_identity(
+                hex_key,
+                &["client", "encrypted-index", "create", collection, field],
+            )
+            .or_else(|_| {
+                self.exec_with_identity(
+                    hex_key,
+                    &[
+                        "client",
+                        "encrypted-index",
+                        "create",
+                        "--collection",
+                        collection,
+                        "--field",
+                        field,
+                    ],
+                )
+            })?;
+        serde_json::from_str(&out).context("failed to parse encrypted_index_create output")
+    }
+
+    /// List encrypted indexes with identity.
+    pub fn encrypted_index_list_with_identity(
+        &self,
+        collection: &str,
+        hex_key: &str,
+    ) -> Result<Value> {
+        let out = self
+            .exec_with_identity(hex_key, &["client", "encrypted-index", "list", collection])
+            .or_else(|_| {
+                self.exec_with_identity(
+                    hex_key,
+                    &[
+                        "client",
+                        "encrypted-index",
+                        "list",
+                        "--collection",
+                        collection,
+                    ],
+                )
+            })?;
+        serde_json::from_str(&out).context("failed to parse encrypted_index_list output")
+    }
+
+    /// Delete an encrypted index with identity.
+    pub fn encrypted_index_delete_with_identity(
+        &self,
+        collection: &str,
+        field: &str,
+        hex_key: &str,
+    ) -> Result<String> {
+        self.exec_with_identity(
+            hex_key,
+            &["client", "encrypted-index", "delete", collection, field],
+        )
+        .or_else(|_| {
+            self.exec_with_identity(
+                hex_key,
+                &[
+                    "client",
+                    "encrypted-index",
+                    "delete",
+                    "--collection",
+                    collection,
+                    "--field",
+                    field,
+                ],
+            )
+        })
+    }
+
+    /// Add a lens migration with identity.
+    pub fn lens_add_with_identity(&self, config: &str, hex_key: &str) -> Result<Value> {
+        let out = self.exec_with_identity(hex_key, &["client", "lens", "add", config])?;
+        serde_json::from_str(&out).context("failed to parse lens_add output")
+    }
+
+    /// List lens migrations with identity.
+    pub fn lens_list_with_identity(&self, hex_key: &str) -> Result<Value> {
+        let out = self.exec_with_identity(hex_key, &["client", "lens", "list"])?;
+        serde_json::from_str(&out).context("failed to parse lens_list output")
+    }
+
+    /// Set a lens migration with identity.
+    pub fn lens_set_with_identity(
+        &self,
+        src: &str,
+        dst: &str,
+        config: &str,
+        hex_key: &str,
+    ) -> Result<Value> {
+        let out = self.exec_with_identity(hex_key, &["client", "lens", "set", src, dst, config])?;
+        serde_json::from_str(&out).context("failed to parse lens_set output")
+    }
+
+    /// Add a view with identity.
+    pub fn view_add_with_identity(
+        &self,
+        gql_query: &str,
+        sdl: &str,
+        hex_key: &str,
+    ) -> Result<Value> {
+        let out = self.exec_with_identity(
+            hex_key,
+            &["client", "view", "add", "--query", gql_query, "--sdl", sdl],
+        )?;
+        serde_json::from_str(&out).context("failed to parse view_add output")
+    }
+
+    /// Refresh views with identity.
+    pub fn view_refresh_with_identity(&self, name: Option<&str>, hex_key: &str) -> Result<Value> {
+        let out = if let Some(n) = name {
+            self.exec_with_identity(hex_key, &["client", "view", "refresh", "--name", n])?
+        } else {
+            self.exec_with_identity(hex_key, &["client", "view", "refresh"])?
+        };
+        let trimmed = out.trim();
+        if trimmed.is_empty() {
+            return Ok(serde_json::json!({}));
+        }
+        serde_json::from_str(trimmed).context("failed to parse view_refresh output")
+    }
+
+    /// Sync documents with identity.
+    pub fn p2p_document_sync_with_identity(
+        &self,
+        collection: &str,
+        doc_ids: &[&str],
+        hex_key: &str,
+    ) -> Result<String> {
+        let mut args = vec!["client", "p2p", "document", "sync", collection];
+        args.extend(doc_ids);
+        self.exec_with_identity(hex_key, &args)
+    }
+
+    /// Sync collection versions with identity.
+    pub fn p2p_collection_sync_versions_with_identity(
+        &self,
+        version_ids: &[&str],
+        hex_key: &str,
+    ) -> Result<String> {
+        let mut args = vec!["client", "p2p", "collection", "sync-versions"];
+        args.extend(version_ids);
+        self.exec_with_identity(hex_key, &args)
+    }
+
+    /// Sync branchable collection with identity.
+    pub fn p2p_collection_sync_branchable_with_identity(
+        &self,
+        collection_id: &str,
+        hex_key: &str,
+    ) -> Result<String> {
+        self.exec_with_identity(
+            hex_key,
+            &[
+                "client",
+                "p2p",
+                "collection",
+                "sync-branchable",
+                collection_id,
+            ],
+        )
+    }
+
+    // -- Identity-aware collection operations --
+
+    /// List collections with identity.
+    pub fn collection_list_with_identity(&self, hex_key: &str) -> Result<Vec<String>> {
+        let out = self.exec_with_identity(hex_key, &["client", "collection", "list"])?;
+        let val: Value =
+            serde_json::from_str(&out).context("failed to parse collection_list output")?;
+        let arr = val.as_array().context("collection_list not an array")?;
+        Ok(arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect())
+    }
+
+    /// Describe a collection with identity.
+    pub fn collection_describe_with_identity(&self, name: &str, hex_key: &str) -> Result<Value> {
+        let out = self.exec_with_identity(
+            hex_key,
+            &["client", "collection", "describe", "--name", name],
+        )?;
+        serde_json::from_str(&out).context("failed to parse collection_describe output")
+    }
+
+    /// Create a document with identity.
+    pub fn collection_create_with_identity(
+        &self,
+        name: &str,
+        doc: &str,
+        hex_key: &str,
+    ) -> Result<Value> {
+        let out = self.exec_with_identity(
+            hex_key,
+            &["client", "collection", "create", "--name", name, doc],
+        )?;
+        serde_json::from_str(&out).context("failed to parse collection_create output")
+    }
+
+    /// Delete a document with identity.
+    pub fn collection_delete_with_identity(
+        &self,
+        name: &str,
+        doc_id: &str,
+        hex_key: &str,
+    ) -> Result<String> {
+        self.exec_with_identity(
+            hex_key,
+            &[
+                "client",
+                "collection",
+                "delete",
+                "--name",
+                name,
+                "--docID",
+                doc_id,
+            ],
+        )
+    }
+
+    /// Update a document with identity.
+    pub fn collection_update_with_identity(
+        &self,
+        name: &str,
+        doc_id: &str,
+        updater: &str,
+        hex_key: &str,
+    ) -> Result<String> {
+        self.exec_with_identity(
+            hex_key,
+            &[
+                "client",
+                "collection",
+                "update",
+                "--name",
+                name,
+                "--docID",
+                doc_id,
+                "--updater",
+                updater,
+            ],
+        )
+    }
+
+    /// Truncate a collection with identity.
+    pub fn collection_truncate_with_identity(&self, name: &str, hex_key: &str) -> Result<String> {
+        self.exec_with_identity(
+            hex_key,
+            &["client", "collection", "truncate", "--name", name],
+        )
+    }
+
+    /// Patch a collection schema with identity.
+    pub fn collection_patch_with_identity(&self, patch: &str, hex_key: &str) -> Result<String> {
+        self.exec_with_identity(hex_key, &["client", "collection", "patch", patch])
+    }
+
+    // -- Identity-aware index operations --
+
+    /// Create an index with identity.
+    pub fn index_create_with_identity(
+        &self,
+        collection: &str,
+        fields: &[&str],
+        name: Option<&str>,
+        unique: bool,
+        hex_key: &str,
+    ) -> Result<Value> {
+        let fields_csv = fields.join(",");
+        let out = self
+            .try_index_create_with_identity_args(
+                collection,
+                &fields_csv,
+                name,
+                unique,
+                false,
+                hex_key,
+            )
+            .or_else(|_| {
+                self.try_index_create_with_identity_args(
+                    collection,
+                    &fields_csv,
+                    name,
+                    unique,
+                    true,
+                    hex_key,
+                )
+            })?;
+        serde_json::from_str(&out).context("failed to parse index_create output")
+    }
+
+    fn try_index_create_with_identity_args(
+        &self,
+        collection: &str,
+        fields_csv: &str,
+        name: Option<&str>,
+        unique: bool,
+        use_flag: bool,
+        hex_key: &str,
+    ) -> Result<String> {
+        let mut args = vec!["client", "index", "create"];
+        if use_flag {
+            args.push("--collection");
+        }
+        args.push(collection);
+        args.push("--fields");
+        args.push(fields_csv);
+        if let Some(n) = name {
+            args.push("--name");
+            args.push(n);
+        }
+        if unique {
+            args.push("--unique");
+        }
+        self.exec_with_identity(hex_key, &args)
+    }
+
+    /// List indexes with identity.
+    pub fn index_list_with_identity(
+        &self,
+        collection: Option<&str>,
+        hex_key: &str,
+    ) -> Result<Value> {
+        let out = if let Some(c) = collection {
+            self.exec_with_identity(hex_key, &["client", "index", "list", c])
+                .or_else(|_| {
+                    self.exec_with_identity(
+                        hex_key,
+                        &["client", "index", "list", "--collection", c],
+                    )
+                })?
+        } else {
+            self.exec_with_identity(hex_key, &["client", "index", "list"])?
+        };
+        serde_json::from_str(&out).context("failed to parse index_list output")
+    }
+
+    /// Drop an index with identity.
+    pub fn index_drop_with_identity(
+        &self,
+        collection: &str,
+        name: &str,
+        hex_key: &str,
+    ) -> Result<String> {
+        self.exec_with_identity(hex_key, &["client", "index", "drop", collection, name])
+            .or_else(|_| {
+                self.exec_with_identity(
+                    hex_key,
+                    &[
+                        "client",
+                        "index",
+                        "drop",
+                        "--collection",
+                        collection,
+                        "--name",
+                        name,
+                    ],
+                )
+            })
+    }
+
+    // -- Identity-aware P2P operations --
+
+    /// Connect to peers with identity.
+    pub fn p2p_connect_with_identity(&self, addrs: &[&str], hex_key: &str) -> Result<String> {
+        let mut args = vec!["client", "p2p", "connect"];
+        args.extend(addrs);
+        self.exec_with_identity(hex_key, &args)
+    }
+
+    /// Create P2P collections with identity.
+    pub fn p2p_collection_add_with_identity(
+        &self,
+        collections: &[&str],
+        hex_key: &str,
+    ) -> Result<String> {
+        let cols = collections.join(",");
+        self.exec_with_identity(hex_key, &["client", "p2p", "collection", "create", &cols])
+    }
+
+    /// List P2P collections with identity.
+    pub fn p2p_collection_list_with_identity(&self, hex_key: &str) -> Result<Value> {
+        let out = self.exec_with_identity(hex_key, &["client", "p2p", "collection", "list"])?;
+        serde_json::from_str(&out).context("failed to parse p2p_collection_list output")
+    }
+
+    /// Delete P2P collections with identity.
+    pub fn p2p_collection_delete_with_identity(
+        &self,
+        collections: &[&str],
+        hex_key: &str,
+    ) -> Result<String> {
+        let cols = collections.join(",");
+        self.exec_with_identity(hex_key, &["client", "p2p", "collection", "delete", &cols])
+    }
+
+    /// Add documents to P2P subscription with identity.
+    pub fn p2p_document_create_with_identity(
+        &self,
+        doc_ids: &[&str],
+        hex_key: &str,
+    ) -> Result<String> {
+        let mut args = vec!["client", "p2p", "document", "create"];
+        args.extend(doc_ids);
+        self.exec_with_identity(hex_key, &args)
+    }
+
+    /// List P2P document subscriptions with identity.
+    pub fn p2p_document_list_with_identity(&self, hex_key: &str) -> Result<Value> {
+        let out = self.exec_with_identity(hex_key, &["client", "p2p", "document", "list"])?;
+        serde_json::from_str(&out).context("failed to parse p2p_document_list output")
+    }
+
+    /// Delete documents from P2P subscription with identity.
+    pub fn p2p_document_delete_with_identity(
+        &self,
+        doc_ids: &[&str],
+        hex_key: &str,
+    ) -> Result<String> {
+        let mut args = vec!["client", "p2p", "document", "delete"];
+        args.extend(doc_ids);
+        self.exec_with_identity(hex_key, &args)
+    }
+
+    /// Create a replicator with identity.
+    pub fn p2p_replicator_set_with_identity(
+        &self,
+        collections: &[&str],
+        addr: &str,
+        hex_key: &str,
+    ) -> Result<String> {
+        let cols = collections.join(",");
+        self.exec_with_identity(
+            hex_key,
+            &["client", "p2p", "replicator", "create", "-c", &cols, addr],
+        )
+    }
+
+    /// List replicators with identity.
+    pub fn p2p_replicator_list_with_identity(&self, hex_key: &str) -> Result<Value> {
+        let out = self.exec_with_identity(hex_key, &["client", "p2p", "replicator", "list"])?;
+        serde_json::from_str(&out).context("failed to parse p2p_replicator_list output")
+    }
+
+    /// Delete a replicator with identity.
+    pub fn p2p_replicator_delete_with_identity(
+        &self,
+        collections: &[&str],
+        peer_addr: Option<&str>,
+        hex_key: &str,
+    ) -> Result<String> {
+        let cols = collections.join(",");
+        let mut args = vec!["client", "p2p", "replicator", "delete", "-c", &cols];
+        if let Some(addr) = peer_addr {
+            args.push(addr);
+        }
+        self.exec_with_identity(hex_key, &args)
     }
 }
