@@ -1,12 +1,12 @@
 /// Traits for the datastore layer matching Go's internal/datastore/txn.go.
 use crate::multistore::{NamespaceView, RootView};
-use storage::corekv::TxnCallback;
+use storage::corekv::{MaybeSendSync, TxnCallback};
 
 /// Transaction trait for DefraDB operations.
 ///
 /// This matches Go's Txn interface in internal/datastore/txn.go.
 /// It provides access to all namespaced stores and transaction lifecycle methods.
-pub trait Txn: Send + Sync {
+pub trait Txn: MaybeSendSync {
     /// Get the blockstore (namespace 'b').
     fn blockstore(&self) -> NamespaceView;
 

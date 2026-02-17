@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use defra_core::thread_bounds::MaybeBoxFuture;
 use query::planner::index_selection::{IndexScanParams, IndexScanType};
 use storage::corekv::Store;
 use storage::index::IndexIterator;
@@ -16,13 +17,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         &'a self,
         collection_name: &'a str,
         params: &'a IndexScanParams,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = query::error::Result<query::fetcher::IndexScanResult>>
-                + Send
-                + 'a,
-        >,
-    > {
+    ) -> MaybeBoxFuture<'a, query::error::Result<query::fetcher::IndexScanResult>> {
         Box::pin(self.get_by_index_scan_inner(collection_name, params))
     }
 

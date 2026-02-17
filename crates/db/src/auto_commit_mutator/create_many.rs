@@ -60,34 +60,55 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             prepared_docs.push((doc, id_was_generated));
         }
 
-        // === Phase 2: Compute blocks in parallel (pure CPU, no storage access) ===
-        let block_futures: Vec<_> = prepared_docs
+        // === Phase 2: Compute blocks (parallel on native, sequential on WASM) ===
+        #[cfg(feature = "native")]
+        let computed_blocks: Vec<Option<ComputedBlocks>> = {
+            let block_futures: Vec<_> = prepared_docs
+                .iter()
+                .map(|(doc, _)| {
+                    let doc_clone = doc.clone();
+                    let schema = schema_version_id.clone();
+                    let enc = enc_config.clone();
+                    let sign = sign_config.clone();
+                    tokio::task::spawn_blocking(move || {
+                        compute_document_blocks(&doc_clone, &schema, enc.as_ref(), sign.as_ref())
+                    })
+                })
+                .collect();
+
+            let computed_results = futures::future::join_all(block_futures).await;
+
+            computed_results
+                .into_iter()
+                .map(|join_result| match join_result {
+                    Ok(Ok(blocks)) => Some(blocks),
+                    Ok(Err(e)) => {
+                        warn!(error = %e, "Failed to compute document blocks");
+                        None
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Block computation task panicked");
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        #[cfg(not(feature = "native"))]
+        let computed_blocks: Vec<Option<ComputedBlocks>> = prepared_docs
             .iter()
             .map(|(doc, _)| {
-                let doc_clone = doc.clone();
-                let schema = schema_version_id.clone();
-                let enc = enc_config.clone();
-                let sign = sign_config.clone();
-                tokio::task::spawn_blocking(move || {
-                    compute_document_blocks(&doc_clone, &schema, enc.as_ref(), sign.as_ref())
-                })
-            })
-            .collect();
-
-        let computed_results = futures::future::join_all(block_futures).await;
-
-        // Unpack JoinHandle results — a JoinError means the task panicked
-        let computed_blocks: Vec<Option<ComputedBlocks>> = computed_results
-            .into_iter()
-            .map(|join_result| match join_result {
-                Ok(Ok(blocks)) => Some(blocks),
-                Ok(Err(e)) => {
-                    warn!(error = %e, "Failed to compute document blocks");
-                    None
-                }
-                Err(e) => {
-                    warn!(error = %e, "Block computation task panicked");
-                    None
+                match compute_document_blocks(
+                    doc,
+                    &schema_version_id,
+                    enc_config.as_ref(),
+                    sign_config.as_ref(),
+                ) {
+                    Ok(blocks) => Some(blocks),
+                    Err(e) => {
+                        warn!(error = %e, "Failed to compute document blocks");
+                        None
+                    }
                 }
             })
             .collect();

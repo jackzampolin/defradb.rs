@@ -2,6 +2,11 @@ use document::{Document, NormalValue};
 use schema::VectorEmbeddingDescription;
 use std::collections::HashSet;
 
+#[cfg(not(target_arch = "wasm32"))]
+type EmbeddingError = Box<dyn std::error::Error + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+type EmbeddingError = Box<dyn std::error::Error>;
+
 /// Generate and set embedding vectors on a document based on the collection's
 /// vector embedding configuration.
 ///
@@ -19,7 +24,7 @@ pub async fn set_embedding(
     doc: &mut Document,
     is_create: bool,
     modified_fields: Option<&HashSet<String>>,
-) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<String>, EmbeddingError> {
     let mut generated = Vec::new();
 
     for embedding in embeddings {
@@ -84,7 +89,7 @@ async fn call_embedding_provider(
     model: &str,
     url: &str,
     text: &str,
-) -> Result<Vec<f64>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Vec<f64>, EmbeddingError> {
     match provider {
         "ollama" => call_ollama(model, url, text).await,
         "openai" => call_openai(model, url, text).await,
@@ -92,11 +97,7 @@ async fn call_embedding_provider(
     }
 }
 
-async fn call_ollama(
-    model: &str,
-    url: &str,
-    text: &str,
-) -> Result<Vec<f64>, Box<dyn std::error::Error + Send + Sync>> {
+async fn call_ollama(model: &str, url: &str, text: &str) -> Result<Vec<f64>, EmbeddingError> {
     let base = if url.is_empty() {
         "http://localhost:11434/api"
     } else {
@@ -131,11 +132,7 @@ async fn call_ollama(
     Ok(vec)
 }
 
-async fn call_openai(
-    model: &str,
-    url: &str,
-    text: &str,
-) -> Result<Vec<f64>, Box<dyn std::error::Error + Send + Sync>> {
+async fn call_openai(model: &str, url: &str, text: &str) -> Result<Vec<f64>, EmbeddingError> {
     let base = if url.is_empty() {
         "https://api.openai.com/v1"
     } else {

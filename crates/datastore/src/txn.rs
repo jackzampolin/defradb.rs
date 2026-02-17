@@ -14,7 +14,10 @@ use storage::corekv::{Store, Txn, TxnCallback};
 use storage::namespace::Namespace;
 
 /// Asynchronous callback for transaction events.
+#[cfg(not(target_arch = "wasm32"))]
 pub type AsyncCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+#[cfg(target_arch = "wasm32")]
+pub type AsyncCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()>>>>;
 
 /// Transaction state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

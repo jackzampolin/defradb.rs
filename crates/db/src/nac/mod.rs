@@ -75,7 +75,7 @@ impl NacConfig {
 /// Trait for NAC manager operations, enabling dynamic dispatch over different store backends.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait NacManagerApi: Send + Sync {
+pub trait NacManagerApi: defra_core::thread_bounds::MaybeSendSync {
     async fn initialize(&self, owner_identity: Option<&Did>) -> Result<()>;
     async fn status(&self) -> NacStatus;
     async fn owner(&self) -> Option<Did>;
