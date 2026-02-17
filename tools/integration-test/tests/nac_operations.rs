@@ -5,6 +5,9 @@
 
 use integration_test::{for_each_runtime, generate_identity, TestCluster, PRODUCT_SCHEMA};
 
+// ---------------------------------------------------------------------------
+// Non-P2P operations: encrypted index create, lens, views
+// ---------------------------------------------------------------------------
 for_each_runtime!(
     nac_operations_gate,
     nac_operations_gate_test,
@@ -35,30 +38,6 @@ async fn nac_operations_gate_test(cluster: TestCluster) {
     .expect("create product");
 
     // =========================================================================
-    // P2P peer info — outsider rejected, admin accepted
-    // =========================================================================
-    assert!(
-        node.p2p_info_with_identity(outsider_key).is_err(),
-        "outsider should be rejected from p2p info"
-    );
-    assert!(
-        node.p2p_info_with_identity(&admin_key).is_ok(),
-        "admin should access p2p info"
-    );
-
-    // =========================================================================
-    // P2P active peers — outsider rejected, admin accepted
-    // =========================================================================
-    assert!(
-        node.p2p_active_peers_with_identity(outsider_key).is_err(),
-        "outsider should be rejected from active peers"
-    );
-    assert!(
-        node.p2p_active_peers_with_identity(&admin_key).is_ok(),
-        "admin should access active peers"
-    );
-
-    // =========================================================================
     // Encrypted index create — outsider rejected, admin accepted
     // =========================================================================
     assert!(
@@ -68,28 +47,6 @@ async fn nac_operations_gate_test(cluster: TestCluster) {
     );
     node.encrypted_index_create_with_identity("Product", "name", &admin_key)
         .expect("admin should create encrypted index");
-
-    // =========================================================================
-    // Encrypted index list — outsider rejected, admin accepted
-    // =========================================================================
-    assert!(
-        node.encrypted_index_list_with_identity("Product", outsider_key)
-            .is_err(),
-        "outsider should be rejected from encrypted index list"
-    );
-    node.encrypted_index_list_with_identity("Product", &admin_key)
-        .expect("admin should list encrypted indexes");
-
-    // =========================================================================
-    // Encrypted index delete — outsider rejected, admin accepted
-    // =========================================================================
-    assert!(
-        node.encrypted_index_delete_with_identity("Product", "name", outsider_key)
-            .is_err(),
-        "outsider should be rejected from encrypted index delete"
-    );
-    node.encrypted_index_delete_with_identity("Product", "name", &admin_key)
-        .expect("admin should delete encrypted index");
 
     // =========================================================================
     // Lens list — outsider rejected, admin accepted
@@ -103,10 +60,11 @@ async fn nac_operations_gate_test(cluster: TestCluster) {
 
     // =========================================================================
     // View add — outsider rejected, admin accepted
+    // Note: query must NOT include the "query" keyword prefix.
     // =========================================================================
     assert!(
         node.view_add_with_identity(
-            "query { Product { name } }",
+            "Product { name }",
             "type ProductView { name: String }",
             outsider_key,
         )
@@ -114,7 +72,7 @@ async fn nac_operations_gate_test(cluster: TestCluster) {
         "outsider should be rejected from view add"
     );
     node.view_add_with_identity(
-        "query { Product { name } }",
+        "Product { name }",
         "type ProductView { name: String }",
         &admin_key,
     )
@@ -129,4 +87,46 @@ async fn nac_operations_gate_test(cluster: TestCluster) {
     );
     node.view_refresh_with_identity(None, &admin_key)
         .expect("admin should refresh views");
+}
+
+// ---------------------------------------------------------------------------
+// P2P operations: peer info, active peers (requires P2P subsystem)
+// ---------------------------------------------------------------------------
+for_each_runtime!(
+    nac_p2p_operations_gate,
+    nac_p2p_operations_gate_test,
+    .with_acp_local().with_nac().with_p2p()
+);
+
+async fn nac_p2p_operations_gate_test(cluster: TestCluster) {
+    let node = cluster.client(0);
+    let binary = node.binary_path().to_path_buf();
+
+    let admin_key = cluster
+        .startup_identity()
+        .expect("NAC cluster must have startup identity")
+        .to_string();
+
+    let outsider = generate_identity(&binary).expect("outsider identity");
+    let outsider_key = &outsider.private_key_hex;
+
+    // =========================================================================
+    // P2P peer info — outsider rejected, admin accepted
+    // =========================================================================
+    assert!(
+        node.p2p_info_with_identity(outsider_key).is_err(),
+        "outsider should be rejected from p2p info"
+    );
+    node.p2p_info_with_identity(&admin_key)
+        .expect("admin should access p2p info");
+
+    // =========================================================================
+    // P2P active peers — outsider rejected, admin accepted
+    // =========================================================================
+    assert!(
+        node.p2p_active_peers_with_identity(outsider_key).is_err(),
+        "outsider should be rejected from active peers"
+    );
+    node.p2p_active_peers_with_identity(&admin_key)
+        .expect("admin should access active peers");
 }

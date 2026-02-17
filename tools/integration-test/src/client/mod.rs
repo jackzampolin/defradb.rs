@@ -931,7 +931,11 @@ impl DefraClient {
         } else {
             self.exec_with_identity(hex_key, &["client", "view", "refresh"])?
         };
-        serde_json::from_str(&out).context("failed to parse view_refresh output")
+        let trimmed = out.trim();
+        if trimmed.is_empty() {
+            return Ok(serde_json::json!({}));
+        }
+        serde_json::from_str(trimmed).context("failed to parse view_refresh output")
     }
 
     /// Sync documents with identity.
