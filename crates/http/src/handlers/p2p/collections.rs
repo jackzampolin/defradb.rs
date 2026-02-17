@@ -102,13 +102,18 @@ pub async fn remove_collections(
 ///
 /// Accepts JSON body: `{"collectionID": "..."}`
 ///
-/// Requires `P2pCollectionCreate` permission when NAC is enabled (per Go behavior).
+/// Requires `P2pSyncBranchableCollection` permission when NAC is enabled.
 pub async fn sync_branchable(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Json(body): Json<SyncBranchableRequest>,
 ) -> Result<Json<()>, HttpError> {
-    require_permission(&state, &identity, NodePermission::P2pCollectionCreate).await?;
+    require_permission(
+        &state,
+        &identity,
+        NodePermission::P2pSyncBranchableCollection,
+    )
+    .await?;
 
     let p2p = state.require_p2p()?;
 
@@ -125,13 +130,13 @@ pub async fn sync_branchable(
 ///
 /// Accepts JSON body: `{"versionIDs": ["bafyrei...", ...]}`
 ///
-/// Requires `P2pCollectionCreate` permission when NAC is enabled (per Go behavior).
+/// Requires `P2pSyncCollectionVersions` permission when NAC is enabled.
 pub async fn sync_versions(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Json(body): Json<SyncVersionsRequest>,
 ) -> Result<Json<()>, HttpError> {
-    require_permission(&state, &identity, NodePermission::P2pCollectionCreate).await?;
+    require_permission(&state, &identity, NodePermission::P2pSyncCollectionVersions).await?;
 
     let p2p = state.require_p2p()?;
 

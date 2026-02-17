@@ -35,12 +35,12 @@ pub struct ConnectPeerRequest {
 /// Returns array of full multiaddrs with peer ID embedded.
 /// Example: ["/ip4/127.0.0.1/tcp/9181/p2p/12D3KooWxyz..."]
 ///
-/// Requires `P2pPeerConnect` permission when NAC is enabled.
+/// Requires `P2pPeerInfo` permission when NAC is enabled.
 pub async fn get_info(
     State(state): State<AppState>,
     identity: ExtractIdentity,
 ) -> Result<Json<P2pInfoResponse>, HttpError> {
-    require_permission(&state, &identity, NodePermission::P2pPeerConnect).await?;
+    require_permission(&state, &identity, NodePermission::P2pPeerInfo).await?;
 
     let p2p = state.require_p2p()?;
 
@@ -86,12 +86,12 @@ pub async fn list_peers(
 ///
 /// Returns array of connected peer IDs as strings.
 ///
-/// Requires `P2pPeerConnect` permission when NAC is enabled.
+/// Requires `P2pPeerActive` permission when NAC is enabled.
 pub async fn active_peers(
     State(state): State<AppState>,
     identity: ExtractIdentity,
 ) -> Result<Json<Vec<String>>, HttpError> {
-    require_permission(&state, &identity, NodePermission::P2pPeerConnect).await?;
+    require_permission(&state, &identity, NodePermission::P2pPeerActive).await?;
 
     let p2p = state.require_p2p()?;
 

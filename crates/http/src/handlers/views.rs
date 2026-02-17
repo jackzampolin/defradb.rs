@@ -32,13 +32,13 @@ pub struct RefreshViewsRequest {
 ///
 /// Creates a new Defra View from a GQL query and SDL schema.
 ///
-/// Requires `CollectionPatch` permission when NAC is enabled.
+/// Requires `ViewAdd` permission when NAC is enabled.
 pub async fn add_view(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Json(body): Json<AddViewRequest>,
 ) -> Result<Json<Vec<CollectionVersion>>, HttpError> {
-    require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
+    require_permission(&state, &identity, NodePermission::ViewAdd).await?;
 
     let view_ops = state.require_view()?;
 
@@ -60,7 +60,7 @@ pub async fn refresh_views(
     identity: ExtractIdentity,
     Json(body): Json<RefreshViewsRequest>,
 ) -> Result<Json<serde_json::Value>, HttpError> {
-    require_permission(&state, &identity, NodePermission::CollectionGet).await?;
+    require_permission(&state, &identity, NodePermission::ViewRefresh).await?;
 
     let view_ops = state.require_view()?;
 

@@ -126,13 +126,13 @@ pub async fn remove_documents(
 ///
 /// Accepts JSON body: `{"collectionName": "...", "docIDs": ["..."]}`
 ///
-/// Requires `P2pDocumentCreate` permission when NAC is enabled (per Go behavior).
+/// Requires `P2pSyncDocuments` permission when NAC is enabled.
 pub async fn sync_documents(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Json(body): Json<SyncDocumentsRequest>,
 ) -> Result<Json<()>, HttpError> {
-    require_permission(&state, &identity, NodePermission::P2pDocumentCreate).await?;
+    require_permission(&state, &identity, NodePermission::P2pSyncDocuments).await?;
 
     let p2p = state.require_p2p()?;
 

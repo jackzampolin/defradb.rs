@@ -32,7 +32,7 @@ pub async fn go_create_encrypted_index(
     Path(collection): Path<String>,
     body: Option<Json<GoCreateEncryptedIndexRequest>>,
 ) -> Result<Json<EncryptedIndexInfo>, HttpError> {
-    require_permission(&state, &identity, NodePermission::IndexCreate).await?;
+    require_permission(&state, &identity, NodePermission::EncryptedIndexCreate).await?;
 
     let ops = state.require_encrypted_index()?;
 
@@ -64,7 +64,7 @@ pub async fn go_list_encrypted_indexes(
     identity: ExtractIdentity,
     Path(collection): Path<String>,
 ) -> Result<Json<Vec<EncryptedIndexInfo>>, HttpError> {
-    require_permission(&state, &identity, NodePermission::IndexList).await?;
+    require_permission(&state, &identity, NodePermission::EncryptedIndexList).await?;
 
     let ops = state.require_encrypted_index()?;
 
@@ -90,7 +90,7 @@ pub async fn go_list_all_encrypted_indexes(
     State(state): State<AppState>,
     identity: ExtractIdentity,
 ) -> Result<Json<Vec<EncryptedIndexInfo>>, HttpError> {
-    require_permission(&state, &identity, NodePermission::IndexList).await?;
+    require_permission(&state, &identity, NodePermission::EncryptedIndexListAll).await?;
 
     let ops = state.require_encrypted_index()?;
 
@@ -110,7 +110,7 @@ pub async fn go_delete_encrypted_index(
     identity: ExtractIdentity,
     Path((collection, field)): Path<(String, String)>,
 ) -> Result<StatusCode, HttpError> {
-    require_permission(&state, &identity, NodePermission::IndexDrop).await?;
+    require_permission(&state, &identity, NodePermission::EncryptedIndexDelete).await?;
 
     let ops = state.require_encrypted_index()?;
 
