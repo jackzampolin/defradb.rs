@@ -45,6 +45,8 @@ pub struct Context {
     pub doc_id: DocId,
     /// Schema version
     pub schema_version: String,
+    /// When true, skip storage reads (document doesn't exist yet)
+    pub is_create: bool,
 }
 
 /// Delta trait - represents an incremental change to a CRDT
@@ -141,6 +143,7 @@ mod tests {
         let ctx = Context {
             doc_id: DocId::new("bae-test"),
             schema_version: "v1".to_string(),
+            is_create: false,
         };
         assert_eq!(ctx.doc_id.as_str(), "bae-test");
         assert_eq!(ctx.schema_version, "v1");

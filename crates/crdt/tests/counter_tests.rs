@@ -27,6 +27,7 @@ async fn test_counter_increment() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -78,6 +79,7 @@ async fn test_counter_idempotency() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -119,6 +121,7 @@ async fn test_counter_decrement_not_allowed() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -153,6 +156,7 @@ async fn test_counter_overflow_wrapping() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -205,6 +209,7 @@ async fn test_counter_field_name_mismatch() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -243,6 +248,7 @@ async fn test_counter_schema_version_mismatch() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -326,6 +332,7 @@ async fn test_counter_float64_overflow() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -373,6 +380,7 @@ async fn test_counter_float64_basic() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -424,6 +432,7 @@ async fn test_counter_merge_result_applied() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -457,6 +466,7 @@ async fn test_counter_merge_result_skipped_already_applied() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -498,6 +508,7 @@ async fn test_counter_wrong_delta_type() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -535,6 +546,7 @@ async fn test_counter_numeric_kind_mismatch() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();

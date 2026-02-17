@@ -71,6 +71,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let ctx = Context {
             doc_id: DocId::new(&doc_id_str),
             schema_version: payload.schema_version_id.clone(),
+            is_create: payload.priority == 1,
         };
 
         // Perform the merge in a scoped block
@@ -203,6 +204,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let ctx = Context {
             doc_id: DocId::new(&doc_id_str),
             schema_version: payload.schema_version_id.clone(),
+            is_create: payload.priority == 1,
         };
 
         // Perform the merge

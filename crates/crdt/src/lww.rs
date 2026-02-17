@@ -190,36 +190,39 @@ impl Lww {
         rw: &mut dyn ReaderWriter,
         data: &[u8],
         incoming_priority: u64,
+        is_create: bool,
     ) -> Result<MergeResult> {
-        // Get current priority
-        let current_priority = self.get_priority_internal(rw).await?;
+        if !is_create {
+            // Get current priority
+            let current_priority = self.get_priority_internal(rw).await?;
 
-        // Compare priorities
-        match incoming_priority.cmp(&current_priority) {
-            std::cmp::Ordering::Less => {
-                // LWW semantics: Reject updates with lower priority
-                return Ok(MergeResult::RejectedLowerPriority {
-                    current: current_priority,
-                    incoming: incoming_priority,
-                });
-            }
-            std::cmp::Ordering::Equal => {
-                // Same priority - use lexicographic tie-breaking for deterministic convergence
-                // Current value wins if incoming data <= current (lexicographically)
-                // This means: incoming data must be strictly greater to win
-                // Note: Store errors propagate via ?, None (uninitialized) treated as empty
-                let current_value: Vec<u8> = rw
-                    .get(&self.value_key)
-                    .await
-                    .map_err(|e| Error::Storage(e.to_string()))?
-                    .unwrap_or_default();
-                if data <= &current_value[..] {
-                    return Ok(MergeResult::RejectedTieBreak);
+            // Compare priorities
+            match incoming_priority.cmp(&current_priority) {
+                std::cmp::Ordering::Less => {
+                    // LWW semantics: Reject updates with lower priority
+                    return Ok(MergeResult::RejectedLowerPriority {
+                        current: current_priority,
+                        incoming: incoming_priority,
+                    });
                 }
-                // Incoming data is lexicographically greater - fall through to update
-            }
-            std::cmp::Ordering::Greater => {
-                // Incoming priority is higher - fall through to update
+                std::cmp::Ordering::Equal => {
+                    // Same priority - use lexicographic tie-breaking for deterministic convergence
+                    // Current value wins if incoming data <= current (lexicographically)
+                    // This means: incoming data must be strictly greater to win
+                    // Note: Store errors propagate via ?, None (uninitialized) treated as empty
+                    let current_value: Vec<u8> = rw
+                        .get(&self.value_key)
+                        .await
+                        .map_err(|e| Error::Storage(e.to_string()))?
+                        .unwrap_or_default();
+                    if data <= &current_value[..] {
+                        return Ok(MergeResult::RejectedTieBreak);
+                    }
+                    // Incoming data is lexicographically greater - fall through to update
+                }
+                std::cmp::Ordering::Greater => {
+                    // Incoming priority is higher - fall through to update
+                }
             }
         }
 
@@ -281,7 +284,7 @@ impl ReplicatedData for Lww {
     async fn merge(
         &self,
         rw: &mut dyn ReaderWriter,
-        _ctx: &Context,
+        ctx: &Context,
         delta: &dyn Delta,
     ) -> Result<MergeResult> {
         // Downcast to LwwDelta
@@ -306,7 +309,7 @@ impl ReplicatedData for Lww {
         }
 
         // Apply merge logic
-        self.set_value(rw, &lww_delta.data, lww_delta.priority)
+        self.set_value(rw, &lww_delta.data, lww_delta.priority, ctx.is_create)
             .await
     }
 

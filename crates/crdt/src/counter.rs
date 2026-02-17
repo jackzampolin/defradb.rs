@@ -391,6 +391,7 @@ impl Counter {
         &self,
         rw: &mut dyn ReaderWriter,
         delta: &CounterDelta,
+        is_create: bool,
     ) -> Result<MergeResult> {
         // Validate numeric kind matches
         if delta.kind() != self.kind {
@@ -403,7 +404,7 @@ impl Counter {
         }
 
         // Check if nonce already applied (idempotency)
-        if self.has_nonce(rw, delta.nonce).await? {
+        if !is_create && self.has_nonce(rw, delta.nonce).await? {
             return Ok(MergeResult::SkippedAlreadyApplied { nonce: delta.nonce });
         }
 
@@ -414,7 +415,11 @@ impl Counter {
                 if !self.allow_decrement && increment < 0 {
                     return Err(Error::MergeError("decrement not allowed".into()));
                 }
-                let current = self.get_int64(rw).await?;
+                let current = if is_create {
+                    0
+                } else {
+                    self.get_int64(rw).await?
+                };
                 // Int64: Wrap on overflow to match Go DefraDB behavior
                 NewValue::Int64(current.wrapping_add(increment))
             }
@@ -433,7 +438,11 @@ impl Counter {
                     return Err(Error::MergeError("decrement not allowed".into()));
                 }
 
-                let current = self.get_float64(rw).await?;
+                let current = if is_create {
+                    0.0
+                } else {
+                    self.get_float64(rw).await?
+                };
 
                 // Validate current value
                 if !current.is_finite() {
@@ -536,7 +545,7 @@ impl ReplicatedData for Counter {
     async fn merge(
         &self,
         rw: &mut dyn ReaderWriter,
-        _ctx: &Context,
+        ctx: &Context,
         delta: &dyn Delta,
     ) -> Result<MergeResult> {
         // Downcast to CounterDelta
@@ -566,7 +575,7 @@ impl ReplicatedData for Counter {
         }
 
         // Apply delta
-        self.apply_delta(rw, counter_delta).await
+        self.apply_delta(rw, counter_delta, ctx.is_create).await
     }
 
     fn headstore_prefix(&self) -> Vec<u8> {
