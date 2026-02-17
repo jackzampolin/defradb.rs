@@ -21,10 +21,12 @@ const INTROSPECTION_QUERY: &str = r#"
 }
 "#;
 
-/// Check if a field is a DefraDB internal/aggregate field that may require arguments.
-/// Keeps `_docID` (document identifier), filters out everything else starting with `_`.
+/// Check if a field is a DefraDB aggregate field that requires arguments.
 fn is_aggregate_field(name: &str) -> bool {
-    name.starts_with('_') && name != "_docID"
+    matches!(
+        name,
+        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "GROUP" | "SIMILARITY"
+    ) || (name.starts_with('_') && name != "_docID")
 }
 
 /// Check if a field name is a built-in GraphQL or DefraDB field.

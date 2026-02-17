@@ -365,11 +365,30 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
         doc_id: &str,
         identity: Option<&Did>,
     ) -> RestResult<Option<JsonValue>> {
-        // Query all fields by not specifying a selection (the runner returns all fields)
+        // Build an explicit field selection from the collection schema.
+        // An empty selection would auto-expand to include aggregate fields (AVG, SUM, etc.)
+        // which require arguments and fail to parse.
+        let coll = self
+            .runner
+            .get_collection(collection)
+            .await
+            .map_err(|e| RestError::internal(e.to_string()))?;
+        let fields: Vec<&str> = std::iter::once("_docID")
+            .chain(coll.fields.iter().filter_map(|f| {
+                if f.name == "_docID" || !f.kind.is_scalar() {
+                    None
+                } else {
+                    Some(f.name.as_str())
+                }
+            }))
+            .collect();
+        let selection = fields.join(" ");
+
         let query = format!(
-            r#"{{ {collection}(docID: "{doc_id}") }}"#,
+            r#"{{ {collection}(docID: "{doc_id}") {{ {selection} }} }}"#,
             collection = collection,
-            doc_id = doc_id
+            doc_id = doc_id,
+            selection = selection
         );
 
         let result = self
