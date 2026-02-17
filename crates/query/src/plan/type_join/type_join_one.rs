@@ -864,39 +864,74 @@ impl PlanNode for TypeJoinOne {
             serde_json::json!(self.exec_info.iterations),
         );
 
+        let mut inner_obj = serde_json::Map::new();
+
         if matches!(
             self.direction,
             JoinDirection::InvertedIndex { .. } | JoinDirection::OrderedInvertedPrimary { .. }
         ) {
-            // Inverted/ordered modes: child index scan is the "root" scanNode,
-            // parent lookups are the "subType" scanNode.
-            let child_execute = self.child_plan.explain_execute();
-            if let Some(child_obj) = child_execute.as_object() {
-                for (key, value) in child_obj {
-                    obj.insert(key.clone(), value.clone());
-                }
-            }
-            // Parent lookup metrics accumulated per-child
-            obj.insert(
-                "subTypeScanNode".to_string(),
-                self.go_child_metrics.to_json(),
-            );
-        } else {
-            let parent_execute = self.parent_plan.explain_execute();
-            if let Some(parent_obj) = parent_execute.as_object() {
-                for (key, value) in parent_obj {
-                    obj.insert(key.clone(), value.clone());
-                }
-            }
+            // Inverted/ordered modes: child drives the loop, parent is looked up per-child.
+            // root = child plan's execute explain (the driving scan)
+            inner_obj.insert("root".to_string(), self.child_plan.explain_execute());
 
-            // Use simulated Go-compatible metrics for the child scan.
-            // Go re-initializes the child scanNode per parent with a docID-specific prefix,
-            // calling Next() once per parent. Metrics accumulate across all parent lookups.
-            obj.insert(
-                "subTypeScanNode".to_string(),
-                self.go_child_metrics.to_json(),
-            );
+            // subType = parent lookup metrics as a synthetic scanNode
+            let sub_type = serde_json::json!({
+                "selectTopNode": {
+                    "selectNode": {
+                        "scanNode": self.go_child_metrics.to_json()
+                    }
+                }
+            });
+            inner_obj.insert("subType".to_string(), sub_type);
+        } else {
+            // Normal (Primary/Inverted) mode:
+            // root = parent plan's execute explain
+            inner_obj.insert("root".to_string(), self.parent_plan.explain_execute());
+
+            // subType = child plan's execute explain wrapped in selectTopNode > selectNode
+            let child_execute = self.child_plan.explain_execute();
+            let child_is_select = self.child_plan.kind() == "selectNode";
+
+            let select_node_content = if child_is_select {
+                // Extract inner content to avoid double wrapping (selectNode > selectNode)
+                child_execute
+                    .as_object()
+                    .and_then(|o| o.get("selectNode"))
+                    .cloned()
+                    .unwrap_or(child_execute)
+            } else {
+                // Child is not a SelectNode (e.g., ScanNode or nested TypeJoinOne).
+                // Synthesize selectNode metrics from captured child exec info,
+                // matching Go's selectNode wrapper which tracks its own iterations.
+                let mut select_inner = serde_json::Map::new();
+                select_inner.insert(
+                    "iterations".to_string(),
+                    serde_json::json!(self.child_exec_info.iterations),
+                );
+                select_inner.insert(
+                    "filterMatches".to_string(),
+                    serde_json::json!(self.child_exec_info.docs_fetched),
+                );
+                if let Some(child_obj) = child_execute.as_object() {
+                    for (key, value) in child_obj {
+                        select_inner.insert(key.clone(), value.clone());
+                    }
+                }
+                serde_json::Value::Object(select_inner)
+            };
+
+            let sub_type = serde_json::json!({
+                "selectTopNode": {
+                    "selectNode": select_node_content
+                }
+            });
+            inner_obj.insert("subType".to_string(), sub_type);
         }
+
+        obj.insert(
+            "typeJoinOne".to_string(),
+            serde_json::Value::Object(inner_obj),
+        );
 
         serde_json::Value::Object(obj)
     }

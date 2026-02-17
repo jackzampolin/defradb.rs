@@ -431,19 +431,52 @@ impl PlanNode for TypeJoinMany {
             serde_json::json!(self.exec_info.iterations),
         );
 
-        let parent_execute = self.parent_plan.explain_execute();
-        if let Some(parent_obj) = parent_execute.as_object() {
-            for (key, value) in parent_obj {
-                obj.insert(key.clone(), value.clone());
-            }
-        }
+        let mut inner_obj = serde_json::Map::new();
 
-        // Use simulated Go-compatible metrics for the child scan.
-        // Go re-initializes the child scanNode per parent, reading ALL children
-        // from the collection each time with an FK filter. Metrics accumulate.
+        // root = parent plan's execute explain
+        inner_obj.insert("root".to_string(), self.parent_plan.explain_execute());
+
+        // subType = child plan's execute explain wrapped in selectTopNode > selectNode
+        let child_execute = self.child_plan.explain_execute();
+        let child_is_select = self.child_plan.kind() == "selectNode";
+
+        let select_node_content = if child_is_select {
+            // Extract inner content to avoid double wrapping (selectNode > selectNode)
+            child_execute
+                .as_object()
+                .and_then(|o| o.get("selectNode"))
+                .cloned()
+                .unwrap_or(child_execute)
+        } else {
+            // Child is not a SelectNode (e.g., ScanNode or nested join).
+            // Synthesize selectNode metrics from captured child exec info.
+            let mut select_inner = serde_json::Map::new();
+            select_inner.insert(
+                "iterations".to_string(),
+                serde_json::json!(self.child_exec_info.iterations),
+            );
+            select_inner.insert(
+                "filterMatches".to_string(),
+                serde_json::json!(self.child_exec_info.docs_fetched),
+            );
+            if let Some(child_obj) = child_execute.as_object() {
+                for (key, value) in child_obj {
+                    select_inner.insert(key.clone(), value.clone());
+                }
+            }
+            serde_json::Value::Object(select_inner)
+        };
+
+        let sub_type = serde_json::json!({
+            "selectTopNode": {
+                "selectNode": select_node_content
+                }
+        });
+        inner_obj.insert("subType".to_string(), sub_type);
+
         obj.insert(
-            "subTypeScanNode".to_string(),
-            self.go_child_metrics.to_json(),
+            "typeJoinMany".to_string(),
+            serde_json::Value::Object(inner_obj),
         );
 
         serde_json::Value::Object(obj)
