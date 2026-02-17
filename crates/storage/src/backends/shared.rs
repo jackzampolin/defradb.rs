@@ -215,14 +215,15 @@ impl ConflictTracker {
     /// Check for conflicts and record the write set if no conflict.
     /// Returns Err(TxnConflict) if any key in `write_set` was written by a
     /// transaction that committed after `read_version`.
-    pub(crate) fn check_and_record(
+    pub(crate) fn check_and_record<'a>(
         &self,
         read_version: u64,
-        write_set: std::collections::HashSet<Vec<u8>>,
+        write_keys: impl Iterator<Item = &'a Vec<u8>>,
     ) -> std::result::Result<(), crate::corekv::Error> {
         use std::sync::atomic::Ordering;
 
-        if write_set.is_empty() {
+        let write_keys: Vec<&Vec<u8>> = write_keys.collect();
+        if write_keys.is_empty() {
             return Ok(());
         }
 
@@ -232,16 +233,17 @@ impl ConflictTracker {
         // transaction committed after our snapshot
         for (commit_ver, keys) in committed.iter() {
             if *commit_ver > read_version {
-                for key in &write_set {
-                    if keys.contains(key) {
+                for key in &write_keys {
+                    if keys.contains(*key) {
                         return Err(crate::corekv::Error::TxnConflict);
                     }
                 }
             }
         }
 
-        // No conflict - record our write set
+        // No conflict - clone keys into storage (single clone per key)
         let new_version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
+        let write_set = write_keys.into_iter().cloned().collect();
         committed.push((new_version, write_set));
 
         // Prune old entries that can no longer conflict (optional GC).
