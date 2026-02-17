@@ -99,13 +99,14 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static>(
             "Fetching missing DAG blocks via Bitswap"
         );
 
-        for cid in &missing {
-            if !poll_fetch_block(cid, &host, &blockstore, source_peer).await {
-                warn!(
-                    cid = %cid,
-                    root_cid = %root_cid,
-                    "Timeout fetching child block (30s)"
-                );
+        let fetches: Vec<_> = missing
+            .iter()
+            .map(|cid| poll_fetch_block(cid, &host, &blockstore, source_peer))
+            .collect();
+        let results = futures::future::join_all(fetches).await;
+        for (cid, success) in missing.iter().zip(results.iter()) {
+            if !*success {
+                warn!(cid = %cid, root_cid = %root_cid, "Timeout fetching child block (30s)");
             }
         }
     }

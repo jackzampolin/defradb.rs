@@ -9,6 +9,8 @@ pub struct ReplicationConfig {
     pub rebroadcast_on_merge: bool,
     /// Max blocks per batch (matches Go's MergeBatchWithTxn batch size)
     pub batch_size: usize,
+    /// Maximum concurrent merge workers for `run_parallel()`
+    pub max_workers: usize,
 }
 
 impl Default for ReplicationConfig {
@@ -17,6 +19,7 @@ impl Default for ReplicationConfig {
             continue_on_error: true,
             rebroadcast_on_merge: false,
             batch_size: 50,
+            max_workers: 32,
         }
     }
 }
