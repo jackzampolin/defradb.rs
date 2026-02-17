@@ -39,6 +39,9 @@ pub enum Error {
     #[error("invalid collection name: {0}")]
     InvalidCollectionName(String),
 
+    #[error("database is closed")]
+    DatabaseClosed,
+
     #[error("transaction not active")]
     TxnNotActive,
 

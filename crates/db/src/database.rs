@@ -16,7 +16,7 @@ use lens::TransformStore;
 #[cfg(feature = "native")]
 use lens::WasmTransformStore;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use storage::corekv::Store;
 
@@ -94,6 +94,8 @@ pub struct DB<S: Store> {
     options: DbOptions,
     /// Counter for generating unique transaction IDs.
     txn_id_counter: AtomicU64,
+    /// Whether the database has been closed.
+    closed: AtomicBool,
     /// In-memory collection cache (name -> Collection).
     pub(crate) collections: RwLock<HashMap<String, Collection>>,
     /// Event bus for subscription notifications.
@@ -128,6 +130,7 @@ impl<S: Store> DB<S> {
             store: Arc::new(store),
             options,
             txn_id_counter: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
             collections: RwLock::new(HashMap::new()),
             event_bus: None,
             lens_store,
@@ -175,6 +178,7 @@ impl<S: Store> DB<S> {
             store,
             options,
             txn_id_counter: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
             collections: RwLock::new(HashMap::new()),
             event_bus: None,
             lens_store,
@@ -221,7 +225,11 @@ impl<S: Store> DB<S> {
     /// Create a new transaction.
     ///
     /// If `readonly` is true, the transaction cannot perform writes.
+    /// Returns `Error::DatabaseClosed` if the database has been closed.
     pub async fn new_txn(&self, readonly: bool) -> Result<DbTxn<S>> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(Error::DatabaseClosed);
+        }
         let id = self.next_txn_id();
         let basic_txn = BasicTxn::new(&*self.store, id, readonly)
             .await
@@ -289,8 +297,17 @@ impl<S: Store> DB<S> {
     }
 
     /// Close the database.
+    ///
+    /// After closing, any attempt to create new transactions will return
+    /// `Error::DatabaseClosed`. Matches Go's close-guard behavior (PR #4435).
     pub async fn close(&self) -> Result<()> {
+        self.closed.store(true, Ordering::SeqCst);
         self.store.close().await.map_err(Error::Storage)
+    }
+
+    /// Returns true if the database has been closed.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
     }
 
     /// Get a reference to the underlying store.
