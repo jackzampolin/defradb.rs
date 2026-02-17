@@ -176,51 +176,54 @@ impl SelectNode {
 
     /// Detect chained typeIndexJoin nodes in execute explain and flatten into a parallelNode.
     ///
-    /// In execute mode, the structure differs from default/debug:
+    /// With recursive execute explain, the structure is:
     /// ```json
-    /// { "typeIndexJoin": { "iterations": N, "typeIndexJoin": {...}, "subTypeScanNode": {...} } }
+    /// { "typeIndexJoin": { "iterations": N, "typeJoinMany": {
+    ///     "root": { "typeIndexJoin": { ... inner chain ... } },
+    ///     "subType": { ... }
+    /// } } }
     /// ```
-    /// The nested `typeIndexJoin` key (from parent_plan.explain_execute()) indicates a chain.
-    /// The innermost join's `scanNode` is the shared root.
+    /// The nested `typeIndexJoin` inside `root` indicates a chain.
+    /// The innermost join's `root` contains the shared scanNode.
     fn flatten_execute_join_chain(explain: &serde_json::Value) -> Option<serde_json::Value> {
         let obj = explain.as_object()?;
         let join_content = obj.get("typeIndexJoin")?.as_object()?;
 
-        // Check if this join contains another typeIndexJoin (indicating a chain)
-        join_content.get("typeIndexJoin")?;
+        // Navigate through the join type wrapper to find root
+        let root = Self::get_join_root(join_content)?;
+
+        // Check if root contains another typeIndexJoin (indicating a chain)
+        root.as_object()?.get("typeIndexJoin")?;
 
         // Walk the chain collecting all joins
         let mut joins_data: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
         let mut current = join_content.clone();
 
-        loop {
-            if let Some(inner_join) = current.get("typeIndexJoin").and_then(|v| v.as_object()) {
+        while let Some(r) = Self::get_join_root(&current) {
+            let current_root = r.clone();
+            if let Some(inner_join) = current_root
+                .as_object()
+                .and_then(|o| o.get("typeIndexJoin"))
+                .and_then(|v| v.as_object())
+            {
                 joins_data.push(current.clone());
                 current = inner_join.clone();
                 continue;
             }
-            // Innermost join - contains scanNode directly
+            // Innermost join - root contains the shared scanNode
             joins_data.push(current);
             break;
         }
 
-        // The innermost join has the scanNode (shared root metrics)
+        // The innermost join's root is the shared scanNode (e.g., {"scanNode": {...}})
         let innermost = joins_data.last()?;
-        let shared_scan_node = innermost.get("scanNode")?.clone();
+        let shared_root = Self::get_join_root(innermost)?.clone();
 
         // Build the parallel array in reverse order (innermost first = Go convention)
         let mut parallel_items: Vec<serde_json::Value> = Vec::new();
         for join_data in joins_data.iter().rev() {
-            let mut join_copy = serde_json::Map::new();
-            // Copy iterations and subTypeScanNode from this join
-            if let Some(iter) = join_data.get("iterations") {
-                join_copy.insert("iterations".to_string(), iter.clone());
-            }
-            // Set the shared scanNode on every join
-            join_copy.insert("scanNode".to_string(), shared_scan_node.clone());
-            if let Some(sub) = join_data.get("subTypeScanNode") {
-                join_copy.insert("subTypeScanNode".to_string(), sub.clone());
-            }
+            let mut join_copy = join_data.clone();
+            Self::set_join_root(&mut join_copy, shared_root.clone());
             parallel_items.push(serde_json::json!({
                 "typeIndexJoin": serde_json::Value::Object(join_copy)
             }));
