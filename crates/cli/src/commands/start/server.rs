@@ -202,14 +202,40 @@ impl Node {
                     continue_on_error: true,
                     rebroadcast_on_merge: false, // Don't re-broadcast during initial sync
                     batch_size: 50,
+                    max_workers: 32,
                 };
                 let replication_task = tokio::spawn(async move {
-                    info!("Starting replication loop for P2P sync");
-                    p2p::sync::ReplicationLoop::run(
+                    info!("Starting parallel replication loop for P2P sync");
+                    p2p::sync::ReplicationLoop::run_parallel(
                         coordinator_for_replication,
                         sync_events,
                         merge_handler,
                         replication_config,
+                        |result| {
+                            match &result {
+                                p2p::sync::ReplicationResult::Merged { cid, doc_id, .. } => {
+                                    info!(cid = %cid, doc_id = %doc_id, "Block merged successfully");
+                                }
+                                p2p::sync::ReplicationResult::MergedButBroadcastFailed {
+                                    cid, doc_id, broadcast_error, ..
+                                } => {
+                                    error!(
+                                        cid = %cid, doc_id = %doc_id, error = %broadcast_error,
+                                        "Block merged but re-broadcast failed"
+                                    );
+                                }
+                                p2p::sync::ReplicationResult::Failed { cid, error } => {
+                                    error!(cid = %cid, error = %error, "Block merge failed");
+                                }
+                                p2p::sync::ReplicationResult::Skipped { cid, reason } => {
+                                    tracing::debug!(cid = %cid, reason = %reason, "Block skipped");
+                                }
+                                p2p::sync::ReplicationResult::MergedButNotMarked { cid, error } => {
+                                    error!(cid = %cid, error = %error, "Block merged but failed to mark");
+                                }
+                                _ => {}
+                            }
+                        },
                     )
                     .await;
                     info!("Replication loop stopped");
@@ -220,6 +246,7 @@ impl Node {
                 let event_handler_task = if let Some(mut events) = p2p_events.take() {
                     let coordinator_for_events = coordinator.clone();
                     Some(tokio::spawn(async move {
+                        let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
                         while let Some(event) = events.recv().await {
                             // Log events for visibility
                             match &event {
@@ -253,10 +280,15 @@ impl Node {
                                 _ => {}
                             }
 
-                            // Process event through coordinator for response handling
-                            if let Err(e) = coordinator_for_events.handle_host_event(event).await {
-                                error!("Failed to handle host event: {}", e);
-                            }
+                            // Spawn concurrent processing
+                            let permit = semaphore.clone().acquire_owned().await.unwrap();
+                            let coord = coordinator_for_events.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = coord.handle_host_event(event).await {
+                                    error!("Failed to handle host event: {}", e);
+                                }
+                                drop(permit);
+                            });
                         }
                     }))
                 } else {

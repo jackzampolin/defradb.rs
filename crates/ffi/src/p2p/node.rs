@@ -227,6 +227,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let event_bus_for_host = event_bus.clone();
         let host_event_task = tokio::spawn(async move {
             let mut rx = event_rx;
+            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
             while let Some(event) = rx.recv().await {
                 match &event {
                     p2p::HostEvent::PeerSubscribed { peer_id, topic } => {
@@ -249,9 +250,14 @@ pub unsafe extern "C" fn new_node_with_p2p(
                     }
                     _ => {}
                 }
-                if let Err(e) = coord_for_events.handle_host_event(event).await {
-                    tracing::error!(error = %e, "Error handling host event");
-                }
+                let permit = semaphore.clone().acquire_owned().await.unwrap();
+                let coord = coord_for_events.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = coord.handle_host_event(event).await {
+                        tracing::error!(error = %e, "Error handling host event");
+                    }
+                    drop(permit);
+                });
             }
         });
 
@@ -259,53 +265,41 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let handler_for_repl = merge_handler.clone();
         let event_bus_for_repl = event_bus.clone();
         let replication_task = tokio::spawn(async move {
-            let config = ReplicationConfig::default();
-            let mut events = sync_events_rx;
-            loop {
-                let results = ReplicationLoop::process_next_batch(
-                    &coord_for_repl,
-                    &mut events,
-                    handler_for_repl.as_ref(),
-                    &config,
-                )
-                .await;
-
-                let mut should_break = false;
-                for result in &results {
-                    match result {
+            let local_peer = coord_for_repl.local_peer_id().to_string();
+            let ebus = event_bus_for_repl;
+            ReplicationLoop::run_parallel(
+                coord_for_repl,
+                sync_events_rx,
+                handler_for_repl,
+                ReplicationConfig::default(),
+                move |result| {
+                    match &result {
                         ReplicationResult::Merged { cid, doc_id, collection_id } => {
-                            let mc = events::MergeCompleteData {
+                            ebus.publish(events::Message::merge_complete(events::MergeCompleteData {
                                 doc_id: doc_id.clone(),
                                 cid: *cid,
                                 collection_id: collection_id.clone(),
-                                by_peer: coord_for_repl.local_peer_id().to_string(),
-                            };
-                            event_bus_for_repl.publish(events::Message::merge_complete(mc));
+                                by_peer: local_peer.clone(),
+                            }));
                             if !doc_id.is_empty() {
-                                event_bus_for_repl.publish(events::Message::se_artifact_received(
+                                ebus.publish(events::Message::se_artifact_received(
                                     events::SEArtifactReceivedData { doc_id: doc_id.clone() },
                                 ));
                             }
                         }
                         ReplicationResult::MergedButBroadcastFailed { cid, doc_id, collection_id, .. } => {
                             tracing::info!(cid = %cid, doc_id = %doc_id, "Block merged (broadcast failed) - publishing MergeComplete event");
-                            let mc = events::MergeCompleteData {
+                            ebus.publish(events::Message::merge_complete(events::MergeCompleteData {
                                 doc_id: doc_id.clone(),
                                 cid: *cid,
                                 collection_id: collection_id.clone(),
-                                by_peer: coord_for_repl.local_peer_id().to_string(),
-                            };
-                            event_bus_for_repl.publish(events::Message::merge_complete(mc));
+                                by_peer: local_peer.clone(),
+                            }));
                             if !doc_id.is_empty() {
-                                event_bus_for_repl.publish(events::Message::se_artifact_received(
+                                ebus.publish(events::Message::se_artifact_received(
                                     events::SEArtifactReceivedData { doc_id: doc_id.clone() },
                                 ));
                             }
-                        }
-                        ReplicationResult::ChannelClosed => {
-                            tracing::info!("Sync event channel closed, stopping replication loop");
-                            should_break = true;
-                            break;
                         }
                         ReplicationResult::Failed { cid, error } => {
                             tracing::error!(cid = %cid, error = %error, "Block merge failed");
@@ -318,11 +312,8 @@ pub unsafe extern "C" fn new_node_with_p2p(
                         }
                         _ => {}
                     }
-                }
-                if should_break {
-                    break;
-                }
-            }
+                },
+            ).await;
             tracing::info!("FFI replication loop stopped");
         });
 

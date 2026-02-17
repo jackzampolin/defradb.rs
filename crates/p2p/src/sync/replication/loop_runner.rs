@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use blockstore::Blockstore;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 
 use super::config::ReplicationConfig;
 use super::handlers::{is_mergeable_event, process_event, process_merge_batch};
@@ -126,6 +126,56 @@ impl ReplicationLoop {
         }
 
         tracing::info!("Replication loop stopped");
+    }
+
+    /// Run the replication loop with concurrent workers.
+    ///
+    /// Spawns up to `config.max_workers` concurrent tasks via a semaphore.
+    /// Each result is passed to `on_result` for caller-specific handling
+    /// (e.g., publishing events to an event bus).
+    pub async fn run_parallel<B, H, F>(
+        coordinator: Arc<SyncCoordinator<B>>,
+        mut events: mpsc::Receiver<SyncEvent>,
+        handler: Arc<H>,
+        config: ReplicationConfig,
+        on_result: F,
+    ) where
+        B: Blockstore + 'static,
+        H: MergeHandler + 'static,
+        F: Fn(ReplicationResult) + Send + Sync + 'static,
+    {
+        tracing::info!(
+            max_workers = config.max_workers,
+            "Starting parallel replication loop"
+        );
+
+        let semaphore = Arc::new(Semaphore::new(config.max_workers));
+        let on_result = Arc::new(on_result);
+        let config = Arc::new(config);
+
+        loop {
+            let event = match events.recv().await {
+                Some(e) => e,
+                None => {
+                    tracing::info!("Event channel closed, stopping parallel replication loop");
+                    break;
+                }
+            };
+
+            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let coord = coordinator.clone();
+            let h = handler.clone();
+            let c = config.clone();
+            let cb = on_result.clone();
+
+            tokio::spawn(async move {
+                let result = process_event(&coord, event, h.as_ref(), &c).await;
+                cb(result);
+                drop(permit);
+            });
+        }
+
+        tracing::info!("Parallel replication loop stopped");
     }
 
     /// Process the next sync event.
