@@ -9,7 +9,9 @@ use super::{
 };
 use crate::commands::client::http_client::HttpClient;
 use crate::commands::client::ClientContext;
-use crate::commands::client::{escape_graphql_string, get_data_from_args, validate_identifier};
+use crate::commands::client::{
+    escape_graphql_string, get_data_from_args, json_to_graphql_input, validate_identifier,
+};
 use crate::error::{Error, Result};
 
 impl DocumentCreateArgs {
@@ -22,7 +24,7 @@ impl DocumentCreateArgs {
         let data = get_data_from_args(&self.document, &self.file)?;
         let parsed: JsonValue = serde_json::from_str(&data)?;
 
-        let input_str = serde_json::to_string(&parsed)?;
+        let input_str = json_to_graphql_input(&parsed);
         let query = format!(
             r#"mutation {{ create_{collection}(input: {input}) {{ _docID }} }}"#,
             collection = collection,

@@ -50,6 +50,31 @@ pub fn escape_graphql_string(s: &str) -> String {
     result
 }
 
+/// Convert a JSON value to GraphQL input literal syntax.
+///
+/// GraphQL input objects use unquoted keys: `{name: "Alice", age: 30}`
+/// instead of JSON's `{"name": "Alice", "age": 30}`.
+pub fn json_to_graphql_input(value: &serde_json::Value) -> String {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            let fields: Vec<String> = map
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, json_to_graphql_input(v)))
+                .collect();
+            format!("{{{}}}", fields.join(", "))
+        }
+        Value::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(json_to_graphql_input).collect();
+            format!("[{}]", items.join(", "))
+        }
+        Value::String(s) => format!("\"{}\"", escape_graphql_string(s)),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => "null".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

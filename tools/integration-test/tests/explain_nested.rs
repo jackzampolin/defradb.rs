@@ -70,7 +70,7 @@ async fn explain_nested_execute_test(cluster: TestCluster) {
         .as_str()
         .expect("address 2 _docID");
 
-    // 2 AuthorContact documents (linked to addresses via _addressID)
+    // 2 AuthorContact documents linked to addresses
     // First query for address IDs
     let addresses = client
         .query(r#"query { ContactAddress { _docID city } }"#)
@@ -83,16 +83,16 @@ async fn explain_nested_execute_test(cluster: TestCluster) {
 
     client
         .query(&format!(
-            r#"mutation {{ create_AuthorContact(input: {{cell: "5197212301", email: "john@example.com", address_id: "{addr_id_0}"}}) {{ _docID }} }}"#,
+            r#"mutation {{ create_AuthorContact(input: {{cell: "5197212301", email: "john@example.com", _addressID: "{addr_id_0}"}}) {{ _docID }} }}"#,
         ))
         .expect("create contact 1");
     client
         .query(&format!(
-            r#"mutation {{ create_AuthorContact(input: {{cell: "5197212302", email: "cornelia@example.com", address_id: "{addr_id_1}"}}) {{ _docID }} }}"#,
+            r#"mutation {{ create_AuthorContact(input: {{cell: "5197212302", email: "cornelia@example.com", _addressID: "{addr_id_1}"}}) {{ _docID }} }}"#,
         ))
         .expect("create contact 2");
 
-    // 2 Author documents (linked to contacts via _contactID)
+    // 2 Author documents linked to contacts
     let contacts = client
         .query(r#"query { AuthorContact { _docID email } }"#)
         .expect("query contacts");
@@ -102,12 +102,12 @@ async fn explain_nested_execute_test(cluster: TestCluster) {
 
     client
         .query(&format!(
-            r#"mutation {{ create_Author(input: {{name: "John Grisham", age: 65, verified: true, contact_id: "{contact_id_0}"}}) {{ _docID }} }}"#,
+            r#"mutation {{ create_Author(input: {{name: "John Grisham", age: 65, verified: true, _contactID: "{contact_id_0}"}}) {{ _docID }} }}"#,
         ))
         .expect("create author 1");
     client
         .query(&format!(
-            r#"mutation {{ create_Author(input: {{name: "Cornelia Funke", age: 62, verified: false, contact_id: "{contact_id_1}"}}) {{ _docID }} }}"#,
+            r#"mutation {{ create_Author(input: {{name: "Cornelia Funke", age: 62, verified: false, _contactID: "{contact_id_1}"}}) {{ _docID }} }}"#,
         ))
         .expect("create author 2");
 

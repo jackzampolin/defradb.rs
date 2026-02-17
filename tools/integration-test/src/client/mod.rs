@@ -91,7 +91,11 @@ impl DefraClient {
     /// Create a document via `client collection create --name <n> '<json>'`.
     pub fn collection_create(&self, name: &str, doc: &str) -> Result<Value> {
         let out = self.exec(&["client", "collection", "create", "--name", name, doc])?;
-        serde_json::from_str(&out).context("failed to parse collection_create output")
+        let trimmed = out.trim();
+        if trimmed.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(trimmed).context("failed to parse collection_create output")
     }
 
     /// Get a document via `client collection get --name <n> <id>`.
@@ -116,13 +120,7 @@ impl DefraClient {
     /// List collections via `client collection list`.
     pub fn collection_list(&self) -> Result<Vec<String>> {
         let out = self.exec(&["client", "collection", "list"])?;
-        let val: Value =
-            serde_json::from_str(&out).context("failed to parse collection_list output")?;
-        let arr = val.as_array().context("collection_list not an array")?;
-        Ok(arr
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect())
+        Self::parse_collection_list(&out)
     }
 
     /// Get P2P node info via `client p2p info`.
@@ -377,6 +375,26 @@ impl DefraClient {
     pub fn tx_create_concurrent(&self) -> Result<String> {
         let out = self.exec(&["client", "tx", "create", "--concurrent"])?;
         Self::parse_tx_id(&out)
+    }
+
+    /// Parse `collection list` output.
+    ///
+    /// Handles both JSON array format and line-separated plain text.
+    fn parse_collection_list(output: &str) -> Result<Vec<String>> {
+        let trimmed = output.trim();
+        if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+            if let Some(arr) = val.as_array() {
+                return Ok(arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect());
+            }
+        }
+        Ok(trimmed
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect())
     }
 
     fn parse_tx_id(output: &str) -> Result<String> {
@@ -984,13 +1002,7 @@ impl DefraClient {
     /// List collections with identity.
     pub fn collection_list_with_identity(&self, hex_key: &str) -> Result<Vec<String>> {
         let out = self.exec_with_identity(hex_key, &["client", "collection", "list"])?;
-        let val: Value =
-            serde_json::from_str(&out).context("failed to parse collection_list output")?;
-        let arr = val.as_array().context("collection_list not an array")?;
-        Ok(arr
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect())
+        Self::parse_collection_list(&out)
     }
 
     /// Describe a collection with identity.
@@ -1013,7 +1025,11 @@ impl DefraClient {
             hex_key,
             &["client", "collection", "create", "--name", name, doc],
         )?;
-        serde_json::from_str(&out).context("failed to parse collection_create output")
+        let trimmed = out.trim();
+        if trimmed.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(trimmed).context("failed to parse collection_create output")
     }
 
     /// Delete a document with identity.

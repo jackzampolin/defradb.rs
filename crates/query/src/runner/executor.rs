@@ -100,13 +100,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
-        // Resolve effective identity: request identity takes precedence over default
-        let identity = self.resolve_identity(request.identity);
-
-        // NAC check: enforce at query level (returns GraphQL error, not HTTP 401)
-        if let Some(denial) = check_nac(self, &identity, &parsed).await {
+        // NAC check uses the raw request identity (not default fallback).
+        // The default_identity is for document ACP, not node access control.
+        if let Some(denial) = check_nac(self, &request.identity, &parsed).await {
             return denial;
         }
+
+        // Resolve effective identity: request identity takes precedence over default
+        let identity = self.resolve_identity(request.identity);
 
         // Route to appropriate handler based on operation type
         // Pass identity and variables through for ACP permission checks and variable substitution
@@ -231,13 +232,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
-        // Resolve effective identity: request identity takes precedence over default
-        let identity = self.resolve_identity(request.identity);
-
-        // NAC check: enforce at query level (returns GraphQL error, not HTTP 401)
-        if let Some(denial) = check_nac(self, &identity, &parsed).await {
+        // NAC check uses the raw request identity (not default fallback).
+        if let Some(denial) = check_nac(self, &request.identity, &parsed).await {
             return denial;
         }
+
+        // Resolve effective identity: request identity takes precedence over default
+        let identity = self.resolve_identity(request.identity);
 
         // Route to appropriate handler based on operation type
         let result = match parsed {

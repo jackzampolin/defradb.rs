@@ -41,7 +41,7 @@ pub use view::ViewArgs;
 use crate::config::Config;
 use crate::error::{Error, Result};
 
-pub use validation::{escape_graphql_string, validate_identifier};
+pub use validation::{escape_graphql_string, json_to_graphql_input, validate_identifier};
 
 /// Client context passed to all subcommands
 #[derive(Debug, Clone)]

@@ -25,15 +25,20 @@ async fn parallel_truncate_test(cluster: TestCluster) {
         client
             .query(&format!(
                 r#"mutation {{ create_ItemB(input: {{label: "b{}", count: {}}}) {{ _docID }} }}"#,
-                i, i * 10
+                i,
+                i * 10
             ))
             .unwrap_or_else(|e| panic!("failed to create ItemB doc {}: {}", i, e));
     }
 
     // Verify documents exist
-    let data_a = client.query("query { ItemA { name } }").expect("query ItemA");
+    let data_a = client
+        .query("query { ItemA { name } }")
+        .expect("query ItemA");
     assert_eq!(data_a["ItemA"].as_array().unwrap().len(), 5);
-    let data_b = client.query("query { ItemB { label } }").expect("query ItemB");
+    let data_b = client
+        .query("query { ItemB { label } }")
+        .expect("query ItemB");
     assert_eq!(data_b["ItemB"].as_array().unwrap().len(), 5);
 
     // Truncate both collections (sequentially — the CLI is synchronous)

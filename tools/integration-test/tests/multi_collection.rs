@@ -28,18 +28,78 @@ async fn many_collections_field_ids_test(cluster: TestCluster) {
 
     // Insert a document into each collection and query it back
     let collections = [
-        ("Alpha", r#"mutation { create_Alpha(input: {name: "a", value: 1}) { _docID name value } }"#, "name", "a"),
-        ("Bravo", r#"mutation { create_Bravo(input: {title: "b", count: 2}) { _docID title count } }"#, "title", "b"),
-        ("Charlie", r#"mutation { create_Charlie(input: {label: "c", score: 3.0}) { _docID label } }"#, "label", "c"),
-        ("Delta", r#"mutation { create_Delta(input: {tag: "d", amount: 4}) { _docID tag amount } }"#, "tag", "d"),
-        ("Echo", r#"mutation { create_Echo(input: {desc: "e", priority: 5}) { _docID desc priority } }"#, "desc", "e"),
-        ("Foxtrot", r#"mutation { create_Foxtrot(input: {code: "f", level: 6}) { _docID code level } }"#, "code", "f"),
-        ("Golf", r#"mutation { create_Golf(input: {memo: "g", rank: 7}) { _docID memo rank } }"#, "memo", "g"),
-        ("Hotel", r#"mutation { create_Hotel(input: {note: "h", weight: 8.0}) { _docID note } }"#, "note", "h"),
-        ("India", r#"mutation { create_India(input: {body: "i", height: 9}) { _docID body height } }"#, "body", "i"),
-        ("Juliet", r#"mutation { create_Juliet(input: {text: "j", width: 10}) { _docID text width } }"#, "text", "j"),
-        ("Kilo", r#"mutation { create_Kilo(input: {summary: "k", depth: 11}) { _docID summary depth } }"#, "summary", "k"),
-        ("Lima", r#"mutation { create_Lima(input: {content: "l", length: 12}) { _docID content length } }"#, "content", "l"),
+        (
+            "Alpha",
+            r#"mutation { create_Alpha(input: {name: "a", value: 1}) { _docID name value } }"#,
+            "name",
+            "a",
+        ),
+        (
+            "Bravo",
+            r#"mutation { create_Bravo(input: {title: "b", count: 2}) { _docID title count } }"#,
+            "title",
+            "b",
+        ),
+        (
+            "Charlie",
+            r#"mutation { create_Charlie(input: {label: "c", score: 3.0}) { _docID label } }"#,
+            "label",
+            "c",
+        ),
+        (
+            "Delta",
+            r#"mutation { create_Delta(input: {tag: "d", amount: 4}) { _docID tag amount } }"#,
+            "tag",
+            "d",
+        ),
+        (
+            "Echo",
+            r#"mutation { create_Echo(input: {desc: "e", priority: 5}) { _docID desc priority } }"#,
+            "desc",
+            "e",
+        ),
+        (
+            "Foxtrot",
+            r#"mutation { create_Foxtrot(input: {code: "f", level: 6}) { _docID code level } }"#,
+            "code",
+            "f",
+        ),
+        (
+            "Golf",
+            r#"mutation { create_Golf(input: {memo: "g", rank: 7}) { _docID memo rank } }"#,
+            "memo",
+            "g",
+        ),
+        (
+            "Hotel",
+            r#"mutation { create_Hotel(input: {note: "h", weight: 8.0}) { _docID note } }"#,
+            "note",
+            "h",
+        ),
+        (
+            "India",
+            r#"mutation { create_India(input: {body: "i", height: 9}) { _docID body height } }"#,
+            "body",
+            "i",
+        ),
+        (
+            "Juliet",
+            r#"mutation { create_Juliet(input: {text: "j", width: 10}) { _docID text width } }"#,
+            "text",
+            "j",
+        ),
+        (
+            "Kilo",
+            r#"mutation { create_Kilo(input: {summary: "k", depth: 11}) { _docID summary depth } }"#,
+            "summary",
+            "k",
+        ),
+        (
+            "Lima",
+            r#"mutation { create_Lima(input: {content: "l", length: 12}) { _docID content length } }"#,
+            "content",
+            "l",
+        ),
     ];
 
     for (col_name, mutation, _, _) in &collections {
