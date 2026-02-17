@@ -207,6 +207,7 @@ impl CompositeDAG {
         rw: &mut dyn ReaderWriter,
         field_name: &str,
         field_delta: &FieldDelta,
+        is_create: bool,
     ) -> Result<MergeResult> {
         let crdt_type = self
             .field_managers
@@ -216,29 +217,32 @@ impl CompositeDAG {
         match (crdt_type, field_delta) {
             (FieldCrdtType::Lww, FieldDelta::Lww { priority, data }) => {
                 let value_key = self.build_value_key(field_name);
-                let current_priority = self.get_field_priority(rw, field_name).await?;
 
-                // LWW conflict resolution: higher priority wins
-                match priority.cmp(&current_priority) {
-                    std::cmp::Ordering::Less => {
-                        return Ok(MergeResult::RejectedLowerPriority {
-                            current: current_priority,
-                            incoming: *priority,
-                        });
-                    }
-                    std::cmp::Ordering::Equal => {
-                        // Same priority - use lexicographic tie-breaking
-                        let current_value = rw
-                            .get(&value_key)
-                            .await
-                            .map_err(|e| Error::Storage(e.to_string()))?
-                            .unwrap_or_default();
-                        if data.as_slice() <= current_value.as_slice() {
-                            return Ok(MergeResult::RejectedTieBreak);
+                if !is_create {
+                    let current_priority = self.get_field_priority(rw, field_name).await?;
+
+                    // LWW conflict resolution: higher priority wins
+                    match priority.cmp(&current_priority) {
+                        std::cmp::Ordering::Less => {
+                            return Ok(MergeResult::RejectedLowerPriority {
+                                current: current_priority,
+                                incoming: *priority,
+                            });
                         }
-                    }
-                    std::cmp::Ordering::Greater => {
-                        // Higher priority - proceed to update
+                        std::cmp::Ordering::Equal => {
+                            // Same priority - use lexicographic tie-breaking
+                            let current_value = rw
+                                .get(&value_key)
+                                .await
+                                .map_err(|e| Error::Storage(e.to_string()))?
+                                .unwrap_or_default();
+                            if data.as_slice() <= current_value.as_slice() {
+                                return Ok(MergeResult::RejectedTieBreak);
+                            }
+                        }
+                        std::cmp::Ordering::Greater => {
+                            // Higher priority - proceed to update
+                        }
                     }
                 }
 
@@ -271,30 +275,35 @@ impl CompositeDAG {
                 nonce_key.extend_from_slice(b"/nonces/");
                 nonce_key.extend_from_slice(&nonce.to_be_bytes());
 
-                if rw
-                    .has(&nonce_key)
-                    .await
-                    .map_err(|e| Error::Storage(e.to_string()))?
+                if !is_create
+                    && rw
+                        .has(&nonce_key)
+                        .await
+                        .map_err(|e| Error::Storage(e.to_string()))?
                 {
                     return Ok(MergeResult::SkippedAlreadyApplied { nonce: *nonce });
                 }
 
                 // Apply increment
-                let current = match rw
-                    .get(&value_key)
-                    .await
-                    .map_err(|e| Error::Storage(e.to_string()))?
-                {
-                    Some(bytes) => {
-                        if bytes.len() != 8 {
-                            return Err(Error::MergeError(format!(
-                                "invalid counter data length for field '{}': expected 8 bytes, got {}",
-                                field_name, bytes.len()
-                            )));
+                let current = if is_create {
+                    0
+                } else {
+                    match rw
+                        .get(&value_key)
+                        .await
+                        .map_err(|e| Error::Storage(e.to_string()))?
+                    {
+                        Some(bytes) => {
+                            if bytes.len() != 8 {
+                                return Err(Error::MergeError(format!(
+                                    "invalid counter data length for field '{}': expected 8 bytes, got {}",
+                                    field_name, bytes.len()
+                                )));
+                            }
+                            i64::from_be_bytes(bytes[..8].try_into().unwrap())
                         }
-                        i64::from_be_bytes(bytes[..8].try_into().unwrap())
+                        None => 0,
                     }
-                    None => 0,
                 };
 
                 if data.len() != 8 {
@@ -318,29 +327,34 @@ impl CompositeDAG {
             }
             (_, FieldDelta::Delete { priority }) => {
                 let value_key = self.build_value_key(field_name);
-                let current_priority = self.get_field_priority(rw, field_name).await?;
 
-                // Delete conflict resolution: higher priority wins
-                // On tie, non-empty value wins over deletion (empty < any value lexicographically)
-                match priority.cmp(&current_priority) {
-                    std::cmp::Ordering::Less => {
-                        return Ok(MergeResult::RejectedLowerPriority {
-                            current: current_priority,
-                            incoming: *priority,
-                        });
-                    }
-                    std::cmp::Ordering::Equal => {
-                        // Same priority - deletion (empty) loses to any existing value
-                        let current_value = rw
-                            .get(&value_key)
-                            .await
-                            .map_err(|e| Error::Storage(e.to_string()))?;
-                        if current_value.is_some() && !current_value.as_ref().unwrap().is_empty() {
-                            return Ok(MergeResult::RejectedTieBreak);
+                if !is_create {
+                    let current_priority = self.get_field_priority(rw, field_name).await?;
+
+                    // Delete conflict resolution: higher priority wins
+                    // On tie, non-empty value wins over deletion (empty < any value lexicographically)
+                    match priority.cmp(&current_priority) {
+                        std::cmp::Ordering::Less => {
+                            return Ok(MergeResult::RejectedLowerPriority {
+                                current: current_priority,
+                                incoming: *priority,
+                            });
                         }
-                    }
-                    std::cmp::Ordering::Greater => {
-                        // Higher priority - proceed to delete
+                        std::cmp::Ordering::Equal => {
+                            // Same priority - deletion (empty) loses to any existing value
+                            let current_value = rw
+                                .get(&value_key)
+                                .await
+                                .map_err(|e| Error::Storage(e.to_string()))?;
+                            if current_value.is_some()
+                                && !current_value.as_ref().unwrap().is_empty()
+                            {
+                                return Ok(MergeResult::RejectedTieBreak);
+                            }
+                        }
+                        std::cmp::Ordering::Greater => {
+                            // Higher priority - proceed to delete
+                        }
                     }
                 }
 
@@ -366,7 +380,7 @@ impl ReplicatedData for CompositeDAG {
     async fn merge(
         &self,
         rw: &mut dyn ReaderWriter,
-        _ctx: &Context,
+        ctx: &Context,
         delta: &dyn Delta,
     ) -> Result<MergeResult> {
         // Downcast to CompositeDelta
@@ -428,7 +442,9 @@ impl ReplicatedData for CompositeDAG {
         // Apply each field delta (now that all fields are pre-validated)
         let mut any_applied = false;
         for (field_name, field_delta) in &composite_delta.field_deltas {
-            let result = self.apply_field_delta(rw, field_name, field_delta).await?;
+            let result = self
+                .apply_field_delta(rw, field_name, field_delta, ctx.is_create)
+                .await?;
             if result.was_applied() {
                 any_applied = true;
             }

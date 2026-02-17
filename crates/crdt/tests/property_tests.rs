@@ -45,6 +45,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let delta1 = LwwDelta::new(
@@ -95,6 +96,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let delta = LwwDelta::new(
@@ -135,6 +137,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let delta = LwwDelta::new(
@@ -189,6 +192,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let delta1 = CounterDelta::new_int64(
@@ -241,6 +245,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let delta = CounterDelta::new_int64(
@@ -281,6 +286,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let delta = LwwDelta::new(
@@ -310,6 +316,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let delta = LwwDelta::new(
@@ -346,6 +353,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let store = MemoryStore::new();
@@ -400,6 +408,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let store = MemoryStore::new();
@@ -444,6 +453,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let store = MemoryStore::new();
@@ -499,6 +509,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let delta1 = LwwDelta::new(
@@ -568,6 +579,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let delta1 = CounterDelta::new_int64(
@@ -642,6 +654,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let delta1 = CounterDelta::new_int64(
@@ -697,6 +710,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let delta1 = CounterDelta::new_int64(
@@ -772,6 +786,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let delta1 = CounterDelta::new_float64(
@@ -825,6 +840,7 @@ proptest! {
             let ctx = Context {
                 doc_id: DocId::new("doc1"),
                 schema_version: "v1".to_string(),
+                is_create: false,
             };
 
             let delta = CounterDelta::new_float64(
@@ -862,6 +878,7 @@ async fn test_lww_priority_ordering_exhaustive() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let store = MemoryStore::new();
@@ -904,6 +921,7 @@ async fn test_lww_tie_breaking_lexicographic() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let store = MemoryStore::new();
@@ -946,6 +964,7 @@ async fn test_counter_multiple_nonces() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let store = MemoryStore::new();
@@ -984,6 +1003,7 @@ async fn test_counter_nonce_replay_protection() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let store = MemoryStore::new();
@@ -1023,6 +1043,7 @@ async fn test_composite_multi_field_atomicity() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let store = MemoryStore::new();
@@ -1061,6 +1082,7 @@ async fn test_lww_empty_value_handling() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let store = MemoryStore::new();
@@ -1091,6 +1113,7 @@ async fn test_float64_counter_basic() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let store = MemoryStore::new();
@@ -1139,6 +1162,7 @@ async fn test_counter_decrement_not_allowed() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let store = MemoryStore::new();
@@ -1172,6 +1196,7 @@ async fn test_composite_doc_id_mismatch() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let store = MemoryStore::new();
@@ -1195,6 +1220,7 @@ async fn test_composite_schema_version_mismatch() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let store = MemoryStore::new();
@@ -1218,6 +1244,7 @@ async fn test_lww_large_payload() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let store = MemoryStore::new();

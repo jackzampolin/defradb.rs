@@ -24,6 +24,7 @@ async fn test_composite_multiple_fields() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     // Create composite delta with multiple fields
@@ -77,6 +78,7 @@ async fn test_composite_field_type_mismatch_lww_to_counter() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     // Try to apply Counter delta to LWW field
@@ -112,6 +114,7 @@ async fn test_composite_field_type_mismatch_counter_to_lww() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     // Try to apply LWW delta to Counter field
@@ -145,6 +148,7 @@ async fn test_composite_unknown_field() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     // Try to apply delta to unknown field
@@ -176,6 +180,7 @@ async fn test_composite_schema_evolution_type_change() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     // Apply LWW delta successfully
@@ -227,6 +232,7 @@ async fn test_composite_doc_id_mismatch() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     // Delta with wrong doc ID
@@ -260,6 +266,7 @@ async fn test_composite_schema_version_mismatch() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     // Delta with wrong schema version

@@ -19,6 +19,7 @@ async fn test_lww_higher_priority_wins() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     // First write with priority 10
@@ -58,6 +59,7 @@ async fn test_lww_lower_priority_ignored() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -96,6 +98,7 @@ async fn test_lww_same_priority_lexicographic() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -135,6 +138,7 @@ async fn test_lww_deletion() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -175,6 +179,7 @@ async fn test_lww_empty_data_tie_breaking() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -231,6 +236,7 @@ async fn test_lww_deletion_resurrection_with_priority() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -364,6 +370,7 @@ async fn test_lww_wrong_delta_type() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     // Try to merge a CounterDelta into an LWW register
@@ -394,6 +401,7 @@ async fn test_lww_merge_result_applied() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let delta = LwwDelta::new(
@@ -418,6 +426,7 @@ async fn test_lww_merge_result_rejected_lower_priority() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -461,6 +470,7 @@ async fn test_lww_merge_result_rejected_tie_break() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -499,6 +509,7 @@ async fn test_lww_priority_zero() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -539,6 +550,7 @@ async fn test_lww_priority_max() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -578,6 +590,7 @@ async fn test_lww_field_name_mismatch() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     // Delta with wrong field name
@@ -607,6 +620,7 @@ async fn test_lww_schema_version_mismatch() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     // Delta with wrong schema version
@@ -664,6 +678,7 @@ async fn test_lww_large_payload() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
@@ -720,6 +735,7 @@ async fn test_lww_large_payload_priority_rejected() {
     let ctx = Context {
         doc_id: DocId::new("doc1"),
         schema_version: "v1".to_string(),
+        is_create: false,
     };
 
     let mut txn = store.new_txn(false).await.unwrap();
