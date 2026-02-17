@@ -1,17 +1,19 @@
 # Development Principles
 
-## 0. The North Star: Go Behavioral Compatibility
+## 0. The North Star: 1.0 Feature Parity with Go
 
-**This Rust implementation must behave identically to Go DefraDB.**
+**defradb.rs ships 1.0 simultaneously with Go DefraDB (end of February 2026).**
 
-Every feature is validated against Go via the FFI test suite. If Rust and Go produce different results, the Rust implementation is wrong.
+Go's `develop` branch is the upstream reference. We track it continuously — pulling changes, identifying new features, and implementing them in Rust. The FFI test phase bootstrapped the implementation; now we validate with Rust-native integration tests that exercise the full CLI, HTTP API, and P2P stack.
 
-### What "Compatible" Means
+### What "1.0 Parity" Means
 
 - Same GraphQL query → Same results (field values, ordering, errors)
 - Same document content → Same document ID (content-addressed CIDs)
 - Same CRDT operations → Same merged state (convergence)
 - Same P2P protocol → Nodes can discover, connect, and replicate
+- Same CLI commands → Same behavior and output
+- Same HTTP API → Same wire format and response structure
 
 ---
 
@@ -60,10 +62,11 @@ crates/
 ├── p2p/             # P2P networking
 ├── query/           # Query engine
 ├── schema/          # Schema validation
-└── storage/         # Storage backends
+└── storage/         # Storage backends (redb, fjall, rocksdb, memory)
 
 tools/
-└── ffi-test/        # FFI compatibility testing tool
+├── ffi-test/          # FFI compatibility testing against Go
+└── integration-test/  # Rust-native integration tests (primary validation)
 ```
 
 ### File Size Guidelines
@@ -93,52 +96,78 @@ tools/
 ## 7. Git Worktree Workflow
 
 ```bash
-cd ../defradb.rs-crdt     # Work on CRDT subsystem
-cd ../defradb.rs-storage  # Work on storage subsystem
+cd ../defradb.rs-foo     # Work on feature foo
+cd ../defradb.rs-bar     # Work on feature bar
 ```
 
 Each worktree is isolated, no branch switching overhead.
 
 ## Common Commands
 
-### FFI Compatibility Testing
+### Integration Tests (Primary Validation)
 
 ```bash
-# Install the tool (once)
-cargo install --path tools/ffi-test
+# Run all integration tests
+cargo test -p integration-test
 
-# Run tests
-ffi-test run query/simple          # Package tests
-ffi-test run query                  # All query/* packages
-ffi-test run query/simple -t Test  # Specific test pattern
-ffi-test run query/simple --skip-build  # Skip rebuild
+# Run specific test file
+cargo test -p integration-test --test smoke
+cargo test -p integration-test --test replication
+cargo test -p integration-test --test acp_basic
 
-# View status
-ffi-test status                    # Current worktree
-ffi-test status --all              # All worktrees
-
-# Manage worktrees
-ffi-test worktree create foo       # Create paired Rust+Go worktrees
-ffi-test worktree list             # List all pairs
-ffi-test worktree remove foo       # Remove both
+# Run specific test
+cargo test -p integration-test --test smoke -- test_name
 ```
+
+Integration tests live in `tools/integration-test/tests/` and exercise the full
+Rust node via CLI + HTTP API. Test areas:
+
+| Area | Files |
+|------|-------|
+| Core | smoke, document_lifecycle, transactions, collection_management |
+| Query | view, lens, sdl_generate, index_management |
+| ACP | acp_basic, acp_multi_identity, acp_multi_role, acp_revoke_lifecycle, acp_node_access, acp_p2p |
+| NAC | nac_document_acp, cross_compartment_isolation, policy_evolution |
+| P2P | p2p_document, p2p_sync, p2p_management, p2p_trust_boundary, replication, replication_advanced |
+| Encryption | encrypted_index, encrypted_acp, block_verify |
+| Identity | identity_lifecycle, identity_types, node_identity, keyring_lifecycle |
+| Backup | backup_restore, dump, purge |
+| SourceHub | sourcehub_smoke, sourcehub_compartments, sourcehub_p2p_acp, sourcehub_policy_lifecycle |
 
 ### Rust Commands
 
 ```bash
-cargo test                         # Run all tests
+cargo test                         # Run all unit tests
 cargo test -p crdt                 # Test specific crate
 cargo clippy --all -- -D warnings  # Lint
 cargo fmt --all                    # Format
 cargo build --release              # Build release
 ```
 
+### Tracking Go Upstream
+
+```bash
+# Go repo location
+cd /Users/johnzampolin/go/src/github.com/sourcenetwork/defradb
+
+# Check what's landed on develop
+git fetch origin develop
+git log origin/develop --oneline -20
+
+# Compare with our last sync point
+git log origin/develop --oneline --since="1 week ago"
+```
+
+The Go repo has two remotes:
+- `origin` → `sourcenetwork/defradb` (upstream)
+- `fork` → `jackzampolin/defradb` (our fork, `jack/ffi-rust-compat` branch)
+
 ### Git Worktrees
 
 ```bash
-git worktree list                  # List worktrees
-git worktree add ../defradb.rs-foo -b ffi/foo  # Create worktree
-git worktree remove ../defradb.rs-foo          # Remove worktree
+git worktree list                                  # List worktrees
+git worktree add ../defradb.rs-foo -b feat/foo     # Create worktree
+git worktree remove ../defradb.rs-foo              # Remove worktree
 ```
 
 ## Before Committing
@@ -146,70 +175,23 @@ git worktree remove ../defradb.rs-foo          # Remove worktree
 1. `cargo test` passes
 2. `cargo clippy --all -- -D warnings` clean
 3. `cargo fmt --all` applied
-4. If touching P2P/query/schema/CRDT: FFI tests pass
+4. If touching core behavior: `cargo test -p integration-test` passes
 
 ## ACP / Searchable Encryption
 
 - When fixing ACP (Access Control Policy) filtering, always verify BOTH User queries AND Commits queries are filtered. These are two separate code paths that both require ACP checks.
-- After fixing any ACP-related code, run the full ACP test suite (all 36+ tests) not just the immediately failing one.
+- After fixing any ACP-related code, run the full ACP test suite not just the immediately failing one.
 
-## Shinzo Benchmarking (this branch: `shinzo/memory-leak`)
+## Storage Backends
 
-### Tracking
+Four backends available, selectable via `--store` flag or `STORE` env var:
 
-- **Issue #419**: Persistent scratch pad. Post a comment after every ~1000-block run with metrics.
-- **PR #418**: Push code fixes to this branch.
-
-### Running a 1000-block benchmark
-
-```bash
-# 1. Always start clean
-./scripts/shinzo-test.sh clean
-
-# 2. Build release (required after code changes)
-cargo build --release
-
-# 3. Start defra + indexer (uses random ports, logs to /tmp/shinzo-test/)
-./scripts/shinzo-test.sh
-
-# 4. In another terminal / background, monitor RSS/CPU/disk every 5s
-./scripts/shinzo-test.sh monitor
-```
-
-The script picks random free ports, so no conflicts. Everything lives under `/tmp/shinzo-test/`.
-
-### Monitoring a run
-
-- `./scripts/shinzo-test.sh status` — ports, PIDs, latest block height, disk
-- `./scripts/shinzo-test.sh logs defra` — tail defra log
-- `./scripts/shinzo-test.sh logs indexer` — tail indexer log
-- `./scripts/shinzo-test.sh monitor` — live RSS/CPU/disk/block/errors every 5s
-- `./scripts/shinzo-test.sh query '{ Ethereum__Mainnet__Block(limit:1, order:{number:DESC}) { number } }'`
-
-### After a run completes (~1000 blocks)
-
-1. Stop: `./scripts/shinzo-test.sh stop`
-2. Capture final metrics from monitor output and logs
-3. Post a comment on issue #419 with the run results
-4. Save logs: `cp /tmp/shinzo-test/*.log /tmp/shinzo-run-N/`
-5. If a bottleneck was found: fix, rebuild, run again
-
-### Metrics to capture per run
-
-| Metric | Source |
-|--------|--------|
-| RSS start/peak/end | `ps -o rss=` or monitor output |
-| Blocks indexed | Indexer log height delta from start height |
-| Wall time | Timestamps from monitor |
-| Blocks/sec | blocks / wall_time |
-| Disk usage | `du -sh /tmp/shinzo-test/` |
-| Error count | `grep -c ERROR /tmp/shinzo-test/indexer.log` |
-
-### Config knobs
-
-- `CONCURRENCY=N` — concurrent blocks (default 4)
-- `RECEIPT_WORKERS=N` — receipt workers (default 4)
-- `START_HEIGHT_OVERRIDE=N` — start block (default 23700000)
+| Backend | Type | Use Case |
+|---------|------|----------|
+| `redb` | COW B+ tree | Default, single-writer, reliable |
+| `fjall` | LSM-tree | High write throughput, Shinzo indexer |
+| `rocksdb` | LSM-tree | Production, configurable via `ROCKS_*` env vars |
+| `memory` | In-memory | Testing only |
 
 ## Goal
 
