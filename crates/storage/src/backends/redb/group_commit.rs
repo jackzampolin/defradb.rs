@@ -108,8 +108,7 @@ async fn flush_loop(
         let mut failed: Vec<(PendingCommit, Error)> = Vec::new();
 
         for commit in batch {
-            let write_set = commit.changes.keys().cloned().collect();
-            match conflict_tracker.check_and_record(commit.read_version, write_set) {
+            match conflict_tracker.check_and_record(commit.read_version, commit.changes.keys()) {
                 Ok(()) => passed.push(commit),
                 Err(e) => failed.push((commit, e)),
             }

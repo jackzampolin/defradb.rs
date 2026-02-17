@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use redb::{Database, ReadTransaction};
 use std::collections::BTreeMap;
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -320,10 +319,9 @@ impl Txn for RedbTxn {
             }
 
             // Direct commit path: check conflicts eagerly
-            let write_set: HashSet<Vec<u8>> = pending.keys().cloned().collect();
             if let Err(e) = self
                 .conflict_tracker
-                .check_and_record(self.read_version, write_set)
+                .check_and_record(self.read_version, pending.keys())
             {
                 CallbackManager::execute_callbacks(self.callbacks.take_error());
                 CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
