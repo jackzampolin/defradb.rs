@@ -10,7 +10,7 @@ checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
 
 [[package]]
 name = "acp"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "async-lock",
  "async-trait",
@@ -910,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "blockstore"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "cid 0.10.1",
@@ -1212,7 +1212,7 @@ checksum = "c3e64b0cc0439b12df2fa678eae89a1c56a529fd067a9115f7827f1fffd22b32"
 
 [[package]]
 name = "cli"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "acp",
  "anyhow",
@@ -1232,7 +1232,7 @@ dependencies = [
  "getrandom 0.2.14",
  "hex",
  "identity",
- "keyring 0.1.0",
+ "keyring 0.5.0",
  "lens",
  "libipld",
  "libp2p",
@@ -1565,7 +1565,7 @@ dependencies = [
 
 [[package]]
 name = "crdt"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "defra-core",
@@ -1674,7 +1674,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -1910,7 +1910,7 @@ dependencies = [
 
 [[package]]
 name = "datastore"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "async-lock",
  "async-trait",
@@ -1924,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "db"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "acp",
  "async-lock",
@@ -2011,7 +2011,7 @@ dependencies = [
 
 [[package]]
 name = "defra-core"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "defra-http"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "acp",
  "async-stream",
@@ -2057,7 +2057,7 @@ dependencies = [
 
 [[package]]
 name = "defra-wasm"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "cid 0.10.1",
@@ -2270,7 +2270,7 @@ checksum = "0688c2a7f92e427f44895cd63841bff7b29f8d7a1648b9e7e07a4a365b2e1257"
 
 [[package]]
 name = "document"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2491,7 +2491,7 @@ dependencies = [
 
 [[package]]
 name = "events"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "cid 0.10.1",
@@ -2545,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "ffi"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "acp",
  "async-trait",
@@ -3483,7 +3483,7 @@ checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
 name = "identity"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "crypto",
@@ -3914,7 +3914,7 @@ dependencies = [
 
 [[package]]
 name = "keyring"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "josekit",
@@ -3968,7 +3968,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "lens"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5459,7 +5459,7 @@ dependencies = [
 
 [[package]]
 name = "p2p"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "acp",
  "anyhow",
@@ -6076,7 +6076,7 @@ dependencies = [
 
 [[package]]
 name = "query"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "acp",
  "async-graphql",
@@ -6808,7 +6808,7 @@ dependencies = [
 
 [[package]]
 name = "schema"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "cid 0.10.1",
  "defra-core",
@@ -7322,7 +7322,7 @@ dependencies = [
 
 [[package]]
 name = "sourcehub"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "acp",
  "async-trait",
@@ -7393,7 +7393,7 @@ checksum = "d7beae5182595e9a8b683fa98c4317f956c9a2dec3b9716990d20023cc60c766"
 
 [[package]]
 name = "storage"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
