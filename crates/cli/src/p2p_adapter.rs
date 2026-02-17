@@ -132,7 +132,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             .map_err(|e| format!("failed to serialize replicator info: {}", e))?;
         let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
         peerstore
-            .set_replicator(peer_id, &bytes)
+            .create_replicator(peer_id, &bytes)
             .await
             .map_err(|e| format!("failed to persist replicator: {}", e))
     }
@@ -485,7 +485,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     async fn get_replicators(&self) -> Result<Vec<ReplicatorInfo>, String> {
         let p2p_infos = self
             .handle
-            .get_all_replicators()
+            .list_replicators()
             .await
             .map_err(|e| e.to_string())?;
 
@@ -553,12 +553,12 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         // Register replicator (coordinator handles topic auto-subscribe)
         if let Some(ref coordinator) = self.sync_coordinator {
             coordinator
-                .set_replicator(peer_id, collection_cids.clone(), true)
+                .create_replicator(peer_id, collection_cids.clone(), true)
                 .await
                 .map_err(|e| e.to_string())?;
         } else {
             self.handle
-                .set_replicator(peer_id, collection_cids.clone())
+                .create_replicator(peer_id, collection_cids.clone())
                 .await
                 .map_err(|e| e.to_string())?;
         }

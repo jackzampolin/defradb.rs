@@ -153,7 +153,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
                         Ok(kp) => kp,
                         Err(_) => {
                             let kp = libp2p::identity::Keypair::generate_ed25519();
-                            let _ = ps.set_replicator(key_id, &kp.to_protobuf_encoding().unwrap_or_default()).await;
+                            let _ = ps.create_replicator(key_id, &kp.to_protobuf_encoding().unwrap_or_default()).await;
                             kp
                         }
                     }
@@ -161,7 +161,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
                 _ => {
                     let kp = libp2p::identity::Keypair::generate_ed25519();
                     if let Ok(encoded) = kp.to_protobuf_encoding() {
-                        let _ = ps.set_replicator(key_id, &encoded).await;
+                        let _ = ps.create_replicator(key_id, &encoded).await;
                     }
                     kp
                 }
@@ -391,7 +391,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let p2p_state = Arc::new(p2p_state);
 
         let peerstore = Peerstore::new(store.clone());
-        match peerstore.get_all_replicators().await {
+        match peerstore.list_replicators().await {
             Ok(entries) => {
                 tracing::debug!(count = entries.len(), "loading stored replicators");
                 for (peer_id_str, data) in entries {
@@ -399,7 +399,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
                         Ok(info) => {
                             if let Some(peer_id) = info.peer_id() {
                                 tracing::debug!(peer_id = %peer_id, collections = ?info.collections, "restoring replicator");
-                                if let Err(e) = handle.set_replicator(peer_id, info.collections.clone()).await {
+                                if let Err(e) = handle.create_replicator(peer_id, info.collections.clone()).await {
                                     tracing::warn!(error = %e, "failed to restore replicator");
                                     continue;
                                 }

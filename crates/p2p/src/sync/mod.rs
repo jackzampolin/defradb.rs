@@ -47,7 +47,9 @@ mod replication;
 
 pub use broadcaster::{BroadcastResult, Broadcaster};
 pub use collection_store::{NoOpCollectionStorage, P2PCollectionStorage, P2PCollectionStore};
-pub use coordinator::{LoadReplicatorsResult, PushFailure, SetReplicatorResult, SyncCoordinator};
+pub use coordinator::{
+    CreateReplicatorResult, LoadReplicatorsResult, PushFailure, SyncCoordinator,
+};
 pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, SyncPlan};
 pub use head_provider::{DocumentHeadProvider, NoOpHeadProvider};
 pub use manager::{SyncConfig, SyncEvent, SyncManager};

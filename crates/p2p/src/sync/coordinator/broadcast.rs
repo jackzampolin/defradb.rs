@@ -53,7 +53,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         doc_id: &str,
         collection_id: &str,
     ) {
-        let replicators = match self.host.get_all_replicators().await {
+        let replicators = match self.host.list_replicators().await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to get replicators for push");
@@ -150,7 +150,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         doc_id: &str,
         collection_id: &str,
     ) {
-        let replicators = match self.host.get_all_replicators().await {
+        let replicators = match self.host.list_replicators().await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to get replicators for push");

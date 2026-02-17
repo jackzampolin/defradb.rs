@@ -42,7 +42,7 @@ pub unsafe extern "C" fn p2p_retry_replicators(node_ptr: usize) -> FfiResult {
             rt.block_on(async {
                 let replicators = p2p
                     .handle
-                    .get_all_replicators()
+                    .list_replicators()
                     .await
                     .map_err(|e| format!("failed to get replicators: {}", e))?;
 

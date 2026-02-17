@@ -100,7 +100,7 @@ pub enum HostCommand {
     ///
     /// Adds the peer as a replicator for the specified collections.
     /// If the peer is already a replicator, updates their collections.
-    SetReplicator {
+    CreateReplicator {
         peer_id: PeerId,
         collections: Vec<String>,
         response: oneshot::Sender<Result<()>>,
@@ -125,7 +125,7 @@ pub enum HostCommand {
     },
 
     /// Get all registered replicators.
-    GetAllReplicators {
+    ListReplicators {
         response: oneshot::Sender<Vec<ReplicatorInfo>>,
     },
 

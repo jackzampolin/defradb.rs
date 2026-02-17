@@ -30,7 +30,7 @@ async fn test_replicator_management() {
 
     // Set replicator
     handle
-        .set_replicator(peer_id, collections.clone())
+        .create_replicator(peer_id, collections.clone())
         .await
         .unwrap();
 
@@ -46,7 +46,7 @@ async fn test_replicator_management() {
     assert!(replicators.is_replicator("posts", &peer_id));
 
     // Get all replicators
-    let all = handle.get_all_replicators().await.unwrap();
+    let all = handle.list_replicators().await.unwrap();
     assert_eq!(all.len(), 1);
 
     // Delete replicator

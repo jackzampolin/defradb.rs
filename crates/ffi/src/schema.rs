@@ -122,7 +122,7 @@ pub unsafe extern "C" fn get_collections(
 
     ffi_async!(rt, {
         // Return all collection versions from the system store (active + inactive + placeholders).
-        // The Go wrapper handles IncludeInactive filtering on its side.
+        // The Go wrapper handles GetInactive filtering on its side.
         let collections = database
             .get_all_collection_versions()
             .await

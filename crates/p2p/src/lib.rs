@@ -92,9 +92,9 @@ pub use topics::{DefraTopic, DOC_SYNC_TOPIC, ENCRYPTION_TOPIC};
 
 // Re-export sync types
 pub use sync::{
-    Broadcaster, DagSync, DagSyncConfig, DagSyncState, LoadReplicatorsResult, NeedsFetchData,
-    PeerStateTracker, ProcessQueue, SetReplicatorResult, SyncConfig, SyncCoordinator, SyncEvent,
-    SyncManager, SyncPlan,
+    Broadcaster, CreateReplicatorResult, DagSync, DagSyncConfig, DagSyncState,
+    LoadReplicatorsResult, NeedsFetchData, PeerStateTracker, ProcessQueue, SyncConfig,
+    SyncCoordinator, SyncEvent, SyncManager, SyncPlan,
 };
 
 // Re-export bitswap types

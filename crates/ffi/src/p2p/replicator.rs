@@ -69,13 +69,13 @@ pub unsafe extern "C" fn p2p_create_replicator(
                     .map(|(_, id)| id)
                     .collect();
 
-                p2p.handle.set_replicator(parsed.peer_id, collection_cids.clone()).await
+                p2p.handle.create_replicator(parsed.peer_id, collection_cids.clone()).await
                     .map_err(|e| format!("failed to set replicator: {}", e))?;
 
                 let info = ReplicatorInfo::new(parsed.peer_id, collection_cids);
                 if let Ok(bytes) = info.to_bytes() {
                     let peerstore = Peerstore::new(db.store().clone());
-                    match peerstore.set_replicator(&parsed.peer_id.to_string(), &bytes).await {
+                    match peerstore.create_replicator(&parsed.peer_id.to_string(), &bytes).await {
                         Ok(()) => { tracing::debug!(peer_id = %parsed.peer_id, bytes = bytes.len(), "replicator persisted"); }
                         Err(e) => { tracing::warn!(error = %e, "failed to persist replicator"); }
                     }
@@ -175,7 +175,7 @@ pub unsafe extern "C" fn p2p_delete_replicator(
                     tracing::warn!(peer_id = %peer_id, error = %e, "Failed to delete replicator from storage");
                 }
 
-                let remaining_replicators = p2p.handle.get_all_replicators().await.unwrap_or_default();
+                let remaining_replicators = p2p.handle.list_replicators().await.unwrap_or_default();
                 for collection_id in &removed_collections {
                     let still_needed = remaining_replicators.iter().any(|r| r.collections.contains(collection_id));
                     if !still_needed {
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn p2p_list_replicators(
             let p2p = match &state.p2p { Some(p2p) => p2p, None => return Err("no p2p system configured".to_string()) };
 
             rt.block_on(async {
-                let replicators = p2p.handle.get_all_replicators().await
+                let replicators = p2p.handle.list_replicators().await
                     .map_err(|e| format!("failed to get replicators: {}", e))?;
 
                 let response: Vec<serde_json::Value> = replicators.into_iter().map(|r| {

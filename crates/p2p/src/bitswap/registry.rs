@@ -91,7 +91,7 @@ impl ReplicatorRegistry {
     /// Get all registered replicators as ReplicatorInfo.
     ///
     /// This is used for persistence - exporting current state to storage.
-    pub fn get_all_replicator_info(&self) -> Vec<ReplicatorInfo> {
+    pub fn list_replicator_info(&self) -> Vec<ReplicatorInfo> {
         let replicators = self.replicators.read();
 
         // Build a map of peer_id -> collections
@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn test_replicator_registry_get_all_replicator_info() {
+    fn test_replicator_registry_list_replicator_info() {
         let registry = ReplicatorRegistry::new();
         let peer1 = PeerId::random();
         let peer2 = PeerId::random();
@@ -291,7 +291,7 @@ mod tests {
         registry.add_replicator("posts", peer1);
         registry.add_replicator("users", peer2);
 
-        let infos = registry.get_all_replicator_info();
+        let infos = registry.list_replicator_info();
         assert_eq!(infos.len(), 2);
 
         let peer1_info = infos.iter().find(|i| i.peer_id() == Some(peer1)).unwrap();
@@ -431,7 +431,7 @@ mod tests {
         registry1.add_replicator("users", peer2);
         registry1.add_replicator("comments", peer2);
 
-        let infos = registry1.get_all_replicator_info();
+        let infos = registry1.list_replicator_info();
 
         let registry2 = ReplicatorRegistry::new();
         let (loaded, skipped) = registry2.load_from_infos(&infos);

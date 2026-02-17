@@ -225,13 +225,13 @@ impl<S: Store> P2PHost<S> {
         });
     }
 
-    pub(super) fn handle_set_replicator(
+    pub(super) fn handle_create_replicator(
         &mut self,
         peer_id: PeerId,
         collections: Vec<String>,
         response: tokio::sync::oneshot::Sender<Result<()>>,
     ) {
-        debug!(peer_id = %peer_id, collections = ?collections, "Setting replicator");
+        debug!(peer_id = %peer_id, collections = ?collections, "Creating replicator");
         // First remove peer from all existing collections
         self.replicators.remove_peer(&peer_id);
         // Then add to the new collections
@@ -239,7 +239,7 @@ impl<S: Store> P2PHost<S> {
             self.replicators.add_replicator(collection_id, peer_id);
         }
         if response.send(Ok(())).is_err() {
-            debug!(peer_id = %peer_id, "SetReplicator command response dropped - caller cancelled");
+            debug!(peer_id = %peer_id, "CreateReplicator command response dropped - caller cancelled");
         }
     }
 
