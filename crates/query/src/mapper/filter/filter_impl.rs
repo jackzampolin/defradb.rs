@@ -176,7 +176,7 @@ impl Filter {
                 .ok_or_else(|| QueryError::invalid_filter("field condition must be object"))?;
 
             // Check for _similarity misuse in filter (it's a select field, not a filter operator)
-            if ops.contains_key("_similarity") {
+            if ops.contains_key("SIMILARITY") {
                 return Err(QueryError::invalid_filter(format!(
                     "_similarity cannot be used as a filter on '{}'. Use it as a select field with _alias filtering: \
                      {{ Type(filter: {{_alias: {{sim: {{_gt: 0.8}}}}}}, order: {{_alias: {{sim: DESC}}}}, limit: K) \

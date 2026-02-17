@@ -85,9 +85,9 @@ impl Planner {
         let mut selects_to_process: Vec<(&Select, Option<usize>)> = Vec::new();
         for requestable in &select.fields {
             if let Requestable::Select(nested_select) = requestable {
-                if nested_select.field.name == "_group" {
+                if nested_select.field.name == "GROUP" {
                     // Get the _group index in the parent mapping
-                    let group_index = mapping.first_index_of_name("_group");
+                    let group_index = mapping.first_index_of_name("GROUP");
                     // _group is a virtual field - process its inner relation fields
                     for inner_requestable in &nested_select.fields {
                         if let Requestable::Select(inner_select) = inner_requestable {
@@ -1105,7 +1105,7 @@ impl Planner {
                     // the child document's field array indices.
                     for field in &nested_select.fields {
                         if let Requestable::Select(group_select) = field {
-                            if group_select.field.name == "_group" {
+                            if group_select.field.name == "GROUP" {
                                 // Build mapping for _group contents using child_scan_mapping indices
                                 let mut group_mapping = DocumentMapping::new();
                                 for group_field in &group_select.fields {

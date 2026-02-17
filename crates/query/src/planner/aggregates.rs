@@ -93,16 +93,14 @@ impl Planner {
                     let target = &agg.targets[0];
                     let host_name = &target.host_name;
 
-                    if host_name == "_group" {
+                    if host_name == "GROUP" {
                         if let Some(ref fname) = target.field_name {
-                            let is_aggregate_name = matches!(
-                                fname.as_str(),
-                                "_count" | "_sum" | "_avg" | "_min" | "_max"
-                            );
+                            let is_aggregate_name =
+                                matches!(fname.as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX");
                             if is_aggregate_name || mapping.first_index_of_name(fname).is_none() {
                                 is_array_aggregate = true;
                                 array_field_index =
-                                    mapping.first_index_of_name("_group").unwrap_or(0);
+                                    mapping.first_index_of_name("GROUP").unwrap_or(0);
                                 target_field_name = fname.clone();
                             } else {
                                 field_index =

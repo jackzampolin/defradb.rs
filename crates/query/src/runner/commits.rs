@@ -565,7 +565,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         let output_name = nested.field.output_name();
 
                         // Handle _group special field for grouped results
-                        if field_name == "_group" {
+                        if field_name == "GROUP" {
                             if let Some(docs) = group_docs {
                                 // Build array of group documents with requested fields
                                 let group_array: Vec<JsonValue> = docs

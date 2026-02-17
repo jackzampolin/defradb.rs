@@ -164,7 +164,7 @@ impl Planner {
         let aggregates_have_relations = select.fields.iter().any(|f| {
             if let Requestable::Aggregate(agg) = f {
                 agg.targets.iter().any(|t| {
-                    if t.host_name.is_empty() || t.host_name == "_group" {
+                    if t.host_name.is_empty() || t.host_name == "GROUP" {
                         return false;
                     }
                     collection
@@ -211,11 +211,11 @@ impl Planner {
         // Add _group fields to scan_mapping if present in render_mapping.
         // _group is a virtual field (not in schema) that needs to be explicitly copied.
         // Multiple _group entries may exist when aliases are used (e.g., G1: _group(...), G2: _group(...)).
-        if let Some(group_indices) = render_mapping.indexes_of_name("_group") {
+        if let Some(group_indices) = render_mapping.indexes_of_name("GROUP") {
             let group_indices = group_indices.to_vec();
             for render_index in group_indices {
                 let scan_index = scan_mapping.next_index();
-                scan_mapping.add(scan_index, "_group");
+                scan_mapping.add(scan_index, "GROUP");
                 // Copy the render_key for this specific _group entry
                 for rk in &render_mapping.render_keys {
                     if rk.index == render_index {
@@ -287,7 +287,7 @@ impl Planner {
                     // the host_name refers to an inline array field, not a relation.
                     // We need to render the field data so compute_relation_aggregates()
                     // can operate on it after plan execution.
-                    if !target.host_name.is_empty() && target.host_name != "_group" {
+                    if !target.host_name.is_empty() && target.host_name != "GROUP" {
                         let host_name = &target.host_name;
                         if let Some(field_desc) = collection.field_by_name(host_name) {
                             if !field_desc.kind.is_relation() {
@@ -328,7 +328,7 @@ impl Planner {
                     .is_none()
                 {
                     let scan_index = scan_mapping.next_index();
-                    scan_mapping.add(scan_index, "_similarity");
+                    scan_mapping.add(scan_index, "SIMILARITY");
                     scan_mapping.add_render_key(scan_index, output_name);
                 }
 

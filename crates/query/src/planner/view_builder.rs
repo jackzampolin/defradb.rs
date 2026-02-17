@@ -27,7 +27,7 @@ impl Planner {
         for requestable in &select.fields {
             if let Requestable::Select(nested) = requestable {
                 let field_name = &nested.field.name;
-                if field_name == "_group" || field_name == "_version" {
+                if field_name == "GROUP" || field_name == "_version" {
                     continue;
                 }
                 let field = collection.field_by_name(field_name).ok_or_else(|| {

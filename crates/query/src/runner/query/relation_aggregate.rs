@@ -35,7 +35,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let mut relation_targets = Vec::new();
                 for target in &agg.targets {
                     // Skip _group targets - they're handled by GroupByNode and aggregate nodes
-                    if !target.host_name.is_empty() && target.host_name != "_group" {
+                    if !target.host_name.is_empty() && target.host_name != "GROUP" {
                         relation_targets.push(target);
                     }
                 }

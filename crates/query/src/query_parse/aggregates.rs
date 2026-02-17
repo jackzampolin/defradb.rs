@@ -354,15 +354,15 @@ pub(super) fn parse_top_level_aggregate(
         .unwrap_or_default();
 
     // Create a Select that wraps this aggregate
-    // The field name should be the aggregate name (e.g., "_avg") so the response
-    // key is correct (e.g., {"_avg": 29} not {"Users": 29})
+    // The field name should be the aggregate name (e.g., "AVG") so the response
+    // key is correct (e.g., {"AVG": 29} not {"Users": 29})
     let mut select = Select::new(&collection_name);
     let agg_name = agg_type.as_str();
     if let Some(ref a) = field.alias {
-        // If aliased, use alias as the output name: { average: _avg(...) } -> {"average": ...}
+        // If aliased, use alias as the output name: { average: AVG(...) } -> {"average": ...}
         select.field = SelectField::with_alias(agg_name, a.clone());
     } else {
-        // Otherwise use the aggregate name: { _avg(...) } -> {"_avg": ...}
+        // Otherwise use the aggregate name: { AVG(...) } -> {"AVG": ...}
         select.field = SelectField::new(agg_name);
     }
 

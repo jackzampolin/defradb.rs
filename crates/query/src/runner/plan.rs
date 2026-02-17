@@ -36,7 +36,7 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
     let field_exists = |name: &str| -> bool {
         name == "_docID"
             || name == "_deleted"
-            || name == "_group"
+            || name == "GROUP"
             || name == "__typename"
             || name == "_version"
             || collection.fields.iter().any(|f| f.name == name)
@@ -64,11 +64,11 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
                 if let Some(ref field_name) = target.field_name {
                     // Skip validation for:
                     // 1. Relation-based aggregates (non-empty host_name that's a relation field)
-                    // 2. _group aggregates (host_name is "_group") - targets grouped results
+                    // 2. _group aggregates (host_name is "GROUP") - targets grouped results
                     // 3. Nested aggregates (field_name starts with "_") - targets other aggregate results
                     let is_relation_aggregate = !target.host_name.is_empty()
                         && collection.fields.iter().any(|f| f.name == target.host_name);
-                    let is_group_aggregate = target.host_name == "_group";
+                    let is_group_aggregate = target.host_name == "GROUP";
                     let is_nested_aggregate = field_name.starts_with('_');
 
                     if !is_relation_aggregate
@@ -113,7 +113,7 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
                 Requestable::Field(field) => {
                     let name = field.name.as_str();
                     // Skip special fields
-                    if name == "_docID" || name == "_group" || name == "__typename" {
+                    if name == "_docID" || name == "GROUP" || name == "__typename" {
                         continue;
                     }
                     if group_fields.contains(&name) {
@@ -131,7 +131,7 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
                     ));
                 }
                 Requestable::Select(nested) => {
-                    if nested.field.name == "_group" {
+                    if nested.field.name == "GROUP" {
                         // _group is always allowed in groupBy queries
                         continue;
                     }
@@ -152,7 +152,7 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
         // Check for _count(_group: {}) or similar aggregates referencing _group
         if let Requestable::Aggregate(agg) = requestable {
             for target in &agg.targets {
-                if target.host_name == "_group" && !has_group_by {
+                if target.host_name == "GROUP" && !has_group_by {
                     return Err(QueryError::parse(
                         "_group may only be referenced when within a groupBy request",
                     ));
@@ -162,11 +162,11 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
 
         // Check for _group references inside nested _group selections
         if let Requestable::Select(nested) = requestable {
-            if nested.field.name == "_group" {
+            if nested.field.name == "GROUP" {
                 for inner in &nested.fields {
                     if let Requestable::Aggregate(inner_agg) = inner {
                         for target in &inner_agg.targets {
-                            if target.host_name == "_group" && nested.group_by.is_none() {
+                            if target.host_name == "GROUP" && nested.group_by.is_none() {
                                 return Err(QueryError::parse(
                                     "_group may only be referenced when within a groupBy request",
                                 ));
@@ -296,7 +296,7 @@ pub(crate) fn build_mapping(
             }
             Requestable::Similarity(sim) => {
                 let index = mapping.next_index();
-                mapping.add(index, "_similarity");
+                mapping.add(index, "SIMILARITY");
                 mapping.add_render_key(index, sim.output_name());
             }
         }
@@ -500,7 +500,7 @@ pub(crate) fn build_plan(
                 .with_collection_name(select.collection_name.clone());
             // Extract _group alias definitions with per-alias filter/limit/order
             let group_indices = mapping
-                .indexes_of_name("_group")
+                .indexes_of_name("GROUP")
                 .map(|s| s.to_vec())
                 .unwrap_or_default();
             let mut group_aliases = Vec::new();
@@ -508,7 +508,7 @@ pub(crate) fn build_plan(
             let mut child_selects_meta: Vec<ChildSelectMeta> = Vec::new();
             for field in &select.fields {
                 if let Requestable::Select(nested) = field {
-                    if nested.field.name == "_group" {
+                    if nested.field.name == "GROUP" {
                         let alias_index = group_indices.get(alias_count).copied().unwrap_or(0);
                         alias_count += 1;
                         group_aliases.push(GroupAlias {
@@ -551,7 +551,7 @@ pub(crate) fn build_plan(
                 if let Requestable::Aggregate(agg) = field {
                     if agg.aggregate_type == AggregateType::Average {
                         for target in &agg.targets {
-                            if target.host_name == "_group" {
+                            if target.host_name == "GROUP" {
                                 if let Some(ref field_name) = target.field_name {
                                     if !field_name.starts_with('_') {
                                         avg_group_fields.push(field_name.clone());

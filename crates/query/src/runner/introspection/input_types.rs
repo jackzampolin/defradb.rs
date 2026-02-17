@@ -135,7 +135,7 @@ pub(super) fn build_field_enum(collection: &CollectionVersion) -> Enum {
     let mut items: Vec<String> = vec![
         "_deleted".to_string(),
         "_docID".to_string(),
-        "_group".to_string(),
+        "GROUP".to_string(),
         "_version".to_string(),
     ];
 

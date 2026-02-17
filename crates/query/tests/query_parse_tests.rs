@@ -555,7 +555,7 @@ fn test_parse_bare_query_without_explain() {
 fn test_parse_top_level_aggregate() {
     use query::mapper::Requestable;
 
-    let query = "{ _avg(Users: {field: Age}) }";
+    let query = "{ AVG(Users: {field: Age}) }";
     let selects = parse_query(query).unwrap();
 
     assert_eq!(selects.len(), 1);
@@ -581,7 +581,7 @@ fn test_parse_top_level_aggregate() {
 fn test_parse_top_level_count() {
     use query::mapper::Requestable;
 
-    let query = "{ _count(Users: {}) }";
+    let query = "{ COUNT(Users: {}) }";
     let selects = parse_query(query).unwrap();
 
     assert_eq!(selects.len(), 1);
@@ -601,7 +601,7 @@ fn test_parse_top_level_count() {
 fn test_parse_top_level_aggregate_with_alias() {
     use query::mapper::Requestable;
 
-    let query = "{ average: _avg(Users: {field: Age}) }";
+    let query = "{ average: AVG(Users: {field: Age}) }";
     let selects = parse_query(query).unwrap();
 
     assert_eq!(selects.len(), 1);

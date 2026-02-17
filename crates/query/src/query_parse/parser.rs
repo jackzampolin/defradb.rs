@@ -661,7 +661,7 @@ fn parse_field_to_select(
         for field in &select.fields {
             if let Requestable::Field(f) = field {
                 // Allow special meta-fields at group level
-                if f.name == "_docID" || f.name == "_group" || f.name == "__typename" {
+                if f.name == "_docID" || f.name == "GROUP" || f.name == "__typename" {
                     continue;
                 }
                 if group_by.fields.contains(&f.name) {
@@ -703,7 +703,7 @@ pub(super) fn parse_selection_set(
                 let alias = field.alias.clone();
 
                 // Check if this is a _similarity field
-                if field_name == "_similarity" {
+                if field_name == "SIMILARITY" {
                     let similarity = parse_similarity_field(field, variables)?;
                     let sim = if let Some(ref a) = alias {
                         similarity.with_alias(a.clone())
@@ -712,7 +712,7 @@ pub(super) fn parse_selection_set(
                     };
 
                     let index = mapping.next_index();
-                    mapping.add(index, "_similarity");
+                    mapping.add(index, "SIMILARITY");
                     mapping.add_render_key(index, sim.output_name());
 
                     fields.push(Requestable::Similarity(sim));
@@ -808,7 +808,7 @@ pub(super) fn parse_selection_set(
                             mapping.add_render_key(index, s.field.output_name());
                         }
                         Requestable::Similarity(sim) => {
-                            mapping.add(index, "_similarity");
+                            mapping.add(index, "SIMILARITY");
                             mapping.add_render_key(index, sim.output_name());
                         }
                     }
@@ -844,7 +844,7 @@ pub(super) fn parse_selection_set(
                             mapping.add_render_key(index, s.field.output_name());
                         }
                         Requestable::Similarity(sim) => {
-                            mapping.add(index, "_similarity");
+                            mapping.add(index, "SIMILARITY");
                             mapping.add_render_key(index, sim.output_name());
                         }
                     }

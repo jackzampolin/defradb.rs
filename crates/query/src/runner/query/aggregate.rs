@@ -191,8 +191,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // The caller will insert this into the response with the aggregate name as key
         // But for top-level aggregates, we need the caller to extract the value
         // Actually, looking at execute_query_internal, it inserts result with select.field.output_name()
-        // For { _avg(...) }, output_name is "_avg", and we're returning {"_avg": value}
-        // So we'd get {"_avg": {"_avg": value}} which is wrong.
+        // For { AVG(...) }, output_name is "AVG", and we're returning {"AVG": value}
+        // So we'd get {"AVG": {"AVG": value}} which is wrong.
         // We need to return just the value.
 
         // For top-level aggregates, return the single aggregate value

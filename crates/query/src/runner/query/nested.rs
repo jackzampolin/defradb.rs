@@ -111,7 +111,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         for requestable in &select.fields {
             if let Requestable::Select(nested_select) = requestable {
-                if nested_select.field.name == "_group" {
+                if nested_select.field.name == "GROUP" {
                     continue;
                 }
                 let mut allowed = HashSet::new();
@@ -177,7 +177,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mut relation_limits: Vec<(String, u64, u64)> = Vec::new(); // (field_name, limit, offset)
         for requestable in &select.fields {
             if let Requestable::Select(nested_select) = requestable {
-                if nested_select.field.name == "_group" {
+                if nested_select.field.name == "GROUP" {
                     continue; // _group is handled by GroupByNode
                 }
                 if let Some(ref limit) = nested_select.limit {

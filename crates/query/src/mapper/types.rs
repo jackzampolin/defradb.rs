@@ -191,9 +191,9 @@ impl Similarity {
         self
     }
 
-    /// Get the output name (alias if set, otherwise "_similarity")
+    /// Get the output name (alias if set, otherwise "SIMILARITY")
     pub fn output_name(&self) -> &str {
-        self.alias.as_deref().unwrap_or("_similarity")
+        self.alias.as_deref().unwrap_or("SIMILARITY")
     }
 }
 
@@ -223,22 +223,22 @@ pub enum AggregateType {
 impl AggregateType {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "_count" => Some(Self::Count),
-            "_sum" => Some(Self::Sum),
-            "_avg" => Some(Self::Average),
-            "_min" => Some(Self::Min),
-            "_max" => Some(Self::Max),
+            "COUNT" => Some(Self::Count),
+            "SUM" => Some(Self::Sum),
+            "AVG" => Some(Self::Average),
+            "MIN" => Some(Self::Min),
+            "MAX" => Some(Self::Max),
             _ => None,
         }
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Count => "_count",
-            Self::Sum => "_sum",
-            Self::Average => "_avg",
-            Self::Min => "_min",
-            Self::Max => "_max",
+            Self::Count => "COUNT",
+            Self::Sum => "SUM",
+            Self::Average => "AVG",
+            Self::Min => "MIN",
+            Self::Max => "MAX",
         }
     }
 }
@@ -562,8 +562,8 @@ mod tests {
 
     #[test]
     fn test_aggregate_type() {
-        assert_eq!(AggregateType::parse("_count"), Some(AggregateType::Count));
-        assert_eq!(AggregateType::parse("_avg"), Some(AggregateType::Average));
+        assert_eq!(AggregateType::parse("COUNT"), Some(AggregateType::Count));
+        assert_eq!(AggregateType::parse("AVG"), Some(AggregateType::Average));
         assert_eq!(AggregateType::parse("invalid"), None);
     }
 

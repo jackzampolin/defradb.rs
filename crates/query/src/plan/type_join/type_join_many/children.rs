@@ -244,7 +244,7 @@ impl TypeJoinMany {
                     .collect()
             };
 
-            obj.insert("_group".to_string(), JsonValue::Array(group_array));
+            obj.insert("GROUP".to_string(), JsonValue::Array(group_array));
             result.push(JsonValue::Object(obj));
         }
 
@@ -307,7 +307,7 @@ impl TypeJoinMany {
         let mut obj = serde_json::Map::new();
         for rk in &mapping.render_keys {
             // Skip excluded fields (groupBy fields) and _group pseudo-field
-            if exclude_fields.contains(&rk.key) || rk.key == "_group" {
+            if exclude_fields.contains(&rk.key) || rk.key == "GROUP" {
                 continue;
             }
             if let Some(value) = doc.get(rk.index) {

@@ -47,9 +47,9 @@ impl Planner {
                     if field.name == "_docID" {
                         continue;
                     }
-                    if field.name == "_group" {
+                    if field.name == "GROUP" {
                         let index = mapping.next_index();
-                        mapping.add(index, "_group");
+                        mapping.add(index, "GROUP");
                         mapping.add_render_key(index, field.output_name());
                         continue;
                     }
@@ -73,9 +73,9 @@ impl Planner {
                     mapping.add_render_key(index, field.output_name());
                 }
                 Requestable::Select(nested_select) => {
-                    if nested_select.field.name == "_group" {
+                    if nested_select.field.name == "GROUP" {
                         let index = mapping.next_index();
-                        mapping.add(index, "_group");
+                        mapping.add(index, "GROUP");
                         mapping.add_render_key(index, nested_select.field.output_name());
 
                         let child_mapping =
@@ -95,7 +95,7 @@ impl Planner {
                 }
                 Requestable::Similarity(sim) => {
                     let index = mapping.next_index();
-                    mapping.add(index, "_similarity");
+                    mapping.add(index, "SIMILARITY");
                     mapping.add_render_key(index, sim.output_name());
                 }
             }
@@ -169,9 +169,9 @@ impl Planner {
                     child_mapping.add_render_key(schema_idx, field.output_name());
                 }
                 Requestable::Select(nested_select) => {
-                    if nested_select.field.name == "_group" {
+                    if nested_select.field.name == "GROUP" {
                         let index = child_mapping.next_index();
-                        child_mapping.add(index, "_group");
+                        child_mapping.add(index, "GROUP");
                         child_mapping.add_render_key(index, nested_select.field.output_name());
 
                         let inner_child_mapping =

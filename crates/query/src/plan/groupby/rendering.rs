@@ -109,7 +109,7 @@ impl GroupByNode {
             let inner_group_info = mapping
                 .render_keys
                 .iter()
-                .find(|rk| rk.key == "_group")
+                .find(|rk| rk.key == "GROUP")
                 .map(|rk| rk.index);
 
             if let Some(inner_group_index) = inner_group_info {
@@ -175,7 +175,7 @@ impl GroupByNode {
                 // Render fields from the child mapping's render keys
                 if let Some(mapping) = child_mapping {
                     for render_key in &mapping.render_keys {
-                        if render_key.key == "_group" || render_key.key == "__typename" {
+                        if render_key.key == "GROUP" || render_key.key == "__typename" {
                             if render_key.key == "__typename" {
                                 if let Some(ref name) = self.collection_name {
                                     obj.insert(
@@ -212,7 +212,7 @@ impl GroupByNode {
             // Check if child mapping has inner _group (for deeply nested _group)
             if let Some(mapping) = child_mapping {
                 if let Some(inner_group_rk) =
-                    mapping.render_keys.iter().find(|rk| rk.key == "_group")
+                    mapping.render_keys.iter().find(|rk| rk.key == "GROUP")
                 {
                     let inner_child_mapping = mapping.child_at(inner_group_rk.index);
                     let inner_render_keys = if let Some(inner_mapping) = inner_child_mapping {
@@ -274,7 +274,7 @@ impl GroupByNode {
                             self.collection_name.as_deref(),
                         )
                     };
-                    obj.insert("_group".to_string(), inner_array);
+                    obj.insert("GROUP".to_string(), inner_array);
                 }
             }
 
@@ -326,7 +326,7 @@ impl GroupByNode {
             if let Some(first_doc) = sub_group_docs.first() {
                 if let Some(rks) = render_keys {
                     for rk in rks {
-                        if rk.key == "_group" || rk.key == "__typename" {
+                        if rk.key == "GROUP" || rk.key == "__typename" {
                             continue;
                         }
                         let value = first_doc.get(rk.index).cloned().unwrap_or(JsonValue::Null);
@@ -370,7 +370,7 @@ impl GroupByNode {
         let sub_group_fields: Vec<_> = child_mapping
             .render_keys
             .iter()
-            .filter(|rk| rk.key != "_group")
+            .filter(|rk| rk.key != "GROUP")
             .collect();
 
         // Sub-group documents by the sub-grouping field values
@@ -419,7 +419,7 @@ impl GroupByNode {
                 let inner_nested_group = inner_mapping
                     .render_keys
                     .iter()
-                    .find(|rk| rk.key == "_group")
+                    .find(|rk| rk.key == "GROUP")
                     .map(|rk| rk.index);
 
                 if let Some(inner_inner_group_index) = inner_nested_group {
@@ -444,7 +444,7 @@ impl GroupByNode {
                 )
             };
 
-            obj.insert("_group".to_string(), inner_group_array);
+            obj.insert("GROUP".to_string(), inner_group_array);
 
             // Compute inner aggregates for this sub-group
             for agg_def in &self.inner_aggregates {
@@ -558,7 +558,7 @@ impl GroupByNode {
         for doc in docs {
             let mut obj = serde_json::Map::new();
             for render_key in render_keys {
-                if render_key.key == "_group" {
+                if render_key.key == "GROUP" {
                     continue;
                 }
                 // Handle __typename

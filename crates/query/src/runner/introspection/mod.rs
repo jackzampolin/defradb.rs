@@ -218,7 +218,7 @@ pub fn build_introspection_schema(
     // Add top-level aggregate fields to Query
     if !collections.is_empty() {
         // _count: takes one arg per non-embedded collection
-        let mut count_field = Field::new("_count", TypeRef::named("Int"), |_| {
+        let mut count_field = Field::new("COUNT", TypeRef::named("Int"), |_| {
             FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
         });
         for collection in collections {
@@ -233,7 +233,7 @@ pub fn build_introspection_schema(
         query_type = query_type.field(count_field);
 
         // _sum, _avg: takes one arg per non-embedded collection
-        for agg_name in &["_sum", "_avg"] {
+        for agg_name in &["SUM", "AVG"] {
             let mut agg_field = Field::new(*agg_name, TypeRef::named("Float"), |_| {
                 FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
             });

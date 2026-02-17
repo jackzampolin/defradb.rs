@@ -17,8 +17,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     pub(crate) fn is_top_level_aggregate(select: &Select) -> bool {
         // Only true when the query field name itself is an aggregate function
         let field_name = select.field.name.as_str();
-        field_name.starts_with('_')
-            && ["_count", "_sum", "_avg", "_min", "_max"].contains(&field_name)
+        ["COUNT", "SUM", "AVG", "MIN", "MAX"].contains(&field_name)
     }
 
     /// Aggregate node kind names that can wrap a selectNode in the plan explain.

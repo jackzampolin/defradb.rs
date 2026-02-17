@@ -5,11 +5,11 @@ use crate::planner::Doc;
 ///
 /// When a query has nested _group with aggregates (e.g., `_group(groupBy: [Verified]) { _avg(...) }`),
 /// the GroupByNode computes these aggregates inline during _group array rendering,
-/// so that outer aggregates (e.g., `_max(_group: {field: _avg})`) can read the values.
+/// so that outer aggregates (e.g., `MAX(GROUP: {field: AVG})`) can read the values.
 #[derive(Debug, Clone)]
 pub struct InnerAggregateDef {
     pub aggregate_type: AggregateType,
-    /// Render key name for the aggregate result (e.g., "_avg" or alias)
+    /// Render key name for the aggregate result (e.g., "AVG" or alias)
     pub output_key: String,
     /// Index of the target field in the parent mapping (e.g., Age field index)
     pub field_index: usize,

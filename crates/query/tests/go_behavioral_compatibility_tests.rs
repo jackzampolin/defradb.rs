@@ -45,8 +45,8 @@ async fn test_p0_avg_empty_set_returns_zero() {
     mapping.add(0, "_docID");
     mapping.add(1, "name");
     mapping.add(2, "age");
-    mapping.add(3, "_avg");
-    mapping.add_render_key(3, "_avg");
+    mapping.add(3, "AVG");
+    mapping.add_render_key(3, "AVG");
 
     // Empty document set
     let scan = ScanNode::new(collection, mapping.clone()).with_docs(vec![]);
@@ -92,8 +92,8 @@ async fn test_p0_avg_all_nulls_returns_zero() {
     mapping.add(0, "_docID");
     mapping.add(1, "name");
     mapping.add(2, "age");
-    mapping.add(3, "_avg");
-    mapping.add_render_key(3, "_avg");
+    mapping.add(3, "AVG");
+    mapping.add_render_key(3, "AVG");
 
     // All documents have null age
     let docs = vec![
@@ -419,8 +419,8 @@ async fn test_compatible_sum_empty_returns_zero() {
     mapping.add(0, "_docID");
     mapping.add(1, "name");
     mapping.add(2, "age");
-    mapping.add(3, "_sum");
-    mapping.add_render_key(3, "_sum");
+    mapping.add(3, "SUM");
+    mapping.add_render_key(3, "SUM");
 
     let scan = ScanNode::new(collection, mapping.clone()).with_docs(vec![]);
     let mut sum_node = SumNode::new(Box::new(scan), mapping, 2, 3);
@@ -456,8 +456,8 @@ async fn test_compatible_count_empty_returns_zero() {
     mapping.add(0, "_docID");
     mapping.add(1, "name");
     mapping.add(2, "age");
-    mapping.add(3, "_count");
-    mapping.add_render_key(3, "_count");
+    mapping.add(3, "COUNT");
+    mapping.add_render_key(3, "COUNT");
 
     let scan = ScanNode::new(collection, mapping.clone()).with_docs(vec![]);
     let mut count_node = CountNode::new(Box::new(scan), mapping, 3);

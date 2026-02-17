@@ -40,8 +40,8 @@ pub(super) fn build_collection_type(
     let group_order = format!("{}OrderArg", coll_name);
     let group_field_enum = format!("{}Field", coll_name);
     named_fields.push((
-        "_group".to_string(),
-        Field::new("_group", TypeRef::named_list(coll_name), |_| {
+        "GROUP".to_string(),
+        Field::new("GROUP", TypeRef::named_list(coll_name), |_| {
             FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
         })
         .argument(InputValue::new("docID", TypeRef::named_nn_list("ID")))
@@ -72,9 +72,9 @@ pub(super) fn build_collection_type(
     {
         let mut count_args: Vec<(String, InputValue)> = Vec::new();
         count_args.push((
-            "_group".to_string(),
+            "GROUP".to_string(),
             InputValue::new(
-                "_group",
+                "GROUP",
                 TypeRef::named(format!("{}__CountSelector", coll_name)),
             ),
         ));
@@ -102,27 +102,27 @@ pub(super) fn build_collection_type(
             }
         }
         count_args.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut count_field = Field::new("_count", TypeRef::named("Int"), |_| {
+        let mut count_field = Field::new("COUNT", TypeRef::named("Int"), |_| {
             FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
         });
         for (_, arg) in count_args {
             count_field = count_field.argument(arg);
         }
-        named_fields.push(("_count".to_string(), count_field));
+        named_fields.push(("COUNT".to_string(), count_field));
     }
 
     // _sum, _avg, _max, _min: take args for _group and each numeric inline array field
     for (agg_name, agg_type) in &[
-        ("_sum", "Float"),
-        ("_avg", "Float"),
-        ("_max", "Float"),
-        ("_min", "Float"),
+        ("SUM", "Float"),
+        ("AVG", "Float"),
+        ("MAX", "Float"),
+        ("MIN", "Float"),
     ] {
         let mut agg_args: Vec<(String, InputValue)> = Vec::new();
         agg_args.push((
-            "_group".to_string(),
+            "GROUP".to_string(),
             InputValue::new(
-                "_group",
+                "GROUP",
                 TypeRef::named(format!("{}__NumericSelector", coll_name)),
             ),
         ));
@@ -190,13 +190,13 @@ pub(super) fn build_collection_type(
             }
         }
         sim_args.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut similarity_field = Field::new("_similarity", TypeRef::named("Float"), |_| {
+        let mut similarity_field = Field::new("SIMILARITY", TypeRef::named("Float"), |_| {
             FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
         });
         for (_, arg) in sim_args {
             similarity_field = similarity_field.argument(arg);
         }
-        named_fields.push(("_similarity".to_string(), similarity_field));
+        named_fields.push(("SIMILARITY".to_string(), similarity_field));
     }
 
     // Add user-defined fields
@@ -256,12 +256,12 @@ pub(super) fn build_commit_type() -> Object {
 
     Object::new("Commit")
         .field(
-            null_field!("_count", TypeRef::named("Int")).argument(InputValue::new(
+            null_field!("COUNT", TypeRef::named("Int")).argument(InputValue::new(
                 "field",
                 TypeRef::named("commitCountFieldArg"),
             )),
         )
-        .field(null_field!("_group", TypeRef::named_list("Commit")))
+        .field(null_field!("GROUP", TypeRef::named_list("Commit")))
         .field(null_field!("cid", TypeRef::named("String")))
         .field(null_field!("collectionVersionId", TypeRef::named("String")))
         .field(null_field!("delta", TypeRef::named("String")))

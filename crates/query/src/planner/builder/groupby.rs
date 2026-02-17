@@ -40,7 +40,7 @@ impl super::Planner {
                 // Each _group reference (including aliases like G1: _group(limit: 1))
                 // gets its own GroupAlias with per-alias filter/limit/order/docIDs.
                 let group_indices = scan_mapping
-                    .indexes_of_name("_group")
+                    .indexes_of_name("GROUP")
                     .map(|s| s.to_vec())
                     .unwrap_or_default();
                 let mut group_aliases = Vec::new();
@@ -49,7 +49,7 @@ impl super::Planner {
 
                 for field in &select.fields {
                     if let Requestable::Select(nested) = field {
-                        if nested.field.name == "_group" {
+                        if nested.field.name == "GROUP" {
                             let alias_index = group_indices.get(alias_count).copied().unwrap_or(0);
                             alias_count += 1;
 
@@ -103,7 +103,7 @@ impl super::Planner {
                                 // and 3rd-level groupBy/aggregates
                                 for inner_field in &nested.fields {
                                     if let Requestable::Select(inner_nested) = inner_field {
-                                        if inner_nested.field.name == "_group" {
+                                        if inner_nested.field.name == "GROUP" {
                                             if let Some(ref inner_filter) = inner_nested.filter {
                                                 group_node = group_node
                                                     .with_inner_group_filter(inner_filter.clone());
@@ -172,7 +172,7 @@ impl super::Planner {
                 let mut child_selects_meta: Vec<ChildSelectMeta> = Vec::new();
                 for field in &select.fields {
                     if let Requestable::Select(nested) = field {
-                        if nested.field.name == "_group" {
+                        if nested.field.name == "GROUP" {
                             let mut meta = ChildSelectMeta {
                                 collection_name: select.collection_name.clone(),
                                 doc_ids: nested.doc_ids.clone(),
@@ -207,7 +207,7 @@ impl super::Planner {
                     if let Requestable::Aggregate(agg) = field {
                         if agg.aggregate_type == AggregateType::Average {
                             for target in &agg.targets {
-                                if target.host_name == "_group" {
+                                if target.host_name == "GROUP" {
                                     if let Some(ref field_name) = target.field_name {
                                         if !field_name.starts_with('_') {
                                             avg_group_fields.push(field_name.clone());
