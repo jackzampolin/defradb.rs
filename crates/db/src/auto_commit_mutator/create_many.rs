@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::block_builder::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
+
 #[allow(clippy::type_complexity)]
 impl<S: Store + 'static> AutoCommitMutator<S> {
     pub(super) async fn create_many_impl(
@@ -22,14 +24,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let collection = self.get_collection_or_err(collection_name)?;
 
-        // Create ONE write transaction for the entire batch
-        let txn = self.db.new_txn(false).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
-
         let short_id = collection_short_id(collection.collection_id());
-        let schema_version_id = collection.version_id();
+        let schema_version_id = collection.version_id().to_string();
         let sign_config = get_signing_config();
+        let enc_config = get_encryption_config();
 
         // Build IndexManager once for the entire batch (schema is identical for all docs)
         let index_manager =
@@ -40,15 +38,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 ))
             })?;
 
-        let mut results: Vec<(
-            DocID,
-            Document,
-            Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)>,
-        )> = Vec::with_capacity(docs.len());
-
-        // Process each document within the SAME transaction
+        // === Phase 1: Prepare documents (sequential — embeddings are async/external) ===
+        let mut prepared_docs: Vec<(Document, bool)> = Vec::with_capacity(docs.len());
         for mut doc in docs {
-            // Generate embeddings
             crate::embedding::set_embedding(
                 &collection.schema().vector_embeddings,
                 &mut doc,
@@ -58,8 +50,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
 
-            // Generate document ID.
-            // Track whether ID was just generated for blind create optimization.
             let id_was_generated = doc.id().is_none();
             if id_was_generated {
                 doc.generate_and_set_doc_id().map_err(|e| {
@@ -67,11 +57,60 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 })?;
             }
 
+            prepared_docs.push((doc, id_was_generated));
+        }
+
+        // === Phase 2: Compute blocks in parallel (pure CPU, no storage access) ===
+        let block_futures: Vec<_> = prepared_docs
+            .iter()
+            .map(|(doc, _)| {
+                let doc_clone = doc.clone();
+                let schema = schema_version_id.clone();
+                let enc = enc_config.clone();
+                let sign = sign_config.clone();
+                tokio::task::spawn_blocking(move || {
+                    compute_document_blocks(&doc_clone, &schema, enc.as_ref(), sign.as_ref())
+                })
+            })
+            .collect();
+
+        let computed_results = futures::future::join_all(block_futures).await;
+
+        // Unpack JoinHandle results — a JoinError means the task panicked
+        let computed_blocks: Vec<Option<ComputedBlocks>> = computed_results
+            .into_iter()
+            .map(|join_result| match join_result {
+                Ok(Ok(blocks)) => Some(blocks),
+                Ok(Err(e)) => {
+                    warn!(error = %e, "Failed to compute document blocks");
+                    None
+                }
+                Err(e) => {
+                    warn!(error = %e, "Block computation task panicked");
+                    None
+                }
+            })
+            .collect();
+
+        // === Phase 3: Transaction — sequential writes ===
+        let txn = self.db.new_txn(false).await.map_err(|e| {
+            query::error::QueryError::execution(format!("failed to create txn: {}", e))
+        })?;
+
+        let mut results: Vec<(
+            DocID,
+            Document,
+            Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)>,
+        )> = Vec::with_capacity(prepared_docs.len());
+
+        for ((doc, id_was_generated), blocks) in
+            prepared_docs.into_iter().zip(computed_blocks.into_iter())
+        {
             let doc_id = doc.id().cloned().ok_or_else(|| {
                 query::error::QueryError::execution("document should have ID after generation")
             })?;
 
-            // Create with indexes (scoped borrow of datastore)
+            // Datastore + index writes
             {
                 let datastore = txn.datastore().map_err(|e| {
                     query::error::QueryError::execution(format!(
@@ -97,70 +136,71 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     })?;
             } // datastore dropped
 
-            // Write blocks (scoped borrow of blockstore + headstore)
-            let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
-                let blockstore = txn.blockstore().map_err(|e| {
-                    query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
-                })?;
-                let headstore = txn.headstore().map_err(|e| {
-                    query::error::QueryError::execution(format!("failed to get headstore: {}", e))
-                })?;
+            // Insert pre-computed blocks + collection blocks
+            let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = match blocks {
+                Some(computed) => {
+                    let blockstore = txn.blockstore().map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to get blockstore: {}",
+                            e
+                        ))
+                    })?;
+                    let headstore = txn.headstore().map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to get headstore: {}",
+                            e
+                        ))
+                    })?;
 
-                let enc_config = get_encryption_config();
+                    match insert_computed_blocks(&blockstore, &headstore, &computed).await {
+                        Ok(()) => {
+                            if let Some(ref config) = enc_config {
+                                store_doc_encryption(&doc_id.to_string(), config.clone());
+                            }
 
-                match write_document_blocks(
-                    &blockstore,
-                    &headstore,
-                    &doc,
-                    schema_version_id,
-                    None,
-                    enc_config.as_ref(),
-                    sign_config.as_ref(),
-                )
-                .await
-                {
-                    Ok(block_result) => {
-                        if let Some(ref config) = enc_config {
-                            store_doc_encryption(&doc_id.to_string(), config.clone());
-                        }
-
-                        let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-                        if collection.schema().is_branchable {
-                            match write_collection_block(
-                                &blockstore,
-                                &headstore,
-                                short_id,
-                                schema_version_id,
-                                block_result.cid,
-                                sign_config.as_ref(),
-                            )
-                            .await
-                            {
-                                Ok((col_cid, col_bytes)) => {
-                                    col_block_data = Some((col_cid, col_bytes));
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        collection = %collection_name,
-                                        error = %e,
-                                        "Failed to write collection block for branchable create"
-                                    );
+                            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
+                            if collection.schema().is_branchable {
+                                match write_collection_block(
+                                    &blockstore,
+                                    &headstore,
+                                    short_id,
+                                    &schema_version_id,
+                                    computed.block_result.cid,
+                                    sign_config.as_ref(),
+                                )
+                                .await
+                                {
+                                    Ok((col_cid, col_bytes)) => {
+                                        col_block_data = Some((col_cid, col_bytes));
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            collection = %collection_name,
+                                            error = %e,
+                                            "Failed to write collection block for branchable create"
+                                        );
+                                    }
                                 }
                             }
-                        }
 
-                        Some((block_result.cid, block_result.block, col_block_data))
-                    }
-                    Err(e) => {
-                        warn!(
-                            collection = %collection_name,
-                            error = %e,
-                            "Failed to write document blocks - commits queries may not work"
-                        );
-                        None
+                            Some((
+                                computed.block_result.cid,
+                                computed.block_result.block,
+                                col_block_data,
+                            ))
+                        }
+                        Err(e) => {
+                            warn!(
+                                collection = %collection_name,
+                                error = %e,
+                                "Failed to insert pre-computed blocks"
+                            );
+                            None
+                        }
                     }
                 }
-            }; // blockstore and headstore dropped
+                None => None,
+            };
 
             results.push((doc_id, doc, commit_result));
         }

@@ -9,6 +9,7 @@
 
 mod build;
 mod collection;
+mod compute;
 mod read;
 #[cfg(test)]
 mod tests;
@@ -18,6 +19,7 @@ mod write;
 pub use build::build_block_from_document;
 pub use build::build_blocks_from_document;
 pub use collection::write_collection_block;
+pub use compute::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
 pub use read::read_latest_composite_block;
 pub use write::{write_delete_block, write_document_blocks};
 
@@ -43,22 +45,14 @@ pub(super) fn encrypt_delta(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>,
     Ok(ciphertext)
 }
 
-/// Sign a block and store the signature as a separate IPLD block.
+/// Compute a signature block without writing to storage.
 ///
-/// Matches Go's `signBlock()` in `internal/core/block/signing.go`:
-/// 1. Only signs first field blocks (priority <= 1) and composite blocks
-/// 2. Marshals block WITHOUT signature to get bytes to sign
-/// 3. Signs the bytes with the private key
-/// 4. Creates a Signature block with header (type + public key) and value
-/// 5. Stores the signature block in blockstore
-/// 6. Returns the signature block's CID
-///
-/// The caller must then set `block.signature = Some(sig_cid)` and re-serialize.
-pub(super) async fn sign_block(
+/// Pure function: returns `(sig_cid, sig_cbor_bytes)` for the caller to store.
+/// Returns `None` for field blocks with priority > 1 (not signed per Go behavior).
+pub(super) fn compute_signature(
     block: &Block,
     signer: &SigningConfig,
-    blockstore: &NamespaceView,
-) -> Result<Option<Cid>, String> {
+) -> Result<Option<(Cid, Vec<u8>)>, String> {
     // Only sign first field blocks (priority <= 1) and composite blocks.
     // Higher-priority field blocks are not signed — their integrity is
     // guaranteed by the signature on the parent composite block.
@@ -101,12 +95,28 @@ pub(super) async fn sign_block(
         sig_bytes,
     );
 
-    // Store signature block in blockstore and return its CID
     let sig_cbor = signature
         .to_dag_cbor()
         .map_err(|e| format!("Failed to encode signature block: {}", e))?;
     let sig_cid = generate_cid_from_bytes(&sig_cbor)
         .map_err(|e| format!("Failed to generate signature CID: {}", e))?;
+
+    Ok(Some((sig_cid, sig_cbor)))
+}
+
+/// Sign a block and store the signature as a separate IPLD block.
+///
+/// Delegates to `compute_signature()` for the pure computation, then writes
+/// the signature block to blockstore. The caller must then set
+/// `block.signature = Some(sig_cid)` and re-serialize.
+pub(super) async fn sign_block(
+    block: &Block,
+    signer: &SigningConfig,
+    blockstore: &NamespaceView,
+) -> Result<Option<Cid>, String> {
+    let Some((sig_cid, sig_cbor)) = compute_signature(block, signer)? else {
+        return Ok(None);
+    };
 
     blockstore
         .set(&sig_cid.to_bytes(), &sig_cbor)
