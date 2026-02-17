@@ -262,57 +262,65 @@ pub unsafe extern "C" fn new_node_with_p2p(
             let config = ReplicationConfig::default();
             let mut events = sync_events_rx;
             loop {
-                let result = ReplicationLoop::process_next(
+                let results = ReplicationLoop::process_next_batch(
                     &coord_for_repl,
                     &mut events,
                     handler_for_repl.as_ref(),
                     &config,
                 )
                 .await;
-                match &result {
-                    ReplicationResult::Merged { cid, doc_id, collection_id } => {
-                        let mc = events::MergeCompleteData {
-                            doc_id: doc_id.clone(),
-                            cid: *cid,
-                            collection_id: collection_id.clone(),
-                            by_peer: coord_for_repl.local_peer_id().to_string(),
-                        };
-                        event_bus_for_repl.publish(events::Message::merge_complete(mc));
-                        if !doc_id.is_empty() {
-                            event_bus_for_repl.publish(events::Message::se_artifact_received(
-                                events::SEArtifactReceivedData { doc_id: doc_id.clone() },
-                            ));
+
+                let mut should_break = false;
+                for result in &results {
+                    match result {
+                        ReplicationResult::Merged { cid, doc_id, collection_id } => {
+                            let mc = events::MergeCompleteData {
+                                doc_id: doc_id.clone(),
+                                cid: *cid,
+                                collection_id: collection_id.clone(),
+                                by_peer: coord_for_repl.local_peer_id().to_string(),
+                            };
+                            event_bus_for_repl.publish(events::Message::merge_complete(mc));
+                            if !doc_id.is_empty() {
+                                event_bus_for_repl.publish(events::Message::se_artifact_received(
+                                    events::SEArtifactReceivedData { doc_id: doc_id.clone() },
+                                ));
+                            }
                         }
-                    }
-                    ReplicationResult::MergedButBroadcastFailed { cid, doc_id, collection_id, .. } => {
-                        tracing::info!(cid = %cid, doc_id = %doc_id, "Block merged (broadcast failed) - publishing MergeComplete event");
-                        let mc = events::MergeCompleteData {
-                            doc_id: doc_id.clone(),
-                            cid: *cid,
-                            collection_id: collection_id.clone(),
-                            by_peer: coord_for_repl.local_peer_id().to_string(),
-                        };
-                        event_bus_for_repl.publish(events::Message::merge_complete(mc));
-                        if !doc_id.is_empty() {
-                            event_bus_for_repl.publish(events::Message::se_artifact_received(
-                                events::SEArtifactReceivedData { doc_id: doc_id.clone() },
-                            ));
+                        ReplicationResult::MergedButBroadcastFailed { cid, doc_id, collection_id, .. } => {
+                            tracing::info!(cid = %cid, doc_id = %doc_id, "Block merged (broadcast failed) - publishing MergeComplete event");
+                            let mc = events::MergeCompleteData {
+                                doc_id: doc_id.clone(),
+                                cid: *cid,
+                                collection_id: collection_id.clone(),
+                                by_peer: coord_for_repl.local_peer_id().to_string(),
+                            };
+                            event_bus_for_repl.publish(events::Message::merge_complete(mc));
+                            if !doc_id.is_empty() {
+                                event_bus_for_repl.publish(events::Message::se_artifact_received(
+                                    events::SEArtifactReceivedData { doc_id: doc_id.clone() },
+                                ));
+                            }
                         }
+                        ReplicationResult::ChannelClosed => {
+                            tracing::info!("Sync event channel closed, stopping replication loop");
+                            should_break = true;
+                            break;
+                        }
+                        ReplicationResult::Failed { cid, error } => {
+                            tracing::error!(cid = %cid, error = %error, "Block merge failed");
+                        }
+                        ReplicationResult::Skipped { cid, reason } => {
+                            tracing::debug!(cid = %cid, reason = %reason, "replication loop: skipped");
+                        }
+                        ReplicationResult::BitswapFetchStarted { root_cid, .. } => {
+                            tracing::debug!(root_cid = %root_cid, "replication loop: bitswap fetch started");
+                        }
+                        _ => {}
                     }
-                    ReplicationResult::ChannelClosed => {
-                        tracing::info!("Sync event channel closed, stopping replication loop");
-                        break;
-                    }
-                    ReplicationResult::Failed { cid, error } => {
-                        tracing::error!(cid = %cid, error = %error, "Block merge failed");
-                    }
-                    ReplicationResult::Skipped { cid, reason } => {
-                        tracing::debug!(cid = %cid, reason = %reason, "replication loop: skipped");
-                    }
-                    ReplicationResult::BitswapFetchStarted { root_cid, .. } => {
-                        tracing::debug!(root_cid = %root_cid, "replication loop: bitswap fetch started");
-                    }
-                    _ => {}
+                }
+                if should_break {
+                    break;
                 }
             }
             tracing::info!("FFI replication loop stopped");

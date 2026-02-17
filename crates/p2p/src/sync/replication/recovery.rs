@@ -45,6 +45,7 @@ where
     let config = ReplicationConfig {
         continue_on_error: true,
         rebroadcast_on_merge: false,
+        batch_size: 50,
     };
 
     let unmerged = coordinator.get_unmerged().await?;

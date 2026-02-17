@@ -50,7 +50,7 @@ pub use coordinator::{LoadReplicatorsResult, PushFailure, SetReplicatorResult, S
 pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, SyncPlan};
 pub use head_provider::{DocumentHeadProvider, NoOpHeadProvider};
 pub use manager::{SyncConfig, SyncEvent, SyncManager};
-pub use merge::{BlockMetadata, MergeHandler, MergeOutcome};
+pub use merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
 pub use peer_state::{PeerStateTracker, PeerStats};
 pub use queue::ProcessQueue;
 pub use replication::{recover_unmerged, ReplicationConfig, ReplicationLoop, ReplicationResult};

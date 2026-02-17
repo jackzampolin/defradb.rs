@@ -6,6 +6,19 @@
 use async_trait::async_trait;
 use cid::Cid;
 
+/// Owned block data for batch processing.
+///
+/// Unlike `BlockMetadata` which borrows strings, this struct owns all data
+/// so it can be collected into a batch and processed together.
+#[derive(Debug, Clone)]
+pub struct MergeBlock {
+    pub cid: Cid,
+    pub block_data: Vec<u8>,
+    pub doc_id: String,
+    pub collection_id: String,
+    pub creator: String,
+}
+
 /// Outcome of a merge operation.
 ///
 /// Used by `MergeHandler::handle_block` to communicate the result.
@@ -132,6 +145,26 @@ pub trait MergeHandler: Send + Sync {
         block_data: &[u8],
         metadata: BlockMetadata<'_>,
     ) -> Result<MergeOutcome, Self::Error>;
+
+    /// Process a batch of blocks. Default impl calls handle_block() per block.
+    ///
+    /// Implementations can override this to process all blocks within a single
+    /// shared transaction, reducing fsync overhead during P2P catch-up.
+    async fn handle_block_batch(
+        &self,
+        blocks: &[MergeBlock],
+    ) -> Vec<Result<MergeOutcome, Self::Error>> {
+        let mut results = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            let metadata =
+                BlockMetadata::normal(&block.doc_id, &block.collection_id, &block.creator);
+            results.push(
+                self.handle_block(&block.cid, &block.block_data, metadata)
+                    .await,
+            );
+        }
+        results
+    }
 }
 
 #[cfg(test)]

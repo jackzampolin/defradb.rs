@@ -3,6 +3,7 @@
 //! This module implements the `MergeHandler` trait from the P2P layer,
 //! bridging incoming blocks to the CRDT system for document merging.
 
+mod batch;
 mod collection;
 mod composite;
 mod counter;
@@ -23,7 +24,7 @@ use defra_core::block::{
 use defra_core::types::DocId;
 use document::{DocID, Document, NormalValue};
 use events::{MergeCompleteData, Message, Update};
-use p2p::sync::{BlockMetadata, MergeHandler, MergeOutcome};
+use p2p::sync::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
 use schema::{
     self, CType, CollectionSource, CollectionVersion, FieldDescription, FieldKind, QuerySource,
     ScalarKind,
@@ -429,6 +430,27 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
             CrdtDelta::CollectionSet(_) => {
                 tracing::debug!(cid = %cid, "CollectionSet delta - skipping");
                 Ok(MergeOutcome::skipped("collection set delta"))
+            }
+        }
+    }
+
+    async fn handle_block_batch(
+        &self,
+        blocks: &[MergeBlock],
+    ) -> Vec<Result<MergeOutcome, Self::Error>> {
+        if blocks.len() <= 1 {
+            return self.merge_blocks_individually(blocks).await;
+        }
+
+        match self.try_batch_merge(blocks).await {
+            Ok(results) => results,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    batch_size = blocks.len(),
+                    "Batch merge failed, falling back to per-block processing"
+                );
+                self.merge_blocks_individually(blocks).await
             }
         }
     }
