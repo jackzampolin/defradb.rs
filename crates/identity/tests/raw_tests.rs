@@ -146,6 +146,21 @@ fn test_sign_with_secp256k1() {
 }
 
 #[test]
+fn test_sign_with_secp256r1() {
+    let key = generate_secp256r1().unwrap();
+    let identity = RawIdentity::from_secp256r1(key).unwrap();
+
+    let message = b"test message";
+    let signature = identity.sign(message).unwrap();
+
+    // DER signatures vary in length
+    assert!(signature.len() >= 68 && signature.len() <= 72);
+
+    let verified = identity.pub_key().verify(message, &signature).unwrap();
+    assert!(verified);
+}
+
+#[test]
 fn test_priv_key_trait_method() {
     let key = generate_ed25519().unwrap();
     let expected_bytes = key.raw();

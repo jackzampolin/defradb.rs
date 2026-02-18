@@ -1,6 +1,6 @@
 //! Integration tests for digital signatures
 
-use crypto::keys::generation::{generate_ed25519, generate_secp256k1};
+use crypto::keys::generation::{generate_ed25519, generate_secp256k1, generate_secp256r1};
 use crypto::keys::PrivateKey;
 
 // ===== Ed25519 Signature Tests =====
@@ -179,4 +179,78 @@ fn test_ed25519_large_message() {
     let signature = private_key.sign(&message).unwrap();
     let valid = public_key.verify(&message, &signature).unwrap();
     assert!(valid, "Large message signature should verify");
+}
+
+// ===== secp256r1 (P-256) Signature Tests =====
+
+#[test]
+fn test_secp256r1_sign_and_verify() {
+    let private_key = generate_secp256r1().unwrap();
+    let public_key = private_key.public_key();
+    let message = b"test message";
+
+    let signature = private_key.sign(message).unwrap();
+    assert!(
+        signature.len() >= 68 && signature.len() <= 72,
+        "DER signature should be 68-72 bytes, got {}",
+        signature.len()
+    );
+
+    let valid = public_key.verify(message, &signature).unwrap();
+    assert!(valid, "Signature should verify");
+}
+
+#[test]
+fn test_secp256r1_wrong_message_fails() {
+    let private_key = generate_secp256r1().unwrap();
+    let public_key = private_key.public_key();
+    let message = b"original message";
+    let wrong_message = b"wrong message";
+
+    let signature = private_key.sign(message).unwrap();
+
+    let valid = public_key.verify(wrong_message, &signature).unwrap();
+    assert!(!valid, "Signature should not verify for wrong message");
+}
+
+#[test]
+fn test_secp256r1_wrong_key_fails() {
+    let private_key1 = generate_secp256r1().unwrap();
+    let private_key2 = generate_secp256r1().unwrap();
+    let wrong_public_key = private_key2.public_key();
+    let message = b"test message";
+
+    let signature = private_key1.sign(message).unwrap();
+
+    let valid = wrong_public_key.verify(message, &signature).unwrap();
+    assert!(!valid, "Signature should not verify with wrong key");
+}
+
+#[test]
+fn test_secp256r1_tampered_signature_fails() {
+    let private_key = generate_secp256r1().unwrap();
+    let public_key = private_key.public_key();
+    let message = b"test message";
+
+    let mut signature = private_key.sign(message).unwrap();
+
+    if signature.len() > 10 {
+        signature[10] ^= 0xFF;
+    }
+
+    let result = public_key.verify(message, &signature);
+    if let Ok(valid) = result {
+        assert!(!valid, "Tampered signature should not verify");
+    }
+}
+
+#[test]
+fn test_secp256r1_empty_message() {
+    let private_key = generate_secp256r1().unwrap();
+    let public_key = private_key.public_key();
+    let message = b"";
+
+    let signature = private_key.sign(message).unwrap();
+    let valid = public_key.verify(message, &signature).unwrap();
+    assert!(valid, "Empty message signature should verify");
 }

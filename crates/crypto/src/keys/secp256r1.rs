@@ -200,6 +200,9 @@ impl PublicKey for Secp256r1PublicKey {
             Err(_) => return Ok(false),
         };
 
+        // Normalize S to low-S form for compatibility with various signers
+        let sig = sig.normalize_s().unwrap_or(sig);
+
         // Hash the message with SHA-256 first
         // Go's ecdsa.Sign takes a pre-computed hash, so we must also pre-hash
         // and use verify_digest (DigestVerifier) to match Go behavior

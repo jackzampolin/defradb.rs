@@ -2,9 +2,9 @@
 //!
 //! This module provides functions for creating and verifying JWT bearer tokens
 //! for identity authentication. Tokens are signed using the identity's private key
-//! with EdDSA (for Ed25519) or ES256K (for secp256k1).
+//! with EdDSA (for Ed25519), ES256K (for secp256k1), or ES256 (for secp256r1).
 //!
-//! Both algorithms are implemented manually since the jsonwebtoken crate requires
+//! All three algorithms are implemented manually since the jsonwebtoken crate requires
 //! specific key formats (PKCS#8 DER) that differ from our crypto library's raw format.
 //!
 //! # Clock Skew Tolerance
