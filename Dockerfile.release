@@ -1,0 +1,6 @@
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+ARG TARGETPLATFORM
+COPY ${TARGETPLATFORM}/defra /usr/local/bin/defra
+EXPOSE 9161 9171 9181
+ENTRYPOINT ["defra"]

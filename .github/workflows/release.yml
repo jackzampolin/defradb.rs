@@ -6,26 +6,58 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.variant }} (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            use_cross: false
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            use_cross: true
-          - target: x86_64-apple-darwin
-            os: macos-13
-            use_cross: false
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            use_cross: false
+          # redb (default storage backend)
+          - variant: redb
+            target: x86_64-unknown-linux-gnu
+            platform: linux_amd64
+            runner: ubuntu-latest
+            features: ""
+          - variant: redb
+            target: aarch64-unknown-linux-gnu
+            platform: linux_arm64
+            runner: ubuntu-24.04-arm
+            features: ""
+          - variant: redb
+            target: x86_64-apple-darwin
+            platform: darwin_amd64
+            runner: macos-13
+            features: ""
+          - variant: redb
+            target: aarch64-apple-darwin
+            platform: darwin_arm64
+            runner: macos-latest
+            features: ""
+          # rocksdb
+          - variant: rocksdb
+            target: x86_64-unknown-linux-gnu
+            platform: linux_amd64
+            runner: ubuntu-latest
+            features: "--features rocksdb"
+          - variant: rocksdb
+            target: aarch64-unknown-linux-gnu
+            platform: linux_arm64
+            runner: ubuntu-24.04-arm
+            features: "--features rocksdb"
+          - variant: rocksdb
+            target: x86_64-apple-darwin
+            platform: darwin_amd64
+            runner: macos-13
+            features: "--features rocksdb"
+          - variant: rocksdb
+            target: aarch64-apple-darwin
+            platform: darwin_arm64
+            runner: macos-latest
+            features: "--features rocksdb"
     steps:
       - uses: actions/checkout@v4
 
@@ -35,46 +67,124 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          prefix-key: "v1-release"
+          shared-key: ${{ matrix.target }}
 
       - name: Install system dependencies (Linux)
-        if: contains(matrix.os, 'ubuntu') && !matrix.use_cross
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config protobuf-compiler
+          if [ "${{ matrix.variant }}" = "rocksdb" ]; then
+            sudo apt-get install -y libclang-dev
+          fi
 
-      - name: Install cross
-        if: matrix.use_cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
 
       - name: Build
-        run: |
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release -p cli --target ${{ matrix.target }}
-          else
-            cargo build --release -p cli --target ${{ matrix.target }}
-          fi
+        run: cargo build --release -p cli --target ${{ matrix.target }} ${{ matrix.features }}
 
       - name: Package
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME}"
-          case "${{ matrix.target }}" in
-            x86_64-unknown-linux-gnu)   PLATFORM="linux_amd64" ;;
-            aarch64-unknown-linux-gnu)  PLATFORM="linux_arm64" ;;
-            x86_64-apple-darwin)        PLATFORM="darwin_amd64" ;;
-            aarch64-apple-darwin)       PLATFORM="darwin_arm64" ;;
-          esac
-          ARCHIVE="defra_${TAG}_${PLATFORM}.tar.gz"
+          if [ "${{ matrix.variant }}" = "redb" ]; then
+            ARCHIVE="defra_${TAG}_${{ matrix.platform }}.tar.gz"
+          else
+            ARCHIVE="defra-${{ matrix.variant }}_${TAG}_${{ matrix.platform }}.tar.gz"
+          fi
           tar czf "${ARCHIVE}" -C "target/${{ matrix.target }}/release" defra
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: defra-${{ matrix.target }}
+          name: defra-${{ matrix.variant }}-${{ matrix.platform }}
           path: ${{ env.ARCHIVE }}
+
+  build-wasm:
+    name: Build WASM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-release"
+          shared-key: "wasm32"
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM
+        run: wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
+
+      - name: Package
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ARCHIVE="defra-wasm_${TAG}.tar.gz"
+          tar czf "${ARCHIVE}" -C pkg/wasm defra_wasm_bg.wasm defra_wasm.js defra_wasm.d.ts
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: defra-wasm
+          path: ${{ env.ARCHIVE }}
+
+  docker:
+    name: Docker
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: defra-redb-linux_amd64
+          path: docker-context/linux/amd64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: defra-redb-linux_arm64
+          path: docker-context/linux/arm64
+
+      - name: Extract binaries
+        run: |
+          cd docker-context/linux/amd64 && tar xzf *.tar.gz && rm *.tar.gz
+          cd ../arm64 && tar xzf *.tar.gz && rm *.tar.gz
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: docker-context
+          file: Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/jackzampolin/defradb-rs:${{ github.ref_name }}
+            ghcr.io/jackzampolin/defradb-rs:latest
 
   release:
     name: Release
-    needs: build
+    needs: [build, build-wasm, docker]
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
