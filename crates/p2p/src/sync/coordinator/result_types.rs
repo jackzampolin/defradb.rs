@@ -2,14 +2,14 @@
 
 /// Result of setting a replicator with auto-subscribe.
 #[derive(Debug, Clone)]
-pub struct SetReplicatorResult {
+pub struct CreateReplicatorResult {
     /// Collections that were successfully subscribed.
     pub subscribed: Vec<String>,
     /// Collections that failed to subscribe (with error messages).
     pub failed_subscriptions: Vec<(String, String)>,
 }
 
-impl SetReplicatorResult {
+impl CreateReplicatorResult {
     /// Returns true if all subscriptions succeeded.
     pub fn all_subscribed(&self) -> bool {
         self.failed_subscriptions.is_empty()

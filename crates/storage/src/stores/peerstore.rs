@@ -26,7 +26,7 @@ impl<S: Store> Peerstore<S> {
     ///
     /// The peer_id is used as the key, and the data is stored as raw bytes.
     /// The caller is responsible for serialization (typically CBOR).
-    pub async fn set_replicator(&self, peer_id: &str, data: &[u8]) -> Result<()> {
+    pub async fn create_replicator(&self, peer_id: &str, data: &[u8]) -> Result<()> {
         let key = ReplicatorKey::new(peer_id);
         let mut txn = self.store.new_txn(false).await?;
         txn.set(&key.bytes(), data).await?;
@@ -54,7 +54,7 @@ impl<S: Store> Peerstore<S> {
     ///
     /// Returns a list of (peer_id, data) pairs. Keys that don't match the
     /// expected format are logged and skipped.
-    pub async fn get_all_replicators(&self) -> Result<Vec<(String, Vec<u8>)>> {
+    pub async fn list_replicators(&self) -> Result<Vec<(String, Vec<u8>)>> {
         let prefix = ReplicatorKey::replicator_prefix();
         let txn = self.store.new_txn(true).await?;
         let opts = IterOptions::new().with_prefix(prefix);
@@ -290,7 +290,7 @@ mod tests {
         let data = b"replicator_config_data";
 
         // Set
-        peerstore.set_replicator(peer_id, data).await.unwrap();
+        peerstore.create_replicator(peer_id, data).await.unwrap();
 
         // Get
         let result = peerstore.get_replicator(peer_id).await.unwrap();
@@ -310,7 +310,7 @@ mod tests {
         let data = b"replicator_config_data";
 
         // Set
-        peerstore.set_replicator(peer_id, data).await.unwrap();
+        peerstore.create_replicator(peer_id, data).await.unwrap();
         assert!(peerstore.has_replicator(peer_id).await.unwrap());
 
         // Delete
@@ -323,17 +323,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_all_replicators() {
+    async fn test_list_replicators() {
         let store = Arc::new(MemoryStore::new());
         let peerstore = Peerstore::new(store);
 
         // Add multiple replicators
-        peerstore.set_replicator("peer1", b"config1").await.unwrap();
-        peerstore.set_replicator("peer2", b"config2").await.unwrap();
-        peerstore.set_replicator("peer3", b"config3").await.unwrap();
+        peerstore
+            .create_replicator("peer1", b"config1")
+            .await
+            .unwrap();
+        peerstore
+            .create_replicator("peer2", b"config2")
+            .await
+            .unwrap();
+        peerstore
+            .create_replicator("peer3", b"config3")
+            .await
+            .unwrap();
 
         // Get all
-        let all = peerstore.get_all_replicators().await.unwrap();
+        let all = peerstore.list_replicators().await.unwrap();
         assert_eq!(all.len(), 3);
 
         // Check they're all present (order may vary)
@@ -344,11 +353,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_all_replicators_empty() {
+    async fn test_list_replicators_empty() {
         let store = Arc::new(MemoryStore::new());
         let peerstore = Peerstore::new(store);
 
-        let all = peerstore.get_all_replicators().await.unwrap();
+        let all = peerstore.list_replicators().await.unwrap();
         assert!(all.is_empty());
     }
 
@@ -361,7 +370,7 @@ mod tests {
 
         // Set initial
         peerstore
-            .set_replicator(peer_id, b"config_v1")
+            .create_replicator(peer_id, b"config_v1")
             .await
             .unwrap();
         let result = peerstore.get_replicator(peer_id).await.unwrap();
@@ -369,14 +378,14 @@ mod tests {
 
         // Update
         peerstore
-            .set_replicator(peer_id, b"config_v2")
+            .create_replicator(peer_id, b"config_v2")
             .await
             .unwrap();
         let result = peerstore.get_replicator(peer_id).await.unwrap();
         assert_eq!(result, Some(b"config_v2".to_vec()));
 
         // Still only one replicator
-        let all = peerstore.get_all_replicators().await.unwrap();
+        let all = peerstore.list_replicators().await.unwrap();
         assert_eq!(all.len(), 1);
     }
 }

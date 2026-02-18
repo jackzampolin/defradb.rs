@@ -3,7 +3,7 @@
 use blockstore::Blockstore;
 use libp2p::PeerId;
 
-use super::result_types::{LoadReplicatorsResult, SetReplicatorResult};
+use super::result_types::{CreateReplicatorResult, LoadReplicatorsResult};
 use super::SyncCoordinator;
 use crate::error::Result;
 use crate::replicator::ReplicatorInfo;
@@ -22,20 +22,20 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     ///
     /// # Returns
     ///
-    /// Returns `Ok(SetReplicatorResult)` with details about subscription status.
+    /// Returns `Ok(CreateReplicatorResult)` with details about subscription status.
     /// The replicator is registered even if some subscriptions fail.
-    pub async fn set_replicator(
+    pub async fn create_replicator(
         &self,
         peer_id: PeerId,
         collections: Vec<String>,
         auto_subscribe: bool,
-    ) -> Result<SetReplicatorResult> {
+    ) -> Result<CreateReplicatorResult> {
         // Update the registry via host command
         self.host
-            .set_replicator(peer_id, collections.clone())
+            .create_replicator(peer_id, collections.clone())
             .await?;
 
-        let mut result = SetReplicatorResult {
+        let mut result = CreateReplicatorResult {
             subscribed: Vec::new(),
             failed_subscriptions: Vec::new(),
         };
@@ -66,13 +66,13 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 peer_id = %peer_id,
                 subscribed = ?result.subscribed,
                 failed = ?result.failed_subscriptions,
-                "Set replicator with subscription failures"
+                "Create replicator with subscription failures"
             );
         } else {
             tracing::info!(
                 peer_id = %peer_id,
                 collections = ?collections,
-                "Set replicator"
+                "Created replicator"
             );
         }
 
@@ -160,7 +160,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     async fn unsubscribe_orphaned_collections(&self, collections: &[String]) {
         for collection_id in collections {
             // Check if any remaining replicators use this collection
-            let remaining = match self.host.get_all_replicators().await {
+            let remaining = match self.host.list_replicators().await {
                 Ok(reps) => reps.iter().any(|r| r.collections.contains(collection_id)),
                 Err(_) => true, // conservative: don't unsubscribe if we can't check
             };
@@ -178,8 +178,8 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     }
 
     /// Get all registered replicators.
-    pub async fn get_all_replicators(&self) -> Result<Vec<ReplicatorInfo>> {
-        self.host.get_all_replicators().await
+    pub async fn list_replicators(&self) -> Result<Vec<ReplicatorInfo>> {
+        self.host.list_replicators().await
     }
 
     /// Get replicator info for a specific peer.
@@ -202,7 +202,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// # Returns
     ///
     /// Returns a `LoadReplicatorsResult` with details about what was loaded
-    /// and any failures that occurred. Unlike individual `set_replicator` calls,
+    /// and any failures that occurred. Unlike individual `create_replicator` calls,
     /// this method continues loading remaining replicators even if some fail.
     pub async fn load_replicators(
         &self,
@@ -214,7 +214,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         for info in infos {
             if let Some(peer_id) = info.peer_id() {
                 match self
-                    .set_replicator(peer_id, info.collections.clone(), auto_subscribe)
+                    .create_replicator(peer_id, info.collections.clone(), auto_subscribe)
                     .await
                 {
                     Ok(set_result) => {

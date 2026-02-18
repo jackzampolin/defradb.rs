@@ -129,12 +129,12 @@ impl<S: Store> P2PHost<S> {
             } => {
                 self.handle_send_se_artifacts(peer_id, request, response);
             }
-            HostCommand::SetReplicator {
+            HostCommand::CreateReplicator {
                 peer_id,
                 collections,
                 response,
             } => {
-                self.handle_set_replicator(peer_id, collections, response);
+                self.handle_create_replicator(peer_id, collections, response);
             }
             HostCommand::DeleteReplicator { peer_id, response } => {
                 self.handle_delete_replicator(peer_id, response);
@@ -146,10 +146,10 @@ impl<S: Store> P2PHost<S> {
             } => {
                 self.handle_remove_replicator_collections(peer_id, collections, response);
             }
-            HostCommand::GetAllReplicators { response } => {
-                let infos = self.replicators.get_all_replicator_info();
+            HostCommand::ListReplicators { response } => {
+                let infos = self.replicators.list_replicator_info();
                 if response.send(infos).is_err() {
-                    debug!("GetAllReplicators command response dropped - caller cancelled");
+                    debug!("ListReplicators command response dropped - caller cancelled");
                 }
             }
             HostCommand::GetReplicator { peer_id, response } => {

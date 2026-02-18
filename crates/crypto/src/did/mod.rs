@@ -28,6 +28,7 @@ pub fn create_did_key(key_type: KeyType, public_key: &[u8]) -> Result<String> {
         KeyType::Ed25519 => 0xed,     // ed25519-pub (multicodec 0xed)
         KeyType::Secp256k1 => 0xe7,   // secp256k1-pub (multicodec 0xe7)
         KeyType::Secp256r1 => 0x1200, // p256-pub (multicodec 0x1200)
+        KeyType::Bls12381 => 0xea,    // bls12_381-g1-pub (multicodec 0xea)
     };
 
     // Encode with varint prefix
@@ -76,6 +77,7 @@ pub fn parse_did_key(did: &str) -> Result<(KeyType, Vec<u8>)> {
         0xed => KeyType::Ed25519,
         0xe7 => KeyType::Secp256k1,
         0x1200 => KeyType::Secp256r1,
+        0xea => KeyType::Bls12381,
         _ => {
             return Err(crypto_error(format!(
                 "unknown multicodec: 0x{:x}",

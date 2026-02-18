@@ -189,6 +189,7 @@ impl<S: Store> CommitsFetcher<S> {
                     let sig_type = match sig.header.sig_type {
                         defra_core::block::SignatureType::ES256K => "ES256K",
                         defra_core::block::SignatureType::EdDSA => "EdDSA",
+                        defra_core::block::SignatureType::BLS => "BLS",
                     };
                     let sig_json = json!({
                         "type": sig_type,

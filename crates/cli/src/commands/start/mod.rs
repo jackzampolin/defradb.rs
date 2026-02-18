@@ -103,6 +103,22 @@ pub struct StartArgs {
     /// "immediate" (fsync every commit, safer against OS crashes)
     #[arg(long)]
     pub durability: Option<String>,
+
+    /// Signer type: "local" (default) or "orbis" (Orbis ring threshold signing)
+    #[arg(long)]
+    pub signer_type: Option<String>,
+
+    /// Orbis gRPC endpoint (required when --signer-type=orbis)
+    #[arg(long)]
+    pub signer_orbis_endpoint: Option<String>,
+
+    /// Orbis ring ID from DKG (required when --signer-type=orbis)
+    #[arg(long)]
+    pub signer_orbis_ring_id: Option<String>,
+
+    /// Orbis derivation label for the ring's derived key (e.g. "x-archive")
+    #[arg(long)]
+    pub signer_orbis_derivation: Option<String>,
 }
 
 impl StartArgs {
@@ -122,9 +138,72 @@ impl StartArgs {
         // Parse user identity from --identity flag if provided
         let user_identity = self.parse_user_identity()?;
 
+        // Set up Orbis remote signer if configured
+        if self.signer_type.as_deref() == Some("orbis") {
+            self.setup_orbis_signer(&user_identity).await?;
+        }
+
         // Start the node
         let node = Node::new(config, user_identity).await?;
         node.run().await
+    }
+
+    /// Set up Orbis ring threshold signing.
+    ///
+    /// Connects to the Orbis ring, derives the BLS public key, and stores
+    /// a SigningConfig with a remote signer under the signer's DID.
+    async fn setup_orbis_signer(
+        &self,
+        user_identity: &Option<std::sync::Arc<identity::RawIdentity>>,
+    ) -> Result<()> {
+        let service_identity = user_identity.as_ref().ok_or_else(|| {
+            Error::InvalidConfig(
+                "--identity is required when --signer-type=orbis \
+                 (service key signs JWTs for Orbis auth)"
+                    .into(),
+            )
+        })?;
+
+        let endpoint = self.signer_orbis_endpoint.as_ref().ok_or_else(|| {
+            Error::InvalidConfig("--signer-orbis-endpoint required for orbis signer".into())
+        })?;
+
+        let ring_id = self.signer_orbis_ring_id.as_ref().ok_or_else(|| {
+            Error::InvalidConfig("--signer-orbis-ring-id required for orbis signer".into())
+        })?;
+
+        let derivation = self.signer_orbis_derivation.clone().unwrap_or_default();
+
+        let client = orbis::OrbisClient::new(
+            endpoint.clone(),
+            ring_id.clone(),
+            derivation,
+            service_identity.clone(),
+        )
+        .await
+        .map_err(|e| Error::InvalidConfig(format!("Orbis signer setup failed: {}", e)))?;
+
+        let signer_did = client.signer_did().to_string();
+        let public_key_bytes = client.public_key_bytes().to_vec();
+        let public_key_hex = client.public_key_hex().to_string();
+
+        defra_core::signing::store_identity(
+            &signer_did,
+            defra_core::signing::SigningConfig {
+                key_type: "bls".to_string(),
+                private_key_bytes: vec![],
+                public_key_bytes,
+                public_key_hex,
+                remote_signer: Some(std::sync::Arc::new(client)),
+            },
+        );
+
+        tracing::info!(
+            signer_did = %signer_did,
+            "Orbis remote signer configured"
+        );
+
+        Ok(())
     }
 
     /// Parse the user identity from the --identity flag.

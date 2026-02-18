@@ -1,0 +1,32 @@
+[package]
+name = "orbis"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+defra-core = { path = "../defra-core" }
+identity = { path = "../identity" }
+crypto = { path = "../crypto" }
+
+# gRPC
+tonic = { workspace = true }
+prost = { workspace = true }
+
+# Async runtime (dedicated runtime for sync bridge)
+tokio = { workspace = true }
+
+# Encoding
+hex.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+[build-dependencies]
+tonic-build = { workspace = true }

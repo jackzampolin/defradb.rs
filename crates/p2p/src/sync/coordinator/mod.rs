@@ -52,7 +52,7 @@ mod replicators;
 mod result_types;
 mod subscriptions;
 
-pub use result_types::{LoadReplicatorsResult, SetReplicatorResult};
+pub use result_types::{CreateReplicatorResult, LoadReplicatorsResult};
 
 use std::sync::Arc;
 

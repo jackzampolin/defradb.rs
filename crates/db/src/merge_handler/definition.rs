@@ -162,7 +162,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
         // Add to runtime cache so it's visible via list_collections/get_collection.
         // Synced collections are inactive but still need to be in the cache for
-        // GetCollections with IncludeInactive=true to find them.
+        // GetCollections with GetInactive=true to find them.
         self.db
             .add_collection_to_cache(schema.clone())
             .map_err(MergeError::Database)?;

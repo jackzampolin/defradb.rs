@@ -62,6 +62,7 @@ impl Node {
                     private_key_bytes: identity.private_key_bytes(),
                     public_key_bytes: identity.public_key_bytes(),
                     public_key_hex: hex::encode(identity.public_key_bytes()),
+                    remote_signer: None,
                 },
             );
             info!("Stored node identity signing config for DID {}", did);
@@ -402,13 +403,13 @@ impl Node {
                 // Restore replicators from peerstore
                 let restore_peerstore =
                     storage::stores::Peerstore::new(store_for_background.clone());
-                match restore_peerstore.get_all_replicators().await {
+                match restore_peerstore.list_replicators().await {
                     Ok(entries) => {
                         for (_peer_id_str, data) in entries {
                             if let Ok(rep_info) = p2p::ReplicatorInfo::from_bytes(&data) {
                                 if let Some(pid) = rep_info.peer_id() {
                                     let _ = p2p_handle
-                                        .set_replicator(pid, rep_info.collections.clone())
+                                        .create_replicator(pid, rep_info.collections.clone())
                                         .await;
                                     for cid in &rep_info.collections {
                                         let _ = p2p_handle

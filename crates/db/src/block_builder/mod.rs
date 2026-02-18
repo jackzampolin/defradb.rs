@@ -84,6 +84,14 @@ pub(super) fn compute_signature(
                 .map_err(|e| format!("Failed to sign block: {}", e))?;
             (SignatureType::ES256K, sig)
         }
+        "bls" => {
+            let remote = signer
+                .remote_signer
+                .as_ref()
+                .ok_or("BLS signing requires a remote signer (Orbis)")?;
+            let sig = remote.sign_sync(&block_bytes)?;
+            (SignatureType::BLS, sig)
+        }
         other => return Err(format!("Unsupported key type for signing: {}", other)),
     };
 

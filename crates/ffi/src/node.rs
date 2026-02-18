@@ -157,6 +157,7 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
                     private_key_bytes: raw_identity.private_key_bytes().to_vec(),
                     public_key_bytes: raw_identity.public_key_bytes().to_vec(),
                     public_key_hex: hex::encode(raw_identity.public_key_bytes()),
+                    remote_signer: None,
                 },
             );
 

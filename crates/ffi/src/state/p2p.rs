@@ -115,7 +115,7 @@ impl P2PState {
         self.documents.read().iter().cloned().collect()
     }
 
-    /// Store a peer's full multiaddr (called on connect/set_replicator).
+    /// Store a peer's full multiaddr (called on connect/create_replicator).
     pub fn set_peer_address(&self, peer_id: &str, full_multiaddr: &str) {
         self.peer_addresses
             .write()

@@ -30,6 +30,7 @@ pub use types::KeyType;
 
 // Re-export key types
 pub use keys::{
+    bls::BlsPublicKey,
     ed25519::{ed25519_key_from_seed, Ed25519PrivateKey, Ed25519PublicKey},
     generation::{
         generate_aes256, generate_ed25519, generate_key, generate_secp256k1, generate_x25519,
