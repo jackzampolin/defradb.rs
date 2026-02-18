@@ -1,6 +1,6 @@
 //! IPLD link extraction and missing link detection.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use cid::Cid;
 use libipld::{Block, DefaultParams};
@@ -22,21 +22,7 @@ pub async fn find_missing_links<B: Blockstore>(
 
 /// Extract IPLD references from block data and check which are missing.
 async fn extract_references<B: Blockstore>(blockstore: &B, block_data: &[u8]) -> Result<Vec<Cid>> {
-    use libipld::multihash::{Code, MultihashDigest};
-    let hash = Code::Sha2_256.digest(block_data);
-    let dummy_cid = Cid::new_v1(0x71, hash); // 0x71 = DAG-CBOR codec
-
-    let mut refs = Vec::new();
-    let block = Block::<DefaultParams>::new_unchecked(dummy_cid, block_data.to_vec());
-    if let Err(e) = block.references(&mut refs) {
-        let error_msg = e.to_string();
-        if error_msg.contains("Unsupported codec") {
-            return Ok(Vec::new());
-        }
-        return Err(Error::BlockParseError {
-            reason: format!("Failed to extract references: {}. Block may be corrupt.", e),
-        });
-    }
+    let refs = extract_ipld_links(block_data)?;
 
     let mut missing = Vec::new();
     for link_cid in refs {
@@ -59,56 +45,66 @@ async fn extract_references<B: Blockstore>(blockstore: &B, block_data: &[u8]) ->
     Ok(missing)
 }
 
-/// Recursively find ALL missing blocks in the DAG rooted at `block_data`.
+/// Parse IPLD block data and return all referenced CIDs.
+fn extract_ipld_links(block_data: &[u8]) -> Result<Vec<Cid>> {
+    use libipld::multihash::{Code, MultihashDigest};
+    let hash = Code::Sha2_256.digest(block_data);
+    let dummy_cid = Cid::new_v1(0x71, hash); // 0x71 = DAG-CBOR codec
+
+    let mut refs = Vec::new();
+    let block = Block::<DefaultParams>::new_unchecked(dummy_cid, block_data.to_vec());
+    if let Err(e) = block.references(&mut refs) {
+        let error_msg = e.to_string();
+        if error_msg.contains("Unsupported codec") {
+            return Ok(Vec::new());
+        }
+        return Err(Error::BlockParseError {
+            reason: format!("Failed to extract references: {}. Block may be corrupt.", e),
+        });
+    }
+    Ok(refs)
+}
+
+/// Iteratively find ALL missing blocks in the DAG rooted at `block_data`.
 ///
-/// Unlike `find_missing_links` (one level), this walks the entire DAG tree.
-/// For multi-level DAGs (Collection → Composite → LWW), this discovers
-/// missing blocks at any depth.
+/// Walks the entire DAG using a work queue instead of recursion, so stack
+/// depth is constant regardless of DAG depth. Uses `is_merged()` to
+/// short-circuit traversal of already-merged subtrees.
 pub async fn find_all_missing_links<B: Blockstore>(
     blockstore: &B,
     block_data: &[u8],
 ) -> Result<Vec<Cid>> {
     let mut missing = Vec::new();
     let mut visited = HashSet::new();
-    find_missing_recursive(blockstore, block_data, &mut missing, &mut visited).await?;
-    Ok(missing)
-}
+    let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
+    queue.push_back(block_data.to_vec());
 
-/// Inner recursive link walker.
-fn find_missing_recursive<'a, B: Blockstore + 'a>(
-    blockstore: &'a B,
-    block_data: &'a [u8],
-    missing: &'a mut Vec<Cid>,
-    visited: &'a mut HashSet<Cid>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
-    Box::pin(async move {
-        use libipld::multihash::{Code, MultihashDigest};
-        let hash = Code::Sha2_256.digest(block_data);
-        let dummy_cid = Cid::new_v1(0x71, hash);
-
-        let mut refs = Vec::new();
-        let block = Block::<DefaultParams>::new_unchecked(dummy_cid, block_data.to_vec());
-        if let Err(e) = block.references(&mut refs) {
-            let error_msg = e.to_string();
-            if error_msg.contains("Unsupported codec") {
-                return Ok(());
-            }
-            return Err(Error::BlockParseError {
-                reason: format!("Failed to extract references: {}", e),
-            });
-        }
+    while let Some(data) = queue.pop_front() {
+        let refs = extract_ipld_links(&data)?;
 
         for link_cid in refs {
-            if visited.contains(&link_cid) {
+            if !visited.insert(link_cid) {
                 continue;
             }
-            visited.insert(link_cid);
+
+            // Early-exit: merged subtrees are complete, skip traversal
+            match blockstore.is_merged(&link_cid).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        cid = %link_cid,
+                        error = %e,
+                        "Failed to check merge status, will traverse"
+                    );
+                }
+            }
 
             match blockstore.has(&link_cid).await {
                 Ok(true) => {
-                    // Block exists — recursively check ITS links too
+                    // Block exists but not merged — enqueue for further traversal
                     if let Ok(Some(child_data)) = blockstore.get(&link_cid).await {
-                        find_missing_recursive(blockstore, &child_data, missing, visited).await?;
+                        queue.push_back(child_data);
                     }
                 }
                 Ok(false) => {
@@ -125,6 +121,7 @@ fn find_missing_recursive<'a, B: Blockstore + 'a>(
                 }
             }
         }
-        Ok(())
-    })
+    }
+
+    Ok(missing)
 }

@@ -60,6 +60,13 @@ use storage::stores::Blockstore as InternalBlockstore;
 /// Default number of entries in the block cache (matches Go's 1M entry LRU).
 const DEFAULT_BLOCK_CACHE_SIZE: usize = 1_000_000;
 
+/// Number of entries in the merged CID cache.
+///
+/// Tracks CIDs that have been merged so `is_merged()` can skip storage reads
+/// during P2P DAG sync hot loops. Sized smaller than the block cache since
+/// only merged CIDs are tracked (not full block data).
+const DEFAULT_MERGED_CACHE_SIZE: usize = 100_000;
+
 /// DefraDB blockstore implementation
 ///
 /// Wraps the internal storage::stores::Blockstore with a clean public API.
@@ -73,6 +80,9 @@ pub struct DefraBlockstore<S: Store> {
     rehash: AtomicBool,
     /// LRU cache for recently accessed blocks (CID → block bytes)
     cache: Mutex<LruCache<Cid, Vec<u8>>>,
+    /// LRU cache for merged CIDs — fast path for `is_merged()` checks
+    /// during P2P DAG sync. Only positive results are cached (merged = true).
+    merged_cache: Mutex<LruCache<Cid, ()>>,
 }
 
 impl<S: Store> fmt::Debug for DefraBlockstore<S> {
@@ -98,6 +108,9 @@ impl<S: Store + 'static> DefraBlockstore<S> {
             rehash: AtomicBool::new(false),
             cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(DEFAULT_BLOCK_CACHE_SIZE).unwrap(),
+            )),
+            merged_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(DEFAULT_MERGED_CACHE_SIZE).unwrap(),
             )),
         }
     }
@@ -273,8 +286,9 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     }
 
     async fn delete(&self, cid: &Cid) -> Result<()> {
-        // Evict from cache
+        // Evict from both caches
         self.cache.lock().pop(cid);
+        self.merged_cache.lock().pop(cid);
 
         let mut txn = self.store.new_txn(false).await?;
         {
@@ -331,34 +345,48 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     }
 
     async fn is_merged(&self, cid: &Cid) -> Result<bool> {
-        // Match Go semantics: return false if block doesn't exist
+        // Fast path: check merged cache
+        if self.merged_cache.lock().contains(cid) {
+            return Ok(true);
+        }
+
+        // Slow path: check storage
         let txn = self.store.new_txn(true).await?;
         let bs_txn = txn
             .as_any()
             .downcast_ref::<BlockstoreTxn>()
             .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
 
-        // First check if block exists
         let has_block = bs_txn.has_block(cid).await?;
         if !has_block {
             return Ok(false);
         }
 
-        // Block exists, check merge status
         let result = bs_txn.is_merged(cid).await?;
+
+        // Cache positive results
+        if result {
+            self.merged_cache.lock().put(*cid, ());
+        }
+
         Ok(result)
     }
 
     async fn mark_as_merged(&self, cid: &Cid) -> Result<()> {
         let mut txn = self.store.new_txn(false).await?;
+        let block_exists;
         {
             let bs_txn = txn
                 .as_any_mut()
                 .downcast_mut::<BlockstoreTxn>()
                 .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
+            block_exists = bs_txn.has_block(cid).await?;
             bs_txn.mark_as_merged(cid).await?;
         }
         txn.commit().await?;
+        if block_exists {
+            self.merged_cache.lock().put(*cid, ());
+        }
         Ok(())
     }
 
@@ -377,6 +405,10 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
             }
         }
         txn.commit().await?;
+        let mut cache = self.merged_cache.lock();
+        for cid in cids {
+            cache.put(*cid, ());
+        }
         Ok(())
     }
 
