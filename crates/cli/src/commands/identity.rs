@@ -29,7 +29,7 @@ pub enum IdentityCommand {
 /// Arguments for identity new command
 #[derive(Args, Debug)]
 pub struct IdentityNewArgs {
-    /// Key type to generate (secp256k1 or ed25519)
+    /// Key type to generate (secp256k1, ed25519, or secp256r1)
     #[arg(long = "type", default_value = "secp256k1")]
     pub key_type: String,
 
@@ -118,9 +118,15 @@ impl IdentityNewArgs {
                 })?;
                 RawIdentity::from_ed25519(private_key)?
             }
+            "secp256r1" | "p256" | "p-256" => {
+                let private_key = crypto::generate_secp256r1().map_err(|e| {
+                    Error::Keyring(format!("failed to generate secp256r1 key: {}", e))
+                })?;
+                RawIdentity::from_secp256r1(private_key)?
+            }
             _ => {
                 return Err(Error::InvalidIdentity(format!(
-                    "unknown key type: '{}'. Valid types: secp256k1, ed25519",
+                    "unknown key type: '{}'. Valid types: secp256k1, ed25519, secp256r1",
                     self.key_type
                 )));
             }
@@ -136,8 +142,7 @@ impl IdentityNewArgs {
                 .map_err(|e| Error::Keyring(e.to_string()))?;
 
             if self.output_key {
-                let key_type = detect_key_type(&raw_bytes)?;
-                let jwk = build_jwk(key_type, &raw_bytes)?;
+                let jwk = build_jwk(identity.identity_key_type(), &raw_bytes)?;
                 print_jwk(&jwk, &self.output);
             } else {
                 match self.output.to_lowercase().as_str() {
@@ -301,6 +306,19 @@ fn build_jwk(key_type: identity::IdentityKeyType, raw_bytes: &[u8]) -> Result<se
                 "did": did.to_string(),
             }))
         }
+        identity::IdentityKeyType::Secp256r1 => {
+            let (x, y) = crypto::secp256r1_private_key_to_xy(raw_bytes).map_err(|e| {
+                Error::Keyring(format!("failed to extract secp256r1 coordinates: {}", e))
+            })?;
+            Ok(serde_json::json!({
+                "kty": "EC",
+                "crv": "P-256",
+                "d": URL_SAFE_NO_PAD.encode(raw_bytes),
+                "x": URL_SAFE_NO_PAD.encode(&x),
+                "y": URL_SAFE_NO_PAD.encode(&y),
+                "did": did.to_string(),
+            }))
+        }
         identity::IdentityKeyType::Ed25519 => {
             let seed = &raw_bytes[..32];
             let pubkey = &raw_bytes[32..64];
@@ -356,6 +374,15 @@ fn parse_jwk(text: &str) -> Result<Vec<u8>> {
             if d_bytes.len() != 32 {
                 return Err(Error::InvalidIdentity(format!(
                     "secp256k1 'd' must be 32 bytes, got {}",
+                    d_bytes.len()
+                )));
+            }
+            Ok(d_bytes)
+        }
+        ("EC", "P-256") => {
+            if d_bytes.len() != 32 {
+                return Err(Error::InvalidIdentity(format!(
+                    "P-256 'd' must be 32 bytes, got {}",
                     d_bytes.len()
                 )));
             }

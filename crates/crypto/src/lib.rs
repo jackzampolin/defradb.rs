@@ -39,7 +39,7 @@ pub use keys::{
         public_key_from_string,
     },
     secp256k1::{secp256k1_private_key_to_xy, Secp256k1PrivateKey, Secp256k1PublicKey},
-    secp256r1::{Secp256r1PrivateKey, Secp256r1PublicKey},
+    secp256r1::{secp256r1_private_key_to_xy, Secp256r1PrivateKey, Secp256r1PublicKey},
     Key, PrivateKey, PublicKey,
 };
 

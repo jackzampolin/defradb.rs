@@ -695,6 +695,9 @@ pub enum SignatureType {
     #[serde(rename = "ES256K")]
     ES256K,
 
+    /// ECDSA with secp256r1 (P-256) curve
+    ES256,
+
     /// EdDSA with Ed25519 curve
     EdDSA,
 

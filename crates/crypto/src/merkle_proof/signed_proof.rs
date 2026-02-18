@@ -33,12 +33,8 @@ impl SignedMerkleProof {
         let sig_type = match private_key.key_type() {
             KeyType::Ed25519 => SignatureType::EdDSA,
             KeyType::Secp256k1 => SignatureType::ES256K,
+            KeyType::Secp256r1 => SignatureType::ES256,
             KeyType::Bls12381 => SignatureType::BLS,
-            _ => {
-                return Err(Error::Crypto(
-                    "Unsupported key type for signing".to_string(),
-                ))
-            }
         };
 
         let public_key = private_key.public_key();
@@ -61,6 +57,7 @@ impl SignedMerkleProof {
         let expected_key_type = match self.signature.header.sig_type {
             SignatureType::EdDSA => KeyType::Ed25519,
             SignatureType::ES256K => KeyType::Secp256k1,
+            SignatureType::ES256 => KeyType::Secp256r1,
             SignatureType::BLS => KeyType::Bls12381,
         };
         if public_key.key_type() != expected_key_type {
@@ -123,6 +120,7 @@ fn extract_public_key_from_signature(sig: &Signature) -> Result<Box<dyn PublicKe
     let key_type = match sig.header.sig_type {
         SignatureType::EdDSA => KeyType::Ed25519,
         SignatureType::ES256K => KeyType::Secp256k1,
+        SignatureType::ES256 => KeyType::Secp256r1,
         SignatureType::BLS => KeyType::Bls12381,
     };
 

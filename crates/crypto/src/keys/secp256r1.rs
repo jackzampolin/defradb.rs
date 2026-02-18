@@ -209,6 +209,24 @@ impl PublicKey for Secp256r1PublicKey {
     }
 }
 
+/// Extract the uncompressed x and y coordinates from a secp256r1 private key.
+///
+/// Returns (x, y) where each is a 32-byte big-endian representation. Used for JWK export.
+pub fn secp256r1_private_key_to_xy(private_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+    let signing_key = SigningKey::from_slice(private_bytes)
+        .map_err(|e| crypto_error(format!("invalid secp256r1 private key: {}", e)))?;
+    let point = signing_key.verifying_key().to_encoded_point(false);
+    let x = point
+        .x()
+        .ok_or_else(|| crypto_error("secp256r1: missing x coordinate"))?
+        .to_vec();
+    let y = point
+        .y()
+        .ok_or_else(|| crypto_error("secp256r1: missing y coordinate"))?
+        .to_vec();
+    Ok((x, y))
+}
+
 // Custom serde module for VerifyingKey
 mod secp256r1_public_key_serde {
     use p256::ecdsa::VerifyingKey;

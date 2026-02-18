@@ -259,6 +259,7 @@ impl From<&SignatureHeader> for Ipld {
         let mut map = BTreeMap::new();
         let type_str = match header.sig_type {
             SignatureType::ES256K => "ES256K",
+            SignatureType::ES256 => "ES256",
             SignatureType::EdDSA => "EdDSA",
             SignatureType::BLS => "BLS",
         };

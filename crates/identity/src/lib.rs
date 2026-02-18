@@ -3,7 +3,7 @@
 //! This crate provides identity management for DefraDB nodes, including:
 //! - `Identity` trait for public identity operations (DID, public key)
 //! - `FullIdentity` trait for identity operations requiring a private key
-//! - `RawIdentity` concrete implementation supporting secp256k1 and ed25519
+//! - `RawIdentity` concrete implementation supporting Ed25519, secp256k1, and secp256r1
 //! - `IdentityKeyType` enum for compile-time key type safety
 //! - `Did` newtype for validated DID strings
 //! - `IdentityContext` for propagating identity through request handling
@@ -12,10 +12,7 @@
 //!
 //! - **Ed25519**: Fast, secure signing with 64-byte signatures
 //! - **secp256k1**: Bitcoin/Ethereum compatible with DER-encoded signatures (70-73 bytes typical)
-//!
-//! Note: secp256r1 (P-256) is NOT supported for identity operations.
-//! Use `IdentityKeyType` instead of `crypto::KeyType` to ensure compile-time
-//! safety when working with identity operations.
+//! - **secp256r1**: P-256 / NIST curve, browser Web Crypto compatible (ES256 JWTs)
 
 mod context;
 mod did;
@@ -63,6 +60,7 @@ pub trait FullIdentity: Identity {
     /// The signature format depends on the key type:
     /// - Ed25519: 64-byte raw signature
     /// - secp256k1: DER-encoded ECDSA signature
+    /// - secp256r1: DER-encoded ECDSA signature
     ///
     /// The default implementation delegates to `self.priv_key().sign(data)`.
     fn sign(&self, data: &[u8]) -> defra_core::Result<Vec<u8>> {
