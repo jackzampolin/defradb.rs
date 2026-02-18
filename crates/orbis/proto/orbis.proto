@@ -1,27 +1,121 @@
 syntax = "proto3";
 
+// Package must match orbis-rs/crates/proto/proto/utility_service.proto
+// so gRPC routes correctly when DefraDB calls Orbis.
 package orbis.utility.v1;
 
 service UtilityService {
+  // Derive a child public key from a ring's master public key.
+  // Unauthenticated — anyone can derive a public key for any label.
   rpc DerivePublicKey(DerivePublicKeyRequest) returns (DerivePublicKeyResponse);
+
+  // Request a threshold signature from the ring.
+  // Authenticated — caller must present a JWT authorizing the operation.
+  //
+  // The ring determines the signing scheme (BLS, FROST, etc.) based on
+  // how it was initialized during DKG. Clients may optionally specify
+  // `algorithm` as a guard: if the ring uses a different scheme, the
+  // request is rejected rather than silently producing the wrong type.
   rpc Sign(SignRequest) returns (SignResponse);
 }
 
+// --- Algorithm Identification ---
+
+// Signing algorithms supported by the Orbis threshold signing protocol.
+//
+// Each algorithm corresponds to a specific ThresholdSigner implementation
+// in the crypto crate and determines the signature format, verification
+// method, and whether interactive nonce rounds (FROST) are required.
+enum SignAlgorithm {
+  // Unspecified — the ring's default algorithm is used.
+  SIGN_ALGORITHM_UNSPECIFIED = 0;
+
+  // BLS12-381 threshold signatures (non-interactive).
+  // Produces G2 point signatures verified via pairings.
+  // Protocol: single signing round, no nonce commitment.
+  // Use case: general-purpose signing, attestations.
+  SIGN_ALGORITHM_BLS = 1;
+
+  // FROST over Decaf377 (interactive Schnorr threshold signatures).
+  // Produces (R, z) Schnorr signatures over Penumbra's prime-order group.
+  // Protocol: two rounds (nonce commitment + signing).
+  // Use case: Penumbra-compatible signatures, EdDSA-like schemes.
+  SIGN_ALGORITHM_FROST_DECAF377 = 2;
+
+  // Reserved for future algorithms:
+  //   SIGN_ALGORITHM_FROST_ED25519 = 3;
+  //   SIGN_ALGORITHM_FROST_SECP256K1 = 4;
+  //   SIGN_ALGORITHM_ECDSA_SECP256K1 = 5;
+}
+
+// --- DerivePublicKey ---
+
 message DerivePublicKeyRequest {
+  // Ring whose master public key to derive from.
   string ring_id = 1;
+
+  // Capability derivation label. The derived key is:
+  //   derived_pk = H(DERIVATION_DOMAIN || derivation) * ring_pk
+  // An empty value returns the ring's master public key directly.
   bytes derivation = 2;
 }
 
 message DerivePublicKeyResponse {
+  // The derived public key (compressed curve point, algorithm-dependent encoding).
   bytes public_key = 1;
+
+  // Which algorithm this public key belongs to.
+  // Lets clients know how to use/verify the key without out-of-band knowledge.
+  SignAlgorithm algorithm = 2;
 }
 
+// --- Sign ---
+
 message SignRequest {
+  // Ring to sign with.
   string ring_id = 1;
+
+  // Message bytes to sign. Interpretation is algorithm-dependent:
+  //   BLS: hash-to-curve (H(msg) mapped to G2)
+  //   FROST: Fiat-Shamir challenge over raw bytes
   bytes message = 2;
+
+  // Optional capability derivation. When set, the ring signs using
+  // the derived key (H(label) * share_i) rather than the master key.
+  // Must match the derivation used in DerivePublicKey to get the
+  // corresponding verification key.
   bytes derivation = 3;
+
+  // Optional algorithm guard. If set and the ring uses a different
+  // algorithm, the request is rejected with INVALID_ARGUMENT.
+  // If UNSPECIFIED (0), the ring's native algorithm is used.
+  SignAlgorithm algorithm = 4;
+
+  // Extensibility: algorithm-specific or use-case-specific options.
+  // Reserved for future use. Examples of potential keys:
+  //   "hash_function": override the hash-to-curve method
+  //   "dst": domain separation tag for BLS
+  //   "aux_rand": additional randomness for FROST
+  map<string, bytes> options = 5;
 }
 
 message SignResponse {
+  // The recovered threshold signature (algorithm-dependent encoding):
+  //   BLS: compressed G2 point (96 bytes)
+  //   FROST/Decaf377: (R || z) Schnorr signature
   bytes signature = 1;
+
+  // Which algorithm produced this signature.
+  SignAlgorithm algorithm = 2;
+
+  // The public key that verifies this signature.
+  // Saves the client a DerivePublicKey round-trip when derivation was used.
+  bytes public_key = 3;
+
+  // Extensibility: additional response metadata.
+  // Reserved for future use. Examples of potential keys:
+  //   "participants": which node indices contributed shares
+  //   "session_id": signing session identifier for audit
+  //   "duration_ms": how long the threshold ceremony took
+  map<string, bytes> metadata = 4;
 }
