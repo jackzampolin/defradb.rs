@@ -151,6 +151,8 @@ impl OrbisClient {
                 ring_id: self.ring_id.clone(),
                 message: data.to_vec(),
                 derivation: self.derivation.clone(),
+                algorithm: 0, // UNSPECIFIED — use ring's native algorithm
+                options: Default::default(),
             })
             .await
             .map_err(|e| format!("Orbis Sign RPC failed: {}", e))?;
