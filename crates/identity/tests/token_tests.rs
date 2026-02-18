@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use crypto::{generate_ed25519, generate_secp256k1};
+use crypto::{generate_ed25519, generate_secp256k1, generate_secp256r1};
 use identity::{
     from_token, new_token, verify_auth_token, Error, Identity, IdentityKeyType, RawIdentity,
 };
@@ -45,6 +45,86 @@ fn test_new_token_secp256k1() {
     assert!(!token.is_empty());
     let token_str = std::str::from_utf8(&token).unwrap();
     assert!(token_str.contains('.'));
+}
+
+#[test]
+fn test_new_token_secp256r1() {
+    let private_key = generate_secp256r1().unwrap();
+    let identity = RawIdentity::from_private_key(private_key).unwrap();
+
+    let token = new_token(
+        &identity,
+        Duration::from_secs(3600),
+        Some("test-audience".to_string()),
+        None,
+    )
+    .unwrap();
+
+    assert!(!token.is_empty());
+    let token_str = std::str::from_utf8(&token).unwrap();
+    assert!(token_str.contains('.'));
+}
+
+#[test]
+fn test_from_token_secp256r1() {
+    let private_key = generate_secp256r1().unwrap();
+    let identity = RawIdentity::from_private_key(private_key).unwrap();
+    let original_did = identity.did().unwrap();
+
+    let token = new_token(
+        &identity,
+        Duration::from_secs(3600),
+        Some("test-audience".to_string()),
+        Some("browser-account".to_string()),
+    )
+    .unwrap();
+
+    let token_identity = from_token(&token).unwrap();
+
+    assert_eq!(token_identity.did().unwrap(), original_did);
+    assert_eq!(token_identity.key_type(), IdentityKeyType::Secp256r1);
+    assert_eq!(token_identity.authorized_account(), Some("browser-account"));
+}
+
+#[test]
+fn test_roundtrip_secp256r1() {
+    let private_key = generate_secp256r1().unwrap();
+    let identity = RawIdentity::from_private_key(private_key).unwrap();
+    let original_pub_key = identity.pub_key().raw();
+
+    let token = new_token(
+        &identity,
+        Duration::from_secs(3600),
+        Some("roundtrip-test".to_string()),
+        None,
+    )
+    .unwrap();
+
+    let token_identity = from_token(&token).unwrap();
+
+    assert_eq!(token_identity.pub_key().raw(), original_pub_key);
+    let result = verify_auth_token(&token_identity, "roundtrip-test");
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_tampered_signature_rejected_secp256r1() {
+    let private_key = generate_secp256r1().unwrap();
+    let identity = RawIdentity::from_private_key(private_key).unwrap();
+
+    let token = new_token(&identity, Duration::from_secs(3600), None, None).unwrap();
+    let token_str = String::from_utf8(token).unwrap();
+
+    let parts: Vec<&str> = token_str.split('.').collect();
+    let sig_bytes = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
+    let mut tampered_sig = sig_bytes.clone();
+    tampered_sig[0] ^= 0xFF;
+    tampered_sig[10] ^= 0xFF;
+    let tampered_sig_b64 = URL_SAFE_NO_PAD.encode(&tampered_sig);
+    let tampered_token = format!("{}.{}.{}", parts[0], parts[1], tampered_sig_b64);
+
+    let result = from_token(tampered_token.as_bytes());
+    assert!(result.is_err());
 }
 
 #[test]

@@ -43,8 +43,10 @@ use crate::{FullIdentity, Result};
 pub const DEFAULT_CLOCK_SKEW_SECONDS: u64 = 60;
 
 pub use claims::IdentityClaims;
-use decoding::{decode_ed25519, decode_secp256k1, parse_algorithm};
-use encoding::{encode_ed25519, encode_secp256k1, EDDSA_ALG, ES256K_ALG};
+use decoding::{decode_ed25519, decode_secp256k1, decode_secp256r1, parse_algorithm};
+use encoding::{
+    encode_ed25519, encode_secp256k1, encode_secp256r1, EDDSA_ALG, ES256K_ALG, ES256_ALG,
+};
 pub use identity::TokenIdentity;
 
 /// Generates a new JWT bearer token for the given identity.
@@ -91,7 +93,8 @@ pub fn new_token<I: FullIdentity>(
     let token = match key_type {
         KeyType::Ed25519 => encode_ed25519(&claims, identity)?,
         KeyType::Secp256k1 => encode_secp256k1(&claims, identity)?,
-        KeyType::Secp256r1 | KeyType::Bls12381 => return Err(Error::UnsupportedKeyType(key_type)),
+        KeyType::Secp256r1 => encode_secp256r1(&claims, identity)?,
+        KeyType::Bls12381 => return Err(Error::UnsupportedKeyType(key_type)),
     };
 
     Ok(token.into_bytes())
@@ -208,6 +211,7 @@ pub fn from_token(data: &[u8]) -> Result<TokenIdentity> {
     let claims: IdentityClaims = match header_alg.as_str() {
         "EdDSA" => decode_ed25519(token_str)?,
         "ES256K" => decode_secp256k1(token_str)?,
+        "ES256" => decode_secp256r1(token_str)?,
         alg => {
             return Err(Error::TokenDecoding(format!(
                 "unsupported algorithm: {}",
@@ -221,6 +225,7 @@ pub fn from_token(data: &[u8]) -> Result<TokenIdentity> {
     let expected_alg = match key_type {
         IdentityKeyType::Ed25519 => EDDSA_ALG,
         IdentityKeyType::Secp256k1 => ES256K_ALG,
+        IdentityKeyType::Secp256r1 => ES256_ALG,
     };
     if header_alg != expected_alg {
         return Err(Error::TokenDecoding(format!(

@@ -5,6 +5,7 @@
 
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use k256::ecdsa::SigningKey as Secp256k1SigningKey;
+use p256::ecdsa::SigningKey as Secp256r1SigningKey;
 use rand::rngs::OsRng;
 use x25519_dalek::StaticSecret;
 
@@ -15,7 +16,7 @@ use crate::keys::{
     bls::BlsPublicKey,
     ed25519::{Ed25519PrivateKey, Ed25519PublicKey},
     secp256k1::{Secp256k1PrivateKey, Secp256k1PublicKey},
-    secp256r1::Secp256r1PublicKey,
+    secp256r1::{Secp256r1PrivateKey, Secp256r1PublicKey},
     PrivateKey,
 };
 use crate::types::{KeyType, AES_KEY_SIZE};
@@ -43,7 +44,10 @@ pub fn generate_key(key_type: KeyType) -> Result<Box<dyn PrivateKey>> {
             let key = generate_ed25519()?;
             Ok(Box::new(key))
         }
-        KeyType::Secp256r1 => Err(unsupported_key_type(key_type)),
+        KeyType::Secp256r1 => {
+            let key = generate_secp256r1()?;
+            Ok(Box::new(key))
+        }
         KeyType::Bls12381 => Err(unsupported_key_type(key_type)),
     }
 }
@@ -61,6 +65,12 @@ pub fn generate_key(key_type: KeyType) -> Result<Box<dyn PrivateKey>> {
 pub fn generate_secp256k1() -> Result<Secp256k1PrivateKey> {
     let signing_key = Secp256k1SigningKey::random(&mut OsRng);
     Secp256k1PrivateKey::from_bytes(&signing_key.to_bytes())
+}
+
+/// Generate a new secp256r1 (P-256) private key
+pub fn generate_secp256r1() -> Result<Secp256r1PrivateKey> {
+    let signing_key = Secp256r1SigningKey::random(&mut OsRng);
+    Secp256r1PrivateKey::from_bytes(&signing_key.to_bytes())
 }
 
 /// Generate a new Ed25519 private key
@@ -157,7 +167,11 @@ pub fn private_key_from_bytes(key_type: KeyType, bytes: &[u8]) -> Result<Box<dyn
             let key = Ed25519PrivateKey::from_bytes(bytes)?;
             Ok(Box::new(key))
         }
-        KeyType::Secp256r1 | KeyType::Bls12381 => Err(unsupported_key_type(key_type)),
+        KeyType::Secp256r1 => {
+            let key = Secp256r1PrivateKey::from_bytes(bytes)?;
+            Ok(Box::new(key))
+        }
+        KeyType::Bls12381 => Err(unsupported_key_type(key_type)),
     }
 }
 

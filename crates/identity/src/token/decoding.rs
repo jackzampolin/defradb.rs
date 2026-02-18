@@ -100,6 +100,20 @@ pub(crate) fn decode_secp256k1(token: &str) -> Result<IdentityClaims> {
     Ok(claims)
 }
 
+pub(crate) fn decode_secp256r1(token: &str) -> Result<IdentityClaims> {
+    let jwt = parse_jwt(token)?;
+    let claims = decode_claims(jwt.payload)?;
+    let public_key = decode_public_key_from_claims(&claims, KeyType::Secp256r1)?;
+    let raw_signature = decode_signature(jwt.signature)?;
+    // ES256 JWT signature is raw R||S (64 bytes), convert to DER for verification
+    let der_signature = der::raw_to_der(&raw_signature)?;
+
+    let signing_input = format!("{}.{}", jwt.header, jwt.payload);
+    verify_signature(public_key.as_ref(), &signing_input, &der_signature)?;
+
+    Ok(claims)
+}
+
 pub(crate) fn parse_algorithm(token: &str) -> Result<String> {
     let header_part = token
         .split('.')

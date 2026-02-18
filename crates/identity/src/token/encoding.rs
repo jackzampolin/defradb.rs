@@ -10,6 +10,7 @@ use super::der;
 
 pub(crate) const EDDSA_ALG: &str = "EdDSA";
 pub(crate) const ES256K_ALG: &str = "ES256K";
+pub(crate) const ES256_ALG: &str = "ES256";
 
 fn build_signing_input(alg: &str, claims: &IdentityClaims) -> Result<String> {
     let header = serde_json::json!({
@@ -49,6 +50,22 @@ pub(crate) fn encode_secp256k1<I: FullIdentity>(
         .sign(signing_input.as_bytes())
         .map_err(|e| Error::TokenEncoding(format!("signing failed: {}", e)))?;
 
+    let raw_sig = der::der_to_raw(&signature)?;
+    let sig_b64 = URL_SAFE_NO_PAD.encode(&raw_sig);
+    Ok(format!("{}.{}", signing_input, sig_b64))
+}
+
+pub(crate) fn encode_secp256r1<I: FullIdentity>(
+    claims: &IdentityClaims,
+    identity: &I,
+) -> Result<String> {
+    let signing_input = build_signing_input(ES256_ALG, claims)?;
+
+    let signature = identity
+        .sign(signing_input.as_bytes())
+        .map_err(|e| Error::TokenEncoding(format!("signing failed: {}", e)))?;
+
+    // ES256 JWT uses raw R||S (64 bytes), same as ES256K
     let raw_sig = der::der_to_raw(&signature)?;
     let sig_b64 = URL_SAFE_NO_PAD.encode(&raw_sig);
     Ok(format!("{}.{}", signing_input, sig_b64))

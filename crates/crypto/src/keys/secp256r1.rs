@@ -1,12 +1,13 @@
-//! secp256r1 (P-256) public key implementations
+//! secp256r1 (P-256) key implementations
 //!
 //! secp256r1 (also known as P-256 or prime256v1) is a NIST standard elliptic curve.
-//! This module provides read-only public key support for verifying signatures from
-//! JavaScript clients. Private key operations are handled by the JS clients.
+//! Used by browser identity via Web Crypto API.
 //!
-//! - Public keys: 33 bytes (compressed format with 0x02/0x03 prefix) or 65 bytes (uncompressed)
+//! - Private keys: 32 bytes
+//! - Public keys: 33 bytes (compressed) or 65 bytes (uncompressed)
+//! - Signatures: DER-encoded ECDSA signatures
 
-use p256::ecdsa::{Signature, VerifyingKey};
+use p256::ecdsa::{signature::DigestSigner, Signature, SigningKey, VerifyingKey};
 use p256::EncodedPoint;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,13 +16,100 @@ use subtle::ConstantTimeEq;
 use defra_core::Result;
 
 use crate::error::crypto_error;
-use crate::keys::{Key, PublicKey};
-use crate::types::KeyType;
+use crate::keys::{Key, PrivateKey, PublicKey};
+use crate::types::{KeyType, SECP256R1_PRIVATE_KEY_SIZE};
+
+/// secp256r1 (P-256) private key wrapper
+#[derive(Clone)]
+pub struct Secp256r1PrivateKey {
+    key: SigningKey,
+}
+
+impl PartialEq for Secp256r1PrivateKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.key.to_bytes().ct_eq(&other.key.to_bytes()).into()
+    }
+}
+
+impl Eq for Secp256r1PrivateKey {}
+
+impl std::fmt::Debug for Secp256r1PrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Secp256r1PrivateKey")
+            .field("key_type", &KeyType::Secp256r1)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Secp256r1PrivateKey {
+    /// Create a new secp256r1 private key from raw bytes
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.is_empty() {
+            return Err(crypto_error("secp256r1 private key cannot be empty"));
+        }
+
+        if bytes.len() != SECP256R1_PRIVATE_KEY_SIZE {
+            return Err(crypto_error(format!(
+                "secp256r1 private key must be {} bytes, got {} bytes",
+                SECP256R1_PRIVATE_KEY_SIZE,
+                bytes.len()
+            )));
+        }
+
+        let key = SigningKey::from_slice(bytes)
+            .map_err(|e| crypto_error(format!("invalid secp256r1 private key: {}", e)))?;
+        Ok(Self { key })
+    }
+
+    /// Get the underlying p256 signing key
+    pub fn underlying(&self) -> &SigningKey {
+        &self.key
+    }
+}
+
+impl Key for Secp256r1PrivateKey {
+    fn equal(&self, other: &dyn Key) -> bool {
+        if other.key_type() != KeyType::Secp256r1 {
+            return false;
+        }
+        let self_raw = self.raw();
+        let other_raw = other.raw();
+        if self_raw.len() != other_raw.len() {
+            return false;
+        }
+        self_raw.ct_eq(&other_raw).into()
+    }
+
+    fn raw(&self) -> Vec<u8> {
+        self.key.to_bytes().to_vec()
+    }
+
+    fn key_type(&self) -> KeyType {
+        KeyType::Secp256r1
+    }
+}
+
+impl PrivateKey for Secp256r1PrivateKey {
+    fn sign(&self, data: &[u8]) -> Result<Vec<u8>> {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+
+        let signature: Signature = self.key.sign_digest(hasher);
+
+        Ok(signature.to_der().as_bytes().to_vec())
+    }
+
+    fn public_key(&self) -> Box<dyn PublicKey> {
+        let verifying_key = *self.key.verifying_key();
+        let compressed_bytes = verifying_key.to_encoded_point(true).as_bytes().to_vec();
+        Box::new(Secp256r1PublicKey {
+            key: verifying_key,
+            compressed_bytes,
+        })
+    }
+}
 
 /// secp256r1 (P-256) public key wrapper
-///
-/// This implementation only supports public key operations (verification).
-/// Private keys are managed by JavaScript clients.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Secp256r1PublicKey {
     #[serde(with = "secp256r1_public_key_serde")]

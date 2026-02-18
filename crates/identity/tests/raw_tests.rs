@@ -4,7 +4,7 @@
 //! of the Identity and FullIdentity traits.
 
 use crypto::keys::Key;
-use crypto::{generate_ed25519, generate_secp256k1, KeyType};
+use crypto::{generate_ed25519, generate_secp256k1, generate_secp256r1, KeyType};
 use identity::{FullIdentity, Identity, IdentityKeyType, RawIdentity};
 
 #[test]
@@ -61,13 +61,19 @@ fn test_from_bytes_invalid() {
 }
 
 #[test]
-fn test_from_bytes_secp256r1_unsupported() {
-    let result = RawIdentity::from_bytes(KeyType::Secp256r1, &[0u8; 32]);
-    assert!(result.is_err(), "secp256r1 should not be supported");
-    assert!(matches!(
-        result.unwrap_err(),
-        identity::Error::UnsupportedKeyType(KeyType::Secp256r1)
-    ));
+fn test_from_secp256r1() {
+    let key = crypto::generate_secp256r1().unwrap();
+    let identity = RawIdentity::from_secp256r1(key).unwrap();
+    assert_eq!(identity.key_type(), KeyType::Secp256r1);
+    assert!(!identity.public_key_bytes().is_empty());
+}
+
+#[test]
+fn test_from_bytes_secp256r1() {
+    let key = crypto::generate_secp256r1().unwrap();
+    let key_bytes = key.raw();
+    let identity = RawIdentity::from_bytes(KeyType::Secp256r1, &key_bytes).unwrap();
+    assert_eq!(identity.key_type(), KeyType::Secp256r1);
 }
 
 #[test]
