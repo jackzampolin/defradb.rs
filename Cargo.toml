@@ -26,7 +26,6 @@ members = [
     "crates/wasm",
     "tools/ffi-test",
     "tools/integration-test",
-    "tools/shinzo-bench",
 ]
 
 [workspace.package]
