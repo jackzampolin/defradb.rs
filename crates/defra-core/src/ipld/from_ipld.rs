@@ -373,6 +373,7 @@ impl TryFrom<&Ipld> for SignatureHeader {
         let sig_type = match map.get("type") {
             Some(Ipld::String(s)) => match s.as_str() {
                 "ES256K" => SignatureType::ES256K,
+                "ES256" => SignatureType::ES256,
                 "EdDSA" => SignatureType::EdDSA,
                 "BLS" => SignatureType::BLS,
                 other => {

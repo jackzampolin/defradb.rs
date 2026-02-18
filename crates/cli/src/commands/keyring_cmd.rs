@@ -51,7 +51,7 @@ pub struct GenerateArgs {
     /// Name of the key to generate (omit for Go-compatible mode: generates peer-key + encryption-key)
     pub name: Option<String>,
 
-    /// Key type to generate (ed25519, secp256k1, aes256) — only used with a named key
+    /// Key type to generate (ed25519, secp256k1, secp256r1, aes256) — only used with a named key
     #[arg(short = 't', long = "key-type", default_value = "ed25519")]
     pub key_type: String,
 
@@ -144,13 +144,18 @@ fn generate_key_bytes(key_type: &str) -> Result<Vec<u8>> {
                 .map_err(|e| Error::Keyring(format!("failed to generate secp256k1 key: {}", e)))?;
             Ok(private_key.raw().to_vec())
         }
+        "secp256r1" | "p256" | "p-256" => {
+            let private_key = crypto::generate_secp256r1()
+                .map_err(|e| Error::Keyring(format!("failed to generate secp256r1 key: {}", e)))?;
+            Ok(private_key.raw().to_vec())
+        }
         "aes256" | "aes" => {
             let key = crypto::generate_aes256()
                 .map_err(|e| Error::Keyring(format!("failed to generate AES-256 key: {}", e)))?;
             Ok(key)
         }
         _ => Err(Error::Keyring(format!(
-            "unknown key type: '{}'. Valid types: ed25519, secp256k1, aes256",
+            "unknown key type: '{}'. Valid types: ed25519, secp256k1, secp256r1, aes256",
             key_type
         ))),
     }

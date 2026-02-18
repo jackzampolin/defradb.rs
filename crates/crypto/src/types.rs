@@ -51,6 +51,9 @@ pub const SECP256K1_COMPRESSED_PUBLIC_KEY_SIZE: usize = 33;
 /// secp256k1 private key size in bytes
 pub const SECP256K1_PRIVATE_KEY_SIZE: usize = 32;
 
+/// secp256r1 (P-256) private key size in bytes
+pub const SECP256R1_PRIVATE_KEY_SIZE: usize = 32;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -36,9 +36,9 @@ fn test_generate_key_ed25519() {
 }
 
 #[test]
-fn test_generate_key_secp256r1_fails() {
-    let result = generate_key(KeyType::Secp256r1);
-    assert!(result.is_err());
+fn test_generate_key_secp256r1() {
+    let key = generate_key(KeyType::Secp256r1).unwrap();
+    assert_eq!(key.key_type(), KeyType::Secp256r1);
 }
 
 #[test]
@@ -259,22 +259,12 @@ fn test_private_key_from_bytes_invalid_ed25519_length() {
 }
 
 #[test]
-fn test_private_key_from_bytes_secp256r1_not_supported() {
-    let key_bytes = vec![1u8; 32];
-    let result = private_key_from_bytes(KeyType::Secp256r1, &key_bytes);
-    assert!(
-        result.is_err(),
-        "Secp256r1 private keys should not be supported"
-    );
-
-    match result {
-        Err(e) => assert!(
-            e.to_string().contains("secp256r1") || e.to_string().contains("not supported"),
-            "Error should mention secp256r1 or unsupported, got: {}",
-            e
-        ),
-        Ok(_) => panic!("Should have failed for secp256r1 private key"),
-    }
+fn test_private_key_from_bytes_secp256r1() {
+    let generated = generate_key(KeyType::Secp256r1).unwrap();
+    let key_bytes = generated.raw();
+    let key = private_key_from_bytes(KeyType::Secp256r1, &key_bytes).unwrap();
+    assert_eq!(key.key_type(), KeyType::Secp256r1);
+    assert_eq!(key.raw(), key_bytes);
 }
 
 #[test]

@@ -150,9 +150,17 @@ pub(crate) fn raw_to_der(raw: &[u8]) -> Result<Vec<u8>> {
     let r_der = encode_der_integer(r);
     let s_der = encode_der_integer(s);
 
+    let content_len = r_der.len() + s_der.len();
+    if content_len > 127 {
+        return Err(Error::TokenEncoding(format!(
+            "DER content length {} exceeds single-byte short form limit",
+            content_len
+        )));
+    }
+
     let mut result = Vec::new();
     result.push(0x30); // SEQUENCE tag
-    result.push((r_der.len() + s_der.len()) as u8);
+    result.push(content_len as u8);
     result.extend_from_slice(&r_der);
     result.extend_from_slice(&s_der);
 

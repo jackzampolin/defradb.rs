@@ -84,6 +84,14 @@ pub(super) fn compute_signature(
                 .map_err(|e| format!("Failed to sign block: {}", e))?;
             (SignatureType::ES256K, sig)
         }
+        "secp256r1" => {
+            let private_key = crypto::Secp256r1PrivateKey::from_bytes(&signer.private_key_bytes)
+                .map_err(|e| format!("Failed to load secp256r1 private key: {}", e))?;
+            let sig = private_key
+                .sign(&block_bytes)
+                .map_err(|e| format!("Failed to sign block: {}", e))?;
+            (SignatureType::ES256, sig)
+        }
         "bls" => {
             let remote = signer
                 .remote_signer

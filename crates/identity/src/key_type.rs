@@ -1,7 +1,4 @@
 //! Identity-specific key type enum.
-//!
-//! This module provides `IdentityKeyType`, a restricted enum that only includes
-//! key types supported for identity operations (Ed25519 and secp256k1).
 
 use crypto::KeyType;
 use serde::{Deserialize, Serialize};
@@ -11,14 +8,11 @@ use crate::Error;
 
 /// Key types supported for identity operations.
 ///
-/// Unlike `crypto::KeyType` which includes secp256r1, this enum only contains
-/// key types that are actually supported for identity operations, providing
-/// compile-time safety.
-///
 /// # Supported Types
 ///
 /// - **Ed25519**: Fast, secure signing with 64-byte signatures
 /// - **Secp256k1**: Bitcoin/Ethereum compatible with DER-encoded signatures
+/// - **Secp256r1**: P-256 / NIST curve, used by browser Web Crypto API (ES256 JWTs)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IdentityKeyType {
@@ -26,6 +20,8 @@ pub enum IdentityKeyType {
     Ed25519,
     /// secp256k1 elliptic curve (used by Bitcoin, Ethereum)
     Secp256k1,
+    /// secp256r1 (P-256) elliptic curve (NIST standard, browser Web Crypto)
+    Secp256r1,
 }
 
 impl IdentityKeyType {
@@ -34,6 +30,7 @@ impl IdentityKeyType {
         match self {
             IdentityKeyType::Ed25519 => KeyType::Ed25519,
             IdentityKeyType::Secp256k1 => KeyType::Secp256k1,
+            IdentityKeyType::Secp256r1 => KeyType::Secp256r1,
         }
     }
 }
@@ -41,17 +38,12 @@ impl IdentityKeyType {
 impl TryFrom<KeyType> for IdentityKeyType {
     type Error = Error;
 
-    /// Converts a `crypto::KeyType` to an `IdentityKeyType`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::UnsupportedKeyType` if the key type is not supported
-    /// for identity operations (e.g., secp256r1).
     fn try_from(key_type: KeyType) -> Result<Self, Self::Error> {
         match key_type {
             KeyType::Ed25519 => Ok(IdentityKeyType::Ed25519),
             KeyType::Secp256k1 => Ok(IdentityKeyType::Secp256k1),
-            KeyType::Secp256r1 | KeyType::Bls12381 => Err(Error::UnsupportedKeyType(key_type)),
+            KeyType::Secp256r1 => Ok(IdentityKeyType::Secp256r1),
+            KeyType::Bls12381 => Err(Error::UnsupportedKeyType(key_type)),
         }
     }
 }
@@ -67,6 +59,7 @@ impl fmt::Display for IdentityKeyType {
         match self {
             IdentityKeyType::Ed25519 => write!(f, "ed25519"),
             IdentityKeyType::Secp256k1 => write!(f, "secp256k1"),
+            IdentityKeyType::Secp256r1 => write!(f, "secp256r1"),
         }
     }
 }
@@ -78,6 +71,7 @@ impl std::str::FromStr for IdentityKeyType {
         match s.to_lowercase().as_str() {
             "ed25519" => Ok(IdentityKeyType::Ed25519),
             "secp256k1" => Ok(IdentityKeyType::Secp256k1),
+            "secp256r1" => Ok(IdentityKeyType::Secp256r1),
             other => Err(Error::UnknownKeyType(other.to_string())),
         }
     }
@@ -97,6 +91,10 @@ mod tests {
             IdentityKeyType::Secp256k1.to_crypto_key_type(),
             KeyType::Secp256k1
         );
+        assert_eq!(
+            IdentityKeyType::Secp256r1.to_crypto_key_type(),
+            KeyType::Secp256r1
+        );
     }
 
     #[test]
@@ -114,12 +112,19 @@ mod tests {
     }
 
     #[test]
-    fn test_try_from_crypto_key_type_secp256r1_fails() {
+    fn test_try_from_crypto_key_type_secp256r1() {
         let result = IdentityKeyType::try_from(KeyType::Secp256r1);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), IdentityKeyType::Secp256r1);
+    }
+
+    #[test]
+    fn test_try_from_crypto_key_type_bls12381_fails() {
+        let result = IdentityKeyType::try_from(KeyType::Bls12381);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            Error::UnsupportedKeyType(KeyType::Secp256r1)
+            Error::UnsupportedKeyType(KeyType::Bls12381)
         ));
     }
 
@@ -130,12 +135,16 @@ mod tests {
 
         let kt: KeyType = IdentityKeyType::Secp256k1.into();
         assert_eq!(kt, KeyType::Secp256k1);
+
+        let kt: KeyType = IdentityKeyType::Secp256r1.into();
+        assert_eq!(kt, KeyType::Secp256r1);
     }
 
     #[test]
     fn test_display() {
         assert_eq!(format!("{}", IdentityKeyType::Ed25519), "ed25519");
         assert_eq!(format!("{}", IdentityKeyType::Secp256k1), "secp256k1");
+        assert_eq!(format!("{}", IdentityKeyType::Secp256r1), "secp256r1");
     }
 
     #[test]
@@ -156,11 +165,18 @@ mod tests {
             "SECP256K1".parse::<IdentityKeyType>().unwrap(),
             IdentityKeyType::Secp256k1
         );
+        assert_eq!(
+            "secp256r1".parse::<IdentityKeyType>().unwrap(),
+            IdentityKeyType::Secp256r1
+        );
+        assert_eq!(
+            "SECP256R1".parse::<IdentityKeyType>().unwrap(),
+            IdentityKeyType::Secp256r1
+        );
     }
 
     #[test]
     fn test_from_str_invalid() {
-        assert!("secp256r1".parse::<IdentityKeyType>().is_err());
         assert!("invalid".parse::<IdentityKeyType>().is_err());
     }
 
@@ -177,5 +193,11 @@ mod tests {
         assert_eq!(json, "\"secp256k1\"");
         let parsed: IdentityKeyType = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, secp256k1);
+
+        let secp256r1 = IdentityKeyType::Secp256r1;
+        let json = serde_json::to_string(&secp256r1).unwrap();
+        assert_eq!(json, "\"secp256r1\"");
+        let parsed: IdentityKeyType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, secp256r1);
     }
 }
