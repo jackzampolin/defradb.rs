@@ -17,7 +17,7 @@ impl ServerDumpArgs {
                     "server-dump is not supported for in-memory datastore".into(),
                 ));
             }
-            DatastoreType::Badger => {
+            DatastoreType::Redb => {
                 let opts = storage::backends::RedbStoreOptions::new()
                     .with_durability(config.datastore.durability);
                 let store = Arc::new(storage::RedbStore::open_with_options(
