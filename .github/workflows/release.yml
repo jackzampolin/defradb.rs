@@ -30,7 +30,7 @@ jobs:
           - variant: redb
             target: x86_64-apple-darwin
             platform: darwin_amd64
-            runner: macos-13
+            runner: macos-14
             features: ""
           - variant: redb
             target: aarch64-apple-darwin
@@ -51,7 +51,7 @@ jobs:
           - variant: fjall
             target: x86_64-apple-darwin
             platform: darwin_amd64
-            runner: macos-13
+            runner: macos-14
             features: "--features fjall"
           - variant: fjall
             target: aarch64-apple-darwin
@@ -72,7 +72,7 @@ jobs:
           - variant: rocksdb
             target: x86_64-apple-darwin
             platform: darwin_amd64
-            runner: macos-13
+            runner: macos-14
             features: "--features rocksdb"
           - variant: rocksdb
             target: aarch64-apple-darwin
@@ -95,7 +95,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config protobuf-compiler
+          sudo apt-get install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
           if [ "${{ matrix.variant }}" = "rocksdb" ]; then
             sudo apt-get install -y libclang-dev
           fi
@@ -181,7 +181,7 @@ jobs:
           - variant: redb
             target: x86_64-apple-darwin
             platform: darwin_amd64
-            runner: macos-13
+            runner: macos-14
             features: ""
           - variant: redb
             target: aarch64-apple-darwin
@@ -202,7 +202,7 @@ jobs:
           - variant: fjall
             target: x86_64-apple-darwin
             platform: darwin_amd64
-            runner: macos-13
+            runner: macos-14
             features: "--features fjall"
           - variant: fjall
             target: aarch64-apple-darwin
@@ -223,7 +223,7 @@ jobs:
           - variant: rocksdb
             target: x86_64-apple-darwin
             platform: darwin_amd64
-            runner: macos-13
+            runner: macos-14
             features: "--features rocksdb"
           - variant: rocksdb
             target: aarch64-apple-darwin
