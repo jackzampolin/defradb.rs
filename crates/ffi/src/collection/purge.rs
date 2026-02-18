@@ -49,9 +49,8 @@ pub unsafe extern "C" fn delete_documents(
         let mut deleted: u64 = 0;
 
         for id_str in &doc_id_strings {
-            let doc_id = DocID::from_string(id_str).map_err(|e| {
-                format!("invalid docID '{}': {}", id_str, e)
-            })?;
+            let doc_id = DocID::from_string(id_str)
+                .map_err(|e| format!("invalid docID '{}': {}", id_str, e))?;
             match mutator.delete(&col_name, &doc_id).await {
                 Ok(result) => {
                     if result.existed {
