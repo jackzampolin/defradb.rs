@@ -67,6 +67,55 @@ async fn nac_operations_gate_test(cluster: TestCluster) {
         .expect("admin should list lenses");
 
     // =========================================================================
+    // Lens add — anonymous rejected, outsider rejected, admin accepted
+    // =========================================================================
+    let lens_config = r#"{"lenses":[]}"#;
+    assert!(
+        node.lens_add(lens_config).is_err(),
+        "anonymous should be rejected from lens add"
+    );
+    assert!(
+        node.lens_add_with_identity(lens_config, outsider_key)
+            .is_err(),
+        "outsider should be rejected from lens add"
+    );
+    // Admin call: may succeed or fail for non-NAC reasons (empty config),
+    // but must not be NAC-rejected.
+    let admin_lens_result = node.lens_add_with_identity(lens_config, &admin_key);
+    if let Err(ref e) = admin_lens_result {
+        let msg = e.to_string().to_lowercase();
+        assert!(
+            !msg.contains("unauthorized") && !msg.contains("forbidden") && !msg.contains("nac"),
+            "admin should pass NAC gate for lens add, got: {e}"
+        );
+    }
+
+    // =========================================================================
+    // Lens set (migration-set) — anonymous rejected, outsider rejected, admin accepted
+    // =========================================================================
+    let migration_config = r#"{"Lenses":[]}"#;
+    assert!(
+        node.lens_set("dummy-src-v1", "dummy-dst-v2", migration_config)
+            .is_err(),
+        "anonymous should be rejected from lens set (migration-set)"
+    );
+    assert!(
+        node.lens_set_with_identity("dummy-src-v1", "dummy-dst-v2", migration_config, outsider_key)
+            .is_err(),
+        "outsider should be rejected from lens set (migration-set)"
+    );
+    // Admin call: will fail because dummy version IDs don't exist, but must pass NAC gate.
+    let admin_migration_result =
+        node.lens_set_with_identity("dummy-src-v1", "dummy-dst-v2", migration_config, &admin_key);
+    if let Err(ref e) = admin_migration_result {
+        let msg = e.to_string().to_lowercase();
+        assert!(
+            !msg.contains("unauthorized") && !msg.contains("forbidden") && !msg.contains("nac"),
+            "admin should pass NAC gate for lens set, got: {e}"
+        );
+    }
+
+    // =========================================================================
     // View add — anonymous rejected, outsider rejected, admin accepted
     // Note: query must NOT include the "query" keyword prefix.
     // =========================================================================
@@ -154,4 +203,72 @@ async fn nac_p2p_operations_gate_test(cluster: TestCluster) {
     );
     node.p2p_active_peers_with_identity(&admin_key)
         .expect("admin should access active peers");
+
+    // =========================================================================
+    // P2P connect — anonymous rejected, outsider rejected, admin passes NAC gate
+    // Note: admin call will fail because the peer doesn't exist, but must pass NAC.
+    // =========================================================================
+    let dummy_addr = "/ip4/127.0.0.1/tcp/19999/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    assert!(
+        node.p2p_connect(&[dummy_addr]).is_err(),
+        "anonymous should be rejected from p2p connect"
+    );
+    assert!(
+        node.p2p_connect_with_identity(&[dummy_addr], outsider_key)
+            .is_err(),
+        "outsider should be rejected from p2p connect"
+    );
+    let admin_connect = node.p2p_connect_with_identity(&[dummy_addr], &admin_key);
+    if let Err(ref e) = admin_connect {
+        let msg = e.to_string().to_lowercase();
+        assert!(
+            !msg.contains("unauthorized") && !msg.contains("forbidden") && !msg.contains("nac"),
+            "admin should pass NAC gate for p2p connect, got: {e}"
+        );
+    }
+
+    // =========================================================================
+    // P2P sync collection versions — anonymous rejected, outsider rejected, admin passes NAC
+    // =========================================================================
+    assert!(
+        node.p2p_collection_sync_versions(&["dummy-version-id"])
+            .is_err(),
+        "anonymous should be rejected from sync collection versions"
+    );
+    assert!(
+        node.p2p_collection_sync_versions_with_identity(&["dummy-version-id"], outsider_key)
+            .is_err(),
+        "outsider should be rejected from sync collection versions"
+    );
+    let admin_sync_versions =
+        node.p2p_collection_sync_versions_with_identity(&["dummy-version-id"], &admin_key);
+    if let Err(ref e) = admin_sync_versions {
+        let msg = e.to_string().to_lowercase();
+        assert!(
+            !msg.contains("unauthorized") && !msg.contains("forbidden") && !msg.contains("nac"),
+            "admin should pass NAC gate for sync collection versions, got: {e}"
+        );
+    }
+
+    // =========================================================================
+    // P2P sync branchable collection — anonymous rejected, outsider rejected, admin passes NAC
+    // =========================================================================
+    assert!(
+        node.p2p_collection_sync_branchable("1").is_err(),
+        "anonymous should be rejected from sync branchable collection"
+    );
+    assert!(
+        node.p2p_collection_sync_branchable_with_identity("1", outsider_key)
+            .is_err(),
+        "outsider should be rejected from sync branchable collection"
+    );
+    let admin_sync_branchable =
+        node.p2p_collection_sync_branchable_with_identity("1", &admin_key);
+    if let Err(ref e) = admin_sync_branchable {
+        let msg = e.to_string().to_lowercase();
+        assert!(
+            !msg.contains("unauthorized") && !msg.contains("forbidden") && !msg.contains("nac"),
+            "admin should pass NAC gate for sync branchable collection, got: {e}"
+        );
+    }
 }

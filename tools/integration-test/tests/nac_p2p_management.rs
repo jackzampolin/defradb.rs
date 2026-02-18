@@ -138,4 +138,50 @@ async fn nac_p2p_management_gate_test(cluster: TestCluster) {
     if let Err(e) = node.p2p_replicator_list_with_identity(&admin_key) {
         eprintln!("Warning: admin p2p_replicator_list failed (Go may lack permission): {e}");
     }
+
+    // =========================================================================
+    // P2P replicator create — anonymous rejected, outsider rejected, admin passes NAC
+    // Note: admin call will fail because peer doesn't exist, but must pass NAC gate.
+    // =========================================================================
+    let dummy_addr = "/ip4/127.0.0.1/tcp/19999/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    assert!(
+        node.p2p_replicator_set(&["Product"], dummy_addr).is_err(),
+        "anonymous should be rejected from p2p replicator create"
+    );
+    assert!(
+        node.p2p_replicator_set_with_identity(&["Product"], dummy_addr, outsider_key)
+            .is_err(),
+        "outsider should be rejected from p2p replicator create"
+    );
+    let admin_replicator = node.p2p_replicator_set_with_identity(&["Product"], dummy_addr, &admin_key);
+    if let Err(ref e) = admin_replicator {
+        let msg = e.to_string().to_lowercase();
+        assert!(
+            !msg.contains("unauthorized") && !msg.contains("forbidden") && !msg.contains("nac"),
+            "admin should pass NAC gate for replicator create, got: {e}"
+        );
+    }
+
+    // =========================================================================
+    // P2P replicator delete — anonymous rejected, outsider rejected, admin passes NAC
+    // =========================================================================
+    assert!(
+        node.p2p_replicator_delete(&["Product"], Some(dummy_addr))
+            .is_err(),
+        "anonymous should be rejected from p2p replicator delete"
+    );
+    assert!(
+        node.p2p_replicator_delete_with_identity(&["Product"], Some(dummy_addr), outsider_key)
+            .is_err(),
+        "outsider should be rejected from p2p replicator delete"
+    );
+    let admin_rep_delete =
+        node.p2p_replicator_delete_with_identity(&["Product"], Some(dummy_addr), &admin_key);
+    if let Err(ref e) = admin_rep_delete {
+        let msg = e.to_string().to_lowercase();
+        assert!(
+            !msg.contains("unauthorized") && !msg.contains("forbidden") && !msg.contains("nac"),
+            "admin should pass NAC gate for replicator delete, got: {e}"
+        );
+    }
 }
