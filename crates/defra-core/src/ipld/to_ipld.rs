@@ -260,6 +260,7 @@ impl From<&SignatureHeader> for Ipld {
         let type_str = match header.sig_type {
             SignatureType::ES256K => "ES256K",
             SignatureType::EdDSA => "EdDSA",
+            SignatureType::BLS => "BLS",
         };
         map.insert("type".to_string(), Ipld::String(type_str.to_string()));
         map.insert("identity".to_string(), Ipld::Bytes(header.identity.clone()));

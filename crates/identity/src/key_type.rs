@@ -51,7 +51,7 @@ impl TryFrom<KeyType> for IdentityKeyType {
         match key_type {
             KeyType::Ed25519 => Ok(IdentityKeyType::Ed25519),
             KeyType::Secp256k1 => Ok(IdentityKeyType::Secp256k1),
-            KeyType::Secp256r1 => Err(Error::UnsupportedKeyType(KeyType::Secp256r1)),
+            KeyType::Secp256r1 | KeyType::Bls12381 => Err(Error::UnsupportedKeyType(key_type)),
         }
     }
 }

@@ -6,19 +6,41 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+/// Remote signing delegate (e.g. Orbis ring threshold signing).
+///
+/// Implementations call an external service to produce signatures.
+/// `sign_sync` must be callable from synchronous contexts (the block builder
+/// runs inside `spawn_blocking`).
+pub trait RemoteSigner: Send + Sync {
+    fn sign_sync(&self, data: &[u8]) -> Result<Vec<u8>, String>;
+}
 
 /// Signing configuration containing key material for block signing.
-#[derive(Clone)]
 pub struct SigningConfig {
-    /// Key type: "ed25519" or "secp256k1"
+    /// Key type: "ed25519", "secp256k1", or "bls"
     pub key_type: String,
-    /// Raw private key bytes
+    /// Raw private key bytes (empty for remote signers like Orbis)
     pub private_key_bytes: Vec<u8>,
     /// Raw public key bytes (for identity in signature header)
     pub public_key_bytes: Vec<u8>,
     /// Public key hex string (for signature header identity, matches Go's pubKey.String())
     pub public_key_hex: String,
+    /// Optional remote signer for delegated signing (e.g. Orbis ring)
+    pub remote_signer: Option<Arc<dyn RemoteSigner>>,
+}
+
+impl Clone for SigningConfig {
+    fn clone(&self) -> Self {
+        Self {
+            key_type: self.key_type.clone(),
+            private_key_bytes: self.private_key_bytes.clone(),
+            public_key_bytes: self.public_key_bytes.clone(),
+            public_key_hex: self.public_key_hex.clone(),
+            remote_signer: self.remote_signer.clone(),
+        }
+    }
 }
 
 thread_local! {

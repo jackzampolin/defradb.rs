@@ -91,7 +91,7 @@ pub fn new_token<I: FullIdentity>(
     let token = match key_type {
         KeyType::Ed25519 => encode_ed25519(&claims, identity)?,
         KeyType::Secp256k1 => encode_secp256k1(&claims, identity)?,
-        KeyType::Secp256r1 => return Err(Error::UnsupportedKeyType(KeyType::Secp256r1)),
+        KeyType::Secp256r1 | KeyType::Bls12381 => return Err(Error::UnsupportedKeyType(key_type)),
     };
 
     Ok(token.into_bytes())

@@ -697,6 +697,9 @@ pub enum SignatureType {
 
     /// EdDSA with Ed25519 curve
     EdDSA,
+
+    /// Threshold BLS12-381 (Orbis ring signing)
+    BLS,
 }
 
 // ============================================================================

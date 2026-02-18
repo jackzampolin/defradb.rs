@@ -3,6 +3,7 @@
 //! This module provides trait definitions and implementations for various
 //! cryptographic key types (secp256k1, Ed25519, secp256r1).
 
+pub mod bls;
 pub mod ed25519;
 pub mod generation;
 pub mod secp256k1;

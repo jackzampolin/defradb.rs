@@ -374,6 +374,7 @@ impl TryFrom<&Ipld> for SignatureHeader {
             Some(Ipld::String(s)) => match s.as_str() {
                 "ES256K" => SignatureType::ES256K,
                 "EdDSA" => SignatureType::EdDSA,
+                "BLS" => SignatureType::BLS,
                 other => {
                     return Err(Error::IpldError(format!(
                         "Unknown signature type: {}",

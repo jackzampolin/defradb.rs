@@ -62,6 +62,7 @@ impl Node {
                     private_key_bytes: identity.private_key_bytes(),
                     public_key_bytes: identity.public_key_bytes(),
                     public_key_hex: hex::encode(identity.public_key_bytes()),
+                    remote_signer: None,
                 },
             );
             info!("Stored node identity signing config for DID {}", did);

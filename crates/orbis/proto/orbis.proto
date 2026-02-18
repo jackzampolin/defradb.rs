@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package orbis.utility.v1;
+
+service UtilityService {
+  rpc DerivePublicKey(DerivePublicKeyRequest) returns (DerivePublicKeyResponse);
+  rpc Sign(SignRequest) returns (SignResponse);
+}
+
+message DerivePublicKeyRequest {
+  string ring_id = 1;
+  bytes derivation = 2;
+}
+
+message DerivePublicKeyResponse {
+  bytes public_key = 1;
+}
+
+message SignRequest {
+  string ring_id = 1;
+  bytes message = 2;
+  bytes derivation = 3;
+}
+
+message SignResponse {
+  bytes signature = 1;
+}

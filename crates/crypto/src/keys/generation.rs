@@ -12,6 +12,7 @@ use defra_core::Result;
 
 use crate::error::{crypto_error, unsupported_key_type};
 use crate::keys::{
+    bls::BlsPublicKey,
     ed25519::{Ed25519PrivateKey, Ed25519PublicKey},
     secp256k1::{Secp256k1PrivateKey, Secp256k1PublicKey},
     secp256r1::Secp256r1PublicKey,
@@ -42,10 +43,8 @@ pub fn generate_key(key_type: KeyType) -> Result<Box<dyn PrivateKey>> {
             let key = generate_ed25519()?;
             Ok(Box::new(key))
         }
-        KeyType::Secp256r1 => {
-            // secp256r1 private keys are not supported (JS clients manage them)
-            Err(unsupported_key_type(key_type))
-        }
+        KeyType::Secp256r1 => Err(unsupported_key_type(key_type)),
+        KeyType::Bls12381 => Err(unsupported_key_type(key_type)),
     }
 }
 
@@ -158,7 +157,7 @@ pub fn private_key_from_bytes(key_type: KeyType, bytes: &[u8]) -> Result<Box<dyn
             let key = Ed25519PrivateKey::from_bytes(bytes)?;
             Ok(Box::new(key))
         }
-        KeyType::Secp256r1 => Err(unsupported_key_type(key_type)),
+        KeyType::Secp256r1 | KeyType::Bls12381 => Err(unsupported_key_type(key_type)),
     }
 }
 
@@ -209,6 +208,10 @@ pub fn public_key_from_bytes(
         }
         KeyType::Secp256r1 => {
             let key = Secp256r1PublicKey::from_bytes(bytes)?;
+            Ok(Box::new(key))
+        }
+        KeyType::Bls12381 => {
+            let key = BlsPublicKey::from_bytes(bytes)?;
             Ok(Box::new(key))
         }
     }

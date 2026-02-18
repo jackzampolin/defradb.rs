@@ -120,6 +120,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
                     private_key_bytes: raw_identity.private_key_bytes().to_vec(),
                     public_key_bytes: raw_identity.public_key_bytes().to_vec(),
                     public_key_hex: hex::encode(raw_identity.public_key_bytes()),
+                    remote_signer: None,
                 },
             );
 

@@ -78,6 +78,7 @@ pub extern "C" fn RegisterIdentity(
                 private_key_bytes,
                 public_key_bytes,
                 public_key_hex: pub_hex,
+                remote_signer: None,
             },
         );
 
@@ -128,6 +129,7 @@ pub extern "C" fn create_identity() -> FfiResult {
                 private_key_bytes: identity.private_key_bytes().to_vec(),
                 public_key_bytes: identity.public_key_bytes().to_vec(),
                 public_key_hex,
+                remote_signer: None,
             },
         );
 

@@ -12,6 +12,8 @@ pub enum KeyType {
     Ed25519,
     /// secp256r1 (P-256) elliptic curve (NIST standard)
     Secp256r1,
+    /// BLS12-381 threshold keys (Orbis ring signing)
+    Bls12381,
 }
 
 impl std::fmt::Display for KeyType {
@@ -20,6 +22,7 @@ impl std::fmt::Display for KeyType {
             KeyType::Secp256k1 => write!(f, "secp256k1"),
             KeyType::Ed25519 => write!(f, "ed25519"),
             KeyType::Secp256r1 => write!(f, "secp256r1"),
+            KeyType::Bls12381 => write!(f, "bls12381"),
         }
     }
 }

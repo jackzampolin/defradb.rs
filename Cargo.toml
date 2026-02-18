@@ -21,6 +21,7 @@ members = [
     "crates/events",
     "crates/ffi",
     "crates/lens",
+    "crates/orbis",
     "crates/wasm",
     "tools/ffi-test",
     "tools/integration-test",
@@ -88,6 +89,11 @@ hyper = "1.0"
 # Error handling
 thiserror = "1.0"
 anyhow = "1.0"
+
+# gRPC (Orbis ring integration)
+tonic = "0.12"
+prost = "0.13"
+tonic-build = "0.12"
 
 # Bytes
 bytes = "1.5"

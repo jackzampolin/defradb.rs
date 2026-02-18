@@ -95,7 +95,9 @@ impl RawIdentity {
                     .map_err(|e| Error::InvalidKeyBytes(KeyType::Secp256k1, e.to_string()))?;
                 Self::from_secp256k1(secp256k1_key)
             }
-            KeyType::Secp256r1 => Err(Error::UnsupportedKeyType(KeyType::Secp256r1)),
+            KeyType::Secp256r1 | KeyType::Bls12381 => {
+                Err(Error::UnsupportedKeyType(private_key.key_type()))
+            }
         }
     }
 
@@ -123,7 +125,7 @@ impl RawIdentity {
                     .map_err(|e| Error::InvalidKeyBytes(KeyType::Secp256k1, e.to_string()))?;
                 Self::from_secp256k1(private_key)
             }
-            KeyType::Secp256r1 => Err(Error::UnsupportedKeyType(KeyType::Secp256r1)),
+            KeyType::Secp256r1 | KeyType::Bls12381 => Err(Error::UnsupportedKeyType(key_type)),
         }
     }
 
