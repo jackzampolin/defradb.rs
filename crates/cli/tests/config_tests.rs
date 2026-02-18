@@ -100,7 +100,7 @@ fn test_config_defaults() {
     let config = Config::default();
     assert!(config.rootdir.as_os_str().is_empty());
     assert_eq!(config.api.address, "127.0.0.1:9181");
-    assert_eq!(config.datastore.store, DatastoreType::Badger);
+    assert_eq!(config.datastore.store, DatastoreType::Redb);
     assert!(!config.development);
     assert_eq!(config.secret_file, ".env");
 }

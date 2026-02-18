@@ -171,6 +171,12 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/set", post(handlers::lens::set_migration))
         .route("/reload", post(handlers::lens::reload));
 
+    // Batch signing routes
+    let batch_routes = Router::new()
+        .route("/start", post(handlers::batch::batch_start))
+        .route("/sign", post(handlers::batch::batch_sign))
+        .route("/verify", post(handlers::batch::batch_verify));
+
     // NAC (Node Access Control) routes
     let nac_routes = Router::new()
         .route("/status", get(handlers::nac::get_status))
@@ -232,6 +238,8 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .nest("/block", block_routes)
         // Lens migration endpoints
         .nest("/lens", lens_routes)
+        // Batch signing endpoints
+        .nest("/batch", batch_routes)
         // NAC endpoints (Rust-native routes)
         .nest("/nac", nac_routes)
         // Go-compatible list-all encrypted indexes

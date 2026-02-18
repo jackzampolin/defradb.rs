@@ -44,7 +44,7 @@ PIDS_FILE="${BASE_DIR}/pids"
 CONCURRENCY="${CONCURRENCY:-4}"
 RECEIPT_WORKERS="${RECEIPT_WORKERS:-4}"
 START_HEIGHT="${START_HEIGHT_OVERRIDE:-23700000}"
-STORE="${STORE:-badger}"
+STORE="${STORE:-redb}"
 # Set RUST_FFI=1 to use embedded Rust DefraDB via FFI (no separate defra process)
 RUST_FFI="${RUST_FFI:-0}"
 # Watchdog limits (override with env vars)
@@ -425,7 +425,9 @@ YAML
   echo ""
   echo "Starting indexer..."
   cd "$INDEXER_DIR"
-  ./block_poster -config "$indexer_config" > "$INDEXER_LOG" 2>&1 &
+  HTTPS_PROXY="${HTTPS_PROXY:-${ALL_PROXY:-}}" \
+    HTTP_PROXY="${HTTP_PROXY:-${ALL_PROXY:-}}" \
+    ./block_poster -config "$indexer_config" > "$INDEXER_LOG" 2>&1 &
   INDEXER_PID=$!
   echo "  PID: ${INDEXER_PID}"
   cd "$DEFRA_ROOT"
@@ -510,6 +512,13 @@ indexer:
   pprof_port: 0
   open_browser_on_start: false
 
+pruner:
+  enabled: true
+  max_blocks: 10000
+  prune_threshold: 100
+  interval_seconds: 60
+  prune_history: false
+
 logger:
   development: false
 YAML
@@ -523,10 +532,43 @@ YAML
     die "No .env file at ${INDEXER_DIR}/.env (need GETH_RPC_URL, GETH_WS_URL, GETH_API_KEY)"
   fi
 
+  # ---- Log RocksDB tuning if applicable ----
+  if [ "${FFI_STORE}" = "rocksdb" ]; then
+    echo "  RocksDB tuning (env overrides):"
+    for var in ROCKS_BLOCK_CACHE_MB ROCKS_WRITE_BUFFER_MB ROCKS_MAX_WRITE_BUFFERS \
+               ROCKS_COMPACTIONS ROCKS_FLUSHES ROCKS_L0_SLOWDOWN ROCKS_L0_STOP \
+               ROCKS_TARGET_FILE_MB ROCKS_LEVEL_BASE_MB ROCKS_BLOCK_SIZE_KB \
+               ROCKS_COMPRESSION ROCKS_COMPACTION_STYLE ROCKS_BLOB_FILES ROCKS_MIN_BLOB_SIZE; do
+      val="${!var:-}"
+      if [ -n "$val" ]; then
+        echo "    ${var}=${val}"
+      fi
+    done
+    echo "    (unset vars use defaults: cache=512MB, wbuf=64MB, wbufs=4, compact=4, flush=2)"
+    echo ""
+  fi
+
   # ---- Start indexer (no separate defra needed) ----
   echo "Starting indexer with embedded Rust DefraDB..."
   cd "$INDEXER_DIR"
-  ./block_poster -config "$indexer_config" > "$INDEXER_LOG" 2>&1 &
+  STORE="${FFI_STORE}" \
+    ROCKS_BLOCK_CACHE_MB="${ROCKS_BLOCK_CACHE_MB:-}" \
+    ROCKS_WRITE_BUFFER_MB="${ROCKS_WRITE_BUFFER_MB:-}" \
+    ROCKS_MAX_WRITE_BUFFERS="${ROCKS_MAX_WRITE_BUFFERS:-}" \
+    ROCKS_COMPACTIONS="${ROCKS_COMPACTIONS:-}" \
+    ROCKS_FLUSHES="${ROCKS_FLUSHES:-}" \
+    ROCKS_L0_SLOWDOWN="${ROCKS_L0_SLOWDOWN:-}" \
+    ROCKS_L0_STOP="${ROCKS_L0_STOP:-}" \
+    ROCKS_TARGET_FILE_MB="${ROCKS_TARGET_FILE_MB:-}" \
+    ROCKS_LEVEL_BASE_MB="${ROCKS_LEVEL_BASE_MB:-}" \
+    ROCKS_BLOCK_SIZE_KB="${ROCKS_BLOCK_SIZE_KB:-}" \
+    ROCKS_COMPRESSION="${ROCKS_COMPRESSION:-}" \
+    ROCKS_COMPACTION_STYLE="${ROCKS_COMPACTION_STYLE:-}" \
+    ROCKS_BLOB_FILES="${ROCKS_BLOB_FILES:-}" \
+    ROCKS_MIN_BLOB_SIZE="${ROCKS_MIN_BLOB_SIZE:-}" \
+    HTTPS_PROXY="${HTTPS_PROXY:-${ALL_PROXY:-}}" \
+    HTTP_PROXY="${HTTP_PROXY:-${ALL_PROXY:-}}" \
+    ./block_poster -config "$indexer_config" > "$INDEXER_LOG" 2>&1 &
   INDEXER_PID=$!
   echo "  PID: ${INDEXER_PID}"
   cd "$DEFRA_ROOT"

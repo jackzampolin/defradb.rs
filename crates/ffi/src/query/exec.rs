@@ -29,6 +29,8 @@ use super::{
 /// * `request_query` - GraphQL query string (required)
 /// * `operation_name` - Optional operation name for multi-operation documents (null if not used)
 /// * `variables` - Optional JSON string of variables (null if not used)
+/// * `batch_session_id` - Optional batch session ID for CID collection (null if not in batch mode).
+///   When provided, CIDs created during this request are collected under this session.
 ///
 /// # Safety
 ///
@@ -40,6 +42,7 @@ pub unsafe extern "C" fn exec_request(
     request_query: *const c_char,
     operation_name: *const c_char,
     variables: *const c_char,
+    batch_session_id: *const c_char,
 ) -> FfiResult {
     let rt = try_ffi!(get_rt());
     let query_str = try_ffi!(require_c_str(request_query, "request_query"));
@@ -50,6 +53,7 @@ pub unsafe extern "C" fn exec_request(
     let identity_str = c_str_to_string(identity_did);
     let op_name = c_str_to_string(operation_name);
     let vars_str = c_str_to_string(variables);
+    let batch_session = c_str_to_string(batch_session_id);
 
     // Parse identity DID if provided
     let did = match identity_str {
@@ -67,6 +71,9 @@ pub unsafe extern "C" fn exec_request(
         .flatten();
     let signing =
         defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
+    // Use caller-provided session ID if available; otherwise fall back to public key.
+    let session_key = batch_session.or_else(|| signing.as_ref().map(|s| s.public_key_hex.clone()));
+    defra_core::batch_signing::set_batch_session_key(session_key);
     defra_core::signing::set_signing_config(signing);
 
     // Check if identity has DAC bypass (NAC admin/owner can read all documents)

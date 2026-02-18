@@ -3,6 +3,7 @@
 //! This crate defines the fundamental types, traits, and interfaces
 //! used throughout the DefraDB ecosystem.
 
+pub mod batch_signing;
 pub mod block;
 pub mod collection;
 pub mod dac_bypass;

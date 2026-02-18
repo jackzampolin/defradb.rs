@@ -37,6 +37,27 @@ jobs:
             platform: darwin_arm64
             runner: macos-latest
             features: ""
+          # fjall
+          - variant: fjall
+            target: x86_64-unknown-linux-gnu
+            platform: linux_amd64
+            runner: ubuntu-latest
+            features: "--features fjall"
+          - variant: fjall
+            target: aarch64-unknown-linux-gnu
+            platform: linux_arm64
+            runner: ubuntu-24.04-arm
+            features: "--features fjall"
+          - variant: fjall
+            target: x86_64-apple-darwin
+            platform: darwin_amd64
+            runner: macos-13
+            features: "--features fjall"
+          - variant: fjall
+            target: aarch64-apple-darwin
+            platform: darwin_arm64
+            runner: macos-latest
+            features: "--features fjall"
           # rocksdb
           - variant: rocksdb
             target: x86_64-unknown-linux-gnu
@@ -139,6 +160,125 @@ jobs:
           name: defra-wasm
           path: ${{ env.ARCHIVE }}
 
+  build-ffi:
+    name: FFI ${{ matrix.variant }} (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # redb (default)
+          - variant: redb
+            target: x86_64-unknown-linux-gnu
+            platform: linux_amd64
+            runner: ubuntu-latest
+            features: ""
+          - variant: redb
+            target: aarch64-unknown-linux-gnu
+            platform: linux_arm64
+            runner: ubuntu-24.04-arm
+            features: ""
+          - variant: redb
+            target: x86_64-apple-darwin
+            platform: darwin_amd64
+            runner: macos-13
+            features: ""
+          - variant: redb
+            target: aarch64-apple-darwin
+            platform: darwin_arm64
+            runner: macos-latest
+            features: ""
+          # fjall
+          - variant: fjall
+            target: x86_64-unknown-linux-gnu
+            platform: linux_amd64
+            runner: ubuntu-latest
+            features: "--features fjall"
+          - variant: fjall
+            target: aarch64-unknown-linux-gnu
+            platform: linux_arm64
+            runner: ubuntu-24.04-arm
+            features: "--features fjall"
+          - variant: fjall
+            target: x86_64-apple-darwin
+            platform: darwin_amd64
+            runner: macos-13
+            features: "--features fjall"
+          - variant: fjall
+            target: aarch64-apple-darwin
+            platform: darwin_arm64
+            runner: macos-latest
+            features: "--features fjall"
+          # rocksdb
+          - variant: rocksdb
+            target: x86_64-unknown-linux-gnu
+            platform: linux_amd64
+            runner: ubuntu-latest
+            features: "--features rocksdb"
+          - variant: rocksdb
+            target: aarch64-unknown-linux-gnu
+            platform: linux_arm64
+            runner: ubuntu-24.04-arm
+            features: "--features rocksdb"
+          - variant: rocksdb
+            target: x86_64-apple-darwin
+            platform: darwin_amd64
+            runner: macos-13
+            features: "--features rocksdb"
+          - variant: rocksdb
+            target: aarch64-apple-darwin
+            platform: darwin_arm64
+            runner: macos-latest
+            features: "--features rocksdb"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-ffi"
+          shared-key: ${{ matrix.target }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config protobuf-compiler
+          if [ "${{ matrix.variant }}" = "rocksdb" ]; then
+            sudo apt-get install -y libclang-dev
+          fi
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install cbindgen
+        run: cargo install cbindgen
+
+      - name: Build FFI
+        run: cargo build --release -p ffi --target ${{ matrix.target }} ${{ matrix.features }}
+
+      - name: Generate header
+        run: cbindgen --config crates/ffi/cbindgen.toml --crate ffi --output defra.h
+
+      - name: Package
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ARCHIVE="defra-ffi-${{ matrix.variant }}_${TAG}_${{ matrix.platform }}.tar.gz"
+          tar czf "${ARCHIVE}" \
+            -C "target/${{ matrix.target }}/release" libffi.a \
+            -C "${GITHUB_WORKSPACE}" defra.h
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: defra-ffi-${{ matrix.variant }}-${{ matrix.platform }}
+          path: ${{ env.ARCHIVE }}
+
   docker:
     name: Docker
     needs: build
@@ -183,7 +323,7 @@ jobs:
 
   release:
     name: Release
-    needs: [build, build-wasm, docker]
+    needs: [build, build-ffi, build-wasm, docker]
     if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:

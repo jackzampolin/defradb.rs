@@ -361,6 +361,16 @@ pub async fn write_document_blocks(
         "Built composite block with field links and wrote heads"
     );
 
+    // Collect CIDs for batch signing if a session is active.
+    if let Some(session_key) = defra_core::batch_signing::get_batch_session_key() {
+        if priority == 1 {
+            for fc in &field_cids {
+                defra_core::batch_signing::batch_collect_cid(&session_key, *fc);
+            }
+        }
+        defra_core::batch_signing::batch_collect_cid(&session_key, composite_cid);
+    }
+
     Ok(BlockResult {
         cid: composite_cid,
         block: composite_bytes,
@@ -447,6 +457,11 @@ pub async fn write_delete_block(
         priority = priority,
         "Built delete composite block (status=2)"
     );
+
+    // Collect composite CID for batch signing if a session is active.
+    if let Some(session_key) = defra_core::batch_signing::get_batch_session_key() {
+        defra_core::batch_signing::batch_collect_cid(&session_key, composite_cid);
+    }
 
     Ok(BlockResult {
         cid: composite_cid,

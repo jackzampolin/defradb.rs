@@ -49,27 +49,15 @@ fn test_apply_to_config_valid_store_succeeds() {
 }
 
 #[test]
-fn test_apply_to_config_badger_store_succeeds() {
+fn test_apply_to_config_redb_store_succeeds() {
     let mut config = Config::default();
     config.datastore.store = DatastoreType::Memory; // Start with non-default
-    let mut args = default_start_args();
-    args.store = Some("badger".to_string());
-
-    let result = args.apply_to_config(&mut config);
-    assert!(result.is_ok());
-    assert_eq!(config.datastore.store, DatastoreType::Badger);
-}
-
-#[test]
-fn test_apply_to_config_redb_alias_succeeds() {
-    let mut config = Config::default();
     let mut args = default_start_args();
     args.store = Some("redb".to_string());
 
     let result = args.apply_to_config(&mut config);
     assert!(result.is_ok());
-    // redb is an alias for badger in Rust implementation
-    assert_eq!(config.datastore.store, DatastoreType::Badger);
+    assert_eq!(config.datastore.store, DatastoreType::Redb);
 }
 
 #[test]

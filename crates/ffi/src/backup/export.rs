@@ -100,6 +100,7 @@ mod tests {
                 mutation.as_ptr(),
                 ptr::null(),
                 ptr::null(),
+                ptr::null(),
             )
         };
         assert_eq!(result.status, 0, "create failed");
@@ -164,6 +165,7 @@ mod tests {
                 query_str.as_ptr(),
                 ptr::null(),
                 ptr::null(),
+                ptr::null(),
             )
         };
         assert_eq!(result.status, 0, "query failed");
@@ -211,6 +213,7 @@ mod tests {
                 mutation.as_ptr(),
                 ptr::null(),
                 ptr::null(),
+                ptr::null(),
             )
         };
         assert_eq!(result.status, 0);
@@ -226,6 +229,7 @@ mod tests {
                 node,
                 ptr::null(),
                 mutation.as_ptr(),
+                ptr::null(),
                 ptr::null(),
                 ptr::null(),
             )

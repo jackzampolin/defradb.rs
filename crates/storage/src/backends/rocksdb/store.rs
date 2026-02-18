@@ -57,12 +57,50 @@ impl RocksDbStore {
         db_opts.set_max_write_buffer_number(opts.max_write_buffer_number());
         db_opts.set_level_zero_slowdown_writes_trigger(opts.l0_slowdown_writes_trigger());
         db_opts.set_level_zero_stop_writes_trigger(opts.l0_stop_writes_trigger());
+        db_opts.set_target_file_size_base(opts.target_file_size_base());
+        db_opts.set_max_bytes_for_level_base(opts.max_bytes_for_level_base());
+
+        use super::config::{CompactionStyle, CompressionType};
+        let rocksdb_compression = match opts.compression() {
+            CompressionType::None => rocksdb::DBCompressionType::None,
+            CompressionType::Snappy => rocksdb::DBCompressionType::Snappy,
+            CompressionType::Zstd => rocksdb::DBCompressionType::Zstd,
+            CompressionType::Lz4 => rocksdb::DBCompressionType::Lz4,
+        };
+        db_opts.set_compression_type(rocksdb_compression);
+
+        match opts.compaction_style() {
+            CompactionStyle::Level => {
+                db_opts.set_compaction_style(rocksdb::DBCompactionStyle::Level);
+                // Auto-adjust level sizes based on actual DB size. Critical for
+                // databases that grow from empty to 100GB+. Achieves ~1.11x space
+                // amplification and reduces write amplification during growth.
+                db_opts.set_level_compaction_dynamic_level_bytes(true);
+            }
+            CompactionStyle::Universal => {
+                db_opts.set_compaction_style(rocksdb::DBCompactionStyle::Universal);
+            }
+        }
+
+        // Zstd for bottommost level (best ratio where data is rewritten least often).
+        db_opts.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
+
+        // Smooth out I/O: sync every 1MB instead of bursting at compaction end.
+        db_opts.set_bytes_per_sync(1_048_576);
+        // Explicit readahead for compaction (reduces syscall overhead on all drives).
+        db_opts.set_compaction_readahead_size(2 * 1024 * 1024);
 
         // Block-based table options with cache
         let mut block_opts = rocksdb::BlockBasedOptions::default();
         let cache = rocksdb::Cache::new_lru_cache(opts.block_cache_size());
         block_opts.set_block_cache(&cache);
         block_opts.set_bloom_filter(10.0, false);
+        block_opts.set_block_size(opts.block_size());
+        // Count index/filter blocks against block cache budget to prevent
+        // uncontrolled memory growth outside the cache.
+        block_opts.set_cache_index_and_filter_blocks(true);
+        block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        block_opts.set_format_version(5);
         db_opts.set_block_based_table_factory(&block_opts);
 
         // BlobDB for large values

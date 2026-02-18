@@ -35,7 +35,7 @@ pub struct StartArgs {
     #[arg(long)]
     pub max_txn_retries: Option<u32>,
 
-    /// Specify the datastore to use (supported: badger, redb, memory, fjall)
+    /// Specify the datastore to use (supported: redb, memory, fjall, rocksdb)
     #[arg(long)]
     pub store: Option<String>,
 

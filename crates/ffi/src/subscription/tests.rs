@@ -76,6 +76,7 @@ fn test_subscription_receives_mutation_event() {
             mutation.as_ptr(),
             ptr::null(),
             ptr::null(),
+            ptr::null(),
         )
     };
     assert_eq!(result.status, 0);
@@ -209,6 +210,7 @@ fn test_subscription_collection_filter() {
             mutation.as_ptr(),
             ptr::null(),
             ptr::null(),
+            ptr::null(),
         )
     };
     assert_eq!(result.status, 0);
@@ -231,6 +233,7 @@ fn test_subscription_collection_filter() {
             node,
             ptr::null(),
             mutation.as_ptr(),
+            ptr::null(),
             ptr::null(),
             ptr::null(),
         )
