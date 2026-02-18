@@ -18,10 +18,13 @@ impl GoNode {
         }
     }
 
-    /// Verify the Go binary is available.
+    /// Verify the Go binary is available and version-compatible.
+    ///
+    /// Compares the Go binary's commit against `GO_COMPAT_COMMIT` from `defra-version`.
+    /// Set `DEFRA_SKIP_VERSION_CHECK=1` to bypass the check.
     pub fn check_available() -> Result<()> {
         let output = Command::new("defradb")
-            .arg("version")
+            .args(["version", "--format", "json"])
             .output()
             .context("defradb binary not found in PATH")?;
 
@@ -30,6 +33,28 @@ impl GoNode {
             "defradb version failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .context("failed to parse defradb version JSON")?;
+
+        let go_commit = json["commit"].as_str().unwrap_or("unknown");
+
+        let expected = defra_version::GO_COMPAT_COMMIT;
+        if !go_commit.starts_with(expected) {
+            if std::env::var("DEFRA_SKIP_VERSION_CHECK").as_deref() == Ok("1") {
+                tracing::warn!(
+                    expected = expected,
+                    actual = go_commit,
+                    "Go binary version mismatch (skipped via DEFRA_SKIP_VERSION_CHECK)"
+                );
+            } else {
+                anyhow::bail!(
+                    "Go binary version mismatch: expected commit starting with {expected}, got {go_commit}. \
+                     Set DEFRA_SKIP_VERSION_CHECK=1 to bypass."
+                );
+            }
+        }
+
         Ok(())
     }
 }

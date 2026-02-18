@@ -143,7 +143,8 @@ async fn nac_p2p_management_gate_test(cluster: TestCluster) {
     // P2P replicator create — anonymous rejected, outsider rejected, admin passes NAC
     // Note: admin call will fail because peer doesn't exist, but must pass NAC gate.
     // =========================================================================
-    let dummy_addr = "/ip4/127.0.0.1/tcp/19999/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    let dummy_addr =
+        "/ip4/127.0.0.1/tcp/19999/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
     assert!(
         node.p2p_replicator_set(&["Product"], dummy_addr).is_err(),
         "anonymous should be rejected from p2p replicator create"
@@ -153,7 +154,8 @@ async fn nac_p2p_management_gate_test(cluster: TestCluster) {
             .is_err(),
         "outsider should be rejected from p2p replicator create"
     );
-    let admin_replicator = node.p2p_replicator_set_with_identity(&["Product"], dummy_addr, &admin_key);
+    let admin_replicator =
+        node.p2p_replicator_set_with_identity(&["Product"], dummy_addr, &admin_key);
     if let Err(ref e) = admin_replicator {
         let msg = e.to_string().to_lowercase();
         assert!(

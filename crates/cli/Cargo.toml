@@ -34,6 +34,7 @@ document = { path = "../document" }
 keyring = { path = "../keyring" }
 orbis = { path = "../orbis" }
 sourcehub = { path = "../sourcehub" }
+defra-version = { path = "../defra-version" }
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }

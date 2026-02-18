@@ -1,7 +1,6 @@
 //! Meta endpoint handlers (health check, version, schema).
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use serde::Serialize;
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
@@ -13,19 +12,11 @@ pub async fn health_check() -> impl IntoResponse {
     (StatusCode::OK, "Healthy")
 }
 
-/// Version information response.
-#[derive(Debug, Clone, Serialize)]
-pub struct VersionResponse {
-    pub version: String,
-    pub commit: String,
-}
-
 /// Version endpoint handler.
-pub async fn version() -> Json<VersionResponse> {
-    Json(VersionResponse {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        commit: option_env!("GIT_COMMIT").unwrap_or("unknown").to_string(),
-    })
+///
+/// Returns full version info including Go compatibility metadata.
+pub async fn version() -> Json<defra_version::VersionInfo> {
+    Json(defra_version::VersionInfo::new())
 }
 
 /// Schema endpoint handler.

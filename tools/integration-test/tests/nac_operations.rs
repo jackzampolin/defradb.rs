@@ -100,8 +100,13 @@ async fn nac_operations_gate_test(cluster: TestCluster) {
         "anonymous should be rejected from lens set (migration-set)"
     );
     assert!(
-        node.lens_set_with_identity("dummy-src-v1", "dummy-dst-v2", migration_config, outsider_key)
-            .is_err(),
+        node.lens_set_with_identity(
+            "dummy-src-v1",
+            "dummy-dst-v2",
+            migration_config,
+            outsider_key
+        )
+        .is_err(),
         "outsider should be rejected from lens set (migration-set)"
     );
     // Admin call: will fail because dummy version IDs don't exist, but must pass NAC gate.
@@ -208,7 +213,8 @@ async fn nac_p2p_operations_gate_test(cluster: TestCluster) {
     // P2P connect — anonymous rejected, outsider rejected, admin passes NAC gate
     // Note: admin call will fail because the peer doesn't exist, but must pass NAC.
     // =========================================================================
-    let dummy_addr = "/ip4/127.0.0.1/tcp/19999/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    let dummy_addr =
+        "/ip4/127.0.0.1/tcp/19999/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
     assert!(
         node.p2p_connect(&[dummy_addr]).is_err(),
         "anonymous should be rejected from p2p connect"
@@ -262,8 +268,7 @@ async fn nac_p2p_operations_gate_test(cluster: TestCluster) {
             .is_err(),
         "outsider should be rejected from sync branchable collection"
     );
-    let admin_sync_branchable =
-        node.p2p_collection_sync_branchable_with_identity("1", &admin_key);
+    let admin_sync_branchable = node.p2p_collection_sync_branchable_with_identity("1", &admin_key);
     if let Err(ref e) = admin_sync_branchable {
         let msg = e.to_string().to_lowercase();
         assert!(

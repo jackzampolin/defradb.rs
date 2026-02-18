@@ -17,6 +17,7 @@ members = [
     "crates/keyring",
     "crates/identity",
     "crates/acp",
+    "crates/defra-version",
     "crates/sourcehub",
     "crates/events",
     "crates/ffi",

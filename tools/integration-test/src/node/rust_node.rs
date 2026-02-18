@@ -30,6 +30,27 @@ impl RustNode {
         anyhow::ensure!(status.success(), "cargo build failed with {}", status);
         Ok(())
     }
+
+    /// Verify the Rust binary is built and returns parseable version info.
+    pub fn check_available() -> Result<()> {
+        let binary = workspace_root().join("target/debug/defra");
+
+        let output = Command::new(&binary)
+            .args(["version", "--format", "json"])
+            .output()
+            .context("defra binary not found — run `cargo build -p cli` first")?;
+
+        anyhow::ensure!(
+            output.status.success(),
+            "defra version failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let _json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).context("failed to parse defra version JSON")?;
+
+        Ok(())
+    }
 }
 
 impl DefraNode for RustNode {

@@ -16,7 +16,7 @@ mod transactions;
 /// Go DefraDB transaction header name.
 pub(crate) const TX_HEADER_NAME: &str = "x-defradb-tx";
 
-pub use meta::{health_check, schema, version, VersionResponse};
+pub use meta::{health_check, schema, version};
 pub use query::{
     graphql, graphql_get, graphql_transactional, graphql_ws_handler, GraphqlQueryParams,
     TransactionalQueryRequest,
