@@ -100,11 +100,8 @@ impl PrivateKey for Secp256r1PrivateKey {
     }
 
     fn public_key(&self) -> Box<dyn PublicKey> {
-        let verifying_key = *self.key.verifying_key();
-        let compressed_bytes = verifying_key.to_encoded_point(true).as_bytes().to_vec();
         Box::new(Secp256r1PublicKey {
-            key: verifying_key,
-            compressed_bytes,
+            key: *self.key.verifying_key(),
         })
     }
 }
@@ -114,14 +111,10 @@ impl PrivateKey for Secp256r1PrivateKey {
 pub struct Secp256r1PublicKey {
     #[serde(with = "secp256r1_public_key_serde")]
     key: VerifyingKey,
-    /// Cached compressed bytes for efficient serialization
-    #[serde(skip)]
-    compressed_bytes: Vec<u8>,
 }
 
 impl PartialEq for Secp256r1PublicKey {
     fn eq(&self, other: &Self) -> bool {
-        // Compare only the key, not the cached compressed_bytes which may be empty after deserialization
         self.key == other.key
     }
 }
@@ -151,13 +144,7 @@ impl Secp256r1PublicKey {
         let key = VerifyingKey::from_encoded_point(&point)
             .map_err(|_| crypto_error("invalid secp256r1 public key: not on curve"))?;
 
-        // Pre-compute and cache compressed bytes
-        let compressed_bytes = key.to_encoded_point(true).as_bytes().to_vec();
-
-        Ok(Self {
-            key,
-            compressed_bytes,
-        })
+        Ok(Self { key })
     }
 
     /// Get the underlying p256 verifying key
@@ -181,8 +168,7 @@ impl Key for Secp256r1PublicKey {
     }
 
     fn raw(&self) -> Vec<u8> {
-        // Return cached compressed format (33 bytes with 0x02/0x03 prefix)
-        self.compressed_bytes.clone()
+        self.key.to_encoded_point(true).as_bytes().to_vec()
     }
 
     fn key_type(&self) -> KeyType {
