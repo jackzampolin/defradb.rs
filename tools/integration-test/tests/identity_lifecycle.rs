@@ -234,14 +234,91 @@ fn import_rejects_missing_d_field() {
 
 #[test]
 #[ignore]
-fn import_rejects_wrong_curve() {
+fn import_rejects_unsupported_curve() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
 
-    let jwk = r#"{"kty":"EC","crv":"P-256","d":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#;
+    let jwk = r#"{"kty":"EC","crv":"P-384","d":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#;
     let out = defra_identity_stdin(kr, &["import", "--name", "x", "--stdin"], jwk);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("unsupported JWK curve"));
+}
+
+#[test]
+#[ignore]
+fn new_output_key_delete_reimport_secp256r1() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kr = tmp.path();
+
+    let out = defra_identity(
+        kr,
+        &[
+            "new",
+            "--name",
+            "p256key",
+            "--output-key",
+            "--type",
+            "secp256r1",
+        ],
+    );
+    assert!(out.status.success(), "new failed: {}", stderr(&out));
+    let did1 = did_from_jwk_stdout(&out);
+    assert!(did1.starts_with("did:key:z"), "unexpected DID: {}", did1);
+    let jwk_text = stdout(&out);
+
+    // Verify the JWK has P-256 curve
+    let jwk: serde_json::Value = serde_json::from_str(jwk_text.trim()).expect("valid JSON");
+    assert_eq!(jwk["crv"], "P-256", "expected P-256 curve in JWK");
+    assert_eq!(jwk["kty"], "EC", "expected EC key type in JWK");
+
+    let out = defra_identity(kr, &["delete", "--name", "p256key"]);
+    assert!(out.status.success(), "delete failed: {}", stderr(&out));
+
+    let out = defra_identity_stdin(kr, &["import", "--name", "p256key", "--stdin"], &jwk_text);
+    assert!(out.status.success(), "import failed: {}", stderr(&out));
+    let did2_text = stdout(&out);
+    assert!(
+        did2_text.contains(&did1),
+        "DID mismatch after reimport: got '{}', expected '{}'",
+        did2_text.trim(),
+        did1
+    );
+}
+
+#[test]
+#[ignore]
+fn identity_new_secp256r1_json_rust() {
+    let tmp = tempfile::tempdir().unwrap();
+    let kr = tmp.path();
+
+    let out = defra_identity(kr, &["new", "--type", "secp256r1"]);
+    assert!(
+        out.status.success(),
+        "identity new failed: {}",
+        stderr(&out)
+    );
+    let text = stdout(&out);
+    let val: serde_json::Value =
+        serde_json::from_str(text.trim()).expect("default output should be JSON");
+    assert_eq!(
+        val.get("KeyType").and_then(|v| v.as_str()),
+        Some("secp256r1"),
+        "expected KeyType secp256r1"
+    );
+    assert!(
+        val.get("PrivateKey").and_then(|v| v.as_str()).is_some(),
+        "missing PrivateKey"
+    );
+    assert!(
+        val.get("PublicKey").and_then(|v| v.as_str()).is_some(),
+        "missing PublicKey"
+    );
+    assert!(
+        val.get("DID")
+            .and_then(|v| v.as_str())
+            .is_some_and(|d| d.starts_with("did:key:z")),
+        "missing or invalid DID"
+    );
 }
 
 #[test]

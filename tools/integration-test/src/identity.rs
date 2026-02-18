@@ -34,6 +34,23 @@ pub fn generate_identity(binary_path: &Path) -> Result<TestIdentity> {
     parse_identity_output(&stdout)
 }
 
+/// Generate a new secp256r1 (P-256) identity using the given DefraDB binary.
+pub fn generate_secp256r1_identity(binary_path: &Path) -> Result<TestIdentity> {
+    let output = Command::new(binary_path)
+        .args(["identity", "new", "--type", "secp256r1"])
+        .output()
+        .context("failed to run identity new --type secp256r1")?;
+
+    anyhow::ensure!(
+        output.status.success(),
+        "identity new --type secp256r1 failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_identity_output(&stdout)
+}
+
 /// Generate a new ed25519 identity using the given DefraDB binary.
 pub fn generate_ed25519_identity(binary_path: &Path) -> Result<TestIdentity> {
     let output = Command::new(binary_path)

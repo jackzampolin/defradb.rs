@@ -20,7 +20,9 @@ pub use fixtures::{
     users_schema_with_policy, workout_schema_with_policy, HIKING_ACP_POLICY, MULTI_ROLE_ACP_POLICY,
     PRODUCT_SCHEMA, SECRET_ACP_POLICY, STANDARD_FIELDS, USER_ACP_POLICY, XARCHIVE_ACP_POLICY,
 };
-pub use identity::{generate_ed25519_identity, generate_identity, TestIdentity};
+pub use identity::{
+    generate_ed25519_identity, generate_identity, generate_secp256r1_identity, TestIdentity,
+};
 pub use poll::poll_until;
 
 /// Return the absolute path to the workspace root.
