@@ -87,9 +87,15 @@ url = "2.5"
 # URL encoding for query parameters
 urlencoding = "2.1"
 
+[dependencies.openssl-sys]
+version = "0.9"
+features = ["vendored"]
+optional = true
+
 [features]
 fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]
+vendored-openssl = ["dep:openssl-sys"]
 
 [dev-dependencies]
 tempfile = "3.17"

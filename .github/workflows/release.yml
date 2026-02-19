@@ -31,7 +31,7 @@ jobs:
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: macos-14
-            features: ""
+            features: "--features vendored-openssl"
           - variant: redb
             target: aarch64-apple-darwin
             platform: darwin_arm64
@@ -52,7 +52,7 @@ jobs:
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: macos-14
-            features: "--features fjall"
+            features: "--features fjall,vendored-openssl"
           - variant: fjall
             target: aarch64-apple-darwin
             platform: darwin_arm64
@@ -73,7 +73,7 @@ jobs:
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: macos-14
-            features: "--features rocksdb"
+            features: "--features rocksdb,vendored-openssl"
           - variant: rocksdb
             target: aarch64-apple-darwin
             platform: darwin_arm64
