@@ -67,7 +67,7 @@ impl Block {
     pub fn new(delta: CrdtDelta, heads: Vec<Cid>, links: Vec<DAGLink>) -> Self {
         // Sort and normalize heads
         let mut sorted_heads = heads;
-        sorted_heads.sort_by_key(|a| a.to_string());
+        sorted_heads.sort_by_key(|a| a.to_bytes());
         let heads = if sorted_heads.is_empty() {
             None
         } else {
@@ -204,7 +204,7 @@ impl PartialOrd for DAGLink {
 impl Ord for DAGLink {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Sort by link CID string (matching Go behavior)
-        self.link.to_string().cmp(&other.link.to_string())
+        self.link.to_bytes().cmp(&other.link.to_bytes())
     }
 }
 

@@ -24,6 +24,10 @@ fn default_start_args() -> StartArgs {
         identity: None,
         replicator_retry_intervals: None,
         durability: None,
+        signer_type: None,
+        signer_orbis_endpoint: None,
+        signer_orbis_ring_id: None,
+        signer_orbis_derivation: None,
     }
 }
 
@@ -82,6 +86,10 @@ fn test_apply_to_config_all_flags() {
         identity: None, // identity is handled in Node::new, not apply_to_config
         replicator_retry_intervals: Some(vec![10, 20, 30]),
         durability: None,
+        signer_type: None,
+        signer_orbis_endpoint: None,
+        signer_orbis_ring_id: None,
+        signer_orbis_derivation: None,
     };
 
     let result = args.apply_to_config(&mut config);

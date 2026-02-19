@@ -6,7 +6,6 @@ use crate::{ffi_async, try_ffi};
 
 use db::auto_commit_mutator::AutoCommitMutator;
 use document::DocID;
-use query::mutator::DocMutator;
 
 /// Delete multiple documents by their docIDs.
 ///
@@ -46,27 +45,18 @@ pub unsafe extern "C" fn delete_documents(
 
     ffi_async!(rt, {
         let mutator = AutoCommitMutator::new(database.clone());
-        let mut deleted: u64 = 0;
 
-        for id_str in &doc_id_strings {
-            let doc_id = DocID::from_string(id_str)
-                .map_err(|e| format!("invalid docID '{}': {}", id_str, e))?;
-            match mutator.delete(&col_name, &doc_id).await {
-                Ok(result) => {
-                    if result.existed {
-                        deleted += 1;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        collection = %col_name,
-                        doc_id = %id_str,
-                        error = %e,
-                        "Failed to delete document during purge"
-                    );
-                }
-            }
-        }
+        let doc_ids: Vec<DocID> = doc_id_strings
+            .iter()
+            .map(|s| DocID::from_string(s).map_err(|e| format!("invalid docID '{}': {}", s, e)))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let results = mutator
+            .delete_many_impl(&col_name, &doc_ids)
+            .await
+            .map_err(|e| format!("batch delete failed: {}", e))?;
+
+        let deleted: u64 = results.iter().filter(|r| r.existed).count() as u64;
 
         Ok(format!("{{\"deleted\":{}}}", deleted))
     })

@@ -114,10 +114,10 @@ impl<S: Store> VersionedFetcher<S> {
         // Each collection block links to one document composite block.
         // We track doc_id → (priority, composite_cid) keeping highest priority per doc.
         let mut doc_composites: HashMap<String, (u64, Cid)> = HashMap::new();
-        let mut visited = HashSet::new();
+        let mut visited: HashSet<Cid> = HashSet::new();
         let mut queue: VecDeque<(Cid, Block)> = VecDeque::new();
 
-        visited.insert(start_cid.to_string());
+        visited.insert(*start_cid);
         queue.push_back((*start_cid, start_block.clone()));
 
         while let Some((_col_cid, col_block)) = queue.pop_front() {
@@ -148,9 +148,8 @@ impl<S: Store> VersionedFetcher<S> {
             // Traverse collection heads (previous collection blocks)
             if let Some(ref heads) = col_block.heads {
                 for head_cid in heads {
-                    let head_str = head_cid.to_string();
-                    if !visited.contains(&head_str) {
-                        visited.insert(head_str);
+                    if !visited.contains(head_cid) {
+                        visited.insert(*head_cid);
                         if let Ok(head_block) = self.load_block(txn, head_cid).await {
                             queue.push_back((*head_cid, head_block));
                         }
@@ -231,12 +230,12 @@ impl<S: Store> VersionedFetcher<S> {
         start_block: &Block,
     ) -> Result<HashMap<Cid, Block>> {
         let mut blocks = HashMap::new();
-        let mut visited = HashSet::new();
+        let mut visited: HashSet<Cid> = HashSet::new();
         let mut queue: VecDeque<Cid> = VecDeque::new();
 
         // Start with the target block
         blocks.insert(*start_cid, start_block.clone());
-        visited.insert(start_cid.to_string());
+        visited.insert(*start_cid);
 
         // Queue up heads for traversal
         if let Some(ref heads) = start_block.heads {
@@ -248,7 +247,7 @@ impl<S: Store> VersionedFetcher<S> {
         // Also traverse links (for composite blocks that link to field blocks)
         if let Some(ref links) = start_block.links {
             for link in links {
-                if !visited.contains(&link.link.to_string()) {
+                if !visited.contains(&link.link) {
                     queue.push_back(link.link);
                 }
             }
@@ -256,11 +255,10 @@ impl<S: Store> VersionedFetcher<S> {
 
         // BFS traversal
         while let Some(cid) = queue.pop_front() {
-            let cid_str = cid.to_string();
-            if visited.contains(&cid_str) {
+            if visited.contains(&cid) {
                 continue;
             }
-            visited.insert(cid_str);
+            visited.insert(cid);
 
             let block = match self.load_block(txn, &cid).await {
                 Ok(b) => b,
@@ -270,7 +268,7 @@ impl<S: Store> VersionedFetcher<S> {
             // Queue heads for further traversal
             if let Some(ref heads) = block.heads {
                 for head_cid in heads {
-                    if !visited.contains(&head_cid.to_string()) {
+                    if !visited.contains(head_cid) {
                         queue.push_back(*head_cid);
                     }
                 }
@@ -279,7 +277,7 @@ impl<S: Store> VersionedFetcher<S> {
             // Queue links for composite blocks
             if let Some(ref links) = block.links {
                 for link in links {
-                    if !visited.contains(&link.link.to_string()) {
+                    if !visited.contains(&link.link) {
                         queue.push_back(link.link);
                     }
                 }

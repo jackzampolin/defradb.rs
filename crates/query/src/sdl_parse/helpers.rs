@@ -338,7 +338,7 @@ pub(super) fn generate_collection_id(
             }
         }
     }
-    head_cids.sort_by_key(|c| c.to_string());
+    head_cids.sort_by_key(|c| c.to_bytes());
 
     let priority = max_height + 1;
 

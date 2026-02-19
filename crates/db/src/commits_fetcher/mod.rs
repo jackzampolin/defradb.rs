@@ -105,10 +105,10 @@ impl<S: Store> CommitsFetcher<S> {
         let head_cids = self.get_head_cids(txn, options).await?;
 
         let mut commits = Vec::new();
-        let mut visited = HashSet::new();
+        let mut visited: HashSet<Cid> = HashSet::new();
 
         for cid in head_cids {
-            if visited.contains(&cid.to_string()) {
+            if visited.contains(&cid) {
                 continue;
             }
 
@@ -116,11 +116,10 @@ impl<S: Store> CommitsFetcher<S> {
             stack.push((cid, 0));
 
             while let Some((current_cid, current_depth)) = stack.pop() {
-                let cid_str = current_cid.to_string();
-                if visited.contains(&cid_str) {
+                if visited.contains(&current_cid) {
                     continue;
                 }
-                visited.insert(cid_str.clone());
+                visited.insert(current_cid);
 
                 let block = match self.load_block(txn, &current_cid).await {
                     Ok(b) => b,

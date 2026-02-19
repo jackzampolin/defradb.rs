@@ -131,6 +131,7 @@ mod tests {
             private_key_bytes: private_key.raw(),
             public_key_bytes: public_key.raw(),
             public_key_hex: public_key.to_hex_string(),
+            remote_signer: None,
         }
     }
 
@@ -142,6 +143,7 @@ mod tests {
             private_key_bytes: private_key.raw(),
             public_key_bytes: public_key.raw(),
             public_key_hex: public_key.to_hex_string(),
+            remote_signer: None,
         }
     }
 

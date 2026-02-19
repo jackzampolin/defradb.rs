@@ -8,6 +8,7 @@
 mod create;
 mod create_many;
 mod delete;
+mod delete_many;
 pub(super) mod helpers;
 mod read;
 mod update;

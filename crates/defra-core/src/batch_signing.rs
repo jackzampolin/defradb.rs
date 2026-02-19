@@ -29,7 +29,7 @@ pub fn compute_merkle_root(cids: &[Cid]) -> Option<[u8; 32]> {
     }
 
     let mut sorted: Vec<&Cid> = cids.iter().collect();
-    sorted.sort_by_key(|a| a.to_string());
+    sorted.sort_by_key(|a| a.to_bytes());
 
     let mut hashes: Vec<[u8; 32]> = sorted
         .iter()

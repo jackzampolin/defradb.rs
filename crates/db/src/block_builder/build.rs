@@ -1,5 +1,6 @@
 use super::*;
 use blockstore::Blockstore;
+use defra_core::block::generate_cid_from_bytes;
 use std::sync::Arc;
 
 /// Build IPLD blocks from a document for P2P sync.
@@ -72,12 +73,11 @@ pub async fn build_blocks_from_document<B: Blockstore>(
         // Create the field block
         let field_block = Block::new(delta, vec![], vec![]);
 
-        // Serialize and generate CID
+        // Serialize once, then derive CID from the same bytes
         let field_block_bytes = field_block
             .to_dag_cbor()
             .map_err(|e| format!("Failed to encode field block: {}", e))?;
-        let field_cid = field_block
-            .generate_cid()
+        let field_cid = generate_cid_from_bytes(&field_block_bytes)
             .map_err(|e| format!("Failed to generate field CID: {}", e))?;
 
         // Store the field block in the blockstore
@@ -109,12 +109,11 @@ pub async fn build_blocks_from_document<B: Blockstore>(
     // Create the composite block with links to all field blocks
     let composite_block = Block::new(CrdtDelta::Composite(composite_payload), vec![], field_links);
 
-    // Serialize the composite block
+    // Serialize once, then derive CID from the same bytes
     let composite_bytes = composite_block
         .to_dag_cbor()
         .map_err(|e| format!("Failed to encode composite block: {}", e))?;
-    let composite_cid = composite_block
-        .generate_cid()
+    let composite_cid = generate_cid_from_bytes(&composite_bytes)
         .map_err(|e| format!("Failed to generate composite CID: {}", e))?;
 
     // Store the composite block
