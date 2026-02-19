@@ -12,7 +12,7 @@ use crate::run::TestRunDir;
 use crate::sourcehub::SourceHubNode;
 
 use super::health::health_check_all;
-use super::runtime::{RunningNode, TestCluster};
+use super::runtime::{NodeKind, RunningNode, TestCluster};
 
 pub struct TestClusterBuilder {
     rust_nodes: usize,
@@ -27,6 +27,7 @@ pub struct TestClusterBuilder {
     nac_enabled: bool,
     source_hub_enabled: bool,
     development: bool,
+    store: Option<String>,
 }
 
 impl Default for TestClusterBuilder {
@@ -50,6 +51,7 @@ impl TestClusterBuilder {
             nac_enabled: false,
             source_hub_enabled: false,
             development: false,
+            store: None,
         }
     }
 
@@ -111,6 +113,11 @@ impl TestClusterBuilder {
 
     pub fn with_development(mut self) -> Self {
         self.development = true;
+        self
+    }
+
+    pub fn with_store(mut self, store: impl Into<String>) -> Self {
+        self.store = Some(store.into());
         self
     }
 
@@ -204,6 +211,8 @@ impl TestClusterBuilder {
                 sh_comet.clone(),
                 sh_chain_id.clone(),
                 self.development,
+                self.store.clone(),
+                NodeKind::Rust,
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -232,6 +241,8 @@ impl TestClusterBuilder {
                 sh_comet.clone(),
                 sh_chain_id.clone(),
                 self.development,
+                self.store.clone(),
+                NodeKind::Go,
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -273,6 +284,8 @@ async fn spawn_node(
     source_hub_comet_address: Option<String>,
     source_hub_chain_id: Option<String>,
     development: bool,
+    store: Option<String>,
+    kind: NodeKind,
 ) -> Result<RunningNode> {
     let node_dir = run_dir.node_dir(name)?;
     let log_dir = node_dir.join("logs");
@@ -303,6 +316,7 @@ async fn spawn_node(
         source_hub_comet_address,
         source_hub_chain_id,
         development,
+        store,
     };
 
     let cmd = node.command(&config);
@@ -327,5 +341,7 @@ async fn spawn_node(
         process,
         log_tracker,
         rootdir,
+        config,
+        kind,
     })
 }

@@ -29,6 +29,17 @@ pub struct LogTracker {
 }
 
 impl LogTracker {
+    /// Create an empty placeholder (no background task).
+    pub fn empty() -> Self {
+        let (tx, _) = broadcast::channel(1);
+        let task = tokio::spawn(async {});
+        Self {
+            tx,
+            seen: Arc::new(Mutex::new(HashMap::new())),
+            task,
+        }
+    }
+
     /// Start tailing `log_path`, matching the ready pattern and any named patterns.
     pub fn start(log_path: PathBuf, named_patterns: Vec<NamedPattern>) -> Self {
         let (tx, _) = broadcast::channel(64);

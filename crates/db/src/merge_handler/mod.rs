@@ -442,17 +442,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
             return self.merge_blocks_individually(blocks).await;
         }
 
-        match self.try_batch_merge(blocks).await {
-            Ok(results) => results,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    batch_size = blocks.len(),
-                    "Batch merge failed, falling back to per-block processing"
-                );
-                self.merge_blocks_individually(blocks).await
-            }
-        }
+        self.try_batch_merge_with_split(blocks).await
     }
 }
 

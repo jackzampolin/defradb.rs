@@ -41,6 +41,14 @@ impl ManagedProcess {
         })
     }
 
+    /// Create an empty placeholder (no child process).
+    pub fn empty() -> Self {
+        Self {
+            name: String::new(),
+            child: None,
+        }
+    }
+
     pub fn id(&self) -> Option<u32> {
         self.child.as_ref().map(|c| c.id())
     }

@@ -25,6 +25,42 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         results
     }
 
+    /// Attempt batch merge with binary-split retry on failure.
+    ///
+    /// Tries the whole batch first. On failure, splits into two halves and
+    /// recurses on each half. Base case: single block falls back to individual
+    /// processing. This isolates bad blocks with ~log2(N) batch attempts
+    /// instead of falling back to N individual transactions.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn try_batch_merge_with_split<'a>(
+        &'a self,
+        blocks: &'a [MergeBlock],
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Vec<Result<MergeOutcome, MergeError>>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            if blocks.len() <= 1 {
+                return self.merge_blocks_individually(blocks).await;
+            }
+
+            match self.try_batch_merge(blocks).await {
+                Ok(results) => results,
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        batch_size = blocks.len(),
+                        "Batch merge failed, splitting in half"
+                    );
+                    let mid = blocks.len() / 2;
+                    let (left, right) = blocks.split_at(mid);
+                    let mut results = self.try_batch_merge_with_split(left).await;
+                    results.extend(self.try_batch_merge_with_split(right).await);
+                    results
+                }
+            }
+        })
+    }
+
     /// Attempt to merge all blocks within a single shared transaction.
     ///
     /// If any block fails, the entire transaction is rolled back and the caller

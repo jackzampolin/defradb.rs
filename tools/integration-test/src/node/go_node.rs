@@ -70,7 +70,8 @@ impl DefraNode for GoNode {
         cmd.arg("--no-keyring");
 
         cmd.arg("start");
-        cmd.arg("--store").arg("memory");
+        cmd.arg("--store")
+            .arg(config.store.as_deref().unwrap_or("memory"));
         cmd.arg("--no-telemetry");
 
         if !config.encryption_enabled {

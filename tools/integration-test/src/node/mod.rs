@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Configuration for a single DefraDB node.
+#[derive(Clone)]
 pub struct NodeConfig {
     pub name: String,
     pub rootdir: PathBuf,
@@ -25,6 +26,7 @@ pub struct NodeConfig {
     pub source_hub_comet_address: Option<String>,
     pub source_hub_chain_id: Option<String>,
     pub development: bool,
+    pub store: Option<String>,
 }
 
 /// Trait for building a DefraDB command from config.
