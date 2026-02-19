@@ -155,7 +155,7 @@ async fn test_create_empty_fields_fails() {
 }
 
 #[tokio::test]
-async fn test_drop_index() {
+async fn test_delete_index() {
     let store = MemoryStore::new();
     let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
@@ -182,13 +182,13 @@ async fn test_drop_index() {
 
     assert!(manager.has_index("idx_name"));
 
-    let dropped = manager.drop_index(&datastore, "idx_name").await.unwrap();
+    let dropped = manager.delete_index(&datastore, "idx_name").await.unwrap();
     assert!(dropped);
     assert!(!manager.has_index("idx_name"));
 }
 
 #[tokio::test]
-async fn test_drop_nonexistent_index() {
+async fn test_delete_nonexistent_index() {
     let store = MemoryStore::new();
     let db = DB::new(store).unwrap();
     let txn = db.new_txn(false).await.unwrap();
@@ -196,7 +196,7 @@ async fn test_drop_nonexistent_index() {
 
     let mut manager = IndexManager::new(1);
 
-    let dropped = manager.drop_index(&datastore, "nonexistent").await.unwrap();
+    let dropped = manager.delete_index(&datastore, "nonexistent").await.unwrap();
     assert!(!dropped);
 }
 

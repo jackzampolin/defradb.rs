@@ -20,8 +20,8 @@ pub enum IndexCommand {
     Create(IndexCreateArgs),
     /// List indexes (optionally filtered by collection)
     List(IndexListArgs),
-    /// Drop an index by name
-    Drop(IndexDropArgs),
+    /// Delete an index by name
+    Delete(IndexDeleteArgs),
 }
 
 /// Arguments for index create command
@@ -52,14 +52,14 @@ pub struct IndexListArgs {
     pub collection: Option<String>,
 }
 
-/// Arguments for index drop command
+/// Arguments for index delete command
 #[derive(Args, Debug)]
-pub struct IndexDropArgs {
+pub struct IndexDeleteArgs {
     /// The collection containing the index
     #[arg(value_name = "COLLECTION")]
     pub collection: String,
 
-    /// The name of the index to drop
+    /// The name of the index to delete
     #[arg(value_name = "NAME")]
     pub name: String,
 }
@@ -70,7 +70,7 @@ impl IndexArgs {
         match &self.command {
             IndexCommand::Create(args) => args.execute(ctx).await,
             IndexCommand::List(args) => args.execute(ctx).await,
-            IndexCommand::Drop(args) => args.execute(ctx).await,
+            IndexCommand::Delete(args) => args.execute(ctx).await,
         }
     }
 }
@@ -121,8 +121,8 @@ impl IndexListArgs {
     }
 }
 
-impl IndexDropArgs {
-    /// Execute the index drop command
+impl IndexDeleteArgs {
+    /// Execute the index delete command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         validate_identifier(&self.collection)?;
         validate_identifier(&self.name)?;
@@ -131,9 +131,9 @@ impl IndexDropArgs {
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        client.index_drop(&self.collection, &self.name).await?;
+        client.index_delete(&self.collection, &self.name).await?;
         println!(
-            "Index '{}' dropped from collection '{}'",
+            "Index '{}' deleted from collection '{}'",
             self.name, self.collection
         );
         Ok(())
@@ -184,8 +184,8 @@ mod tests {
     }
 
     #[test]
-    fn test_index_drop_args() {
-        let args = IndexDropArgs {
+    fn test_index_delete_args() {
+        let args = IndexDeleteArgs {
             collection: "Users".to_string(),
             name: "idx_name".to_string(),
         };

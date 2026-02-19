@@ -207,8 +207,8 @@ impl IndexManager {
     ///
     /// This method is intentionally idempotent. Calling it multiple times with
     /// the same index name is safe and will not produce errors. This matches
-    /// SQL `DROP INDEX IF EXISTS` semantics.
-    pub async fn drop_index(&mut self, datastore: &NamespaceView, name: &str) -> Result<bool> {
+    /// SQL `DELETE INDEX IF EXISTS` semantics.
+    pub async fn delete_index(&mut self, datastore: &NamespaceView, name: &str) -> Result<bool> {
         match self.indexes.remove(name) {
             Some(index) => {
                 index

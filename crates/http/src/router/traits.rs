@@ -189,8 +189,8 @@ pub trait IndexOperations: Send + Sync {
     /// If `collection` is `None`, returns indexes from all collections.
     async fn list_indexes(&self, collection: Option<&str>) -> Result<Vec<IndexInfo>, String>;
 
-    /// Drop an index by collection and name.
-    async fn drop_index(&self, collection: &str, name: &str) -> Result<(), String>;
+    /// Delete an index by collection and name.
+    async fn delete_index(&self, collection: &str, name: &str) -> Result<(), String>;
 }
 
 /// Index information for HTTP responses.
@@ -214,8 +214,8 @@ pub struct IndexFieldInfo {
 /// Trait for encrypted index (searchable encryption) operations.
 #[async_trait::async_trait]
 pub trait EncryptedIndexOperations: Send + Sync {
-    /// Create an encrypted index on a collection field.
-    async fn create_encrypted_index(
+    /// Add an encrypted index on a collection field.
+    async fn add_encrypted_index(
         &self,
         collection: &str,
         field_name: &str,

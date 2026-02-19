@@ -9,13 +9,13 @@ use crate::nac_check::check_nac_for_node;
 use crate::types::FfiResult;
 use crate::{ffi_async, try_ffi};
 
-/// Drop an index from a collection.
+/// Delete an index from a collection.
 ///
 /// # Arguments
 ///
 /// * `node_ptr` - Handle to the node
 /// * `collection_name` - Name of the collection
-/// * `index_name` - Name of the index to drop
+/// * `index_name` - Name of the index to delete
 ///
 /// # Returns
 ///
@@ -25,7 +25,7 @@ use crate::{ffi_async, try_ffi};
 ///
 /// All string pointers must be valid null-terminated UTF-8 strings.
 #[no_mangle]
-pub unsafe extern "C" fn drop_index(
+pub unsafe extern "C" fn delete_index(
     node_ptr: usize,
     identity_did: *const c_char,
     collection_name: *const c_char,
@@ -36,7 +36,7 @@ pub unsafe extern "C" fn drop_index(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::IndexDrop
+        NodePermission::IndexDelete
     ));
     let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
     let index_name_str = try_ffi!(require_c_str(index_name, "index_name"));
@@ -55,7 +55,7 @@ pub unsafe extern "C" fn drop_index(
             .await
             .map_err(|e| format!("failed to create transaction: {}", e))?;
 
-        // Do all datastore operations in a scope to drop references before commit
+        // Do all datastore operations in a scope to delete references before commit
         {
             let datastore = txn
                 .datastore()
@@ -68,11 +68,11 @@ pub unsafe extern "C" fn drop_index(
             )
             .map_err(|e| format!("failed to create index manager: {}", e))?;
 
-            // Drop the index
+            // Delete the index
             let dropped = index_manager
-                .drop_index(&datastore, &index_name_str)
+                .delete_index(&datastore, &index_name_str)
                 .await
-                .map_err(|e| format!("failed to drop index: {}", e))?;
+                .map_err(|e| format!("failed to delete index: {}", e))?;
 
             if !dropped {
                 return Err(format!(
@@ -187,7 +187,7 @@ pub unsafe extern "C" fn get_indexes(
 ///
 /// Caller must ensure all pointer arguments are valid, non-null, and point to valid C strings.
 #[no_mangle]
-pub unsafe extern "C" fn get_all_indexes(
+pub unsafe extern "C" fn list_all_indexes(
     node_ptr: usize,
     identity_did: *const c_char,
 ) -> FfiResult {
@@ -243,7 +243,7 @@ mod tests {
     use std::ffi::CString;
 
     #[test]
-    fn test_drop_index() {
+    fn test_delete_index() {
         // Initialize runtime
         assert!(crate::runtime::init_runtime());
 
@@ -281,14 +281,14 @@ mod tests {
         // Drop index
         let index_name = CString::new("idx_title").unwrap();
         let result = unsafe {
-            drop_index(
+            delete_index(
                 node,
                 std::ptr::null(),
                 collection_name.as_ptr(),
                 index_name.as_ptr(),
             )
         };
-        assert_eq!(result.status, 0, "drop_index should succeed");
+        assert_eq!(result.status, 0, "delete_index should succeed");
         if !result.value.is_null() {
             unsafe { crate::types::defra_free_string(result.value) };
         }
@@ -305,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_all_indexes() {
+    fn test_list_all_indexes() {
         // Initialize runtime
         assert!(crate::runtime::init_runtime());
 
@@ -353,8 +353,8 @@ mod tests {
         }
 
         // Get all indexes
-        let result = unsafe { get_all_indexes(node, std::ptr::null()) };
-        assert_eq!(result.status, 0, "get_all_indexes should succeed");
+        let result = unsafe { list_all_indexes(node, std::ptr::null()) };
+        assert_eq!(result.status, 0, "list_all_indexes should succeed");
 
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("Author"), "should contain Author collection");

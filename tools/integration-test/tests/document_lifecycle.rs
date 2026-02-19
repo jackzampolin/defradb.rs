@@ -132,10 +132,10 @@ async fn document_lifecycle_test(cluster: TestCluster) {
         doc
     );
 
-    // 11. Index drop
+    // 11. Index delete
     client
-        .index_drop("Article", "idx_author")
-        .expect("index_drop failed");
+        .index_delete("Article", "idx_author")
+        .expect("index_delete failed");
 
     // 12. Index list — verify 1 index remains
     let indexes_after = client

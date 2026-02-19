@@ -16,22 +16,22 @@ pub struct EncryptedIndexArgs {
 /// Encrypted index subcommands
 #[derive(Subcommand, Debug)]
 pub enum EncryptedIndexCommand {
-    /// Create an encrypted index on a collection field
-    Create(EncryptedIndexCreateArgs),
+    /// Add an encrypted index on a collection field
+    Add(EncryptedIndexAddArgs),
     /// Delete an encrypted index from a collection field
     Delete(EncryptedIndexDeleteArgs),
     /// List encrypted indexes for a collection
     List(EncryptedIndexListArgs),
 }
 
-/// Arguments for encrypted-index create command
+/// Arguments for encrypted-index add command
 #[derive(Args, Debug)]
-pub struct EncryptedIndexCreateArgs {
+pub struct EncryptedIndexAddArgs {
     /// Collection name
     #[arg(value_name = "COLLECTION")]
     pub collection: String,
 
-    /// Field name to create encrypted index on
+    /// Field name to add encrypted index on
     #[arg(value_name = "FIELD")]
     pub field: String,
 }
@@ -59,14 +59,14 @@ pub struct EncryptedIndexListArgs {
 impl EncryptedIndexArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            EncryptedIndexCommand::Create(args) => args.execute(ctx).await,
+            EncryptedIndexCommand::Add(args) => args.execute(ctx).await,
             EncryptedIndexCommand::Delete(args) => args.execute(ctx).await,
             EncryptedIndexCommand::List(args) => args.execute(ctx).await,
         }
     }
 }
 
-impl EncryptedIndexCreateArgs {
+impl EncryptedIndexAddArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         validate_identifier(&self.collection)?;
         validate_identifier(&self.field)?;
@@ -76,7 +76,7 @@ impl EncryptedIndexCreateArgs {
             .with_verbose(ctx.verbose);
 
         let response = client
-            .encrypted_index_create(&self.collection, &self.field)
+            .encrypted_index_add(&self.collection, &self.field)
             .await?;
 
         println!("{}", serde_json::to_string_pretty(&response)?);

@@ -77,9 +77,9 @@ async fn index_management_test(cluster: TestCluster) {
         "idx_name_price not found in list"
     );
 
-    // 5. Drop one index and verify removal
-    node.index_drop("Product", "idx_name")
-        .expect("drop idx_name");
+    // 5. Delete one index and verify removal
+    node.index_delete("Product", "idx_name")
+        .expect("delete idx_name");
 
     let list_after = node
         .index_list(Some("Product"))

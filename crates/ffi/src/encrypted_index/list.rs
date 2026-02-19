@@ -1,7 +1,10 @@
 use std::ffi::c_char;
 
+use acp::nac::NodePermission;
+
 use crate::helpers::{get_node_database, get_rt, require_c_str};
-use crate::types::{c_str_to_string, FfiResult};
+use crate::nac_check::check_nac_for_node;
+use crate::types::FfiResult;
 use crate::{ffi_async, try_ffi};
 
 /// List encrypted indexes for a collection.
@@ -16,7 +19,12 @@ pub unsafe extern "C" fn list_encrypted_indexes(
     collection_name: *const c_char,
 ) -> FfiResult {
     let rt = try_ffi!(get_rt());
-    let _identity = c_str_to_string(identity_did);
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::EncryptedIndexList
+    ));
     let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
     let database = try_ffi!(get_node_database(node_ptr));
 
@@ -46,7 +54,12 @@ pub unsafe extern "C" fn list_all_encrypted_indexes(
     identity_did: *const c_char,
 ) -> FfiResult {
     let rt = try_ffi!(get_rt());
-    let _identity = c_str_to_string(identity_did);
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::EncryptedIndexListAll
+    ));
     let database = try_ffi!(get_node_database(node_ptr));
 
     ffi_async!(rt, {
@@ -84,7 +97,7 @@ pub unsafe extern "C" fn list_all_encrypted_indexes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encrypted_index::create_encrypted_index;
+    use crate::encrypted_index::add_encrypted_index;
     use crate::node::{new_node, node_close};
     use crate::schema::add_schema;
     use crate::types::NodeInitOptions;
@@ -119,7 +132,7 @@ mod tests {
         let tax_field = CString::new("taxId").unwrap();
 
         let result = unsafe {
-            create_encrypted_index(
+            add_encrypted_index(
                 node,
                 std::ptr::null(),
                 person_coll.as_ptr(),
@@ -132,7 +145,7 @@ mod tests {
         }
 
         let result = unsafe {
-            create_encrypted_index(
+            add_encrypted_index(
                 node,
                 std::ptr::null(),
                 company_coll.as_ptr(),

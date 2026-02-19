@@ -6,7 +6,7 @@ use urlencoding::encode;
 use super::HttpClient;
 use crate::error::Result;
 
-/// Encrypted index info from list/create
+/// Encrypted index info from list/add
 #[derive(Debug, Deserialize, Serialize)]
 pub struct EncryptedIndexInfo {
     #[serde(rename = "FieldName")]
@@ -16,8 +16,8 @@ pub struct EncryptedIndexInfo {
 }
 
 impl HttpClient {
-    /// Create an encrypted index on a collection field.
-    pub async fn encrypted_index_create(
+    /// Add an encrypted index on a collection field.
+    pub async fn encrypted_index_add(
         &self,
         collection: &str,
         field: &str,

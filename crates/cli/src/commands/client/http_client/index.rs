@@ -75,7 +75,7 @@ impl HttpClient {
         self.request_json("GET", &url, None).await
     }
 
-    pub async fn index_drop(&self, collection: &str, name: &str) -> Result<()> {
+    pub async fn index_delete(&self, collection: &str, name: &str) -> Result<()> {
         let url = format!(
             "{}/api/v0/index?collection={}&name={}",
             self.base_url,

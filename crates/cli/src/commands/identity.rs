@@ -218,10 +218,9 @@ impl IdentityImportArgs {
             ));
         };
 
-        let raw_bytes = parse_jwk(&jwk_text)?;
+        let (key_type, raw_bytes) = parse_jwk(&jwk_text)?;
 
         // Validate the key by constructing a RawIdentity
-        let key_type = detect_key_type(&raw_bytes)?;
         let identity = RawIdentity::from_identity_key_type(key_type, &raw_bytes)?;
         let did = identity.did()?;
 
@@ -345,8 +344,8 @@ fn print_jwk(jwk: &serde_json::Value, output_mode: &str) {
     }
 }
 
-/// Parse a JWK JSON string and return raw private key bytes.
-fn parse_jwk(text: &str) -> Result<Vec<u8>> {
+/// Parse a JWK JSON string and return (key_type, raw private key bytes).
+fn parse_jwk(text: &str) -> Result<(identity::IdentityKeyType, Vec<u8>)> {
     let jwk: serde_json::Value = serde_json::from_str(text.trim())
         .map_err(|e| Error::InvalidIdentity(format!("invalid JWK JSON: {}", e)))?;
 
@@ -377,7 +376,7 @@ fn parse_jwk(text: &str) -> Result<Vec<u8>> {
                     d_bytes.len()
                 )));
             }
-            Ok(d_bytes)
+            Ok((identity::IdentityKeyType::Secp256k1, d_bytes))
         }
         ("EC", "P-256") => {
             if d_bytes.len() != 32 {
@@ -386,7 +385,7 @@ fn parse_jwk(text: &str) -> Result<Vec<u8>> {
                     d_bytes.len()
                 )));
             }
-            Ok(d_bytes)
+            Ok((identity::IdentityKeyType::Secp256r1, d_bytes))
         }
         ("OKP", "Ed25519") => {
             if d_bytes.len() != 32 {
@@ -396,9 +395,10 @@ fn parse_jwk(text: &str) -> Result<Vec<u8>> {
                 )));
             }
             // Reconstruct 64-byte key from 32-byte seed
-            crypto::ed25519_key_from_seed(&d_bytes).map_err(|e| {
+            let full_key = crypto::ed25519_key_from_seed(&d_bytes).map_err(|e| {
                 Error::InvalidIdentity(format!("failed to reconstruct Ed25519 key: {}", e))
-            })
+            })?;
+            Ok((identity::IdentityKeyType::Ed25519, full_key))
         }
         _ => Err(Error::InvalidIdentity(format!(
             "unsupported JWK curve: kty={}, crv={}",

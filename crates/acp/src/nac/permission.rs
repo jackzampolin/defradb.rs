@@ -93,11 +93,11 @@ pub enum NodePermission {
     /// Create an index (used by POST /api/v0/collections/:name/indexes)
     IndexCreate,
 
-    /// Drop an index (used by DELETE /api/v0/collections/:name/indexes/:index)
-    IndexDrop,
+    /// Delete an index (used by DELETE /api/v0/collections/:name/indexes/:index)
+    IndexDelete,
 
-    /// Create an encrypted index (used by POST /api/v0/collections/:name/encrypted-indexes)
-    EncryptedIndexCreate,
+    /// Add an encrypted index (used by POST /api/v0/collections/:name/encrypted-indexes)
+    EncryptedIndexAdd,
 
     /// List encrypted indexes for a collection (used by GET /api/v0/collections/:name/encrypted-indexes)
     EncryptedIndexList,
@@ -121,7 +121,7 @@ pub enum NodePermission {
     P2pPeerActive,
 
     /// Create a replicator (used by POST /api/v0/p2p/replicators)
-    P2pReplicatorCreate,
+    P2pReplicatorAdd,
 
     /// Delete a replicator (used by DELETE /api/v0/p2p/replicators)
     P2pReplicatorDelete,
@@ -130,7 +130,7 @@ pub enum NodePermission {
     P2pReplicatorList,
 
     /// Add collection to P2P (used by POST /api/v0/p2p/collections)
-    P2pCollectionCreate,
+    P2pCollectionAdd,
 
     /// Remove collection from P2P (used by DELETE /api/v0/p2p/collections)
     P2pCollectionDelete,
@@ -139,7 +139,7 @@ pub enum NodePermission {
     P2pCollectionList,
 
     /// Add document to P2P replication (used by POST /api/v0/p2p/documents)
-    P2pDocumentCreate,
+    P2pDocumentAdd,
 
     /// Remove document from P2P replication (used by DELETE /api/v0/p2p/documents)
     P2pDocumentDelete,
@@ -222,8 +222,8 @@ impl NodePermission {
             // Index operations
             Self::IndexList => "index-list",
             Self::IndexCreate => "index-create",
-            Self::IndexDrop => "index-drop",
-            Self::EncryptedIndexCreate => "encrypted-index-create",
+            Self::IndexDelete => "index-delete",
+            Self::EncryptedIndexAdd => "encrypted-index-add",
             Self::EncryptedIndexList => "encrypted-index-list",
             Self::EncryptedIndexListAll => "encrypted-index-list-all",
             Self::EncryptedIndexDelete => "encrypted-index-delete",
@@ -232,13 +232,13 @@ impl NodePermission {
             Self::P2pPeerInfo => "p2p-peer-info",
             Self::P2pPeerConnect => "p2p-peer-connect",
             Self::P2pPeerActive => "p2p-peer-active",
-            Self::P2pReplicatorCreate => "p2p-replicator-create",
+            Self::P2pReplicatorAdd => "p2p-replicator-add",
             Self::P2pReplicatorDelete => "p2p-replicator-delete",
             Self::P2pReplicatorList => "p2p-replicator-list",
-            Self::P2pCollectionCreate => "p2p-collection-create",
+            Self::P2pCollectionAdd => "p2p-collection-add",
             Self::P2pCollectionDelete => "p2p-collection-delete",
             Self::P2pCollectionList => "p2p-collection-list",
-            Self::P2pDocumentCreate => "p2p-document-create",
+            Self::P2pDocumentAdd => "p2p-document-add",
             Self::P2pDocumentDelete => "p2p-document-delete",
             Self::P2pDocumentList => "p2p-document-list",
             Self::P2pSyncDocuments => "p2p-sync-documents",
@@ -291,8 +291,8 @@ impl NodePermission {
             // Index
             Self::IndexList,
             Self::IndexCreate,
-            Self::IndexDrop,
-            Self::EncryptedIndexCreate,
+            Self::IndexDelete,
+            Self::EncryptedIndexAdd,
             Self::EncryptedIndexList,
             Self::EncryptedIndexListAll,
             Self::EncryptedIndexDelete,
@@ -300,13 +300,13 @@ impl NodePermission {
             Self::P2pPeerInfo,
             Self::P2pPeerConnect,
             Self::P2pPeerActive,
-            Self::P2pReplicatorCreate,
+            Self::P2pReplicatorAdd,
             Self::P2pReplicatorDelete,
             Self::P2pReplicatorList,
-            Self::P2pCollectionCreate,
+            Self::P2pCollectionAdd,
             Self::P2pCollectionDelete,
             Self::P2pCollectionList,
-            Self::P2pDocumentCreate,
+            Self::P2pDocumentAdd,
             Self::P2pDocumentDelete,
             Self::P2pDocumentList,
             Self::P2pSyncDocuments,
@@ -355,8 +355,8 @@ impl NodePermission {
             // Index
             "index-list" => Self::IndexList,
             "index-create" => Self::IndexCreate,
-            "index-drop" => Self::IndexDrop,
-            "encrypted-index-create" => Self::EncryptedIndexCreate,
+            "index-delete" => Self::IndexDelete,
+            "encrypted-index-add" => Self::EncryptedIndexAdd,
             "encrypted-index-list" => Self::EncryptedIndexList,
             "encrypted-index-list-all" => Self::EncryptedIndexListAll,
             "encrypted-index-delete" => Self::EncryptedIndexDelete,
@@ -364,13 +364,13 @@ impl NodePermission {
             "p2p-peer-info" => Self::P2pPeerInfo,
             "p2p-peer-connect" => Self::P2pPeerConnect,
             "p2p-peer-active" => Self::P2pPeerActive,
-            "p2p-replicator-create" => Self::P2pReplicatorCreate,
+            "p2p-replicator-add" => Self::P2pReplicatorAdd,
             "p2p-replicator-delete" => Self::P2pReplicatorDelete,
             "p2p-replicator-list" => Self::P2pReplicatorList,
-            "p2p-collection-create" => Self::P2pCollectionCreate,
+            "p2p-collection-add" => Self::P2pCollectionAdd,
             "p2p-collection-delete" => Self::P2pCollectionDelete,
             "p2p-collection-list" => Self::P2pCollectionList,
-            "p2p-document-create" => Self::P2pDocumentCreate,
+            "p2p-document-add" => Self::P2pDocumentAdd,
             "p2p-document-delete" => Self::P2pDocumentDelete,
             "p2p-document-list" => Self::P2pDocumentList,
             "p2p-sync-documents" => Self::P2pSyncDocuments,
@@ -427,8 +427,8 @@ mod tests {
     fn test_permission_display() {
         assert_eq!(format!("{}", NodePermission::DacBypass), "dac-bypass");
         assert_eq!(
-            format!("{}", NodePermission::P2pReplicatorCreate),
-            "p2p-replicator-create"
+            format!("{}", NodePermission::P2pReplicatorAdd),
+            "p2p-replicator-add"
         );
     }
 

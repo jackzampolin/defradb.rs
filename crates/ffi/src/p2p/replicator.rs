@@ -26,7 +26,7 @@ use super::{parse_collections_json, parse_multiaddr_with_peer_id};
 ///
 /// All string pointers must be valid null-terminated UTF-8 strings.
 #[no_mangle]
-pub unsafe extern "C" fn p2p_create_replicator(
+pub unsafe extern "C" fn p2p_add_replicator(
     node_ptr: usize,
     identity_did: *const c_char,
     peer_addr: *const c_char,
@@ -37,7 +37,7 @@ pub unsafe extern "C" fn p2p_create_replicator(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pReplicatorCreate
+        NodePermission::P2pReplicatorAdd
     ));
 
     let addr_str = try_ffi!(require_c_str(peer_addr, "peer_addr"));

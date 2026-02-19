@@ -102,7 +102,7 @@ impl IndexOperations for MockIndexOperations {
         }
     }
 
-    async fn drop_index(&self, collection: &str, name: &str) -> Result<(), String> {
+    async fn delete_index(&self, collection: &str, name: &str) -> Result<(), String> {
         let mut indexes = self.indexes.write().unwrap();
         let initial_len = indexes.len();
         indexes.retain(|i| !(i.collection == collection && i.name == name));
@@ -148,7 +148,7 @@ impl IndexOperations for FailingMockIndexOperations {
         Err(self.error.clone())
     }
 
-    async fn drop_index(&self, _collection: &str, _name: &str) -> Result<(), String> {
+    async fn delete_index(&self, _collection: &str, _name: &str) -> Result<(), String> {
         Err(self.error.clone())
     }
 }

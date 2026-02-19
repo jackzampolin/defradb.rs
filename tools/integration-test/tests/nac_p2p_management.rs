@@ -82,15 +82,15 @@ async fn nac_p2p_management_gate_test(cluster: TestCluster) {
     // P2P document create — anonymous rejected, outsider rejected, admin accepted
     // =========================================================================
     assert!(
-        node.p2p_document_create(&[&doc_id]).is_err(),
-        "anonymous should be rejected from p2p document create"
+        node.p2p_document_add(&[&doc_id]).is_err(),
+        "anonymous should be rejected from p2p document add"
     );
     assert!(
-        node.p2p_document_create_with_identity(&[&doc_id], outsider_key)
+        node.p2p_document_add_with_identity(&[&doc_id], outsider_key)
             .is_err(),
-        "outsider should be rejected from p2p document create"
+        "outsider should be rejected from p2p document add"
     );
-    node.p2p_document_create_with_identity(&[&doc_id], &admin_key)
+    node.p2p_document_add_with_identity(&[&doc_id], &admin_key)
         .expect("admin should add p2p document");
 
     // =========================================================================
@@ -123,6 +123,29 @@ async fn nac_p2p_management_gate_test(cluster: TestCluster) {
         .expect("admin should delete p2p document");
 
     // =========================================================================
+    // P2P document sync — anonymous rejected, outsider rejected, admin passes NAC
+    // Note: admin call may fail because no peers are connected, but must pass NAC gate.
+    // =========================================================================
+    assert!(
+        node.p2p_document_sync("Product", &[&doc_id]).is_err(),
+        "anonymous should be rejected from p2p document sync"
+    );
+    assert!(
+        node.p2p_document_sync_with_identity("Product", &[&doc_id], outsider_key)
+            .is_err(),
+        "outsider should be rejected from p2p document sync"
+    );
+    let admin_doc_sync =
+        node.p2p_document_sync_with_identity("Product", &[&doc_id], &admin_key);
+    if let Err(ref e) = admin_doc_sync {
+        let msg = e.to_string().to_lowercase();
+        assert!(
+            !msg.contains("unauthorized") && !msg.contains("forbidden") && !msg.contains("nac"),
+            "admin should pass NAC gate for p2p document sync, got: {e}"
+        );
+    }
+
+    // =========================================================================
     // P2P replicator list — anonymous rejected, outsider rejected, admin accepted
     // =========================================================================
     assert!(
@@ -147,12 +170,12 @@ async fn nac_p2p_management_gate_test(cluster: TestCluster) {
         "/ip4/127.0.0.1/tcp/19999/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
     assert!(
         node.p2p_replicator_set(&["Product"], dummy_addr).is_err(),
-        "anonymous should be rejected from p2p replicator create"
+        "anonymous should be rejected from p2p replicator add"
     );
     assert!(
         node.p2p_replicator_set_with_identity(&["Product"], dummy_addr, outsider_key)
             .is_err(),
-        "outsider should be rejected from p2p replicator create"
+        "outsider should be rejected from p2p replicator add"
     );
     let admin_replicator =
         node.p2p_replicator_set_with_identity(&["Product"], dummy_addr, &admin_key);

@@ -17,7 +17,7 @@ pub struct P2pDocumentArgs {
 #[derive(Subcommand, Debug)]
 pub enum P2pDocumentCommand {
     /// Add document(s) to P2P sync
-    Create(P2pDocumentCreateArgs),
+    Add(P2pDocumentAddArgs),
     /// Remove document(s) from P2P sync
     Delete(P2pDocumentDeleteArgs),
     /// List all P2P synced documents
@@ -26,9 +26,9 @@ pub enum P2pDocumentCommand {
     Sync(P2pDocumentSyncArgs),
 }
 
-/// Arguments for p2p document create command
+/// Arguments for p2p document add command
 #[derive(Args, Debug)]
-pub struct P2pDocumentCreateArgs {
+pub struct P2pDocumentAddArgs {
     /// Document IDs to add
     #[arg(value_name = "docIDs")]
     pub doc_ids: Vec<String>,
@@ -69,7 +69,7 @@ pub struct P2pDocumentSyncArgs {
 impl P2pDocumentArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            P2pDocumentCommand::Create(args) => args.execute(ctx).await,
+            P2pDocumentCommand::Add(args) => args.execute(ctx).await,
             P2pDocumentCommand::Delete(args) => args.execute(ctx).await,
             P2pDocumentCommand::List(args) => args.execute(ctx).await,
             P2pDocumentCommand::Sync(args) => args.execute(ctx).await,
@@ -77,7 +77,7 @@ impl P2pDocumentArgs {
     }
 }
 
-impl P2pDocumentCreateArgs {
+impl P2pDocumentAddArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         let schema_ids: Vec<String> = self.schema_id.iter().cloned().collect();
 

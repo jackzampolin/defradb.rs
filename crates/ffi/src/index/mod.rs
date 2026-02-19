@@ -2,7 +2,7 @@ mod create;
 mod manage;
 
 pub use create::create_index;
-pub use manage::{drop_index, get_all_indexes, get_indexes};
+pub use manage::{delete_index, get_indexes, list_all_indexes};
 
 /// Input structure for creating an index via FFI.
 #[derive(serde::Deserialize)]

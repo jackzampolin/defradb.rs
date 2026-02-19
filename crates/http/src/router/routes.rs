@@ -72,7 +72,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
             get(handlers::get_collection_by_version_id),
         )
         // Go-compatible list-all-indexes route (no path param)
-        .route("/indexes", get(handlers::index::go_get_all_indexes))
+        .route("/indexes", get(handlers::index::go_list_all_indexes))
         .route(
             "/:name",
             get(handlers::get_collection_doc_ids)
@@ -90,7 +90,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/:name/indexes", post(handlers::index::go_create_index))
         .route(
             "/:name/indexes/:index",
-            delete(handlers::index::go_drop_index),
+            delete(handlers::index::go_delete_index),
         )
         // Go-compatible encrypted index routes
         .route(
@@ -99,7 +99,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
         )
         .route(
             "/:name/encrypted-indexes",
-            post(handlers::encrypted_index::go_create_encrypted_index),
+            post(handlers::encrypted_index::go_add_encrypted_index),
         )
         .route(
             "/:name/encrypted-indexes/:field",
@@ -153,7 +153,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
     let index_routes = Router::new()
         .route("/", post(handlers::index::create_index))
         .route("/", get(handlers::index::list_indexes))
-        .route("/", delete(handlers::index::drop_index));
+        .route("/", delete(handlers::index::delete_index));
 
     // Backup routes (POST for both to match Go DefraDB)
     let backup_routes = Router::new()

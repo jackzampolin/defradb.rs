@@ -1,25 +1,32 @@
 use std::ffi::c_char;
 
+use acp::nac::NodePermission;
 use storage::corekv::Key;
 
 use crate::helpers::{get_node_database, get_rt, require_c_str};
-use crate::types::{c_str_to_string, FfiResult};
+use crate::nac_check::check_nac_for_node;
+use crate::types::FfiResult;
 use crate::{ffi_async, try_ffi};
 
-/// Create a new encrypted index on a collection field.
+/// Add a new encrypted index on a collection field.
 ///
 /// # Safety
 ///
 /// All string pointers must be valid null-terminated UTF-8 strings.
 #[no_mangle]
-pub unsafe extern "C" fn create_encrypted_index(
+pub unsafe extern "C" fn add_encrypted_index(
     node_ptr: usize,
     identity_did: *const c_char,
     collection_name: *const c_char,
     field_name: *const c_char,
 ) -> FfiResult {
     let rt = try_ffi!(get_rt());
-    let _identity = c_str_to_string(identity_did);
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::EncryptedIndexAdd
+    ));
     let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
     let field_name_str = try_ffi!(require_c_str(field_name, "field_name"));
     let database = try_ffi!(get_node_database(node_ptr));
@@ -123,7 +130,12 @@ pub unsafe extern "C" fn delete_encrypted_index(
     field_name: *const c_char,
 ) -> FfiResult {
     let rt = try_ffi!(get_rt());
-    let _identity = c_str_to_string(identity_did);
+    try_ffi!(check_nac_for_node(
+        rt,
+        node_ptr,
+        identity_did,
+        NodePermission::EncryptedIndexDelete
+    ));
     let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
     let field_name_str = try_ffi!(require_c_str(field_name, "field_name"));
     let database = try_ffi!(get_node_database(node_ptr));
@@ -228,14 +240,14 @@ mod tests {
         let collection_name = CString::new("User").unwrap();
         let field_name = CString::new("ssn").unwrap();
         let result = unsafe {
-            create_encrypted_index(
+            add_encrypted_index(
                 node,
                 std::ptr::null(),
                 collection_name.as_ptr(),
                 field_name.as_ptr(),
             )
         };
-        assert_eq!(result.status, 0, "create_encrypted_index should succeed");
+        assert_eq!(result.status, 0, "add_encrypted_index should succeed");
 
         let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
         assert!(value.contains("ssn"), "should contain field name");
@@ -272,7 +284,7 @@ mod tests {
         let collection_name = CString::new("Employee").unwrap();
         let field_name = CString::new("salary").unwrap();
         let result = unsafe {
-            create_encrypted_index(
+            add_encrypted_index(
                 node,
                 std::ptr::null(),
                 collection_name.as_ptr(),
@@ -308,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_encrypted_index_nonexistent_field() {
+    fn test_add_encrypted_index_nonexistent_field() {
         assert!(crate::runtime::init_runtime());
 
         let options = NodeInitOptions::default();
@@ -326,7 +338,7 @@ mod tests {
         let collection_name = CString::new("Product").unwrap();
         let field_name = CString::new("nonexistent").unwrap();
         let result = unsafe {
-            create_encrypted_index(
+            add_encrypted_index(
                 node,
                 std::ptr::null(),
                 collection_name.as_ptr(),
@@ -365,7 +377,7 @@ mod tests {
         let collection_name = CString::new("Account").unwrap();
         let field_name = CString::new("email").unwrap();
         let result = unsafe {
-            create_encrypted_index(
+            add_encrypted_index(
                 node,
                 std::ptr::null(),
                 collection_name.as_ptr(),
@@ -378,7 +390,7 @@ mod tests {
         }
 
         let result = unsafe {
-            create_encrypted_index(
+            add_encrypted_index(
                 node,
                 std::ptr::null(),
                 collection_name.as_ptr(),

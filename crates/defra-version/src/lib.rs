@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 /// Go upstream commit we last synced with.
-pub const GO_COMPAT_COMMIT: &str = "a6a2e9c5";
+pub const GO_COMPAT_COMMIT: &str = "4b8993f8";
 /// Go upstream branch.
 pub const GO_COMPAT_BRANCH: &str = "develop";
 /// Go release tag (empty until Go cuts a release).

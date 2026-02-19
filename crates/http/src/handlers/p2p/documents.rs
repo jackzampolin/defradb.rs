@@ -37,13 +37,13 @@ pub async fn list_documents(
 ///
 /// Go DefraDB accepts flat array of document IDs: `["doc-id-1", "doc-id-2"]`
 ///
-/// Requires `P2pDocumentCreate` permission when NAC is enabled.
+/// Requires `P2pDocumentAdd` permission when NAC is enabled.
 pub async fn add_documents(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Json(doc_ids): Json<Vec<String>>,
 ) -> Result<(), HttpError> {
-    require_permission(&state, &identity, NodePermission::P2pDocumentCreate).await?;
+    require_permission(&state, &identity, NodePermission::P2pDocumentAdd).await?;
 
     let p2p = state.require_p2p()?;
 

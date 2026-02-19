@@ -36,7 +36,7 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pCollectionCreate
+        NodePermission::P2pSyncCollectionVersions
     ));
 
     let version_ids_str = try_ffi!(require_c_str(version_ids_json, "version_ids_json"));

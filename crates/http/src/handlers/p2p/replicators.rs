@@ -85,13 +85,13 @@ pub async fn list_replicators(
 ///
 /// Body: {"Addresses": ["..."], "Collections": ["..."]}
 ///
-/// Requires `P2pReplicatorCreate` permission when NAC is enabled.
+/// Requires `P2pReplicatorAdd` permission when NAC is enabled.
 pub async fn add_replicator(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Json(request): Json<ReplicatorRequest>,
 ) -> Result<Json<()>, HttpError> {
-    require_permission(&state, &identity, NodePermission::P2pReplicatorCreate).await?;
+    require_permission(&state, &identity, NodePermission::P2pReplicatorAdd).await?;
 
     let p2p = state.require_p2p()?;
 

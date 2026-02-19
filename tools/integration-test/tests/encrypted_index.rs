@@ -38,12 +38,12 @@ async fn encrypted_index_test(cluster: TestCluster) {
     .expect("create product 3");
 
     // Create encrypted index on name
-    node.encrypted_index_create("Product", "name")
-        .expect("create encrypted index on name");
+    node.encrypted_index_add("Product", "name")
+        .expect("add encrypted index on name");
 
     // Create encrypted index on sku
-    node.encrypted_index_create("Product", "sku")
-        .expect("create encrypted index on sku");
+    node.encrypted_index_add("Product", "sku")
+        .expect("add encrypted index on sku");
 
     // List encrypted indexes — should be 2
     let list1 = node

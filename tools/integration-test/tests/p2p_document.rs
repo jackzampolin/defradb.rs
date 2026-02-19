@@ -63,8 +63,8 @@ async fn p2p_document_test(cluster: TestCluster) {
         .expect("could not extract _docID from mutation result");
 
     // 3. Add document to P2P subscription
-    node.p2p_document_create(&[doc_id])
-        .expect("p2p_document_create");
+    node.p2p_document_add(&[doc_id])
+        .expect("p2p_document_add");
 
     // 4. Verify document appears in list
     let list_after_add = node

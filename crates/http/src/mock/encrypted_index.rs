@@ -14,7 +14,7 @@ impl MockEncryptedIndexOperations {
 
 #[async_trait]
 impl EncryptedIndexOperations for MockEncryptedIndexOperations {
-    async fn create_encrypted_index(
+    async fn add_encrypted_index(
         &self,
         _collection: &str,
         field_name: &str,

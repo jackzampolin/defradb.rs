@@ -123,16 +123,16 @@ async fn nac_core_operations_gate_test(cluster: TestCluster) {
     // index drop — anonymous rejected, outsider rejected, admin accepted
     // =========================================================================
     assert!(
-        node.index_drop("Product", "idx_name").is_err(),
-        "anonymous should be rejected from index drop"
+        node.index_delete("Product", "idx_name").is_err(),
+        "anonymous should be rejected from index delete"
     );
     assert!(
-        node.index_drop_with_identity("Product", "idx_name", outsider_key)
+        node.index_delete_with_identity("Product", "idx_name", outsider_key)
             .is_err(),
-        "outsider should be rejected from index drop"
+        "outsider should be rejected from index delete"
     );
-    node.index_drop_with_identity("Product", "idx_name", &admin_key)
-        .expect("admin should drop index");
+    node.index_delete_with_identity("Product", "idx_name", &admin_key)
+        .expect("admin should delete index");
 
     // =========================================================================
     // collection create (document mutation) — anonymous rejected, outsider rejected, admin accepted

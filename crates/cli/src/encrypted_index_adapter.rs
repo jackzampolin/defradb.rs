@@ -18,7 +18,7 @@ impl<S: Store + 'static> EncryptedIndexAdapter<S> {
 
 #[async_trait]
 impl<S: Store + 'static> EncryptedIndexOperations for EncryptedIndexAdapter<S> {
-    async fn create_encrypted_index(
+    async fn add_encrypted_index(
         &self,
         collection: &str,
         field_name: &str,

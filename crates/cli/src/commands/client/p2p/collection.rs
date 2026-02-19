@@ -16,8 +16,8 @@ pub struct P2pCollectionArgs {
 /// P2P collection subcommands
 #[derive(Subcommand, Debug)]
 pub enum P2pCollectionCommand {
-    /// Create P2P collections to the synchronized pubsub topics
-    Create(P2pCollectionCreateArgs),
+    /// Add P2P collections to the synchronized pubsub topics
+    Add(P2pCollectionAddArgs),
     /// Delete P2P collections from the followed pubsub topics
     Delete(P2pCollectionDeleteArgs),
     /// List P2P collections
@@ -32,9 +32,9 @@ pub enum P2pCollectionCommand {
 #[derive(Args, Debug)]
 pub struct P2pCollectionListArgs {}
 
-/// Arguments for collection create command
+/// Arguments for collection add command
 #[derive(Args, Debug)]
-pub struct P2pCollectionCreateArgs {
+pub struct P2pCollectionAddArgs {
     /// Collection names (comma-separated, e.g. User,Address)
     #[arg(value_name = "collectionNames")]
     pub collections: String,
@@ -69,7 +69,7 @@ impl P2pCollectionArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
             P2pCollectionCommand::List(args) => args.execute(ctx).await,
-            P2pCollectionCommand::Create(args) => args.execute(ctx).await,
+            P2pCollectionCommand::Add(args) => args.execute(ctx).await,
             P2pCollectionCommand::Delete(args) => args.execute(ctx).await,
             P2pCollectionCommand::SyncVersions(args) => args.execute(ctx).await,
             P2pCollectionCommand::SyncBranchable(args) => args.execute(ctx).await,
@@ -90,8 +90,8 @@ impl P2pCollectionListArgs {
     }
 }
 
-impl P2pCollectionCreateArgs {
-    /// Execute the collection create command
+impl P2pCollectionAddArgs {
+    /// Execute the collection add command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         let collections: Vec<String> = self
             .collections

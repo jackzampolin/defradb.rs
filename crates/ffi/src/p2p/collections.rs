@@ -22,7 +22,7 @@ use super::{parse_collections_json, persist_p2p_collections};
 ///
 /// `collections_json` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn p2p_create_collections(
+pub unsafe extern "C" fn p2p_add_collections(
     node_ptr: usize,
     identity_did: *const c_char,
     collections_json: *const c_char,
@@ -32,7 +32,7 @@ pub unsafe extern "C" fn p2p_create_collections(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pCollectionCreate
+        NodePermission::P2pCollectionAdd
     ));
 
     let collections_str = try_ffi!(require_c_str(collections_json, "collections_json"));

@@ -15,24 +15,24 @@ use crate::nac_guard::require_permission;
 use crate::router::{AppState, EncryptedIndexInfo, NodePermission};
 use crate::validation::validate_identifier;
 
-/// Go-compatible request to create an encrypted index.
+/// Go-compatible request to add an encrypted index.
 #[derive(Debug, Deserialize)]
-pub struct GoCreateEncryptedIndexRequest {
+pub struct GoAddEncryptedIndexRequest {
     /// Field name to create the encrypted index on.
     #[serde(rename = "FieldName")]
     pub field_name: Option<String>,
 }
 
-/// Create an encrypted index (Go-compatible route).
+/// Add an encrypted index (Go-compatible route).
 ///
 /// POST /api/v0/collections/{name}/encrypted-indexes
-pub async fn go_create_encrypted_index(
+pub async fn go_add_encrypted_index(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path(collection): Path<String>,
-    body: Option<Json<GoCreateEncryptedIndexRequest>>,
+    body: Option<Json<GoAddEncryptedIndexRequest>>,
 ) -> Result<Json<EncryptedIndexInfo>, HttpError> {
-    require_permission(&state, &identity, NodePermission::EncryptedIndexCreate).await?;
+    require_permission(&state, &identity, NodePermission::EncryptedIndexAdd).await?;
 
     let ops = state.require_encrypted_index()?;
 
@@ -49,7 +49,7 @@ pub async fn go_create_encrypted_index(
         .ok_or_else(|| HttpError::BadRequest("field_name is required".into()))?;
 
     let info = ops
-        .create_encrypted_index(&collection, &field_name)
+        .add_encrypted_index(&collection, &field_name)
         .await
         .map_err(HttpError::BadRequest)?;
 

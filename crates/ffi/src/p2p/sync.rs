@@ -38,7 +38,7 @@ pub unsafe extern "C" fn p2p_sync_documents(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pDocumentCreate
+        NodePermission::P2pSyncDocuments
     ));
 
     let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
@@ -186,7 +186,7 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pCollectionCreate
+        NodePermission::P2pSyncBranchableCollection
     ));
 
     let collection_id_str = try_ffi!(require_c_str(collection_id, "collection_id"));

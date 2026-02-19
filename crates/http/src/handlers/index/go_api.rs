@@ -180,18 +180,18 @@ pub async fn go_list_indexes(
     Ok(Json(response))
 }
 
-/// Drop an index (Go-compatible route).
+/// Delete an index (Go-compatible route).
 ///
 /// DELETE /api/v0/collections/{name}/indexes/{index}
 ///
-/// Requires `IndexDrop` permission when NAC is enabled.
+/// Requires `IndexDelete` permission when NAC is enabled.
 /// Returns HTTP 200 with empty body to match Go DefraDB behavior.
-pub async fn go_drop_index(
+pub async fn go_delete_index(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Path((collection, index_name)): Path<(String, String)>,
 ) -> Result<StatusCode, HttpError> {
-    require_permission(&state, &identity, NodePermission::IndexDrop).await?;
+    require_permission(&state, &identity, NodePermission::IndexDelete).await?;
 
     let index_ops = state.require_index()?;
 
@@ -212,7 +212,7 @@ pub async fn go_drop_index(
     })?;
 
     index_ops
-        .drop_index(&collection, &index_name)
+        .delete_index(&collection, &index_name)
         .await
         .map_err(HttpError::BadRequest)?;
 
@@ -225,7 +225,7 @@ pub async fn go_drop_index(
 /// GET /api/v0/collections/indexes
 ///
 /// Returns a map grouped by collection name to match Go DefraDB format.
-pub async fn go_get_all_indexes(
+pub async fn go_list_all_indexes(
     State(state): State<AppState>,
     identity: ExtractIdentity,
 ) -> Result<Json<HashMap<String, Vec<GoIndexDescription>>>, HttpError> {

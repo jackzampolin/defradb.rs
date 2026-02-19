@@ -32,13 +32,13 @@ pub async fn list_collections(
 ///
 /// Go DefraDB accepts raw array: `["collection1", "collection2"]`
 ///
-/// Requires `P2pCollectionCreate` permission when NAC is enabled.
+/// Requires `P2pCollectionAdd` permission when NAC is enabled.
 pub async fn add_collections(
     State(state): State<AppState>,
     identity: ExtractIdentity,
     Json(collections): Json<Vec<String>>,
 ) -> Result<(), HttpError> {
-    require_permission(&state, &identity, NodePermission::P2pCollectionCreate).await?;
+    require_permission(&state, &identity, NodePermission::P2pCollectionAdd).await?;
 
     let p2p = state.require_p2p()?;
 

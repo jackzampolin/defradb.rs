@@ -170,7 +170,7 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
         Ok(result)
     }
 
-    async fn drop_index(&self, collection: &str, name: &str) -> Result<(), String> {
+    async fn delete_index(&self, collection: &str, name: &str) -> Result<(), String> {
         let col = self
             .database
             .require_collection(collection)
@@ -197,7 +197,7 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
             let systemstore = txn.systemstore().map_err(|e| format!("{}", e))?;
 
             let existed = index_manager
-                .drop_index(&systemstore, name)
+                .delete_index(&systemstore, name)
                 .await
                 .map_err(|e| format!("{}", e))?;
 

@@ -136,16 +136,16 @@ impl DefraClient {
         self.exec(&args)
     }
 
-    /// Create P2P collections via `client p2p collection create <cols>`.
+    /// Add P2P collections via `client p2p collection add <cols>`.
     pub fn p2p_collection_add(&self, collections: &[&str]) -> Result<String> {
         let cols = collections.join(",");
-        self.exec(&["client", "p2p", "collection", "create", &cols])
+        self.exec(&["client", "p2p", "collection", "add", &cols])
     }
 
-    /// Create a replicator via `client p2p replicator create -c <cols> <addr>`.
+    /// Add a replicator via `client p2p replicator add -c <cols> <addr>`.
     pub fn p2p_replicator_set(&self, collections: &[&str], addr: &str) -> Result<String> {
         let cols = collections.join(",");
-        self.exec(&["client", "p2p", "replicator", "create", "-c", &cols, addr])
+        self.exec(&["client", "p2p", "replicator", "add", "-c", &cols, addr])
     }
 
     /// Execute a GraphQL query with an identity via `client -i <key> query '<gql>'`.
@@ -346,14 +346,14 @@ impl DefraClient {
         serde_json::from_str(&out).context("failed to parse index_list output")
     }
 
-    /// Drop an index. Rust: positional args. Go: `--collection` and `--name` flags.
-    pub fn index_drop(&self, collection: &str, name: &str) -> Result<String> {
-        self.exec(&["client", "index", "drop", collection, name])
+    /// Delete an index. Rust: positional args. Go: `--collection` and `--name` flags.
+    pub fn index_delete(&self, collection: &str, name: &str) -> Result<String> {
+        self.exec(&["client", "index", "delete", collection, name])
             .or_else(|_| {
                 self.exec(&[
                     "client",
                     "index",
-                    "drop",
+                    "delete",
                     "--collection",
                     collection,
                     "--name",
@@ -492,9 +492,9 @@ impl DefraClient {
 
     // -- P2P Document operations --
 
-    /// Add documents to P2P subscription via `client p2p document create <id1> <id2>`.
-    pub fn p2p_document_create(&self, doc_ids: &[&str]) -> Result<String> {
-        let mut args = vec!["client", "p2p", "document", "create"];
+    /// Add documents to P2P subscription via `client p2p document add <id1> <id2>`.
+    pub fn p2p_document_add(&self, doc_ids: &[&str]) -> Result<String> {
+        let mut args = vec!["client", "p2p", "document", "add"];
         args.extend(doc_ids);
         self.exec(&args)
     }
@@ -611,24 +611,24 @@ impl DefraClient {
 
     // -- Encrypted Index operations --
 
-    /// Create an encrypted index.
-    /// Rust: `client encrypted-index create <collection> <field>`
-    /// Go: `client encrypted-index create --collection <c> --field <f>`
-    pub fn encrypted_index_create(&self, collection: &str, field: &str) -> Result<Value> {
+    /// Add an encrypted index.
+    /// Rust: `client encrypted-index add <collection> <field>`
+    /// Go: `client encrypted-index add --collection <c> --field <f>`
+    pub fn encrypted_index_add(&self, collection: &str, field: &str) -> Result<Value> {
         let out = self
-            .exec(&["client", "encrypted-index", "create", collection, field])
+            .exec(&["client", "encrypted-index", "add", collection, field])
             .or_else(|_| {
                 self.exec(&[
                     "client",
                     "encrypted-index",
-                    "create",
+                    "add",
                     "--collection",
                     collection,
                     "--field",
                     field,
                 ])
             })?;
-        serde_json::from_str(&out).context("failed to parse encrypted_index_create output")
+        serde_json::from_str(&out).context("failed to parse encrypted_index_add output")
     }
 
     /// Delete an encrypted index.
@@ -825,8 +825,8 @@ impl DefraClient {
         serde_json::from_str(&out).context("failed to parse p2p_active_peers output")
     }
 
-    /// Create an encrypted index with identity.
-    pub fn encrypted_index_create_with_identity(
+    /// Add an encrypted index with identity.
+    pub fn encrypted_index_add_with_identity(
         &self,
         collection: &str,
         field: &str,
@@ -835,7 +835,7 @@ impl DefraClient {
         let out = self
             .exec_with_identity(
                 hex_key,
-                &["client", "encrypted-index", "create", collection, field],
+                &["client", "encrypted-index", "add", collection, field],
             )
             .or_else(|_| {
                 self.exec_with_identity(
@@ -843,7 +843,7 @@ impl DefraClient {
                     &[
                         "client",
                         "encrypted-index",
-                        "create",
+                        "add",
                         "--collection",
                         collection,
                         "--field",
@@ -851,7 +851,7 @@ impl DefraClient {
                     ],
                 )
             })?;
-        serde_json::from_str(&out).context("failed to parse encrypted_index_create output")
+        serde_json::from_str(&out).context("failed to parse encrypted_index_add output")
     }
 
     /// List encrypted indexes with identity.
@@ -1170,21 +1170,21 @@ impl DefraClient {
         serde_json::from_str(&out).context("failed to parse index_list output")
     }
 
-    /// Drop an index with identity.
-    pub fn index_drop_with_identity(
+    /// Delete an index with identity.
+    pub fn index_delete_with_identity(
         &self,
         collection: &str,
         name: &str,
         hex_key: &str,
     ) -> Result<String> {
-        self.exec_with_identity(hex_key, &["client", "index", "drop", collection, name])
+        self.exec_with_identity(hex_key, &["client", "index", "delete", collection, name])
             .or_else(|_| {
                 self.exec_with_identity(
                     hex_key,
                     &[
                         "client",
                         "index",
-                        "drop",
+                        "delete",
                         "--collection",
                         collection,
                         "--name",
@@ -1210,7 +1210,7 @@ impl DefraClient {
         hex_key: &str,
     ) -> Result<String> {
         let cols = collections.join(",");
-        self.exec_with_identity(hex_key, &["client", "p2p", "collection", "create", &cols])
+        self.exec_with_identity(hex_key, &["client", "p2p", "collection", "add", &cols])
     }
 
     /// List P2P collections with identity.
@@ -1230,12 +1230,12 @@ impl DefraClient {
     }
 
     /// Add documents to P2P subscription with identity.
-    pub fn p2p_document_create_with_identity(
+    pub fn p2p_document_add_with_identity(
         &self,
         doc_ids: &[&str],
         hex_key: &str,
     ) -> Result<String> {
-        let mut args = vec!["client", "p2p", "document", "create"];
+        let mut args = vec!["client", "p2p", "document", "add"];
         args.extend(doc_ids);
         self.exec_with_identity(hex_key, &args)
     }
@@ -1267,7 +1267,7 @@ impl DefraClient {
         let cols = collections.join(",");
         self.exec_with_identity(
             hex_key,
-            &["client", "p2p", "replicator", "create", "-c", &cols, addr],
+            &["client", "p2p", "replicator", "add", "-c", &cols, addr],
         )
     }
 

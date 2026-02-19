@@ -22,7 +22,7 @@ use super::{parse_doc_ids_json, persist_p2p_documents};
 ///
 /// `doc_ids_json` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn p2p_create_documents(
+pub unsafe extern "C" fn p2p_add_documents(
     node_ptr: usize,
     identity_did: *const c_char,
     doc_ids_json: *const c_char,
@@ -32,7 +32,7 @@ pub unsafe extern "C" fn p2p_create_documents(
         rt,
         node_ptr,
         identity_did,
-        NodePermission::P2pDocumentCreate
+        NodePermission::P2pDocumentAdd
     ));
 
     let doc_ids_str = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));

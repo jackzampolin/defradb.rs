@@ -41,16 +41,46 @@ async fn nac_operations_gate_test(cluster: TestCluster) {
     // Encrypted index create — anonymous rejected, outsider rejected, admin accepted
     // =========================================================================
     assert!(
-        node.encrypted_index_create("Product", "name").is_err(),
+        node.encrypted_index_add("Product", "name").is_err(),
         "anonymous should be rejected from encrypted index create"
     );
     assert!(
-        node.encrypted_index_create_with_identity("Product", "name", outsider_key)
+        node.encrypted_index_add_with_identity("Product", "name", outsider_key)
             .is_err(),
         "outsider should be rejected from encrypted index create"
     );
-    node.encrypted_index_create_with_identity("Product", "name", &admin_key)
-        .expect("admin should create encrypted index");
+    node.encrypted_index_add_with_identity("Product", "name", &admin_key)
+        .expect("admin should add encrypted index");
+
+    // =========================================================================
+    // Encrypted index list — anonymous rejected, outsider rejected, admin accepted
+    // =========================================================================
+    assert!(
+        node.encrypted_index_list("Product").is_err(),
+        "anonymous should be rejected from encrypted index list"
+    );
+    assert!(
+        node.encrypted_index_list_with_identity("Product", outsider_key)
+            .is_err(),
+        "outsider should be rejected from encrypted index list"
+    );
+    node.encrypted_index_list_with_identity("Product", &admin_key)
+        .expect("admin should list encrypted indexes");
+
+    // =========================================================================
+    // Encrypted index delete — anonymous rejected, outsider rejected, admin accepted
+    // =========================================================================
+    assert!(
+        node.encrypted_index_delete("Product", "name").is_err(),
+        "anonymous should be rejected from encrypted index delete"
+    );
+    assert!(
+        node.encrypted_index_delete_with_identity("Product", "name", outsider_key)
+            .is_err(),
+        "outsider should be rejected from encrypted index delete"
+    );
+    node.encrypted_index_delete_with_identity("Product", "name", &admin_key)
+        .expect("admin should delete encrypted index");
 
     // =========================================================================
     // Lens list — anonymous rejected, outsider rejected, admin accepted

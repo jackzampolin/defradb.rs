@@ -32,9 +32,9 @@ pub struct ListIndexesQuery {
     pub collection: Option<String>,
 }
 
-/// Query parameters for dropping an index.
+/// Query parameters for deleting an index.
 #[derive(Debug, Clone, Deserialize)]
-pub struct DropIndexQuery {
+pub struct DeleteIndexQuery {
     pub collection: String,
     pub name: String,
 }
@@ -132,17 +132,17 @@ pub async fn list_indexes(
     Ok(Json(indexes))
 }
 
-/// Drop an index.
+/// Delete an index.
 ///
 /// DELETE /api/v0/index
 ///
-/// Requires `IndexDrop` permission when NAC is enabled.
-pub async fn drop_index(
+/// Requires `IndexDelete` permission when NAC is enabled.
+pub async fn delete_index(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Query(query): Query<DropIndexQuery>,
+    Query(query): Query<DeleteIndexQuery>,
 ) -> Result<Json<()>, HttpError> {
-    require_permission(&state, &identity, NodePermission::IndexDrop).await?;
+    require_permission(&state, &identity, NodePermission::IndexDelete).await?;
 
     let index_ops = state.require_index()?;
 
@@ -163,7 +163,7 @@ pub async fn drop_index(
     })?;
 
     index_ops
-        .drop_index(&query.collection, &query.name)
+        .delete_index(&query.collection, &query.name)
         .await
         .map_err(HttpError::BadRequest)?;
 
@@ -209,9 +209,9 @@ mod tests {
     }
 
     #[test]
-    fn test_drop_index_query() {
+    fn test_delete_index_query() {
         let json = r#"{"collection": "Users", "name": "idx_name"}"#;
-        let query: DropIndexQuery = serde_json::from_str(json).unwrap();
+        let query: DeleteIndexQuery = serde_json::from_str(json).unwrap();
         assert_eq!(query.collection, "Users");
         assert_eq!(query.name, "idx_name");
     }

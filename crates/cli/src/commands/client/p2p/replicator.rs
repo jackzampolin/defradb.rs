@@ -16,8 +16,8 @@ pub struct P2pReplicatorArgs {
 /// Replicator subcommands
 #[derive(Subcommand, Debug)]
 pub enum P2pReplicatorCommand {
-    /// Create replicator(s) and start synchronization
-    Create(P2pReplicatorCreateArgs),
+    /// Add replicator(s) and start synchronization
+    Add(P2pReplicatorAddArgs),
     /// Delete replicator(s) and stop synchronization
     Delete(P2pReplicatorDeleteArgs),
     /// List all replicators
@@ -28,9 +28,9 @@ pub enum P2pReplicatorCommand {
 #[derive(Args, Debug)]
 pub struct P2pReplicatorListArgs {}
 
-/// Arguments for replicator create command
+/// Arguments for replicator add command
 #[derive(Args, Debug)]
-pub struct P2pReplicatorCreateArgs {
+pub struct P2pReplicatorAddArgs {
     /// Collection(s) to replicate (comma-separated or multiple --collection)
     #[arg(long, short = 'c', required = true, value_delimiter = ',')]
     pub collection: Vec<String>,
@@ -56,7 +56,7 @@ impl P2pReplicatorArgs {
     /// Execute the replicator subcommand
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            P2pReplicatorCommand::Create(args) => args.execute(ctx).await,
+            P2pReplicatorCommand::Add(args) => args.execute(ctx).await,
             P2pReplicatorCommand::Delete(args) => args.execute(ctx).await,
             P2pReplicatorCommand::List(args) => args.execute(ctx).await,
         }
@@ -76,8 +76,8 @@ impl P2pReplicatorListArgs {
     }
 }
 
-impl P2pReplicatorCreateArgs {
-    /// Execute the replicator create command
+impl P2pReplicatorAddArgs {
+    /// Execute the replicator add command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         for col in &self.collection {
             validate_identifier(col)?;
