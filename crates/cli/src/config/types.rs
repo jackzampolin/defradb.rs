@@ -138,6 +138,7 @@ impl std::str::FromStr for KeyringBackend {
 #[serde(rename_all = "lowercase")]
 pub enum DatastoreType {
     #[default]
+    #[serde(alias = "badger")]
     Redb,
     Memory,
     Fjall,
@@ -197,7 +198,7 @@ impl std::str::FromStr for DatastoreType {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "redb" => Ok(DatastoreType::Redb),
+            "redb" | "badger" => Ok(DatastoreType::Redb),
             "memory" => Ok(DatastoreType::Memory),
             "fjall" => Ok(DatastoreType::Fjall),
             "rocksdb" => Ok(DatastoreType::RocksDb),

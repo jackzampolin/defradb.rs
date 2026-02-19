@@ -108,6 +108,10 @@ fn test_datastore_type_from_str_valid() {
         "rocksdb".parse::<DatastoreType>().unwrap(),
         DatastoreType::RocksDb
     );
+    assert_eq!(
+        "badger".parse::<DatastoreType>().unwrap(),
+        DatastoreType::Redb
+    );
 }
 
 #[test]
@@ -117,9 +121,6 @@ fn test_datastore_type_from_str_invalid() {
 
     let result: Result<DatastoreType, _> = "sqlite".parse();
     assert!(matches!(result, Err(Error::InvalidDatastore(s)) if s == "sqlite"));
-
-    let result: Result<DatastoreType, _> = "badger".parse();
-    assert!(matches!(result, Err(Error::InvalidDatastore(s)) if s == "badger"));
 }
 
 #[test]
