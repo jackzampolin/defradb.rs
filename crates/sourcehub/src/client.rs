@@ -2,7 +2,7 @@
 ///
 /// Uses the Cosmos LCD REST API for queries (avoids proto compilation)
 /// and CometBFT JSON-RPC for transaction broadcast.
-pub struct SourceHubClient {
+pub(crate) struct SourceHubClient {
     /// LCD/REST base URL derived from gRPC address (same host, port 1317 or LCD port)
     grpc_address: String,
     /// CometBFT RPC address for broadcast_tx_sync
@@ -12,7 +12,7 @@ pub struct SourceHubClient {
 }
 
 impl SourceHubClient {
-    pub fn new(grpc_address: String, comet_rpc_address: String) -> Self {
+    pub(crate) fn new(grpc_address: String, comet_rpc_address: String) -> Self {
         Self {
             grpc_address,
             comet_rpc_address,
@@ -21,7 +21,10 @@ impl SourceHubClient {
     }
 
     /// Query a policy by ID.
-    pub async fn query_policy(&self, policy_id: &str) -> Result<Option<PolicyInfo>, ClientError> {
+    pub(crate) async fn query_policy(
+        &self,
+        policy_id: &str,
+    ) -> Result<Option<PolicyInfo>, ClientError> {
         let url = format!(
             "{}/sourcenetwork/sourcehub/acp/policy/{}",
             self.rest_base_url(),
@@ -53,7 +56,7 @@ impl SourceHubClient {
 
     /// Query the owner of an object registered under a policy.
     /// Returns (is_registered, owner_did).
-    pub async fn query_object_owner(
+    pub(crate) async fn query_object_owner(
         &self,
         policy_id: &str,
         resource: &str,
@@ -87,7 +90,7 @@ impl SourceHubClient {
     ///
     /// Uses CometBFT ABCI query with protobuf-encoded request since
     /// the REST/LCD endpoint doesn't support repeated nested fields in GET params.
-    pub async fn verify_access(
+    pub(crate) async fn verify_access(
         &self,
         policy_id: &str,
         resource: &str,
@@ -140,7 +143,7 @@ impl SourceHubClient {
     }
 
     /// Query account number and sequence for transaction signing.
-    pub async fn query_account(&self, address: &str) -> Result<(u64, u64), ClientError> {
+    pub(crate) async fn query_account(&self, address: &str) -> Result<(u64, u64), ClientError> {
         let url = format!(
             "{}/cosmos/auth/v1beta1/accounts/{}",
             self.rest_base_url(),
@@ -169,7 +172,7 @@ impl SourceHubClient {
 
     /// Broadcast a signed transaction via CometBFT JSON-RPC.
     /// Returns the tx hash on success.
-    pub async fn broadcast_tx_sync(&self, tx_bytes: &[u8]) -> Result<String, ClientError> {
+    pub(crate) async fn broadcast_tx_sync(&self, tx_bytes: &[u8]) -> Result<String, ClientError> {
         let tx_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, tx_bytes);
         let url = self.comet_rpc_base_url();
         let body = serde_json::json!({
@@ -198,7 +201,7 @@ impl SourceHubClient {
 
     /// Wait for a transaction to be included in a block.
     /// Returns the full CometBFT tx query response on success.
-    pub async fn await_tx(
+    pub(crate) async fn await_tx(
         &self,
         tx_hash: &str,
         timeout_ms: u64,
@@ -261,13 +264,13 @@ impl SourceHubClient {
 }
 
 #[derive(Debug, Clone)]
-pub struct PolicyInfo {
+pub(crate) struct PolicyInfo {
     pub id: String,
     pub name: String,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ClientError {
+pub(crate) enum ClientError {
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
 

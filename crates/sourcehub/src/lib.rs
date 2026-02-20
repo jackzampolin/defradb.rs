@@ -1,7 +1,9 @@
 mod client;
+mod cosmos;
 mod dac;
+mod provider;
 mod tx;
 
-pub use client::SourceHubClient;
+pub use cosmos::CosmosProvider;
 pub use dac::SourceHubDocumentACP;
-pub use tx::TxSigner;
+pub use provider::{ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef};

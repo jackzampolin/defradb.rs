@@ -1,8 +1,10 @@
 //! SourceHub DocumentACP implementation.
 //!
-//! Implements the `DocumentACP` trait by communicating with a SourceHub
-//! blockchain node via REST/LCD queries and CometBFT transaction broadcast.
+//! Implements the `DocumentACP` trait by delegating to a `SourceHubProvider`
+//! for all on-chain communication. The provider abstraction allows swapping
+//! between Cosmos SDK and EVM backends.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,37 +12,33 @@ use identity::Did;
 
 use acp::{DocumentACP, DocumentPermission, Identity, Result};
 
-use crate::client::SourceHubClient;
-use crate::tx::TxSigner;
+use crate::provider::{ProviderError, SourceHubProvider, SubjectRef};
 
 /// DocumentACP backed by SourceHub's on-chain x/acp module.
 ///
-/// Write operations (register, relationship changes) are submitted as
-/// Cosmos SDK transactions using bearer token authentication.
-/// Read operations (is_registered, check_access) use REST/LCD queries.
+/// Delegates write and read operations to a `SourceHubProvider` implementation.
 pub struct SourceHubDocumentACP {
-    client: SourceHubClient,
-    signer: TxSigner,
+    provider: Arc<dyn SourceHubProvider>,
 }
 
 impl SourceHubDocumentACP {
-    pub fn new(client: SourceHubClient, signer: TxSigner) -> Self {
-        Self { client, signer }
+    pub fn new(provider: Arc<dyn SourceHubProvider>) -> Self {
+        Self { provider }
     }
 
-    /// Create a policy on SourceHub. Returns the tx hash.
+    /// Create a policy on SourceHub. Returns the policy ID.
     pub async fn add_policy(
         &self,
         _creator_did: &str,
         policy_yaml: &str,
-    ) -> std::result::Result<String, crate::tx::TxSignerError> {
-        self.signer.create_policy(&self.client, policy_yaml).await
+    ) -> std::result::Result<String, ProviderError> {
+        self.provider.create_policy(policy_yaml).await
     }
 
     /// Generate a bearer token for the given DID.
     ///
     /// Looks up the identity's signing config from the global store,
-    /// creates a JWT with `authorized_account` set to the validator address.
+    /// creates a JWT with `authorized_account` set to the provider's account.
     fn create_bearer_token(&self, did: &str) -> std::result::Result<String, acp::Error> {
         let signing_config = defra_core::signing::get_identity(did).ok_or_else(|| {
             acp::Error::PermissionDenied(format!("no signing config found for DID: {}", did))
@@ -67,7 +65,7 @@ impl SourceHubDocumentACP {
             &raw_identity,
             Duration::from_secs(300), // 5 minute validity
             None,
-            Some(self.signer.address()),
+            Some(self.provider.authorized_account()),
         )
         .map_err(|e| {
             acp::Error::PermissionDenied(format!("failed to create bearer token: {}", e))
@@ -77,30 +75,18 @@ impl SourceHubDocumentACP {
             acp::Error::PermissionDenied(format!("bearer token is not valid UTF-8: {}", e))
         })
     }
+}
 
-    /// Execute a bearer policy command transaction.
-    async fn bearer_cmd(
-        &self,
-        did: &str,
-        policy_id: &str,
-        cmd: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let bearer_token = self.create_bearer_token(did)?;
-        self.signer
-            .bearer_policy_cmd(&self.client, &bearer_token, policy_id, cmd)
-            .await
-            .map_err(|e| acp::Error::Storage(format!("SourceHub tx failed: {}", e)))
+fn did_to_subject(target: &Did) -> SubjectRef {
+    if target.as_str() == "*" {
+        SubjectRef::AllActors
+    } else {
+        SubjectRef::Actor(target.as_str().to_string())
     }
 }
 
-/// Build a JSON subject for SourceHub protobuf encoding.
-/// Wildcard DID (`*`) maps to `all_actors`, regular DIDs map to `actor`.
-fn build_subject_json(target: &Did) -> serde_json::Value {
-    if target.as_str() == "*" {
-        serde_json::json!({ "all_actors": {} })
-    } else {
-        serde_json::json!({ "actor": { "id": target.as_str() } })
-    }
+fn provider_err(e: ProviderError) -> acp::Error {
+    acp::Error::Storage(format!("SourceHub: {}", e))
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -113,16 +99,11 @@ impl DocumentACP for SourceHubDocumentACP {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<()> {
-        let cmd = serde_json::json!({
-            "register_object_cmd": {
-                "object": {
-                    "resource": resource_name,
-                    "id": doc_id,
-                }
-            }
-        });
-        self.bearer_cmd(identity.as_str(), policy_id, cmd).await?;
-        Ok(())
+        let bearer_token = self.create_bearer_token(identity.as_str())?;
+        self.provider
+            .register_object(&bearer_token, policy_id, resource_name, doc_id)
+            .await
+            .map_err(provider_err)
     }
 
     async fn is_doc_registered(
@@ -132,10 +113,10 @@ impl DocumentACP for SourceHubDocumentACP {
         doc_id: &str,
     ) -> Result<bool> {
         let (is_registered, _owner) = self
-            .client
+            .provider
             .query_object_owner(policy_id, resource_name, doc_id)
             .await
-            .map_err(|e| acp::Error::Storage(format!("SourceHub query failed: {}", e)))?;
+            .map_err(provider_err)?;
         Ok(is_registered)
     }
 
@@ -149,10 +130,10 @@ impl DocumentACP for SourceHubDocumentACP {
     ) -> Result<bool> {
         // Unregistered docs are public
         let (is_registered, _owner) = self
-            .client
+            .provider
             .query_object_owner(policy_id, resource_name, doc_id)
             .await
-            .map_err(|e| acp::Error::Storage(format!("SourceHub query failed: {}", e)))?;
+            .map_err(provider_err)?;
 
         if !is_registered {
             return Ok(true);
@@ -182,10 +163,10 @@ impl DocumentACP for SourceHubDocumentACP {
 
         for perm in permissions_to_check {
             let has_access = self
-                .client
+                .provider
                 .verify_access(policy_id, resource_name, doc_id, perm.as_str(), &actor_did)
                 .await
-                .map_err(|e| acp::Error::Storage(format!("SourceHub query failed: {}", e)))?;
+                .map_err(provider_err)?;
 
             if has_access {
                 return Ok(true);
@@ -205,28 +186,19 @@ impl DocumentACP for SourceHubDocumentACP {
         relation: &str,
         _managing_relations: &[String],
     ) -> Result<bool> {
-        let subject = build_subject_json(target);
-        let cmd = serde_json::json!({
-            "set_relationship_cmd": {
-                "relationship": {
-                    "object": {
-                        "resource": resource_name,
-                        "id": doc_id,
-                    },
-                    "relation": relation,
-                    "subject": subject,
-                }
-            }
-        });
-        let result = self.bearer_cmd(requestor.as_str(), policy_id, cmd).await?;
-
-        // SourceHub returns RecordExisted in the tx result.
-        // Go wrapper: ExistedAlready = !added. So added = !record_existed.
-        let record_existed = result
-            .get("record_existed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        Ok(!record_existed)
+        let bearer_token = self.create_bearer_token(requestor.as_str())?;
+        let subject = did_to_subject(target);
+        self.provider
+            .set_relationship(
+                &bearer_token,
+                policy_id,
+                resource_name,
+                doc_id,
+                relation,
+                &subject,
+            )
+            .await
+            .map_err(provider_err)
     }
 
     async fn delete_actor_relationship(
@@ -239,28 +211,19 @@ impl DocumentACP for SourceHubDocumentACP {
         relation: &str,
         _managing_relations: &[String],
     ) -> Result<bool> {
-        let subject = build_subject_json(target);
-        let cmd = serde_json::json!({
-            "delete_relationship_cmd": {
-                "relationship": {
-                    "object": {
-                        "resource": resource_name,
-                        "id": doc_id,
-                    },
-                    "relation": relation,
-                    "subject": subject,
-                }
-            }
-        });
-        let result = self.bearer_cmd(requestor.as_str(), policy_id, cmd).await?;
-
-        // SourceHub returns RecordFound in the tx result.
-        // Go wrapper: RecordFound = deleted. No negation needed.
-        let record_found = result
-            .get("record_found")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        Ok(record_found)
+        let bearer_token = self.create_bearer_token(requestor.as_str())?;
+        let subject = did_to_subject(target);
+        self.provider
+            .delete_relationship(
+                &bearer_token,
+                policy_id,
+                resource_name,
+                doc_id,
+                relation,
+                &subject,
+            )
+            .await
+            .map_err(provider_err)
     }
 
     async fn unregister_doc_object(
@@ -272,24 +235,19 @@ impl DocumentACP for SourceHubDocumentACP {
         // Unregister needs a bearer token from the owner.
         // Query the owner first, then use their identity.
         let (_is_registered, owner_did) = self
-            .client
+            .provider
             .query_object_owner(policy_id, resource_name, doc_id)
             .await
-            .map_err(|e| acp::Error::Storage(format!("SourceHub query failed: {}", e)))?;
+            .map_err(provider_err)?;
 
         if owner_did.is_empty() {
             return Ok(());
         }
 
-        let cmd = serde_json::json!({
-            "archive_object_cmd": {
-                "object": {
-                    "resource": resource_name,
-                    "id": doc_id,
-                }
-            }
-        });
-        self.bearer_cmd(&owner_did, policy_id, cmd).await?;
-        Ok(())
+        let bearer_token = self.create_bearer_token(&owner_did)?;
+        self.provider
+            .archive_object(&bearer_token, policy_id, resource_name, doc_id)
+            .await
+            .map_err(provider_err)
     }
 }
