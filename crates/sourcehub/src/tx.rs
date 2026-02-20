@@ -9,7 +9,7 @@ use crate::client::SourceHubClient;
 /// Uses cosmrs for standard Cosmos SDK tx building (TxBody, AuthInfo, SignDoc,
 /// signing) and hand-encoded protobuf only for SourceHub-specific messages
 /// (MsgCreatePolicy, MsgBearerPolicyCmd) that aren't in cosmos-sdk-proto.
-pub struct TxSigner {
+pub(crate) struct TxSigner {
     signing_key: SigningKey,
     account_id: AccountId,
     chain_id: cosmrs::tendermint::chain::Id,
@@ -17,7 +17,10 @@ pub struct TxSigner {
 
 impl TxSigner {
     /// Create a signer from raw secp256k1 private key bytes.
-    pub fn from_secp256k1_bytes(key_bytes: &[u8], chain_id: &str) -> Result<Self, TxSignerError> {
+    pub(crate) fn from_secp256k1_bytes(
+        key_bytes: &[u8],
+        chain_id: &str,
+    ) -> Result<Self, TxSignerError> {
         let signing_key = SigningKey::from_slice(key_bytes)
             .map_err(|e| TxSignerError::Key(format!("invalid secp256k1 key: {}", e)))?;
 
@@ -38,13 +41,13 @@ impl TxSigner {
     }
 
     /// Get the bech32 account address (e.g., "source1...").
-    pub fn address(&self) -> String {
+    pub(crate) fn address(&self) -> String {
         self.account_id.to_string()
     }
 
     /// Build, sign, and broadcast a MsgCreatePolicy transaction.
     /// Returns the policy ID extracted from the tx result.
-    pub async fn create_policy(
+    pub(crate) async fn create_policy(
         &self,
         client: &SourceHubClient,
         policy_yaml: &str,
@@ -76,7 +79,7 @@ impl TxSigner {
 
     /// Build, sign, and broadcast a MsgBearerPolicyCmd transaction.
     /// Returns a JSON object with `tx_hash` and optionally `record_existed`/`record_found`.
-    pub async fn bearer_policy_cmd(
+    pub(crate) async fn bearer_policy_cmd(
         &self,
         client: &SourceHubClient,
         bearer_token: &str,
@@ -512,7 +515,7 @@ fn decode_bool_field(data: &[u8], target_field: u32) -> bool {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TxSignerError {
+pub(crate) enum TxSignerError {
     #[error("key error: {0}")]
     Key(String),
 

@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use identity::Identity;
+use sourcehub::SourceHubProvider;
 
 use crate::state::{FfiStore, NodeState, PolicyStore, NODES};
 use crate::try_ffi;
@@ -224,11 +225,12 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
                     "sourcehub_signer_key is required when SourceHub is configured".to_string(),
                 );
             };
-            let sh_client = sourcehub::SourceHubClient::new(grpc_addr, comet_addr);
-            let sh_signer = sourcehub::TxSigner::from_secp256k1_bytes(signer_key, &chain_id)
-                .map_err(|e| format!("failed to create SourceHub signer: {}", e))?;
-            tracing::debug!(validator = %sh_signer.address(), "SourceHub ACP configured");
-            let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(sh_client, sh_signer));
+            let provider = Arc::new(
+                sourcehub::CosmosProvider::new(grpc_addr, comet_addr, signer_key, &chain_id)
+                    .map_err(|e| format!("failed to create SourceHub provider: {}", e))?,
+            );
+            tracing::debug!(validator = %provider.authorized_account(), "SourceHub ACP configured");
+            let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider));
             (sh_acp.clone() as Arc<dyn acp::DocumentACP>, Some(sh_acp))
         } else if db_path_opt.is_some() {
             // File-based storage: use persistent ACP store (namespace isolated in main DB)

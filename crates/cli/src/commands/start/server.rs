@@ -500,17 +500,17 @@ impl Node {
                     )
                 })?;
 
-                let client = sourcehub::SourceHubClient::new(
-                    config.acp.sourcehub_address.clone(),
-                    config.acp.sourcehub_comet_address.clone(),
+                let provider = Arc::new(
+                    sourcehub::CosmosProvider::new(
+                        config.acp.sourcehub_address.clone(),
+                        config.acp.sourcehub_comet_address.clone(),
+                        signer_key_bytes,
+                        &config.acp.sourcehub_chain_id,
+                    )
+                    .map_err(|e| Error::InvalidConfig(format!("SourceHub provider: {}", e)))?,
                 );
-                let signer = sourcehub::TxSigner::from_secp256k1_bytes(
-                    signer_key_bytes,
-                    &config.acp.sourcehub_chain_id,
-                )
-                .map_err(|e| Error::InvalidConfig(format!("SourceHub signer: {}", e)))?;
 
-                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(client, signer));
+                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider));
                 let sh_adapter = crate::sourcehub_acp_adapter::SourceHubAcpAdapter::new_arc(
                     sh_acp.clone(),
                     zanzibar_store.clone(),
