@@ -52,8 +52,8 @@ impl AcpOperations for AcpAdapter {
         acp::policy_yaml::validate_policy_expressions(&parsed)?;
 
         let counter = self.counter.fetch_add(1, Ordering::SeqCst);
-        let policy =
-            Policy::from_parsed(&parsed, counter).map_err(|e| format!("invalid policy: {}", e))?;
+        let policy = acp::policy_yaml::build_policy(&parsed, counter)
+            .map_err(|e| format!("invalid policy: {}", e))?;
         let policy_id = policy.id.clone();
 
         let options = StorePolicyOptions::new()

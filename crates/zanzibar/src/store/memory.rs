@@ -1,15 +1,13 @@
-//! In-memory Zanzibar store implementation.
-
 use async_trait::async_trait;
-use identity::Did;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 
+use crate::did::Did;
+
 use super::traits::ZanzibarStore;
 use crate::error::Result;
-use crate::zanzibar::types::{ObjectRef, Policy, Relationship, Subject};
+use crate::types::{ObjectRef, Policy, Relationship, Subject};
 
-/// In-memory Zanzibar store for testing.
 pub struct MemoryZanzibarStore {
     policies: RwLock<HashMap<String, Policy>>,
     relationships: RwLock<HashMap<String, HashMap<String, Relationship>>>,
@@ -113,7 +111,6 @@ impl ZanzibarStore for MemoryZanzibarStore {
                 return Ok(true);
             }
 
-            // TypedWildcard matches any entity (DIDs don't carry resource type info)
             let prefix = Relationship::relation_prefix(resource, object_id, relation);
             for (key, rel) in rels.iter() {
                 if key.starts_with(&prefix) && rel.subject.is_typed_wildcard() {

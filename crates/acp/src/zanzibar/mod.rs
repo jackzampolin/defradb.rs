@@ -1,24 +1,15 @@
-//! Zanzibar permission model implementation.
+//! Zanzibar permission model — defradb-specific integration layer.
 //!
-//! This module implements the full Zanzibar permission model with:
-//! - Policy-based resource/relation definitions
-//! - Userset rewrite rules (computed usersets, tuple-to-userset)
-//! - Set operations (union, intersection, difference)
-//! - Goal-tree search with cycle detection
+//! The core Zanzibar engine (types, expressions, evaluation, store trait,
+//! memory store) lives in the standalone `zanzibar` crate.
+//!
+//! This module provides:
+//! - `ZanzibarDocumentACP`: bridges Zanzibar engine to defradb's `DocumentACP` trait
+//! - `PersistentZanzibarStore`: implements `ZanzibarStore` against defradb's storage layer
 
 mod acp;
-mod engine;
-mod expression;
-mod lookup;
-mod store;
-mod types;
+pub mod store;
 
 pub use acp::ZanzibarDocumentACP;
-pub use engine::{
-    EvaluationStep, EvaluationTrace, PermissionCheckRequest, PermissionEngine,
-    PermissionExplanation, StepResult,
-};
-pub use expression::RelationExpression;
-pub use lookup::PolicyLookupTable;
-pub use store::{MemoryZanzibarStore, PersistentZanzibarStore, StorePolicyOptions, ZanzibarStore};
-pub use types::{Policy, Relation, Relationship, Resource, Subject, SubjectRestriction};
+pub(crate) use acp::{from_zdid, to_zdid};
+pub use store::PersistentZanzibarStore;

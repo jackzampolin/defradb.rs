@@ -3,10 +3,11 @@
 use std::sync::Arc;
 
 use acp::{
-    Error, MemoryZanzibarStore, PermissionCheckRequest, PermissionEngine, Policy, Relation,
+    MemoryZanzibarStore, PermissionCheckRequest, PermissionEngine, Policy, Relation,
     RelationExpression, Relationship, Resource, StepResult, Subject, ZanzibarStore,
 };
-use identity::Did;
+use zanzibar::error::Error;
+use zanzibar::Did;
 
 fn test_did() -> Did {
     Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap()

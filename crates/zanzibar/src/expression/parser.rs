@@ -1,5 +1,3 @@
-//! Expression parser for RelationExpression string format.
-
 use super::RelationExpression;
 use crate::error::{Error, Result};
 
@@ -16,24 +14,16 @@ impl RelationExpression {
     ///
     /// All operators have equal precedence and are evaluated left-to-right,
     /// matching Go zanzi behavior. Use parentheses to override.
-    ///
-    /// Example: `a + b & c` parses as `(a + b) & c` (left-to-right)
     pub fn parse(input: &str) -> Result<Self> {
         let input = input.trim();
         if input.is_empty() {
             return Err(Error::InvalidExpression("empty expression".into()));
         }
 
-        // Handle parenthesized expressions
-        if input.starts_with('(') && input.ends_with(')') {
-            // Check if the entire expression is wrapped in matching parens
-            if is_fully_parenthesized(input) {
-                return Self::parse(&input[1..input.len() - 1]);
-            }
+        if input.starts_with('(') && input.ends_with(')') && is_fully_parenthesized(input) {
+            return Self::parse(&input[1..input.len() - 1]);
         }
 
-        // Find the RIGHTMOST operator at depth 0 (left-to-right evaluation)
-        // This ensures `a + b & c` is parsed as `(a + b) & c`
         if let Some((pos, op)) = find_rightmost_operator(input) {
             let left = Self::parse(&input[..pos])?;
             let right = Self::parse(&input[pos + 1..])?;
@@ -49,13 +39,10 @@ impl RelationExpression {
             };
         }
 
-        // No operators, parse as single term
         parse_term(input)
     }
 }
 
-/// Check if the expression is fully wrapped in matching parentheses.
-/// e.g., "(a + b)" returns true, but "(a) + (b)" returns false.
 fn is_fully_parenthesized(input: &str) -> bool {
     if !input.starts_with('(') || !input.ends_with(')') {
         return false;
@@ -68,7 +55,6 @@ fn is_fully_parenthesized(input: &str) -> bool {
             '(' => depth += 1,
             ')' => {
                 depth -= 1;
-                // If depth reaches 0 before the end, the outer parens don't wrap everything
                 if depth == 0 && i < chars.len() - 1 {
                     return false;
                 }
@@ -79,11 +65,6 @@ fn is_fully_parenthesized(input: &str) -> bool {
     true
 }
 
-/// Find the RIGHTMOST operator (+, &, or -) at depth 0.
-/// Returns the position and the operator character.
-/// This implements left-to-right evaluation with equal precedence.
-///
-/// For '-', ensures it's not part of '->' (tuple-to-userset).
 fn find_rightmost_operator(input: &str) -> Option<(usize, char)> {
     let mut depth = 0;
     let chars: Vec<char> = input.chars().collect();
@@ -97,9 +78,7 @@ fn find_rightmost_operator(input: &str) -> Option<(usize, char)> {
                 rightmost = Some((i, chars[i]));
             }
             '-' if depth == 0 => {
-                // Check if this is part of '->'
                 if i + 1 < chars.len() && chars[i + 1] == '>' {
-                    // This is '->', skip
                     continue;
                 }
                 rightmost = Some((i, '-'));
@@ -110,16 +89,13 @@ fn find_rightmost_operator(input: &str) -> Option<(usize, char)> {
     rightmost
 }
 
-/// Parse a single term (no operators).
 fn parse_term(input: &str) -> Result<RelationExpression> {
     let input = input.trim();
 
-    // Check for _this
     if input == "_this" {
         return Ok(RelationExpression::This);
     }
 
-    // Check for tuple-to-userset (relation->computed)
     if let Some(arrow_pos) = input.find("->") {
         let tuple_relation = input[..arrow_pos].trim();
         let computed_relation = input[arrow_pos + 2..].trim();
@@ -144,14 +120,12 @@ fn parse_term(input: &str) -> Result<RelationExpression> {
         });
     }
 
-    // Otherwise it's a computed userset (just a relation name)
     validate_identifier(input)?;
     Ok(RelationExpression::ComputedUserset {
         relation: input.into(),
     })
 }
 
-/// Validate that a string is a valid identifier.
 fn validate_identifier(s: &str) -> Result<()> {
     if s.is_empty() {
         return Err(Error::InvalidExpression("empty identifier".into()));
@@ -177,7 +151,6 @@ fn validate_identifier(s: &str) -> Result<()> {
     Ok(())
 }
 
-/// Merge two expressions into a union, flattening nested unions.
 fn merge_union(left: RelationExpression, right: RelationExpression) -> RelationExpression {
     let mut exprs = Vec::new();
 
@@ -194,7 +167,6 @@ fn merge_union(left: RelationExpression, right: RelationExpression) -> RelationE
     RelationExpression::Union(exprs)
 }
 
-/// Merge two expressions into an intersection, flattening nested intersections.
 fn merge_intersection(left: RelationExpression, right: RelationExpression) -> RelationExpression {
     let mut exprs = Vec::new();
 

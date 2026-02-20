@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use identity::Did;
 use serde::{Deserialize, Serialize};
+use zanzibar::Did;
 
 use acp::{
     MemoryZanzibarStore, PermissionEngine, Policy, Relation, RelationExpression, Relationship,

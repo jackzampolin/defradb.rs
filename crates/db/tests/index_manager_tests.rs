@@ -196,7 +196,10 @@ async fn test_delete_nonexistent_index() {
 
     let mut manager = IndexManager::new(1);
 
-    let dropped = manager.delete_index(&datastore, "nonexistent").await.unwrap();
+    let dropped = manager
+        .delete_index(&datastore, "nonexistent")
+        .await
+        .unwrap();
     assert!(!dropped);
 }
 

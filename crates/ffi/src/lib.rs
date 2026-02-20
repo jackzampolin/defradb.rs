@@ -116,17 +116,17 @@ pub use collection::{
 };
 pub use document::{collection_create, is_json_array, parse_duration, parse_string_array};
 pub use encrypted_index::{
-    add_encrypted_index, delete_encrypted_index, list_all_encrypted_indexes,
-    list_encrypted_indexes,
+    add_encrypted_index, delete_encrypted_index, list_all_encrypted_indexes, list_encrypted_indexes,
 };
 pub use index::{create_index, delete_index, get_indexes, list_all_indexes};
 pub use lens::{lens_add, lens_list};
 pub use node::{new_node, node_close};
 pub use p2p::{
-    new_node_with_p2p, p2p_active_peers, p2p_add_collections, p2p_add_documents, p2p_add_replicator,
-    p2p_connect, p2p_delete_collections, p2p_delete_documents, p2p_delete_replicator,
-    p2p_list_collections, p2p_list_documents, p2p_list_replicators, p2p_peer_info,
-    p2p_sync_branchable_collection, p2p_sync_collection_versions, p2p_sync_documents,
+    new_node_with_p2p, p2p_active_peers, p2p_add_collections, p2p_add_documents,
+    p2p_add_replicator, p2p_connect, p2p_delete_collections, p2p_delete_documents,
+    p2p_delete_replicator, p2p_list_collections, p2p_list_documents, p2p_list_replicators,
+    p2p_peer_info, p2p_sync_branchable_collection, p2p_sync_collection_versions,
+    p2p_sync_documents,
 };
 pub use query::exec_request;
 pub use schema::{add_schema, get_collections, get_collections_in_txn};

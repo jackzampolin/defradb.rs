@@ -1,5 +1,3 @@
-//! Core Zanzibar types.
-
 mod policy;
 mod relationship;
 mod resource;

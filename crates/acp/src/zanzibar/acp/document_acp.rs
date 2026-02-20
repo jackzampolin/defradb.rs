@@ -1,22 +1,28 @@
 //! DocumentACP trait implementation for ZanzibarDocumentACP.
 
 use async_trait::async_trait;
-use identity::Did;
+
+use zanzibar::did::Did;
+use zanzibar::store::ZanzibarStore;
+use zanzibar::types::{Relationship, Subject};
 
 use super::{ZanzibarDocumentACP, OWNER_RELATION};
 use crate::dac::DocumentACP;
 use crate::error::{Error, Result};
 use crate::identity::Identity;
 use crate::permission::DocumentPermission;
-use crate::zanzibar::store::ZanzibarStore;
-use crate::zanzibar::types::{Relationship, Subject};
+
+/// Convert an identity::Did to zanzibar::Did.
+fn to_zdid(did: &identity::Did) -> Did {
+    Did::new_unchecked(did.to_string())
+}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
     async fn register_doc_object(
         &self,
-        identity: &Did,
+        identity: &identity::Did,
         policy_id: &str,
         resource_name: &str,
         doc_id: &str,
@@ -44,8 +50,8 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             )));
         }
 
-        let rel =
-            Relationship::with_entity(resource_name, doc_id, OWNER_RELATION, identity.clone());
+        let zdid = to_zdid(identity);
+        let rel = Relationship::with_entity(resource_name, doc_id, OWNER_RELATION, zdid);
         self.store.store_relationship(policy_id, &rel).await?;
 
         tracing::info!(
@@ -86,7 +92,6 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             .is_doc_registered(policy_id, resource_name, doc_id)
             .await?
         {
-            // Unregistered (public) documents allow all access
             return Ok(true);
         }
 
@@ -108,14 +113,14 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
 
         self.ensure_policy(policy_id, resource_name).await?;
 
-        // Go DefraDB: for read access, any write permission also implies read.
-        // Try "read", then "update", then "delete" — matching Go's ImplyDocumentReadPerm.
+        let zdid = to_zdid(did);
+
         let granted = if permission == DocumentPermission::Read {
             let engine = self.engine.read().await;
             let mut result = false;
             for perm_name in &["read", "update", "delete"] {
                 match engine
-                    .check(policy_id, resource_name, doc_id, perm_name, did)
+                    .check(policy_id, resource_name, doc_id, perm_name, &zdid)
                     .await
                 {
                     Ok(true) => {
@@ -123,7 +128,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
                         break;
                     }
                     Ok(false) => continue,
-                    Err(_) => continue, // Permission not defined in policy
+                    Err(_) => continue,
                 }
             }
             result
@@ -131,7 +136,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             let relation = Self::permission_to_relation(permission);
             let engine = self.engine.read().await;
             engine
-                .check(policy_id, resource_name, doc_id, relation, did)
+                .check(policy_id, resource_name, doc_id, relation, &zdid)
                 .await?
         };
 
@@ -162,15 +167,14 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
 
     async fn add_actor_relationship(
         &self,
-        requestor: &Did,
-        target: &Did,
+        requestor: &identity::Did,
+        target: &identity::Did,
         _policy_id: &str,
         collection_id: &str,
         doc_id: &str,
         relation: &str,
         _managing_relations: &[String],
     ) -> Result<bool> {
-        // In DPI model, collection_id serves as both policy_id and resource_name
         self.ensure_policy(collection_id, collection_id).await?;
 
         if relation == OWNER_RELATION {
@@ -179,11 +183,11 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             ));
         }
 
-        // Go DefraDB accepts any relation defined in the policy (not a hardcoded list).
-        // Relation validation is done by DocumentAcpAdapter.validate_and_get_managing_relations().
+        let zrequestor = to_zdid(requestor);
+        let ztarget = to_zdid(target);
 
         self.check_manage_relation(
-            requestor,
+            &zrequestor,
             collection_id,
             collection_id,
             doc_id,
@@ -199,7 +203,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
                 collection_id,
                 doc_id,
                 relation,
-                &Subject::Entity(target.clone()),
+                &Subject::Entity(ztarget.clone()),
             )
             .await?;
 
@@ -217,7 +221,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             return Ok(false);
         }
 
-        let rel = Relationship::with_entity(collection_id, doc_id, relation, target.clone());
+        let rel = Relationship::with_entity(collection_id, doc_id, relation, ztarget);
         self.store.store_relationship(collection_id, &rel).await?;
 
         tracing::info!(
@@ -236,15 +240,14 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
 
     async fn delete_actor_relationship(
         &self,
-        requestor: &Did,
-        target: &Did,
+        requestor: &identity::Did,
+        target: &identity::Did,
         _policy_id: &str,
         collection_id: &str,
         doc_id: &str,
         relation: &str,
         _managing_relations: &[String],
     ) -> Result<bool> {
-        // In DPI model, collection_id serves as both policy_id and resource_name
         self.ensure_policy(collection_id, collection_id).await?;
 
         if relation == OWNER_RELATION {
@@ -253,8 +256,11 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             ));
         }
 
+        let zrequestor = to_zdid(requestor);
+        let ztarget = to_zdid(target);
+
         self.check_manage_relation(
-            requestor,
+            &zrequestor,
             collection_id,
             collection_id,
             doc_id,
@@ -263,7 +269,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         )
         .await?;
 
-        let rel = Relationship::with_entity(collection_id, doc_id, relation, target.clone());
+        let rel = Relationship::with_entity(collection_id, doc_id, relation, ztarget);
         let deleted = self.store.delete_relationship(collection_id, &rel).await?;
 
         if deleted {

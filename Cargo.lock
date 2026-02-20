@@ -28,6 +28,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "zanzibar",
 ]
 
 [[package]]
@@ -9909,6 +9910,20 @@ dependencies = [
  "quote",
  "syn 2.0.116",
  "synstructure 0.13.2",
+]
+
+[[package]]
+name = "zanzibar"
+version = "0.5.0"
+dependencies = [
+ "async-lock",
+ "async-trait",
+ "parking_lot 0.12.5",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

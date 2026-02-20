@@ -1,19 +1,16 @@
-//! Permission evaluation with trace collection for explain API.
-
 use std::sync::Arc;
 
-use defra_core::thread_bounds::MaybeBoxFuture;
-use identity::Did;
+use crate::did::Did;
+use crate::thread_bounds::MaybeBoxFuture;
 
 use super::cache::{CheckCache, NodeId, NodeTrail};
 use super::{EvaluationStep, EvaluationTrace, PermissionEngine, StepResult};
 use crate::error::Result;
-use crate::zanzibar::expression::RelationExpression;
-use crate::zanzibar::store::ZanzibarStore;
-use crate::zanzibar::types::Subject;
+use crate::expression::RelationExpression;
+use crate::store::ZanzibarStore;
+use crate::types::Subject;
 
 impl<S: ZanzibarStore> PermissionEngine<S> {
-    /// Evaluate expression with trace collection for explain API.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn evaluate_expr_with_trace<'a>(
         &'a self,
@@ -185,7 +182,6 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
                         }
                     }
 
-                    // Check entity set subjects
                     let subjects = self
                         .store
                         .get_relation_subjects(policy_id, resource, object_id, tuple_relation)

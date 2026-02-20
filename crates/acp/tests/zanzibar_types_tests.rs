@@ -1,10 +1,10 @@
 //! Tests for Zanzibar core types.
 
 use acp::{
-    Error, Policy, Relation, RelationExpression, Relationship, Resource, Subject,
-    SubjectRestriction,
+    Policy, Relation, RelationExpression, Relationship, Resource, Subject, SubjectRestriction,
 };
-use identity::Did;
+use zanzibar::error::Error;
+use zanzibar::Did;
 
 fn test_did() -> Did {
     Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap()

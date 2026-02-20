@@ -14,5 +14,6 @@ pub use go_api::{
     GoIndexDescription, GoIndexedFieldDescription,
 };
 pub use rust_api::{
-    create_index, delete_index, list_indexes, CreateIndexRequest, DeleteIndexQuery, ListIndexesQuery,
+    create_index, delete_index, list_indexes, CreateIndexRequest, DeleteIndexQuery,
+    ListIndexesQuery,
 };

@@ -1,12 +1,8 @@
-//! Policy lookup table for O(1) expression lookup.
-//!
-//! Provides fast lookup of relation expressions by (policy_id, resource, relation).
-
 use std::collections::HashMap;
 
-use super::expression::RelationExpression;
-use super::types::Policy;
 use crate::error::{Error, Result};
+use crate::expression::RelationExpression;
+use crate::types::Policy;
 
 /// Lookup table for fast access to relation expressions.
 ///
@@ -14,19 +10,16 @@ use crate::error::{Error, Result};
 /// by (policy_id, resource, relation) tuple.
 #[derive(Debug, Default)]
 pub struct PolicyLookupTable {
-    /// Map: policy_id -> (resource -> (relation -> expression))
     policies: HashMap<String, HashMap<String, HashMap<String, RelationExpression>>>,
 }
 
 impl PolicyLookupTable {
-    /// Create a new empty lookup table.
     pub fn new() -> Self {
         Self {
             policies: HashMap::new(),
         }
     }
 
-    /// Add a policy to the lookup table.
     pub fn add_policy(&mut self, policy: &Policy) {
         let mut resources = HashMap::new();
 
@@ -43,26 +36,19 @@ impl PolicyLookupTable {
         self.policies.insert(policy.id.clone(), resources);
     }
 
-    /// Remove a policy from the lookup table.
     pub fn remove_policy(&mut self, policy_id: &str) {
         self.policies.remove(policy_id);
     }
 
-    /// Update (reload) a policy in the lookup table.
-    /// Removes the old version and adds the new one.
     pub fn update_policy(&mut self, policy: &Policy) {
         self.remove_policy(&policy.id);
         self.add_policy(policy);
     }
 
-    /// Clear all policies from the lookup table.
     pub fn clear(&mut self) {
         self.policies.clear();
     }
 
-    /// Look up a relation expression.
-    ///
-    /// Returns the expression for the given (policy_id, resource, relation) tuple.
     pub fn get_expression(
         &self,
         policy_id: &str,
@@ -81,12 +67,10 @@ impl PolicyLookupTable {
             })
     }
 
-    /// Check if a policy exists in the lookup table.
     pub fn has_policy(&self, policy_id: &str) -> bool {
         self.policies.contains_key(policy_id)
     }
 
-    /// Check if a resource exists in a policy.
     pub fn has_resource(&self, policy_id: &str, resource: &str) -> bool {
         self.policies
             .get(policy_id)
@@ -94,7 +78,6 @@ impl PolicyLookupTable {
             .unwrap_or(false)
     }
 
-    /// Check if a relation exists in a resource.
     pub fn has_relation(&self, policy_id: &str, resource: &str, relation: &str) -> bool {
         self.policies
             .get(policy_id)
@@ -103,14 +86,12 @@ impl PolicyLookupTable {
             .unwrap_or(false)
     }
 
-    /// Get all relation names for a resource.
     pub fn get_relations(&self, policy_id: &str, resource: &str) -> Option<Vec<String>> {
         self.policies
             .get(policy_id)
             .and_then(|r| r.get(resource).map(|rel| rel.keys().cloned().collect()))
     }
 
-    /// Get all resource names for a policy.
     pub fn get_resources(&self, policy_id: &str) -> Option<Vec<String>> {
         self.policies
             .get(policy_id)
@@ -121,7 +102,7 @@ impl PolicyLookupTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zanzibar::types::{Relation, Resource};
+    use crate::types::{Relation, Resource};
 
     fn test_policy() -> Policy {
         Policy::new("policy1", "Test Policy")
@@ -160,13 +141,11 @@ mod tests {
 
         table.add_policy(&policy);
 
-        // Direct relation
         let expr = table
             .get_expression("policy1", "document", "owner")
             .unwrap();
         assert!(expr.is_this());
 
-        // Computed relation
         let expr = table
             .get_expression("policy1", "document", "reader")
             .unwrap();
@@ -183,15 +162,12 @@ mod tests {
 
         table.add_policy(&policy);
 
-        // Missing policy
         let result = table.get_expression("missing", "document", "owner");
         assert!(matches!(result, Err(Error::PolicyNotFound(_))));
 
-        // Missing resource
         let result = table.get_expression("policy1", "missing", "owner");
         assert!(matches!(result, Err(Error::ResourceNotFound(_))));
 
-        // Missing relation
         let result = table.get_expression("policy1", "document", "missing");
         assert!(matches!(result, Err(Error::RelationNotFound { .. })));
     }

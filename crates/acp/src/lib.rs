@@ -26,7 +26,7 @@
 
 mod auth_error;
 mod dac;
-mod error;
+pub mod error;
 mod identity;
 mod local;
 pub mod nac;
@@ -49,12 +49,14 @@ pub use relation::{
 };
 pub use store::AcpStore;
 
-// Re-export key zanzibar types
-pub use zanzibar::{
+// Re-export key zanzibar engine types from the standalone zanzibar crate
+pub use zanzibar::PersistentZanzibarStore;
+pub use zanzibar::ZanzibarDocumentACP;
+
+pub use ::zanzibar::{
     EvaluationStep, EvaluationTrace, MemoryZanzibarStore, PermissionCheckRequest, PermissionEngine,
-    PermissionExplanation, PersistentZanzibarStore, Policy, Relation, RelationExpression,
-    Relationship, Resource, StepResult, StorePolicyOptions, Subject, SubjectRestriction,
-    ZanzibarDocumentACP, ZanzibarStore,
+    PermissionExplanation, Policy, Relation, RelationExpression, Relationship, Resource,
+    StepResult, StorePolicyOptions, Subject, SubjectRestriction, ZanzibarStore,
 };
 
 // Re-export NAC types

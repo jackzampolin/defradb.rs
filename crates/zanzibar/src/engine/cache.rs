@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use async_lock::RwLock;
-use identity::Did;
+
+use crate::did::Did;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct NodeId(String);
