@@ -1,7 +1,6 @@
 //! Persistent Zanzibar store backed by any Store implementation.
 
 use async_trait::async_trait;
-use identity::Did;
 use std::sync::Arc;
 
 use storage::corekv::{IterOptions, Reader, Store, Writer};
@@ -9,9 +8,10 @@ use storage::namespace::{Namespace, NamespacedStore};
 #[cfg(not(target_arch = "wasm32"))]
 use storage::RedbStore;
 
-use super::traits::ZanzibarStore;
-use crate::error::{Error, Result};
-use crate::zanzibar::types::{ObjectRef, Policy, Relationship, Subject};
+use zanzibar::did::Did;
+use zanzibar::error::{Error, Result};
+use zanzibar::store::ZanzibarStore;
+use zanzibar::types::{ObjectRef, Policy, Relationship, Subject};
 
 /// Persistent Zanzibar store backed by any Store implementation.
 pub struct PersistentZanzibarStore<S: Store> {
@@ -31,7 +31,7 @@ impl<S: Store> PersistentZanzibarStore<S> {
 impl PersistentZanzibarStore<RedbStore> {
     /// Open a persistent store at the given path.
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        let store = RedbStore::open(path).map_err(|e| Error::Storage(e.to_string()))?;
+        let store = RedbStore::open(path).map_err(|e| Error::Serialization(e.to_string()))?;
         Ok(Self::from_store(Arc::new(store)))
     }
 }
@@ -67,39 +67,36 @@ impl<S: Store> PersistentZanzibarStore<S> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
     async fn store_policy(&self, policy: &Policy) -> Result<()> {
-        let mut txn = self
-            .store
-            .new_txn(false)
-            .await
-            .map_err(|e| Error::storage_txn("store_policy: create transaction", e))?;
+        let mut txn = self.store.new_txn(false).await.map_err(|e| {
+            Error::Serialization(format!("store_policy: create transaction: {}", e))
+        })?;
 
         let key = Self::policy_key(&policy.id);
         let value = serde_json::to_vec(policy)?;
 
         txn.set(key.as_bytes(), &value)
             .await
-            .map_err(|e| Error::storage_write(format!("store_policy: set key {}", key), e))?;
+            .map_err(|e| Error::Serialization(format!("store_policy: set key {}: {}", key, e)))?;
 
         txn.commit()
             .await
-            .map_err(|e| Error::storage_txn("store_policy: commit", e))?;
+            .map_err(|e| Error::Serialization(format!("store_policy: commit: {}", e)))?;
 
         Ok(())
     }
 
     async fn get_policy(&self, policy_id: &str) -> Result<Option<Policy>> {
-        let txn = self
-            .store
-            .new_txn(true)
-            .await
-            .map_err(|e| Error::storage_txn("get_policy: create transaction", e))?;
+        let txn =
+            self.store.new_txn(true).await.map_err(|e| {
+                Error::Serialization(format!("get_policy: create transaction: {}", e))
+            })?;
 
         let key = Self::policy_key(policy_id);
 
         match txn
             .get(key.as_bytes())
             .await
-            .map_err(|e| Error::storage_read(format!("get_policy: get key {}", key), e))?
+            .map_err(|e| Error::Serialization(format!("get_policy: get key {}: {}", key, e)))?
         {
             Some(data) => {
                 let policy: Policy = serde_json::from_slice(&data)?;
@@ -110,11 +107,9 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
     }
 
     async fn list_policies(&self) -> Result<Vec<Policy>> {
-        let txn = self
-            .store
-            .new_txn(true)
-            .await
-            .map_err(|e| Error::storage_txn("list_policies: create transaction", e))?;
+        let txn = self.store.new_txn(true).await.map_err(|e| {
+            Error::Serialization(format!("list_policies: create transaction: {}", e))
+        })?;
 
         let prefix = "/zanzibar/policy/";
         let iter_opts = IterOptions::new().with_prefix(prefix.as_bytes().to_vec());
@@ -122,13 +117,13 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
         let mut iter = txn
             .iterator(iter_opts)
             .await
-            .map_err(|e| Error::storage_read("list_policies: create iterator", e))?;
+            .map_err(|e| Error::Serialization(format!("list_policies: create iterator: {}", e)))?;
 
         let mut policies = Vec::new();
         while let Some(kv) = iter
             .next()
             .await
-            .map_err(|e| Error::storage_read("list_policies: iterate", e))?
+            .map_err(|e| Error::Serialization(format!("list_policies: iterate: {}", e)))?
         {
             let policy: Policy = serde_json::from_slice(&kv.value)?;
             policies.push(policy);
@@ -142,21 +137,20 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             .store
             .new_txn(false)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         let key = Self::policy_key(policy_id);
 
         let exists = txn
             .has(key.as_bytes())
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         if exists {
             txn.delete(key.as_bytes())
                 .await
-                .map_err(|e| Error::Storage(e.to_string()))?;
+                .map_err(|e| Error::Serialization(e.to_string()))?;
 
-            // Relationships are stored with prefix /zanzibar/{policy_id}/rel/
             let rel_prefix = format!("/zanzibar/{}/rel/", policy_id);
             let iter_opts = IterOptions::new().with_prefix(rel_prefix.into_bytes());
 
@@ -165,12 +159,12 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
                 let mut iter = txn
                     .iterator(iter_opts)
                     .await
-                    .map_err(|e| Error::Storage(e.to_string()))?;
+                    .map_err(|e| Error::Serialization(e.to_string()))?;
 
                 while let Some(kv) = iter
                     .next()
                     .await
-                    .map_err(|e| Error::Storage(e.to_string()))?
+                    .map_err(|e| Error::Serialization(e.to_string()))?
                 {
                     keys_to_delete.push(kv.key);
                 }
@@ -179,13 +173,13 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             for key in keys_to_delete {
                 txn.delete(&key)
                     .await
-                    .map_err(|e| Error::Storage(e.to_string()))?;
+                    .map_err(|e| Error::Serialization(e.to_string()))?;
             }
         }
 
         txn.commit()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         Ok(exists)
     }
@@ -195,18 +189,18 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             .store
             .new_txn(false)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         let key = Self::relationship_key(policy_id, rel);
         let value = serde_json::to_vec(rel)?;
 
         txn.set(key.as_bytes(), &value)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         txn.commit()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         Ok(())
     }
@@ -216,24 +210,24 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             .store
             .new_txn(false)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         let key = Self::relationship_key(policy_id, rel);
 
         let exists = txn
             .has(key.as_bytes())
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         if exists {
             txn.delete(key.as_bytes())
                 .await
-                .map_err(|e| Error::Storage(e.to_string()))?;
+                .map_err(|e| Error::Serialization(e.to_string()))?;
         }
 
         txn.commit()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         Ok(exists)
     }
@@ -250,14 +244,14 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             .store
             .new_txn(true)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         let rel = Relationship::new(resource, object_id, relation, subject.clone());
         let key = Self::relationship_key(policy_id, &rel);
 
         txn.has(key.as_bytes())
             .await
-            .map_err(|e| Error::Storage(e.to_string()))
+            .map_err(|e| Error::Serialization(e.to_string()))
     }
 
     async fn check_permission_direct(
@@ -272,7 +266,7 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             .store
             .new_txn(true)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         let direct = Relationship::with_entity(resource, object_id, relation, subject.clone());
         let direct_key = Self::relationship_key(policy_id, &direct);
@@ -280,7 +274,7 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
         if txn
             .has(direct_key.as_bytes())
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?
+            .map_err(|e| Error::Serialization(e.to_string()))?
         {
             return Ok(true);
         }
@@ -291,24 +285,23 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
         if txn
             .has(wildcard_key.as_bytes())
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?
+            .map_err(|e| Error::Serialization(e.to_string()))?
         {
             return Ok(true);
         }
 
-        // TypedWildcard matches any entity (DIDs don't carry resource type info)
         let prefix = Self::relation_prefix(policy_id, resource, object_id, relation);
         let iter_opts = IterOptions::new().with_prefix(prefix.into_bytes());
 
         let mut iter = txn
             .iterator(iter_opts)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         while let Some(kv) = iter
             .next()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?
+            .map_err(|e| Error::Serialization(e.to_string()))?
         {
             let rel: Relationship = serde_json::from_slice(&kv.value)?;
             if rel.subject.is_typed_wildcard() {
@@ -330,7 +323,7 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             .store
             .new_txn(true)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         let prefix = Self::relation_prefix(policy_id, resource, object_id, relation);
         let iter_opts = IterOptions::new().with_prefix(prefix.into_bytes());
@@ -338,14 +331,14 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
         let mut iter = txn
             .iterator(iter_opts)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         let mut subjects = Vec::new();
 
         while let Some(kv) = iter
             .next()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?
+            .map_err(|e| Error::Serialization(e.to_string()))?
         {
             let rel: Relationship = serde_json::from_slice(&kv.value)?;
             subjects.push(rel.subject);
@@ -390,7 +383,7 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             .store
             .new_txn(false)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         let prefix = Self::relationship_prefix(policy_id, resource, object_id);
         let iter_opts = IterOptions::new().with_prefix(prefix.clone().into_bytes());
@@ -400,12 +393,12 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
             let mut iter = txn
                 .iterator(iter_opts)
                 .await
-                .map_err(|e| Error::Storage(e.to_string()))?;
+                .map_err(|e| Error::Serialization(e.to_string()))?;
 
             while let Some(kv) = iter
                 .next()
                 .await
-                .map_err(|e| Error::Storage(e.to_string()))?
+                .map_err(|e| Error::Serialization(e.to_string()))?
             {
                 keys_to_delete.push(kv.key);
             }
@@ -414,12 +407,12 @@ impl<S: Store + Send + Sync> ZanzibarStore for PersistentZanzibarStore<S> {
         for key in keys_to_delete {
             txn.delete(&key)
                 .await
-                .map_err(|e| Error::Storage(e.to_string()))?;
+                .map_err(|e| Error::Serialization(e.to_string()))?;
         }
 
         txn.commit()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::Serialization(e.to_string()))?;
 
         Ok(())
     }

@@ -6,7 +6,7 @@ use acp::{
     MemoryZanzibarStore, PermissionEngine, Policy, Relation, RelationExpression, Relationship,
     Resource, Subject, ZanzibarStore,
 };
-use identity::Did;
+use zanzibar::Did;
 
 fn test_did() -> Did {
     Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap()

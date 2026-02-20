@@ -3,13 +3,14 @@
 mod document_acp;
 
 use async_lock::RwLock;
-use identity::Did;
 use std::sync::Arc;
 
-use super::engine::PermissionEngine;
-use super::expression::RelationExpression;
-use super::store::ZanzibarStore;
-use super::types::{Policy, Relation, Resource};
+use zanzibar::did::Did;
+use zanzibar::engine::PermissionEngine;
+use zanzibar::expression::RelationExpression;
+use zanzibar::store::ZanzibarStore;
+use zanzibar::types::{Policy, Relation, Resource};
+
 use crate::error::{Error, Result};
 use crate::permission::DocumentPermission;
 
@@ -19,13 +20,6 @@ pub const UPDATER_RELATION: &str = "updater";
 pub const DELETER_RELATION: &str = "deleter";
 pub const ADMIN_RELATION: &str = "admin";
 
-/// DocumentACP implementation using the Zanzibar permission model.
-///
-/// Uses computed usersets to model permission inheritance:
-/// - `owner` implies all permissions
-/// - `reader` = direct readers + owner + admin + updater + deleter
-/// - `updater` = direct updaters + owner + admin
-/// - `deleter` = direct deleters + owner + admin
 pub struct ZanzibarDocumentACP<S: ZanzibarStore> {
     store: Arc<S>,
     engine: RwLock<PermissionEngine<S>>,
@@ -39,18 +33,9 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
         }
     }
 
-    /// Create a default document policy for a collection.
-    ///
-    /// Creates a policy with the standard DPI relations:
-    /// - owner: direct relation (base case)
-    /// - admin: direct relation that manages [reader, updater, deleter]
-    /// - reader: owner + admin + direct readers + updater + deleter
-    /// - updater: owner + admin + direct updaters
-    /// - deleter: owner + admin + direct deleters
     pub fn create_default_policy(policy_id: &str, resource_name: &str) -> Policy {
         Policy::new(policy_id, format!("Policy for {}", resource_name)).with_resource(
             Resource::new(resource_name)
-                // Direct relations (assignable to actors)
                 .with_relation(Relation::direct(OWNER_RELATION))
                 .with_relation(
                     Relation::computed(
@@ -69,7 +54,6 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
                 .with_relation(Relation::direct(READER_RELATION))
                 .with_relation(Relation::direct(UPDATER_RELATION))
                 .with_relation(Relation::direct(DELETER_RELATION))
-                // Computed permissions (match Go's "read"/"update"/"delete" names)
                 .with_relation(Relation::computed(
                     "read",
                     RelationExpression::union(vec![
@@ -99,8 +83,6 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
         )
     }
 
-    /// Ensure a policy exists for the given policy_id and resource.
-    /// Creates a default policy if one doesn't exist.
     async fn ensure_policy(&self, policy_id: &str, resource_name: &str) -> Result<()> {
         let exists = {
             let engine = self.engine.read().await;
@@ -129,16 +111,12 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<bool> {
-        self.store
+        Ok(self
+            .store
             .check_permission_direct(policy_id, resource_name, doc_id, OWNER_RELATION, subject)
-            .await
+            .await?)
     }
 
-    /// Check if subject can manage a given relation (is owner OR has a managing relation).
-    ///
-    /// DefraDB pattern: actors can manage relationships if they are either:
-    /// 1. The owner of the object, OR
-    /// 2. Have a relation that has the target relation in its `manages` list
     async fn check_manage_relation(
         &self,
         subject: &Did,
@@ -148,7 +126,6 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
         target_relation: &str,
         operation: &str,
     ) -> Result<()> {
-        // Owner check first (fast path)
         if self
             .is_owner(subject, policy_id, resource_name, doc_id)
             .await?
@@ -207,8 +184,6 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
     }
 
     fn permission_to_relation(permission: DocumentPermission) -> &'static str {
-        // These must match the permission names in the policy YAML (not the relation names).
-        // Go DefraDB uses "read"/"update"/"delete" as permission names.
         match permission {
             DocumentPermission::Read => "read",
             DocumentPermission::Update => "update",
@@ -216,21 +191,28 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
         }
     }
 
-    /// Invalidate cached policy, forcing reload on next access.
     pub async fn invalidate_policy_cache(&self, policy_id: &str) {
         let mut engine = self.engine.write().await;
         engine.remove_policy(policy_id);
     }
 
-    /// Reload a policy from the store, updating the cache.
     pub async fn reload_policy(&self, policy_id: &str) -> Result<()> {
         let mut engine = self.engine.write().await;
-        engine.reload_policy(policy_id).await
+        Ok(engine.reload_policy(policy_id).await?)
     }
 
-    /// Clear all cached policies.
     pub async fn clear_policy_cache(&self) {
         let mut engine = self.engine.write().await;
         engine.clear_cache();
     }
+}
+
+/// Convert an identity::Did to zanzibar::Did.
+pub(crate) fn to_zdid(did: &identity::Did) -> Did {
+    Did::new_unchecked(did.to_string())
+}
+
+/// Convert a zanzibar::Did to identity::Did.
+pub(crate) fn from_zdid(did: &Did) -> identity::Did {
+    identity::Did::new(did.as_str()).expect("zanzibar::Did should always be valid identity::Did")
 }

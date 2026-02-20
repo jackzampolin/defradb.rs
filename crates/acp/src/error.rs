@@ -111,6 +111,43 @@ impl From<serde_json::Error> for Error {
     }
 }
 
+impl From<zanzibar::error::Error> for Error {
+    fn from(e: zanzibar::error::Error) -> Self {
+        match e {
+            zanzibar::error::Error::PolicyNotFound(s) => Error::PolicyNotFound(s),
+            zanzibar::error::Error::RelationNotFound { resource, relation } => {
+                Error::RelationNotFound { resource, relation }
+            }
+            zanzibar::error::Error::ResourceNotFound(s) => Error::ResourceNotFound(s),
+            zanzibar::error::Error::InvalidExpression(s) => Error::InvalidExpression(s),
+            zanzibar::error::Error::InvalidPolicy(s) => Error::InvalidPolicy(s),
+            zanzibar::error::Error::Serialization(s) => Error::Serialization(s),
+            zanzibar::error::Error::InvalidDid(s) => Error::Storage(format!("invalid DID: {}", s)),
+            zanzibar::error::Error::InvalidEntitySetReference { resource, relation } => {
+                Error::InvalidEntitySetReference { resource, relation }
+            }
+            zanzibar::error::Error::SubjectRestrictionViolation { message } => {
+                Error::SubjectRestrictionViolation { message }
+            }
+            zanzibar::error::Error::DpiMissingOwner { resource } => {
+                Error::DpiMissingOwner { resource }
+            }
+            zanzibar::error::Error::DpiExpressionMissingOwner { resource, relation } => {
+                Error::DpiExpressionMissingOwner { resource, relation }
+            }
+            zanzibar::error::Error::DpiDisallowedOperation {
+                resource,
+                relation,
+                operation,
+            } => Error::DpiDisallowedOperation {
+                resource,
+                relation,
+                operation,
+            },
+        }
+    }
+}
+
 impl Error {
     /// Create a storage read error with context.
     pub fn storage_read(operation: impl Into<String>, err: impl std::fmt::Display) -> Self {

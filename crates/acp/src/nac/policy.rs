@@ -9,7 +9,7 @@
 //! or any admin can perform any operation.
 
 use super::permission::NodePermission;
-use crate::zanzibar::{Policy, Relation, RelationExpression, Resource};
+use zanzibar::{Policy, Relation, RelationExpression, Resource};
 
 /// The fixed policy ID for the NAC policy.
 pub const NODE_POLICY_ID: &str = "defra-nac-policy";

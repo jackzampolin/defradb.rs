@@ -4,8 +4,11 @@ mod validate;
 pub use parse::{check_duplicate_yaml_keys, parse_policy_yaml};
 pub use validate::validate_policy_expressions;
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use zanzibar::{Policy, Relation, RelationExpression, Resource};
 
 /// Generate a Go-compatible policy ID from parsed policy fields.
 ///
@@ -109,4 +112,57 @@ impl PolicyResource {
             .map(|r| r.name.as_str())
             .collect()
     }
+}
+
+/// Build a Zanzibar Policy from an already-parsed YAML policy.
+///
+/// The `counter` parameter is a monotonic sequence number used together with
+/// the parsed policy fields to generate Go-compatible policy IDs.
+pub fn build_policy(parsed: &ParsedPolicy, counter: u64) -> crate::error::Result<Policy> {
+    let id = generate_policy_id(parsed, counter);
+
+    let mut attributes = HashMap::new();
+    if !parsed.description.is_empty() {
+        attributes.insert("description".to_string(), parsed.description.clone());
+    }
+
+    let mut resources = Vec::new();
+    for res in &parsed.resources {
+        let mut relations = Vec::new();
+
+        // Auto-inject the reserved 'owner' relation (matches Go DefraDB behavior)
+        relations.push(Relation::direct("owner"));
+
+        for rel in &res.relations {
+            let mut relation = Relation::direct(&rel.name);
+            if !rel.manages.is_empty() {
+                relation = relation.with_manages(rel.manages.clone());
+            }
+            relations.push(relation);
+        }
+
+        for perm in &res.permissions {
+            if !perm.expr.is_empty() {
+                let user_expr = RelationExpression::parse(&perm.expr)?;
+                // DPI: every permission must include 'owner' in its expression
+                let expression = RelationExpression::Union(vec![
+                    RelationExpression::computed_userset("owner"),
+                    user_expr,
+                ]);
+                relations.push(Relation::computed(&perm.name, expression));
+            }
+        }
+
+        resources.push(Resource {
+            name: res.name.clone(),
+            relations,
+        });
+    }
+
+    Ok(Policy {
+        id,
+        name: parsed.name.clone(),
+        resources,
+        attributes,
+    })
 }

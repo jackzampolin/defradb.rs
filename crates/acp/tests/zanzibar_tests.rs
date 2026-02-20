@@ -17,7 +17,7 @@ use acp::{
     MemoryZanzibarStore, PermissionEngine, Policy, Relation, RelationExpression, Relationship,
     Resource, Subject, ZanzibarDocumentACP, ZanzibarStore,
 };
-use identity::Did;
+use zanzibar::Did;
 
 fn test_did() -> Did {
     Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap()
@@ -25,6 +25,10 @@ fn test_did() -> Did {
 
 fn test_did2() -> Did {
     Did::new("did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH").unwrap()
+}
+
+fn to_idid(did: &Did) -> identity::Did {
+    identity::Did::new(did.as_str()).unwrap()
 }
 
 // =============================================================================
@@ -331,9 +335,10 @@ async fn test_zanzibar_document_acp_basic() {
     let acp = ZanzibarDocumentACP::new(store);
 
     let owner = test_did();
+    let owner_id = to_idid(&owner);
 
     // Register document
-    acp.register_doc_object(&owner, "policy1", "documents", "doc1")
+    acp.register_doc_object(&owner_id, "policy1", "documents", "doc1")
         .await
         .unwrap();
 
@@ -344,7 +349,7 @@ async fn test_zanzibar_document_acp_basic() {
         .unwrap());
 
     // Owner has all permissions
-    let identity = Identity::Authenticated(owner.clone());
+    let identity = Identity::Authenticated(owner_id);
 
     assert!(acp
         .check_doc_access(
@@ -385,14 +390,16 @@ async fn test_zanzibar_document_acp_sharing() {
 
     let owner = test_did();
     let reader = test_did2();
+    let owner_id = to_idid(&owner);
+    let reader_id = to_idid(&reader);
 
     // Register document (use collection1 as policy_id for simplicity)
-    acp.register_doc_object(&owner, "collection1", "collection1", "doc1")
+    acp.register_doc_object(&owner_id, "collection1", "collection1", "doc1")
         .await
         .unwrap();
 
     // Reader cannot access yet
-    let reader_identity = Identity::Authenticated(reader.clone());
+    let reader_identity = Identity::Authenticated(reader_id.clone());
     assert!(!acp
         .check_doc_access(
             &reader_identity,
@@ -406,8 +413,8 @@ async fn test_zanzibar_document_acp_sharing() {
 
     // Owner shares with reader
     acp.add_actor_relationship(
-        &owner,
-        &reader,
+        &owner_id,
+        &reader_id,
         "collection1",
         "collection1",
         "doc1",
@@ -452,9 +459,10 @@ async fn test_local_document_acp_still_works() {
     let acp = LocalDocumentACP::new(store);
 
     let owner = test_did();
+    let owner_id = to_idid(&owner);
 
     // Register document
-    acp.register_doc_object(&owner, "policy1", "documents", "doc1")
+    acp.register_doc_object(&owner_id, "policy1", "documents", "doc1")
         .await
         .unwrap();
 
@@ -465,7 +473,7 @@ async fn test_local_document_acp_still_works() {
         .unwrap());
 
     // Owner has all permissions
-    let identity = Identity::Authenticated(owner.clone());
+    let identity = Identity::Authenticated(owner_id);
 
     assert!(acp
         .check_doc_access(

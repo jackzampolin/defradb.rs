@@ -6,7 +6,8 @@ use super::{NacStatus, NodeACP, NODE_OBJECT_ID};
 use crate::error::{Error, Result};
 use crate::nac::permission::NodePermission;
 use crate::nac::policy::{ADMIN_RELATION, NODE_POLICY_ID, NODE_RESOURCE_NAME};
-use crate::zanzibar::{Relationship, Subject, ZanzibarStore};
+use crate::zanzibar::to_zdid;
+use zanzibar::{Relationship, Subject, ZanzibarStore};
 
 impl<S: ZanzibarStore> NodeACP<S> {
     /// Check if an identity has a specific node permission.
@@ -27,6 +28,7 @@ impl<S: ZanzibarStore> NodeACP<S> {
         }
 
         // Use the engine to check permission
+        let zdid = to_zdid(identity);
         let engine = self.engine.read().await;
         let has_permission = engine
             .check(
@@ -34,7 +36,7 @@ impl<S: ZanzibarStore> NodeACP<S> {
                 NODE_RESOURCE_NAME,
                 NODE_OBJECT_ID,
                 permission.as_str(),
-                identity,
+                &zdid,
             )
             .await?;
 
@@ -91,16 +93,17 @@ impl<S: ZanzibarStore> NodeACP<S> {
         }
 
         // Check admin relation from stored relationships
+        let zdid = to_zdid(identity);
         let engine = self.engine.read().await;
-        engine
+        Ok(engine
             .check(
                 NODE_POLICY_ID,
                 NODE_RESOURCE_NAME,
                 NODE_OBJECT_ID,
                 ADMIN_RELATION,
-                identity,
+                &zdid,
             )
-            .await
+            .await?)
     }
 
     /// Add an admin relationship.
@@ -127,7 +130,7 @@ impl<S: ZanzibarStore> NodeACP<S> {
         let target_subject = if target.is_wildcard() {
             Subject::Wildcard
         } else {
-            Subject::Entity(target.clone())
+            Subject::Entity(to_zdid(target))
         };
 
         // Check if already admin
@@ -203,7 +206,7 @@ impl<S: ZanzibarStore> NodeACP<S> {
         let target_subject = if target.is_wildcard() {
             Subject::Wildcard
         } else {
-            Subject::Entity(target.clone())
+            Subject::Entity(to_zdid(target))
         };
 
         // Delete admin relationship
@@ -260,7 +263,7 @@ impl<S: ZanzibarStore> NodeACP<S> {
         let target_subject = if target.is_wildcard() {
             Subject::Wildcard
         } else {
-            Subject::Entity(target.clone())
+            Subject::Entity(to_zdid(target))
         };
 
         // Store direct relation for the permission
@@ -328,7 +331,7 @@ impl<S: ZanzibarStore> NodeACP<S> {
         let target_subject = if target.is_wildcard() {
             Subject::Wildcard
         } else {
-            Subject::Entity(target.clone())
+            Subject::Entity(to_zdid(target))
         };
         let rel = Relationship::new(
             NODE_RESOURCE_NAME,

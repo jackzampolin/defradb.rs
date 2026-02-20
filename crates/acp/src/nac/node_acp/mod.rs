@@ -22,7 +22,8 @@ use crate::nac::permission::NodePermission;
 use crate::nac::policy::{
     validate_node_policy, NODE_POLICY_ID, NODE_RESOURCE_NAME, OWNER_RELATION,
 };
-use crate::zanzibar::{PermissionEngine, Subject, ZanzibarStore};
+use crate::zanzibar::from_zdid;
+use zanzibar::{PermissionEngine, Subject, ZanzibarStore};
 
 /// The fixed object ID for the node resource.
 /// There's only one "node" instance, so we use a constant ID.
@@ -95,7 +96,7 @@ impl<S: ZanzibarStore> NodeACP<S> {
                 .await?;
 
             if let Some(Subject::Entity(owner_did)) = subjects.first() {
-                *self.owner.write().await = Some(owner_did.clone());
+                *self.owner.write().await = Some(from_zdid(owner_did));
 
                 let disabled_subjects = self
                     .store

@@ -135,8 +135,7 @@ async fn nac_p2p_management_gate_test(cluster: TestCluster) {
             .is_err(),
         "outsider should be rejected from p2p document sync"
     );
-    let admin_doc_sync =
-        node.p2p_document_sync_with_identity("Product", &[&doc_id], &admin_key);
+    let admin_doc_sync = node.p2p_document_sync_with_identity("Product", &[&doc_id], &admin_key);
     if let Err(ref e) = admin_doc_sync {
         let msg = e.to_string().to_lowercase();
         assert!(

@@ -1,5 +1,3 @@
-//! Relation expression types and parsing.
-
 mod parser;
 
 use serde::{Deserialize, Serialize};
@@ -16,25 +14,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationExpression {
-    /// Direct lookup: subject has this exact relation to the object.
     This,
 
-    /// Computed userset: check a different relation on the same object.
-    ComputedUserset { relation: String },
+    ComputedUserset {
+        relation: String,
+    },
 
-    /// Tuple-to-userset: follow a relation, then check another relation.
     TupleToUserset {
         tuple_relation: String,
         computed_relation: String,
     },
 
-    /// Union of expressions (OR with short-circuit).
     Union(Vec<RelationExpression>),
 
-    /// Intersection of expressions (AND).
     Intersection(Vec<RelationExpression>),
 
-    /// Difference: base AND NOT subtract.
     Difference {
         base: Box<RelationExpression>,
         subtract: Box<RelationExpression>,

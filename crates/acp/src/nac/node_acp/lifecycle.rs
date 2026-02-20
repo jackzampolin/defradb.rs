@@ -5,7 +5,8 @@ use identity::Did;
 use super::{NacStatus, NodeACP, DISABLED_RELATION, NODE_OBJECT_ID};
 use crate::error::{Error, Result};
 use crate::nac::policy::{create_node_policy, NODE_POLICY_ID, NODE_RESOURCE_NAME, OWNER_RELATION};
-use crate::zanzibar::{Relationship, ZanzibarStore};
+use crate::zanzibar::to_zdid;
+use zanzibar::{Relationship, ZanzibarStore};
 
 impl<S: ZanzibarStore> NodeACP<S> {
     /// Enable NAC with the given owner identity.
@@ -35,7 +36,7 @@ impl<S: ZanzibarStore> NodeACP<S> {
             NODE_RESOURCE_NAME,
             NODE_OBJECT_ID,
             OWNER_RELATION,
-            owner.clone(),
+            to_zdid(owner),
         );
         self.store
             .store_relationship(NODE_POLICY_ID, &owner_rel)
@@ -89,7 +90,7 @@ impl<S: ZanzibarStore> NodeACP<S> {
                 NODE_RESOURCE_NAME,
                 NODE_OBJECT_ID,
                 DISABLED_RELATION,
-                owner,
+                to_zdid(&owner),
             );
             self.store
                 .store_relationship(NODE_POLICY_ID, &disabled_rel)
@@ -135,7 +136,7 @@ impl<S: ZanzibarStore> NodeACP<S> {
                 NODE_RESOURCE_NAME,
                 NODE_OBJECT_ID,
                 DISABLED_RELATION,
-                owner,
+                to_zdid(&owner),
             );
             let _ = self
                 .store

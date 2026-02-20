@@ -1,24 +1,14 @@
 [package]
-name = "acp"
+name = "zanzibar"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Access Control Policy for DefraDB"
-
-[features]
-default = ["native"]
-native = []
+description = "Standalone Zanzibar permission engine with pluggable KV backend"
 
 [dependencies]
-defra-core = { path = "../defra-core" }
-identity = { path = "../identity" }
-schema = { path = "../schema" }
-storage = { path = "../storage" }
-zanzibar = { path = "../zanzibar" }
-
 async-trait.workspace = true
 async-lock.workspace = true
 thiserror.workspace = true
@@ -26,10 +16,6 @@ serde.workspace = true
 serde_json.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
-sha2.workspace = true
-serde_yaml = "0.9"
 
 [dev-dependencies]
-proptest.workspace = true
-tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

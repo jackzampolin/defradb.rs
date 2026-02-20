@@ -1,24 +1,18 @@
-//! Permission evaluation engine.
-//!
-//! Implements goal-tree search with cycle detection for evaluating
-//! Zanzibar permission expressions.
-
 mod cache;
 mod evaluate;
 mod trace;
 
 use std::sync::Arc;
 
-use identity::Did;
+use crate::did::Did;
 
-use super::lookup::PolicyLookupTable;
-use super::store::ZanzibarStore;
-use super::types::Policy;
 use crate::error::Result;
+use crate::lookup::PolicyLookupTable;
+use crate::store::ZanzibarStore;
+use crate::types::Policy;
 
 use cache::{CheckCache, NodeId, NodeTrail};
 
-/// A request for a permission check (used in batch operations).
 #[derive(Debug, Clone)]
 pub struct PermissionCheckRequest<'a> {
     pub policy_id: &'a str,
@@ -46,7 +40,6 @@ impl<'a> PermissionCheckRequest<'a> {
     }
 }
 
-/// Explanation of a permission decision, including the evaluation trace.
 #[derive(Debug, Clone)]
 pub struct PermissionExplanation {
     pub granted: bool,
@@ -57,7 +50,6 @@ pub struct PermissionExplanation {
     pub trace: EvaluationTrace,
 }
 
-/// Trace of permission evaluation steps.
 #[derive(Debug, Clone, Default)]
 pub struct EvaluationTrace {
     pub steps: Vec<EvaluationStep>,
@@ -73,7 +65,6 @@ impl EvaluationTrace {
     }
 }
 
-/// A single step in permission evaluation.
 #[derive(Debug, Clone)]
 pub struct EvaluationStep {
     pub expression_type: String,
@@ -84,7 +75,6 @@ pub struct EvaluationStep {
     pub details: Option<String>,
 }
 
-/// Result of an evaluation step.
 #[derive(Debug, Clone)]
 pub enum StepResult {
     Granted,
@@ -104,16 +94,6 @@ impl std::fmt::Display for StepResult {
     }
 }
 
-/// Permission evaluation engine.
-///
-/// Evaluates Zanzibar permission expressions using goal-tree search
-/// with cycle detection. Supports all expression types:
-/// - This: Direct tuple lookup
-/// - ComputedUserset: Check different relation on same object
-/// - TupleToUserset: Follow relation, then check computed relation
-/// - Union: OR of expressions (short-circuit)
-/// - Intersection: AND of expressions
-/// - Difference: Left AND NOT right
 pub struct PermissionEngine<S: ZanzibarStore> {
     store: Arc<S>,
     pub lookup: PolicyLookupTable,
@@ -155,10 +135,6 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
         self.lookup.clear();
     }
 
-    /// Check if subject has permission on object.
-    ///
-    /// Creates a request-scoped cache to avoid redundant evaluations
-    /// during recursive permission checks.
     pub async fn check(
         &self,
         policy_id: &str,
@@ -169,7 +145,6 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
     ) -> Result<bool> {
         let expression = self.lookup.get_expression(policy_id, resource, relation)?;
 
-        // Start evaluation with empty trail, add initial node
         let node_id = NodeId::new(resource, object_id, relation);
         let trail = NodeTrail::new().with_node(node_id);
 
@@ -181,12 +156,7 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
         .await
     }
 
-    /// Check multiple permissions in a single batch operation.
-    ///
-    /// More efficient than calling `check` multiple times as it shares the
-    /// request-scoped cache across all checks.
     pub async fn check_many(&self, requests: &[PermissionCheckRequest<'_>]) -> Vec<Result<bool>> {
-        // Shared cache for all checks in this batch
         let cache = Arc::new(CheckCache::new());
 
         let mut results = Vec::with_capacity(requests.len());
@@ -228,7 +198,6 @@ impl<S: ZanzibarStore> PermissionEngine<S> {
         .await
     }
 
-    /// Check permission and return an explanation of the decision.
     pub async fn explain(
         &self,
         policy_id: &str,
