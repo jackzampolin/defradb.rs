@@ -103,23 +103,45 @@ Supply chain security and unsafe code usage. Audit covers:
 
 **Checklist**: Transmute soundness, Send/Sync safety, fat pointer layout stability, lifetime enforcement
 
-### Session 3: Dependency Audit & CVE Scan (HIGH)
+### Session 3: Dependency Audit & CVE Scan (HIGH) — COMPLETE
 
-Key dependencies to check:
-- rocksdb 0.22.0 (C++ FFI), libp2p 0.53.2 (network-facing), axum (HTTP)
-- k256 0.13.4, ed25519-dalek 2.2.0, aes-gcm 0.10.3 (crypto)
-- 898 transitive dependencies total
+**Findings: 21-37** (17 findings)
 
-**Checklist**: `cargo audit`, yanked crates, unmaintained crates, version discrepancies (Cargo.toml vs Cargo.lock), MSRV 1.82 compatibility
+**Tools used:** cargo audit v0.22.1, cargo deny v0.19.0, cargo outdated v0.17.0, cargo tree --duplicates
 
-### Session 4: Build Scripts & Feature Flags (LOW)
+**Vulnerabilities found: 3 CVEs + 1 unsoundness**
+- RUSTSEC-2025-0009: ring 0.16.20 AES panic (via libp2p-quic)
+- RUSTSEC-2025-0046: wasmtime 27.0.0 fd_renumber host panic
+- RUSTSEC-2025-0118: wasmtime 27.0.0 shared memory unsoundness
+- RUSTSEC-2026-0006: wasmtime 27.0.0 f64.copysign segfault
+- RUSTSEC-2026-0002: lru 0.12.5 IterMut unsoundness (no fix)
 
-| File | Focus |
-|------|-------|
-| `crates/orbis/build.rs` | tonic proto compilation (safe) |
-| `crates/defra-version/build.rs` | Git metadata via Command::new("git") |
+**Unmaintained crates: 7** (serde_cbor, derivative, fxhash, instant, yaml-rust, proc-macro-crate, wasm-timer — 5/7 from iroh-bitswap)
 
-**Checklist**: Proto file safety, git command not injectable, feature exclusivity (storage backends), vendored-openssl scope
+**Key findings:**
+1. wasmtime 27.0.0 is 14 major versions behind with 3 CVEs — upgrade critical
+2. iroh-bitswap (sole git dep) causes ~80% of ~50 duplicate crate versions
+3. serde_cbor unmaintained since 2021, used in 3 core crates alongside ciborium
+4. No deny.toml for automated policy enforcement
+5. All directly-chosen crypto crates are current and safe
+6. Feature flags properly configured, no unsafe features enabled
+7. Build scripts are benign (protobuf, git metadata, C headers)
+
+### Session 4: Build Scripts & Compilation Pipeline (LOW) — COMPLETE
+
+**Findings: 38-49** (12 findings)
+
+**Audited:** All build.rs files, cbindgen configuration, release profile, CI/CD pipelines, Dockerfiles, env!() usage, .cargo/config.toml
+
+**Key findings:**
+1. cbindgen header committed but no CI verification of staleness (#40)
+2. No `overflow-checks = true` in release profile (#41)
+3. WASM release build uses `curl | sh` for wasm-pack install (#42)
+4. No `cargo audit` or `cargo deny` in CI pipeline (#43)
+5. No `rust-toolchain.toml` for build reproducibility (#38)
+6. Release profile hardening is excellent: LTO, strip, panic=abort (#46)
+7. All build scripts are benign — no network access, no untrusted execution (#45)
+8. .cargo/config.toml is minimal and safe (#48)
 
 ### Session 5: FFI Integration Regression (MEDIUM)
 

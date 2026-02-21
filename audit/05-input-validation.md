@@ -30,6 +30,19 @@ All external input surfaces and their validation. Audit covers:
 - `storage/` (key construction)
 - `db/` (backup/restore paths)
 
+## Session 1 Findings (2026-02-21): GraphQL Parser & HTTP Body
+
+| # | Finding | Severity | File |
+|---|---------|----------|------|
+| 00 | [GraphQL No Depth/Complexity Limits](05-input-validation-findings/00-graphql-no-depth-complexity-limits.md) | HIGH | Updated — parser unbounded, planner has MAX_NESTING_DEPTH=10 |
+| 01 | [No HTTP Body Size Limit](05-input-validation-findings/01-no-http-body-size-limit.md) | HIGH | Updated — schema endpoint uses String (no limit), confirmed endpoint-by-endpoint |
+| 02 | [Filter Recursion Unbounded](05-input-validation-findings/02-filter-recursion-unbounded.md) | MEDIUM | NEW — `_and`/`_or`/`_not` nest arbitrarily in evaluator |
+| 03 | [SDL Schema No Size Limits](05-input-validation-findings/03-sdl-schema-no-size-limits.md) | MEDIUM | NEW — unbounded String body, no type count limit |
+| 04 | [Fragment Width Amplification](05-input-validation-findings/04-fragment-width-amplification.md) | LOW | NEW — cycle detection works, width amp is theoretical |
+| 05 | [No Query Timeout or Cost Budget](05-input-validation-findings/05-no-query-timeout-or-cost-budget.md) | MEDIUM | NEW — no timeout, no concurrent limit, no rate limit |
+| 06 | [SSE Subscription No Limits](05-input-validation-findings/06-sse-subscription-no-limits.md) | MEDIUM | NEW — indefinite connections, per-event query re-execution |
+| 07 | [Session 1 Summary](05-input-validation-findings/07-session1-graphql-http-summary.md) | — | Session summary with prioritized remediation |
+
 ## Recon Findings
 
 ### Surface Area
@@ -69,6 +82,38 @@ All external input surfaces and their validation. Audit covers:
 - Strong identifier validation
 - JWT auth is solid
 - Backup HTTP endpoint returns body (doesn't write to server filesystem)
+
+## Session 2 Findings (2026-02-21): Filesystem Operations
+
+| # | Finding | Severity | File |
+|---|---------|----------|------|
+| 08 | [WASM Lens Module Path Traversal via `file://`](05-input-validation-findings/08-wasm-lens-path-traversal.md) | MEDIUM | `lens/src/wasm.rs`, `ffi/src/lens.rs` — no validation after stripping file:// |
+| 09 | [FFI Backup Export Writes to Arbitrary Path](05-input-validation-findings/09-ffi-backup-arbitrary-path-write.md) | MEDIUM | `ffi/src/backup/export.rs` — fs::write on attacker-controlled filepath |
+| 10 | [CLI File Reading No Size Limit](05-input-validation-findings/10-cli-file-read-no-size-limit.md) | LOW | Multiple CLI commands — fs::read_to_string unbounded |
+| 11 | [HTTP Handlers No Filesystem Exposure](05-input-validation-findings/11-http-handlers-no-filesystem-exposure.md) | INFO | GREEN — no HTTP endpoint accepts filesystem paths |
+| 12 | [No canonicalize() or Symlink Resolution](05-input-validation-findings/12-no-canonicalize-or-symlink-resolution.md) | LOW | No production code resolves symlinks on user paths |
+| 13 | [Data Directory No Permission Hardening](05-input-validation-findings/13-data-directory-no-permission-hardening.md) | LOW | `config/mod.rs` — create_dir_all with default 0755 |
+| 14 | [Dump and Purge Safe HTTP-Only](05-input-validation-findings/14-dump-purge-safe-http-only.md) | INFO | GREEN — HTTP-only, no filesystem path parameters |
+| 15 | [Lens Path Traversal Reachable via HTTP API](05-input-validation-findings/15-lens-path-reachable-via-http-api.md) | HIGH | HTTP `/api/v0/lens/set` → lens path → arbitrary file read |
+| 16 | [Null Byte Path Handling](05-input-validation-findings/16-null-byte-path-handling.md) | INFO | GREEN — Rust rejects interior null bytes |
+| 17 | [Session 2 Summary](05-input-validation-findings/17-session2-filesystem-ops-summary.md) | — | Session summary with prioritized remediation |
+
+## Session 3 Findings (2026-02-21): Schema Validation, Multiaddr, Error Leakage
+
+| # | Finding | Severity | File |
+|---|---------|----------|------|
+| 18 | [Unknown Directives Silently Accepted](05-input-validation-findings/18-unknown-directives-silently-accepted.md) | LOW | `sdl_parse/fields.rs` — forward-compat, no strict mode |
+| 19 | [Multiaddr SSRF — No Private IP Blocklist](05-input-validation-findings/19-multiaddr-ssrf-no-ip-blocklist.md) | MEDIUM | `validation.rs` → `p2p/address.rs` → libp2p — zero IP validation |
+| 20 | [Error Messages Echo User Input](05-input-validation-findings/20-error-messages-echo-user-input.md) | LOW | `backup.rs`, `error.rs`, `query.rs` — filepath/serde details reflected |
+| 21 | [GraphQL Introspection Always Enabled](05-input-validation-findings/21-graphql-introspection-always-enabled.md) | MEDIUM | `runner/introspection/` — full schema enumerable by any reader |
+| 22 | [Schema No Field Drop Migration Guard](05-input-validation-findings/22-schema-no-field-drop-migration-guard.md) | LOW | `schema/collection.rs` — no backward-compat validation |
+| 23 | [Content-Type Not Enforced on Schema Endpoint](05-input-validation-findings/23-content-type-not-enforced-on-schema-endpoint.md) | LOW | `handlers/schema.rs` — accepts any Content-Type |
+| 24 | [Identifiers Accept Unbounded Length](05-input-validation-findings/24-identifier-no-length-limit.md) | LOW | `validation.rs` — no max length on names |
+| 25 | [Error Responses Safe — JSON Content-Type](05-input-validation-findings/25-error-response-safe-json-content-type.md) | INFO | GREEN — XSS/CRLF mitigated by application/json |
+| 26 | [Schema Not Replicated via P2P](05-input-validation-findings/26-schema-not-replicated-via-p2p.md) | INFO | GREEN — no P2P schema injection vector |
+| 27 | [Directive Args Not Stored or Evaluated](05-input-validation-findings/27-directive-args-not-stored-or-evaluated.md) | INFO | GREEN — type-checked, never executed |
+| 28 | [Circular References Properly Detected](05-input-validation-findings/28-circular-references-properly-detected.md) | INFO | GREEN — Tarjan's SCC algorithm |
+| 29 | [Session 3 Summary](05-input-validation-findings/29-session3-schema-multiaddr-errors-summary.md) | — | Session summary with prioritized remediation |
 
 ## Estimated Scope
 

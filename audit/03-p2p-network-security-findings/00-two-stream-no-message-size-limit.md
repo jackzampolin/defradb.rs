@@ -3,21 +3,23 @@
 **Stream**: 03 - P2P Network Security
 **Severity**: HIGH
 **Category**: Denial of Service
-**Status**: CONFIRMED
+**Status**: CONFIRMED (Session 4 deep-dive verified)
 
 ## Summary
 
-The two-stream P2P protocol uses `read_to_end()` without any size limit in 5 locations across 3 files. A malicious peer can send arbitrarily large data through any two-stream channel and exhaust the node's memory. In contrast, the request-response codec correctly uses `reader.take(MAX_MESSAGE_SIZE)` with a 16MB limit.
+The two-stream P2P protocol uses `read_to_end()` without any size limit in 5 code sites across 3 files (7 call paths). A malicious peer can send arbitrarily large data through any two-stream channel and exhaust the node's memory. In contrast, the request-response codec correctly uses `reader.take(MAX_MESSAGE_SIZE)` with a 16MB limit.
 
 ## Affected Files
 
-| File | Lines | Instance |
-|------|-------|----------|
-| `crates/p2p/src/two_stream/handler/inbound.rs` | 33-37 | Request stream handler |
-| `crates/p2p/src/two_stream/handler/inbound.rs` | 98-102 | Response stream handler |
-| `crates/p2p/src/two_stream/runner.rs` | ~149 | SE request stream |
-| `crates/p2p/src/two_stream/runner.rs` | ~165 | SE response stream |
-| `crates/p2p/src/two_stream/handler/car.rs` | ~15 | CAR protocol stream |
+| File | Lines | Code Site | Call Paths |
+|------|-------|-----------|------------|
+| `crates/p2p/src/two_stream/handler/inbound.rs` | 33-37 | Request stream handler | PushLog, DocSync, BranchableSync requests |
+| `crates/p2p/src/two_stream/handler/inbound.rs` | 98-102 | Response stream handler | PushLog, DocSync, BranchableSync replies |
+| `crates/p2p/src/two_stream/runner.rs` | 149 | SE request stream | Searchable encryption artifacts |
+| `crates/p2p/src/two_stream/runner.rs` | 165 | SE response stream | SE acknowledgements |
+| `crates/p2p/src/two_stream/handler/car.rs` | 15 | CAR protocol stream | CAR request AND CAR response (shared `read_stream()`) |
+
+**Session 4 verification**: Exhaustive `read_to_end` search across entire `crates/` tree found exactly these 5 unprotected sites + 1 protected site (`codec.rs:46` with `take()`). No additional instances exist.
 
 ## Details
 
@@ -66,7 +68,11 @@ This is used by `PushLogCodec` but is **not used** by the two-stream handler.
 4. Victim's handler allocates unbounded memory via `read_to_end()`
 5. Node OOMs and crashes
 
-Each incoming stream spawns a new tokio task (`runner.rs` lines 82, 117, 146, 161, 179, 195), so multiple concurrent streams can accumulate memory independently with no global budget.
+Each incoming stream spawns a new tokio task (`runner.rs` lines 82, 117, 146, 162, 179, 195), so multiple concurrent streams can accumulate memory independently with no global budget. See Finding 30 for the unbounded task spawning amplifier.
+
+### Amplification via Post-Read Processing
+
+After `read_to_end` completes, the buffer undergoes CBOR deserialization. In `inbound.rs`, the request handler tries THREE deserializations on the same buffer (PushLogRequest, DocSyncRequest, BranchableSyncRequest) — meaning a multi-GB buffer would be parsed up to 3 times before being rejected. See Finding 34 for details.
 
 ### Affected Message Types
 

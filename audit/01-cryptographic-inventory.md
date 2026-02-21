@@ -126,3 +126,63 @@ Every use of cryptographic primitives across the codebase:
 | `crates/crypto/tests/merkle_proof_tests.rs` | all | Proof roundtrip tests |
 
 **Checklist**: Frequency analysis implications, tag isolation, proof extraction, CID determinism
+
+## Completion Status
+
+**Stream 1: Cryptographic Inventory — COMPLETE** (5 sessions, 21 findings)
+
+### Session Status
+
+| Session | Focus | Status | Findings |
+|---------|-------|--------|----------|
+| 1 | Key Management & Zeroization | COMPLETE | 00, 01, 02, 03 |
+| 2 | Signing & Verification Paths | COMPLETE | 04, 05, 06 |
+| 3 | Encryption & ECIES Correctness | COMPLETE | 07, 08, 09 |
+| 4 | Go Compatibility Cross-Verification | COMPLETE | 10, 11, 12, 13, 14 |
+| 5 | Searchable Encryption & Merkle Proof | COMPLETE | 15, 16, 17, 18, 19, 20, 21 |
+
+### All Findings Summary
+
+| # | Finding | Severity | 1.0 Blocker? |
+|---|---|---|---|
+| 00 | Private key types lack Zeroize impls | MEDIUM | No |
+| 01 | ECIES shared secret not zeroed | MEDIUM | No |
+| 02 | Ed25519 keygen seed not zeroed | LOW | No |
+| 03 | Key `raw()` trait returns unprotected Vec | LOW | No |
+| 04 | secp256r1 Go signature S-normalization gap | HIGH | Investigate |
+| 05 | JWT algorithm dispatch from header | MEDIUM | No |
+| 06 | Batch signing missing secp256r1 | MEDIUM | No |
+| 07 | ECIES X25519 low-order key acceptance | MEDIUM | No |
+| 08 | ECIES ciphertext validation gaps | MEDIUM | No |
+| 09 | ECIES AES-GCM correctness audit | INFORMATIONAL | No |
+| 10 | SE tag UTF-8 lossy domain separator diverges from Go | HIGH | **YES** |
+| 11 | SE tag tests contain no Go-generated test vectors | MEDIUM-HIGH | Risk amplifier |
+| 12 | JWT token format has no Go compatibility tests | MEDIUM | Unverified risk |
+| 13 | secp256r1 systematic Go compat test gaps | MEDIUM | Compounds #04 |
+| 14 | Session 4 Go compatibility summary | INFORMATIONAL | Summary |
+| 15 | SE domain separator delimiter collision vulnerability | LOW-MEDIUM | No (shared with Go) |
+| 16 | SE enc_key not zeroized and default all-zeros | MEDIUM | No |
+| 17 | SE deterministic tags enable frequency analysis | INFORMATIONAL | By design |
+| 18 | SE artifact metadata leakage to replicators | MEDIUM | No (shared with Go) |
+| 19 | SE HMAC key accepts any length without validation | LOW-MEDIUM | No |
+| 20 | Merkle proof verification sound; trust boundary | LOW | No |
+| 21 | Session 5 SE & Merkle proof summary | INFORMATIONAL | Summary |
+
+### 1.0 Blockers
+
+| Finding | Issue | Required Action |
+|---------|-------|-----------------|
+| **10** | SE tag UTF-8 lossy divergence from Go | **MUST FIX** — feed raw identity bytes to HMAC, add Go test vectors |
+| **04** | secp256r1 S-normalization CID divergence | **INVESTIGATE** — determine if secp256r1 signatures appear in IPLD blocks |
+
+### Cross-Stream Themes
+
+1. **Zeroization is systematically absent**: Findings 00, 01, 02, 16 all identify key/secret material that is never zeroed on drop. The `zeroize` crate is a dependency but not used on any key type or the SE encryption key.
+
+2. **Go compatibility has asymmetric test coverage**: Ed25519 and secp256k1 have excellent Go test vectors. secp256r1, JWT, and SE tags have significant gaps (Findings 04, 11, 12, 13).
+
+3. **Defense-in-depth input validation is weak**: HMAC key length not checked (Finding 19), ECIES low-order keys accepted (Finding 07), ciphertext validation has gaps (Finding 08). The underlying crypto libraries are correct but the application layer doesn't validate inputs.
+
+4. **Metadata leakage is by design but under-documented**: The SE scheme leaks field names, document IDs, and value frequencies to replicators (Findings 17, 18). This is inherent to the SSE design but users need to understand the trust model.
+
+5. **Merkle proof system is sound**: The proof generation, verification, and signing code is well-implemented with good test coverage (Finding 20). The only concern is caller-side trust verification of embedded keys.

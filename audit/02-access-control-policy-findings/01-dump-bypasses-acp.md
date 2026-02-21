@@ -1,26 +1,67 @@
-# Finding: Database Dump Bypasses ACP Entirely
+# Finding: Database Dump Bypasses ACP and NAC Entirely
 
 **Stream**: 02 - Access Control Policy
-**Severity**: MEDIUM
+**Severity**: HIGH (upgraded from MEDIUM — HTTP-exposed, no auth)
 **Category**: Access Control Bypass
-**Status**: CONFIRMED
+**Status**: CONFIRMED — HTTP ENDPOINT FULLY UNAUTHENTICATED
 
 ## Summary
 
-The `print_dump()` function iterates all database namespaces directly from the storage layer, completely bypassing the query engine and ACP permission filters. This includes the ACP store itself, blockstore, headstore, and all document data.
+The `print_dump()` function iterates all database namespaces directly from the storage layer, completely bypassing the query engine and ACP permission filters. This includes the ACP store itself (revealing who has access to what), blockstore, headstore, encryption store, and all document data.
 
-In contrast, `export_database()` correctly goes through the query executor, which applies ACP `PermissionFilterNode` filtering.
+**Deep-dive confirms**: The dump is exposed via `GET /api/v0/debug/dump` with **no authentication, no identity check, and no NAC permission check**. Any network client that can reach the HTTP API can enumerate all database keys and value sizes.
 
 ## Affected Files
 
 | File | Function | Issue |
 |------|----------|-------|
 | `crates/db/src/dump.rs:11-59` | `print_dump()` | Direct storage iteration, no ACP |
-| `crates/db/src/backup/export.rs:106-107` | `export_database()` | Uses `runner.execute()` - ACP applied (GOOD) |
+| `crates/http/src/handlers/utility.rs:47-54` | `dump()` | **No identity extraction, no NAC check** |
+| `crates/http/src/router/routes.rs:251` | route | `GET /api/v0/debug/dump` exposed |
+| `crates/cli/src/commands/server_dump.rs:14-77` | CLI | Local-only, lower risk |
+| `crates/db/src/backup/export.rs:21-250` | `export_database()` | Uses `runner.execute()` — ACP applied (GOOD) |
 
 ## Details
 
-### The Bypass
+### The HTTP Handler (No Auth)
+
+```rust
+// crates/http/src/handlers/utility.rs:47-54
+/// GET /api/v0/debug/dump
+///
+/// Dumps all database key/value pairs for debugging.
+pub async fn dump(State(state): State<AppState>) -> Result<Json<Vec<String>>, HttpError> {
+    let dump_ops = state.require_dump()?;
+    let lines = dump_ops.print_dump().await.map_err(HttpError::Internal)?;
+    Ok(Json(lines))
+}
+```
+
+Compare with adjacent handlers that DO check permissions:
+
+```rust
+// purge() - has auth
+pub async fn purge(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,          // ← extracts caller identity
+) -> Result<StatusCode, HttpError> {
+    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;  // ← NAC check
+    // ...
+}
+
+// get_node_identity() - has auth
+pub async fn get_node_identity(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,          // ← extracts caller identity
+) -> Result<Json<NodeIdentityResponse>, HttpError> {
+    require_permission(&state, &identity, NodePermission::P2pPeerConnect).await?;  // ← NAC check
+    // ...
+}
+```
+
+The `dump()` handler has neither `ExtractIdentity` nor `require_permission()`.
+
+### The Storage Bypass
 
 ```rust
 // crates/db/src/dump.rs:20-28
@@ -31,25 +72,30 @@ let namespaces = [
     Namespace::Systemstore,  // System metadata
     Namespace::Peerstore,    // Peer information
     Namespace::Encstore,     // Encryption data
-    Namespace::Acpstore,     // ACP POLICIES AND RELATIONS THEMSELVES
+    Namespace::Acpstore,     // ACP POLICIES AND RELATIONS
 ];
 ```
 
-The function iterates over every key-value pair in every namespace. No identity is checked. No ACP permission is evaluated. The caller gets raw keys and value sizes for **all data in the database**.
+### What's Exposed
 
-### Exposure
+The dump output reveals:
+- **All document keys** (containing collection IDs and document IDs) — confirms document existence
+- **Value sizes** for all documents — leaks document size information
+- **ACP store contents** — policy definitions and relation tuples (who has access to what)
+- **Encryption store contents** — encrypted field metadata and key references
+- **Peer store contents** — peer identity mappings
+- **System store contents** — collection schemas and configuration
 
-The dump output includes:
-- **Key names** for all documents (which contain collection IDs and document IDs)
-- **Value sizes** (which leak document size information)
-- **ACP store contents** (policy definitions and relation tuples - i.e., who has access to what)
-- **Encryption store contents** (encrypted field metadata)
+While raw values are not returned (only key names and sizes), the key names themselves contain structured information that reveals the full database topology.
 
-While the raw values are not returned (only sizes), the key names themselves reveal the full structure of the database.
+### Severity Upgrade Justification
 
-### Who Can Trigger This
+The original finding rated this MEDIUM with a note to "check if NAC gates this." Deep-dive confirms:
 
-The dump endpoint is exposed via HTTP at `POST /api/v0/dump` (or similar). Need to check if NAC gates this.
+1. **HTTP-exposed**: `GET /api/v0/debug/dump` is registered on the same router as all other API endpoints
+2. **No auth whatsoever**: No `ExtractIdentity`, no `require_permission()`, no dev-mode check
+3. **Always available**: The endpoint is registered unconditionally (unlike purge which requires dev mode)
+4. **Cross-reference with Finding 16**: Finding 16 already documented the missing NAC check — this finding adds the full ACP bypass analysis and HTTP exposure evidence
 
 ### Contrast with Export
 
@@ -59,25 +105,42 @@ let request = query::QueryRequest::new(query);
 let response = runner.execute(request).await;
 ```
 
-This goes through the normal query path which applies `PermissionFilterNode`.
+This goes through the normal query path which applies `PermissionFilterNode`. Export is properly gated.
+
+### CLI Path (Lower Risk)
+
+`server_dump.rs` opens the database directly from disk and calls `print_dump()`. This requires local filesystem access to the data directory, so it's equivalent to reading the files directly. The CLI path is appropriately lower risk.
 
 ## Remediation
 
-### Option A: Gate dump behind NAC admin permission
+### Option A: Gate behind NAC admin permission + dev mode (recommended)
 
-Require `NodePermission::DumpAll` or similar admin-level permission to execute dump. This is the simplest fix and appropriate since dump is a debugging/admin tool.
+```rust
+pub async fn dump(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<Vec<String>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
 
-### Option B: Filter dump output through ACP
+    if !state.dev_mode {
+        return Err(HttpError::BadRequest(
+            "dump is only available in development mode".into(),
+        ));
+    }
 
-Add identity parameter to `print_dump()` and filter namespaces/keys based on the caller's permissions. This is more work but more correct.
+    let dump_ops = state.require_dump()?;
+    let lines = dump_ops.print_dump().await.map_err(HttpError::Internal)?;
+    Ok(Json(lines))
+}
+```
 
-### Option C: Restrict dump to dev mode only
+### Option B: Remove HTTP endpoint entirely
 
-Only allow dump when `--dev` flag is passed to the node. Production nodes would not expose this endpoint.
+Dump is a debugging tool. Restrict it to CLI-only access via `defradb server-dump`, which already requires local filesystem access.
 
-## Test Gap
+## Test Coverage
 
-No integration test verifies that dump respects ACP boundaries. Should add a test where:
-1. Create documents with ACP policies
-2. Call dump as a non-admin identity
-3. Verify ACP-protected document keys are not visible
+No integration test verifies that dump respects ACP or NAC boundaries. Needed tests:
+1. Call `GET /api/v0/debug/dump` without authentication → should be rejected
+2. Call `GET /api/v0/debug/dump` with NAC enabled but no admin permission → should be rejected
+3. Call `GET /api/v0/debug/dump` in non-dev mode → should be rejected

@@ -90,6 +90,8 @@ Identity creation, authentication, and key storage. Audit covers:
 
 **Checklist**: DID format enforcement, wildcard safety, key type consistency, public key derivation timing
 
+**Status**: COMPLETE — 9 findings (1 MEDIUM, 3 LOW, 1 INFO, 4 GREEN). See `04-identity-key-management-findings/09-session1-core-identity-summary.md`.
+
 ### Session 2: JWT Token Implementation (CRITICAL)
 
 | File | Lines | Focus |
@@ -109,9 +111,11 @@ Identity creation, authentication, and key storage. Audit covers:
 | `crates/keyring/src/file.rs` | 1-170 | PBKDF2 10k iter, JWE PBES2-HS512-A256KW, 0o600 perms, zero-before-delete |
 | `crates/keyring/src/keyring.rs` | 1-31 | Trait: set/get/delete/list |
 | `crates/keyring/src/system.rs` | 1-82 | OS-native keyring, base64 STANDARD encoding |
-| `crates/keyring/src/systemd_creds.rs` | 1-100 | systemd 250+, stdin/stdout pipes, `.cred` extension |
+| `crates/keyring/src/systemd_creds.rs` | 1-207 | systemd 250+, stdin/stdout pipes, `.cred` extension |
 
 **Checklist**: Password Zeroizing wrapper, Windows ACL equiv, base64 safety, secure deletion
+
+**Status**: COMPLETE — 14 findings (3 MEDIUM, 7 LOW, 1 INFO, 3 GREEN). See `04-identity-key-management-findings/34-session3-keyring-backends-summary.md`.
 
 ### Session 4: HTTP Auth & CLI Credential Flow (MEDIUM)
 
@@ -123,11 +127,28 @@ Identity creation, authentication, and key storage. Audit covers:
 
 **Checklist**: Case-insensitive Bearer, empty token=anonymous, Host header for audience, non-ASCII rejection
 
+**Status**: COMPLETE — 18 findings (1 HIGH, 6 MEDIUM, 5 LOW, 3 INFO, 3 GREEN). See `04-identity-key-management-findings/52-session4-http-auth-cli-credentials-summary.md`.
+
 ### Session 5: Integration Tests & Cross-Cutting (MEDIUM)
 
 | File | Focus |
 |------|-------|
-| `tools/integration-test/tests/identity_lifecycle.rs` | JWT creation/verification workflow |
-| `tools/integration-test/tests/identity_types.rs` | Token parsing, audience, expiration |
+| `tools/integration-test/tests/identity_lifecycle.rs` | Key CRUD round-trips (all 3 key types) |
+| `tools/integration-test/tests/identity_types.rs` | Cross-key-type ACP |
+| `tools/integration-test/tests/node_identity.rs` | Node identity endpoint |
+| `tools/integration-test/tests/keyring_lifecycle.rs` | Keyring CRUD, Go interop |
+| `tools/integration-test/tests/acp_basic.rs` | Basic ACP with identity |
+| `tools/integration-test/tests/acp_multi_identity.rs` | Multi-identity ACP |
+| `crates/crypto/src/keys/ed25519.rs` | Ed25519 verify (constant-time) |
+| `crates/crypto/src/keys/secp256k1.rs` | secp256k1 verify (constant-time) |
+| `crates/crypto/src/keys/secp256r1.rs` | secp256r1 verify (constant-time) |
+| `crates/p2p/src/signing.rs` | P2P message signing/verification |
 
-**Checklist**: Timing attack resistance (ct_eq in all key types), replay prevention (exp+aud), expired token rejection
+**Checklist**: Timing attack resistance, replay prevention, expired token rejection, identity confusion, cross-component flow
+
+**Status**: COMPLETE — 11 findings (0 HIGH, 2 MEDIUM, 3 LOW, 1 INFO, 5 GREEN). See `04-identity-key-management-findings/64-session5-integration-cross-cutting-summary.md`.
+
+## Stream Complete
+
+All 5 sessions complete. Total: 64 findings (2 HIGH, 14 MEDIUM, 14 LOW, 10 INFO, 24 GREEN).
+See `04-identity-key-management-findings/STREAM-SUMMARY.md` for the full summary.
