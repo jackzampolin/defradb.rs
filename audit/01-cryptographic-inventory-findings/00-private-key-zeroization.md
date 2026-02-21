@@ -1,105 +1,83 @@
 # Finding: Private Key Types Lack Zeroize
 
 **Stream**: 01 - Cryptographic Inventory
-**Severity**: MEDIUM
+**Severity**: MEDIUM-HIGH (Ed25519), LOW (secp256k1, secp256r1)
 **Category**: Key Lifecycle / Memory Safety
-**Status**: CONFIRMED
+**Status**: CONFIRMED — deep-dive completed, severity split by key type
 
 ## Summary
 
-None of the three private key types (`Ed25519PrivateKey`, `Secp256k1PrivateKey`, `Secp256r1PrivateKey`) implement `Zeroize` or `ZeroizeOnDrop`. Private key material remains in memory after the key struct is dropped.
+The three private key wrapper types (`Ed25519PrivateKey`, `Secp256k1PrivateKey`, `Secp256r1PrivateKey`) do not implement `Zeroize` or `ZeroizeOnDrop`. However, the severity differs sharply between Ed25519 and the other two due to underlying library behavior.
 
-## Affected Files
+## Deep-Dive Results
 
-| File | Struct | Inner Type |
-|------|--------|-----------|
-| `crates/crypto/src/keys/ed25519.rs:38-41` | `Ed25519PrivateKey` | `ed25519_dalek::SigningKey` |
-| `crates/crypto/src/keys/secp256k1.rs:23-26` | `Secp256k1PrivateKey` | `k256::ecdsa::SigningKey` |
-| `crates/crypto/src/keys/secp256r1.rs` | `Secp256r1PrivateKey` | `p256::ecdsa::SigningKey` |
+### Ed25519: MEDIUM-HIGH — Inner key NOT zeroed on drop
 
-## Details
+The workspace `Cargo.toml` (line 67) specifies:
 
-### Problem 1: No Drop-time zeroing
+```toml
+ed25519-dalek = { version = "2.1", features = ["serde"] }
+```
 
-The structs are defined as simple wrappers:
+**The `"zeroize"` feature is NOT enabled.** The `ed25519-dalek 2.2.0` `SigningKey` implements `ZeroizeOnDrop` only when the `"zeroize"` feature flag is active. Without it, neither the wrapper `Ed25519PrivateKey` nor its inner `ed25519_dalek::SigningKey` zeroes key material on drop.
+
+This means the 32-byte private seed persists in memory indefinitely after the struct is dropped.
+
+**Affected code**: `crates/crypto/src/keys/ed25519.rs:38-41`
 
 ```rust
 #[derive(Clone)]
 pub struct Ed25519PrivateKey {
-    key: SigningKey,
+    key: SigningKey,  // NOT zeroed on drop — feature flag missing
 }
 ```
 
-No `Zeroize` derive, no `ZeroizeOnDrop` derive, no manual `Drop` impl. When the struct goes out of scope, the key material stays in the process's memory until the page is reused.
+Ed25519 keys are used as **node peer identity keys** (long-lived, one per node) and document signing keys. These are the highest-value keys in the system.
 
-### Problem 2: `raw()` returns unprotected Vec
+### secp256k1: LOW — Inner key IS zeroed on drop
 
-The `Key::raw()` trait method returns `Vec<u8>` containing raw key bytes:
+The `k256 0.13.4` crate's `ecdsa::SigningKey` (backed by `ecdsa 0.16.9`) implements `ZeroizeOnDrop` **unconditionally** — no feature flag required. When the wrapper `Secp256k1PrivateKey` drops, Rust drops its inner `SigningKey` field, which triggers zeroization.
 
-```rust
-fn raw(&self) -> Vec<u8> {
-    let seed = self.key.to_bytes();
-    let public = self.key.verifying_key().to_bytes();
-    let mut result = Vec::with_capacity(64);
-    result.extend_from_slice(&seed);
-    result.extend_from_slice(&public);
-    result
-}
-```
+**Affected code**: `crates/crypto/src/keys/secp256k1.rs:23-26`
 
-This `Vec<u8>` is not wrapped in `Zeroizing<Vec<u8>>`, so callers of `raw()` also leave key material in memory.
+The remaining concern is `.raw()` returning unprotected `Vec<u8>` (see Finding 03).
 
-### Problem 3: `Clone` without `Zeroize`
+### secp256r1: LOW — Inner key IS zeroed on drop
 
-All three types derive `Clone`, creating additional copies of key material that won't be zeroed.
+Same as secp256k1. The `p256 0.13.2` crate's `ecdsa::SigningKey` implements `ZeroizeOnDrop` unconditionally.
 
-## Impact
+**Affected code**: `crates/crypto/src/keys/secp256r1.rs:22-26`
 
-In a long-running node process, private key material may persist in memory indefinitely. If the process memory is swapped to disk, dumped via core dump, or read by a privileged process, key material could be extracted.
+## Evidence: Library Versions and Zeroize Support
 
-For a database node that manages document signing keys and peer identity keys, this is a meaningful risk.
+| Crate | Version (Cargo.lock) | `ZeroizeOnDrop` | Feature Required | Feature Enabled? |
+|-------|---------------------|-----------------|------------------|-----------------|
+| `ed25519-dalek` | 2.2.0 | Yes | `"zeroize"` | **NO** — only `"serde"` |
+| `k256` (via `ecdsa`) | 0.13.4 (ecdsa 0.16.9) | Yes | None | N/A |
+| `p256` (via `ecdsa`) | 0.13.2 (ecdsa 0.16.9) | Yes | None | N/A |
 
-## Contrast with Keyring
+## Clone Behavior
 
-The keyring crate correctly uses `Zeroizing<Vec<u8>>` for passwords (`crates/keyring/src/file.rs:36`). The same pattern should be applied to private key types.
+All three types derive `Clone`. For k256/p256, cloned copies independently zeroize on drop (each clone contains its own `SigningKey` with `ZeroizeOnDrop`). For Ed25519, cloned copies are also NOT zeroed — compounding the issue.
+
+## Affected Call Sites
+
+The `raw()` concern (returning unprotected `Vec<u8>`) affects all three types and is tracked separately in Finding 03.
 
 ## Remediation
 
-1. Add `zeroize` dependency to crypto crate (already a workspace dep)
-2. Implement `ZeroizeOnDrop` for all private key types
-3. Change `raw()` return type to `Zeroizing<Vec<u8>>` (breaking change to `Key` trait)
-4. Audit all call sites of `raw()` to ensure returned bytes are handled securely
+### Critical (Ed25519)
 
-### Minimal Fix (non-breaking)
+Add `"zeroize"` to ed25519-dalek features in workspace `Cargo.toml`:
 
-Add manual `Drop` impl that zeroes the inner key:
-
-```rust
-impl Drop for Ed25519PrivateKey {
-    fn drop(&mut self) {
-        // ed25519_dalek::SigningKey stores a 32-byte seed internally
-        // We can't directly zero it without unsafe, but we can overwrite via from_bytes
-        self.key = SigningKey::from_bytes(&[0u8; 32]);
-    }
-}
+```toml
+ed25519-dalek = { version = "2.1", features = ["serde", "zeroize"] }
 ```
 
-### Better Fix
+This single change enables `ZeroizeOnDrop` on the inner `SigningKey`, which Rust's drop semantics will invoke automatically when `Ed25519PrivateKey` drops. No wrapper code changes needed for the basic fix.
 
-The underlying libraries (`ed25519-dalek`, `k256`, `p256`) all support `Zeroize` on their signing key types. Derive or delegate:
+### Defense-in-Depth (All Three Types)
 
-```rust
-impl Zeroize for Ed25519PrivateKey {
-    fn zeroize(&mut self) {
-        self.key.zeroize(); // ed25519-dalek::SigningKey implements Zeroize
-    }
-}
+For explicit zeroization control, implement `Zeroize`/`ZeroizeOnDrop` on the wrapper types. Note that `ed25519-dalek::SigningKey` implements `ZeroizeOnDrop` but NOT `Zeroize` (cannot call `.zeroize()` manually). For k256/p256, `ecdsa::SigningKey` also implements only `ZeroizeOnDrop`, not `Zeroize`.
 
-impl Drop for Ed25519PrivateKey {
-    fn drop(&mut self) {
-        self.zeroize();
-    }
-}
-```
-
-Note: `ed25519-dalek::SigningKey` implements `Zeroize` when the `zeroize` feature is enabled. Check if it's enabled in `Cargo.toml`.
+The manual `Drop` + overwrite approach from the original finding is still valid as defense-in-depth.
