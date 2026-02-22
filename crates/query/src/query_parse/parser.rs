@@ -16,6 +16,7 @@ use crate::mapper::{AggregateType, Field as SelectField, Limit, Mutation, Reques
 
 use super::aggregates::{parse_aggregate_field, parse_group_by_value, parse_top_level_aggregate};
 use super::filters::parse_filter_value;
+use super::limits::validate_select_limits;
 use super::mutations::{parse_field_to_mutation, parse_similarity_field};
 use super::ordering::parse_order_value;
 
@@ -491,12 +492,17 @@ pub fn parse_request_with_variables(
 
     if has_subscription {
         // subscription_selects is guaranteed to have exactly one element due to earlier validation
+        let select = subscription_selects.into_iter().next().unwrap();
+        validate_select_limits(&select)?;
         Ok(ParsedOperation::Subscription {
-            select: Box::new(subscription_selects.into_iter().next().unwrap()),
+            select: Box::new(select),
         })
     } else if has_mutation {
         Ok(ParsedOperation::Mutation { mutations, explain })
     } else {
+        for select in &selects {
+            validate_select_limits(select)?;
+        }
         Ok(ParsedOperation::Query { selects, explain })
     }
 }

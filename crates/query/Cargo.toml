@@ -22,6 +22,7 @@ lens = { path = "../lens", default-features = false }
 # Async runtime
 async-trait.workspace = true
 futures.workspace = true
+tokio = { workspace = true, features = ["time"] }
 
 # Serialization
 serde.workspace = true

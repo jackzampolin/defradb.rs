@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::instrument;
 
 use acp::nac::NodePermission;
@@ -14,6 +15,11 @@ use crate::query_parse::{parse_request_with_variables, ParsedOperation};
 use crate::txn::{GetTransactionResult, TransactionHandle, TransactionRegistry};
 
 use super::{DocFetcher, QueryRunner};
+
+/// Maximum wall-clock time allowed for a single query execution.
+///
+/// Queries that exceed this duration are cancelled and return a timeout error.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Map a parsed operation to the required NAC permission.
 fn permission_for_operation(parsed: &ParsedOperation) -> NodePermission {
@@ -111,52 +117,71 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
 
         // Route to appropriate handler based on operation type
         // Pass identity and variables through for ACP permission checks and variable substitution
-        let result = match parsed {
-            ParsedOperation::Query { selects, explain } => {
-                if let Some(explain_type) = explain {
-                    // Return query plan instead of executing
-                    self.explain_query_with_identity_and_vars(
-                        &request.query,
-                        identity,
-                        explain_type,
-                        variables.as_ref(),
-                    )
-                    .await
-                } else {
-                    self.execute_selects_internal(selects, self.fetcher.as_ref(), identity)
+        let execution = async {
+            match parsed {
+                ParsedOperation::Query { selects, explain } => {
+                    if let Some(explain_type) = explain {
+                        // Return query plan instead of executing
+                        self.explain_query_with_identity_and_vars(
+                            &request.query,
+                            identity,
+                            explain_type,
+                            variables.as_ref(),
+                        )
                         .await
-                }
-            }
-            ParsedOperation::Mutation {
-                mutations, explain, ..
-            } => {
-                if let Some(explain_type) = explain {
-                    // Return mutation plan instead of executing
-                    self.explain_mutation_with_identity(&request.query, identity, explain_type)
-                        .await
-                } else {
-                    // Use pre-parsed mutations to avoid redundant re-parsing
-                    match self.mutator.as_ref() {
-                        Some(mutator) => {
-                            self.execute_parsed_mutations(mutations, mutator.clone(), identity)
-                                .await
-                        }
-                        None => Err(crate::error::QueryError::execution(
-                            "mutations require a mutator; call with_mutator() first",
-                        )),
+                    } else {
+                        self.execute_selects_internal(selects, self.fetcher.as_ref(), identity)
+                            .await
                     }
                 }
+                ParsedOperation::Mutation {
+                    mutations, explain, ..
+                } => {
+                    if let Some(explain_type) = explain {
+                        // Return mutation plan instead of executing
+                        self.explain_mutation_with_identity(&request.query, identity, explain_type)
+                            .await
+                    } else {
+                        // Use pre-parsed mutations to avoid redundant re-parsing
+                        match self.mutator.as_ref() {
+                            Some(mutator) => {
+                                self.execute_parsed_mutations(mutations, mutator.clone(), identity)
+                                    .await
+                            }
+                            None => Err(crate::error::QueryError::execution(
+                                "mutations require a mutator; call with_mutator() first",
+                            )),
+                        }
+                    }
+                }
+                ParsedOperation::Subscription { .. } => {
+                    // Subscriptions require SSE transport - they cannot be executed via regular request/response
+                    Err(crate::error::QueryError::parse(
+                        "Subscriptions must be executed via Server-Sent Events (SSE). \
+                         Send the request with Accept: text/event-stream header.",
+                    ))
+                }
+                ParsedOperation::Introspection { query } => {
+                    // Introspection queries are executed against the GraphQL schema
+                    self.execute_introspection(&query).await
+                }
             }
-            ParsedOperation::Subscription { .. } => {
-                // Subscriptions require SSE transport - they cannot be executed via regular request/response
-                Err(crate::error::QueryError::parse(
-                    "Subscriptions must be executed via Server-Sent Events (SSE). \
-                     Send the request with Accept: text/event-stream header.",
-                ))
-            }
-            ParsedOperation::Introspection { query } => {
-                // Introspection queries are executed against the GraphQL schema
-                self.execute_introspection(&query).await
+        };
+
+        let result = match tokio::time::timeout(QUERY_TIMEOUT, execution).await {
+            Ok(r) => r,
+            Err(_) => {
+                return QueryResponse {
+                    data: None,
+                    errors: vec![QueryResponseError {
+                        message: format!(
+                            "query execution timed out after {} seconds",
+                            QUERY_TIMEOUT.as_secs()
+                        ),
+                        path: None,
+                        locations: None,
+                    }],
+                };
             }
         };
 
@@ -241,66 +266,85 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         let identity = self.resolve_identity(request.identity);
 
         // Route to appropriate handler based on operation type
-        let result = match parsed {
-            ParsedOperation::Query { selects, explain } => {
-                // Get the transaction-scoped fetcher and execute with identity for ACP
-                let fetcher = txn_ctx.doc_fetcher();
-                if let Some(explain_type) = explain {
-                    // Return query plan instead of executing
-                    self.explain_query_with_identity_and_vars(
-                        &request.query,
-                        identity,
-                        explain_type,
-                        variables.as_ref(),
-                    )
-                    .await
-                } else {
-                    self.execute_selects_internal(selects, fetcher.as_ref(), identity)
+        let execution = async {
+            match parsed {
+                ParsedOperation::Query { selects, explain } => {
+                    // Get the transaction-scoped fetcher and execute with identity for ACP
+                    let fetcher = txn_ctx.doc_fetcher();
+                    if let Some(explain_type) = explain {
+                        // Return query plan instead of executing
+                        self.explain_query_with_identity_and_vars(
+                            &request.query,
+                            identity,
+                            explain_type,
+                            variables.as_ref(),
+                        )
                         .await
-                }
-            }
-            ParsedOperation::Mutation { explain, .. } => {
-                if let Some(explain_type) = explain {
-                    // Return mutation plan instead of executing
-                    self.explain_mutation_with_identity(&request.query, identity, explain_type)
-                        .await
-                } else {
-                    // Check if this is a read-only transaction
-                    if txn_ctx.is_readonly() {
-                        return QueryResponse::error(
-                            "cannot execute mutation in read-only transaction".to_string(),
-                        );
+                    } else {
+                        self.execute_selects_internal(selects, fetcher.as_ref(), identity)
+                            .await
                     }
-
-                    // Get the transaction-scoped mutator
-                    let mutator = match txn_ctx.doc_mutator() {
-                        Some(m) => m,
-                        None => {
-                            return QueryResponse::error(
-                                "mutations not supported in this transaction context".to_string(),
-                            );
+                }
+                ParsedOperation::Mutation { explain, .. } => {
+                    if let Some(explain_type) = explain {
+                        // Return mutation plan instead of executing
+                        self.explain_mutation_with_identity(&request.query, identity, explain_type)
+                            .await
+                    } else {
+                        // Check if this is a read-only transaction
+                        if txn_ctx.is_readonly() {
+                            return Err(crate::error::QueryError::execution(
+                                "cannot execute mutation in read-only transaction",
+                            ));
                         }
-                    };
 
-                    self.execute_mutation_internal_with_vars(
-                        &request.query,
-                        mutator,
-                        identity,
-                        variables.as_ref(),
-                    )
-                    .await
+                        // Get the transaction-scoped mutator
+                        let mutator = match txn_ctx.doc_mutator() {
+                            Some(m) => m,
+                            None => {
+                                return Err(crate::error::QueryError::execution(
+                                    "mutations not supported in this transaction context",
+                                ));
+                            }
+                        };
+
+                        self.execute_mutation_internal_with_vars(
+                            &request.query,
+                            mutator,
+                            identity,
+                            variables.as_ref(),
+                        )
+                        .await
+                    }
+                }
+                ParsedOperation::Subscription { .. } => {
+                    // Subscriptions require SSE transport
+                    Err(crate::error::QueryError::parse(
+                        "Subscriptions must be executed via Server-Sent Events (SSE). \
+                         Send the request with Accept: text/event-stream header.",
+                    ))
+                }
+                ParsedOperation::Introspection { query } => {
+                    // Introspection queries are executed against the GraphQL schema
+                    self.execute_introspection(&query).await
                 }
             }
-            ParsedOperation::Subscription { .. } => {
-                // Subscriptions require SSE transport
-                Err(crate::error::QueryError::parse(
-                    "Subscriptions must be executed via Server-Sent Events (SSE). \
-                     Send the request with Accept: text/event-stream header.",
-                ))
-            }
-            ParsedOperation::Introspection { query } => {
-                // Introspection queries are executed against the GraphQL schema
-                self.execute_introspection(&query).await
+        };
+
+        let result = match tokio::time::timeout(QUERY_TIMEOUT, execution).await {
+            Ok(r) => r,
+            Err(_) => {
+                return QueryResponse {
+                    data: None,
+                    errors: vec![QueryResponseError {
+                        message: format!(
+                            "query execution timed out after {} seconds",
+                            QUERY_TIMEOUT.as_secs()
+                        ),
+                        path: None,
+                        locations: None,
+                    }],
+                };
             }
         };
 

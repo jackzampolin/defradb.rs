@@ -9,6 +9,12 @@ use super::op::FilterOp;
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 
+/// Maximum recursive depth for filter evaluation.
+///
+/// Filters with `_and`/`_or`/`_not` can nest arbitrarily. This limit prevents
+/// stack exhaustion from pathologically deep filter trees.
+const MAX_FILTER_DEPTH: usize = 50;
+
 /// Filter condition containing parsed conditions.
 ///
 /// Conditions map field names to their filter values.
@@ -57,7 +63,7 @@ impl Filter {
         if self.conditions.is_empty() {
             return Ok(true);
         }
-        self.eval_conditions(&self.conditions, fields, mapping)
+        self.eval_conditions(&self.conditions, fields, mapping, 0)
     }
 
     fn eval_conditions(
@@ -65,7 +71,15 @@ impl Filter {
         conditions: &HashMap<String, JsonValue>,
         fields: &[Option<JsonValue>],
         mapping: &DocumentMapping,
+        depth: usize,
     ) -> Result<bool> {
+        if depth > MAX_FILTER_DEPTH {
+            return Err(QueryError::invalid_filter(format!(
+                "filter exceeds maximum nesting depth of {}",
+                MAX_FILTER_DEPTH
+            )));
+        }
+
         for (key, value) in conditions {
             // Check for logical operators
             if let Some(op) = FilterOp::parse(key) {
@@ -82,7 +96,7 @@ impl Filter {
                             let sub_conditions: HashMap<String, JsonValue> =
                                 serde_json::from_value(item.clone())
                                     .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                            if !self.eval_conditions(&sub_conditions, fields, mapping)? {
+                            if !self.eval_conditions(&sub_conditions, fields, mapping, depth + 1)? {
                                 return Ok(false);
                             }
                         }
@@ -101,7 +115,7 @@ impl Filter {
                             let sub_conditions: HashMap<String, JsonValue> =
                                 serde_json::from_value(item.clone())
                                     .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                            if self.eval_conditions(&sub_conditions, fields, mapping)? {
+                            if self.eval_conditions(&sub_conditions, fields, mapping, depth + 1)? {
                                 any_match = true;
                                 break;
                             }
@@ -119,7 +133,7 @@ impl Filter {
                         let sub_conditions: HashMap<String, JsonValue> =
                             serde_json::from_value(value.clone())
                                 .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                        if self.eval_conditions(&sub_conditions, fields, mapping)? {
+                        if self.eval_conditions(&sub_conditions, fields, mapping, depth + 1)? {
                             return Ok(false);
                         }
                         continue;
