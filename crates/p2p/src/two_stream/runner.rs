@@ -5,13 +5,22 @@
 
 use std::sync::Arc;
 
+use futures::AsyncReadExt as _;
 use futures::StreamExt;
 use libp2p_stream as stream;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 
 use super::event::TwoStreamEvent;
 use super::handler::{PendingResponses, TwoStreamHandler};
+use crate::two_stream::{MAX_MSG_SIZE, STREAM_READ_TIMEOUT};
+
+/// Maximum number of concurrently active stream handler tasks.
+///
+/// Caps the number of tokio tasks spawned from incoming streams.
+/// Without this, a peer opening many streams rapidly can exhaust memory
+/// and thread-pool capacity via unbounded task creation.
+const MAX_CONCURRENT_STREAM_TASKS: usize = 64;
 
 /// Runner that accepts incoming streams and emits events.
 ///
@@ -35,6 +44,8 @@ pub struct TwoStreamRunner {
     car_response_streams: stream::IncomingStreams,
     /// Channel to send events.
     event_tx: mpsc::Sender<TwoStreamEvent>,
+    /// Bounds the number of concurrently active stream handler tasks.
+    semaphore: Arc<Semaphore>,
 }
 
 impl TwoStreamRunner {
@@ -59,6 +70,7 @@ impl TwoStreamRunner {
             car_request_streams,
             car_response_streams,
             event_tx,
+            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_STREAM_TASKS)),
         }
     }
 
@@ -79,7 +91,9 @@ impl TwoStreamRunner {
                         "Received incoming stream on request protocol"
                     );
                     let event_tx = self.event_tx.clone();
+                    let sem = self.semaphore.clone();
                     tokio::spawn(async move {
+                        let _permit = sem.acquire().await.expect("semaphore closed");
                         match TwoStreamHandler::handle_request_stream(peer_id, stream).await {
                             Ok(event) => {
                                 tracing::info!(peer_id = %peer_id, "Sending TwoStreamEvent to host channel");
@@ -114,7 +128,9 @@ impl TwoStreamRunner {
                     );
                     let pending = self.pending.clone();
                     let event_tx = self.event_tx.clone();
+                    let sem = self.semaphore.clone();
                     tokio::spawn(async move {
+                        let _permit = sem.acquire().await.expect("semaphore closed");
                         match TwoStreamHandler::handle_response_stream(&pending, peer_id, stream).await {
                             Ok(Some(event)) => {
                                 // DocSyncReply events should be forwarded to the coordinator
@@ -143,40 +159,64 @@ impl TwoStreamRunner {
                 }
                 // Handle incoming SE request streams (Rust receiving SE artifacts - log for now)
                 Some((peer_id, mut stream)) = self.se_request_streams.next() => {
+                    let sem = self.semaphore.clone();
                     tokio::spawn(async move {
-                        use futures::AsyncReadExt;
+                        let _permit = sem.acquire().await.expect("semaphore closed");
                         let mut buf = Vec::new();
-                        if let Err(e) = stream.read_to_end(&mut buf).await {
-                            tracing::warn!(peer_id = %peer_id, error = %e, "Failed to read SE request stream");
-                            return;
+                        let read_result = tokio::time::timeout(
+                            STREAM_READ_TIMEOUT,
+                            (&mut stream).take(MAX_MSG_SIZE).read_to_end(&mut buf),
+                        ).await;
+                        match read_result {
+                            Err(_) => {
+                                tracing::warn!(peer_id = %peer_id, "SE request stream read timed out");
+                            }
+                            Ok(Err(e)) => {
+                                tracing::warn!(peer_id = %peer_id, error = %e, "Failed to read SE request stream");
+                            }
+                            Ok(Ok(_)) => {
+                                tracing::info!(
+                                    peer_id = %peer_id,
+                                    buf_len = buf.len(),
+                                    "Received SE request stream (Rust as receiver not yet implemented)"
+                                );
+                            }
                         }
-                        tracing::info!(
-                            peer_id = %peer_id,
-                            buf_len = buf.len(),
-                            "Received SE request stream (Rust as receiver not yet implemented)"
-                        );
                     });
                 }
                 // Handle incoming SE response streams (replies to our SE pushes)
                 Some((peer_id, mut stream)) = self.se_response_streams.next() => {
+                    let sem = self.semaphore.clone();
                     tokio::spawn(async move {
-                        use futures::AsyncReadExt;
+                        let _permit = sem.acquire().await.expect("semaphore closed");
                         let mut buf = Vec::new();
-                        if let Err(e) = stream.read_to_end(&mut buf).await {
-                            tracing::warn!(peer_id = %peer_id, error = %e, "Failed to read SE response stream");
-                            return;
+                        let read_result = tokio::time::timeout(
+                            STREAM_READ_TIMEOUT,
+                            (&mut stream).take(MAX_MSG_SIZE).read_to_end(&mut buf),
+                        ).await;
+                        match read_result {
+                            Err(_) => {
+                                tracing::warn!(peer_id = %peer_id, "SE response stream read timed out");
+                            }
+                            Ok(Err(e)) => {
+                                tracing::warn!(peer_id = %peer_id, error = %e, "Failed to read SE response stream");
+                            }
+                            Ok(Ok(_)) => {
+                                tracing::debug!(
+                                    peer_id = %peer_id,
+                                    buf_len = buf.len(),
+                                    "Received SE response (acknowledgement)"
+                                );
+                            }
                         }
-                        tracing::debug!(
-                            peer_id = %peer_id,
-                            buf_len = buf.len(),
-                            "Received SE response (acknowledgement)"
-                        );
                     });
                 }
                 // Handle incoming CAR request streams
                 Some((peer_id, stream)) = self.car_request_streams.next() => {
                     let event_tx = self.event_tx.clone();
+                    let sem = self.semaphore.clone();
                     tokio::spawn(async move {
+                        let _permit = sem.acquire().await.expect("semaphore closed");
                         match TwoStreamHandler::handle_car_request_stream(peer_id, stream).await {
                             Ok(event) => {
                                 if event_tx.send(event).await.is_err() {
@@ -192,7 +232,9 @@ impl TwoStreamRunner {
                 // Handle incoming CAR response streams
                 Some((peer_id, stream)) = self.car_response_streams.next() => {
                     let event_tx = self.event_tx.clone();
+                    let sem = self.semaphore.clone();
                     tokio::spawn(async move {
+                        let _permit = sem.acquire().await.expect("semaphore closed");
                         match TwoStreamHandler::handle_car_response_stream(peer_id, stream).await {
                             Ok(event) => {
                                 if event_tx.send(event).await.is_err() {

@@ -74,7 +74,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         payload: &defra_core::block::CompositeDeltaPayload,
         metadata: &BlockMetadata<'_>,
         from_collection: bool,
+        depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
+        if depth >= super::MAX_MERGE_DEPTH {
+            return Err(MergeError::depth_exceeded(cid, depth));
+        }
+
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
 
         tracing::info!(
@@ -154,6 +159,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         head_payload,
                         metadata,
                         from_collection,
+                        depth + 1,
                     ))
                     .await;
                 }
@@ -737,7 +743,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         from_collection: bool,
         batch_merged: &std::sync::Mutex<HashSet<Cid>>,
         pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
+        depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
+        if depth >= super::MAX_MERGE_DEPTH {
+            return Err(MergeError::depth_exceeded(cid, depth));
+        }
+
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
 
         tracing::info!(
@@ -785,6 +796,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         from_collection,
                         batch_merged,
                         pending_events,
+                        depth + 1,
                     ))
                     .await;
                 }

@@ -30,6 +30,7 @@ use std::time::Duration;
 
 use iroh_bitswap::{Bitswap, BitswapEvent, Config as BitswapConfig, Store};
 use libp2p::{
+    connection_limits::{self, ConnectionLimits},
     gossipsub::{self, MessageAuthenticity, MessageId, ValidationMode},
     identify,
     kad::{self, store::MemoryStore, Mode},
@@ -76,6 +77,11 @@ pub struct DefraBehaviour<S: Store> {
     /// Raw stream protocol for Go two-stream compatibility.
     /// Go's DefraDB uses separate streams for request and response.
     pub stream: stream::Behaviour,
+
+    /// Connection limits to prevent resource exhaustion from too many peers.
+    /// Watermarks match Go DefraDB's defaults: 100 pending/established inbound,
+    /// 400 established outbound, 4 streams per peer.
+    pub connection_limits: connection_limits::Behaviour,
 }
 
 /// Events emitted by the DefraDB network behaviour.
@@ -141,6 +147,14 @@ impl From<()> for DefraEvent {
         // stream::Behaviour emits () events which we ignore
         // Stream handling happens through Control, not events
         unreachable!("stream::Behaviour should not emit events")
+    }
+}
+
+impl From<void::Void> for DefraEvent {
+    fn from(v: void::Void) -> Self {
+        // connection_limits::Behaviour emits Void — it never actually fires events,
+        // it only enforces limits by refusing connections at the transport layer.
+        void::unreachable(v)
     }
 }
 
@@ -237,6 +251,15 @@ impl<S: Store> DefraBehaviour<S> {
         // Configure stream behaviour for Go two-stream compatibility
         let stream = stream::Behaviour::new();
 
+        // Configure connection limits — matches Go DefraDB watermarks
+        let limits = ConnectionLimits::default()
+            .with_max_pending_incoming(Some(100))
+            .with_max_pending_outgoing(Some(100))
+            .with_max_established_incoming(Some(100))
+            .with_max_established_outgoing(Some(400))
+            .with_max_established_per_peer(Some(4));
+        let connection_limits = connection_limits::Behaviour::new(limits);
+
         Ok(Self {
             identify,
             kademlia,
@@ -245,6 +268,7 @@ impl<S: Store> DefraBehaviour<S> {
             gossipsub,
             relay: Toggle::from(None),
             stream,
+            connection_limits,
         })
     }
 
@@ -323,6 +347,15 @@ impl<S: Store> DefraBehaviour<S> {
         // Configure stream behaviour for Go two-stream compatibility
         let stream = stream::Behaviour::new();
 
+        // Configure connection limits — matches Go DefraDB watermarks
+        let limits = ConnectionLimits::default()
+            .with_max_pending_incoming(Some(100))
+            .with_max_pending_outgoing(Some(100))
+            .with_max_established_incoming(Some(100))
+            .with_max_established_outgoing(Some(400))
+            .with_max_established_per_peer(Some(4));
+        let connection_limits = connection_limits::Behaviour::new(limits);
+
         Ok(Self {
             identify,
             kademlia,
@@ -331,6 +364,7 @@ impl<S: Store> DefraBehaviour<S> {
             gossipsub,
             relay: Toggle::from(None),
             stream,
+            connection_limits,
         })
     }
 

@@ -11,6 +11,18 @@ mod event;
 mod handler;
 mod runner;
 
+/// Maximum size of a protocol message (request/response). 16 MiB.
+/// Prevents unbounded memory growth from malicious or misbehaving peers.
+pub(crate) const MAX_MSG_SIZE: u64 = 16 * 1024 * 1024;
+
+/// Maximum size of a CAR file response. 64 MiB.
+/// CAR files carry full DAG subgraphs and legitimately exceed the message limit.
+pub(crate) const MAX_CAR_SIZE: u64 = 64 * 1024 * 1024;
+
+/// Read timeout for incoming streams. Guards against Slowloris-style attacks
+/// where an attacker holds a stream open without sending data.
+pub(crate) const STREAM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub use event::TwoStreamEvent;
 pub use handler::TwoStreamHandler;
 pub use runner::TwoStreamRunner;

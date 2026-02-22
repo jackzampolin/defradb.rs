@@ -217,6 +217,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     false,
                     batch_merged,
                     pending_events,
+                    0,
                 )
                 .await
             }
@@ -230,6 +231,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     metadata,
                     batch_merged,
                     pending_events,
+                    0,
                 )
                 .await
             }

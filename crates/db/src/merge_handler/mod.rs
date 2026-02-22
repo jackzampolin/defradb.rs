@@ -37,6 +37,13 @@ use crate::database::DB;
 use crate::error::Error;
 use crate::index_manager::IndexManager;
 
+/// Maximum DAG recursion depth for merge operations.
+///
+/// Prevents stack overflow from a malicious or corrupt DAG with deeply nested heads.
+/// Recursive async functions allocate a stack frame per level; 1024 is sufficient for
+/// legitimate replication chains while remaining well within typical stack limits.
+pub(crate) const MAX_MERGE_DEPTH: usize = 1024;
+
 /// Encode a priority value as a varint (matches Go's binary.PutUvarint).
 pub(crate) fn encode_priority_varint(priority: u64) -> Vec<u8> {
     let mut buf = Vec::with_capacity(10);
@@ -75,6 +82,24 @@ pub enum MergeError {
     /// Storage error.
     #[error("storage error: {0}")]
     Storage(String),
+
+    /// DAG recursion depth limit exceeded.
+    ///
+    /// A maliciously crafted deeply-nested DAG could otherwise cause a stack overflow.
+    #[error("DAG merge depth limit exceeded at cid={cid} depth={depth}")]
+    DepthExceeded {
+        /// CID that triggered the depth check.
+        cid: Cid,
+        /// Depth at which the limit was hit.
+        depth: usize,
+    },
+}
+
+impl MergeError {
+    /// Construct a `DepthExceeded` error.
+    pub(crate) fn depth_exceeded(cid: &Cid, depth: usize) -> Self {
+        MergeError::DepthExceeded { cid: *cid, depth }
+    }
 }
 
 /// Result of processing an LWW delta, including whether it was applied
@@ -409,11 +434,11 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                 self.process_counter_delta(cid, payload, &metadata).await
             }
             CrdtDelta::Composite(payload) => {
-                self.process_composite_delta(cid, &block, payload, &metadata, false)
+                self.process_composite_delta(cid, &block, payload, &metadata, false, 0)
                     .await
             }
             CrdtDelta::Collection(payload) => {
-                self.process_collection_delta(cid, &block, payload, &metadata)
+                self.process_collection_delta(cid, &block, payload, &metadata, 0)
                     .await
             }
             CrdtDelta::FieldDefinition(_) => {

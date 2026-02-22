@@ -1,18 +1,26 @@
 //! CAR stream protocol handler methods.
 
 use cid::Cid;
+use futures::AsyncReadExt;
 use libp2p::PeerId;
 use libp2p::Stream;
 
 use crate::error::{Error, Result};
 use crate::two_stream::event::TwoStreamEvent;
+use crate::two_stream::{MAX_CAR_SIZE, STREAM_READ_TIMEOUT};
 
 use super::TwoStreamHandler;
 
 async fn read_stream(stream: &mut Stream) -> std::io::Result<Vec<u8>> {
-    use futures::AsyncReadExt;
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await?;
+    tokio::time::timeout(
+        STREAM_READ_TIMEOUT,
+        stream.take(MAX_CAR_SIZE).read_to_end(&mut buf),
+    )
+    .await
+    .map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "CAR stream read timed out")
+    })??;
     Ok(buf)
 }
 

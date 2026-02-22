@@ -55,6 +55,9 @@ unsigned-varint = "0.8"
 # Synchronization (non-poisoning locks)
 parking_lot = { workspace = true }
 
+# Void type used by libp2p connection-limits behaviour (never emits events)
+void = "1.0.2"
+
 [features]
 default = []
 test-utils = []

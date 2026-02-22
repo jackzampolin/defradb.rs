@@ -16,7 +16,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         block: &Block,
         payload: &defra_core::block::CollectionDeltaPayload,
         metadata: &BlockMetadata<'_>,
+        depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
+        if depth >= super::MAX_MERGE_DEPTH {
+            return Err(MergeError::depth_exceeded(cid, depth));
+        }
+
         tracing::debug!(
             cid = %cid,
             schema_version = %payload.schema_version_id,
@@ -66,6 +71,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         &head_block,
                         head_payload,
                         metadata,
+                        depth + 1,
                     ))
                     .await;
                 }
@@ -138,6 +144,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                 composite_payload,
                                 metadata,
                                 true, // from_collection: skip local collection block creation
+                                depth + 1,
                             )
                             .await
                         {
@@ -258,7 +265,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         metadata: &BlockMetadata<'_>,
         batch_merged: &std::sync::Mutex<HashSet<Cid>>,
         pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
+        depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
+        if depth >= super::MAX_MERGE_DEPTH {
+            return Err(MergeError::depth_exceeded(cid, depth));
+        }
+
         tracing::debug!(
             cid = %cid,
             schema_version = %payload.schema_version_id,
@@ -288,6 +300,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         metadata,
                         batch_merged,
                         pending_events,
+                        depth + 1,
                     ))
                     .await;
                 }
@@ -323,6 +336,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             true,
                             batch_merged,
                             pending_events,
+                            depth + 1,
                         )
                         .await
                     {

@@ -10,6 +10,7 @@ use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogReply,
     PushLogRequest,
 };
+use crate::two_stream::{MAX_MSG_SIZE, STREAM_READ_TIMEOUT};
 
 use super::PendingResponses;
 use crate::two_stream::event::TwoStreamEvent;
@@ -29,9 +30,20 @@ impl TwoStreamHandler {
 
         tracing::info!(peer_id = %peer_id, "Reading message from two-stream request");
 
-        // Read raw bytes from the stream
+        // Read raw bytes from the stream with a size cap and timeout.
+        // The cap prevents OOM from a malicious peer sending unbounded data.
+        // The timeout guards against Slowloris-style stream exhaustion.
         let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await.map_err(|e| {
+        tokio::time::timeout(
+            STREAM_READ_TIMEOUT,
+            (&mut stream).take(MAX_MSG_SIZE).read_to_end(&mut buf),
+        )
+        .await
+        .map_err(|_| {
+            tracing::warn!(peer_id = %peer_id, "Request stream read timed out");
+            Error::CborDeserialization("request stream read timed out".to_string())
+        })?
+        .map_err(|e| {
             tracing::error!(peer_id = %peer_id, error = %e, "Failed to read stream bytes");
             Error::CborDeserialization(format!("failed to read stream: {}", e))
         })?;
@@ -94,12 +106,19 @@ impl TwoStreamHandler {
     ) -> Result<Option<TwoStreamEvent>> {
         use futures::AsyncReadExt;
 
-        // Read raw bytes first to try different message types
+        // Read raw bytes first to try different message types.
+        // Size cap and timeout prevent OOM and Slowloris attacks.
         let mut buf = Vec::new();
-        stream
-            .read_to_end(&mut buf)
-            .await
-            .map_err(|e| Error::CborDeserialization(format!("failed to read response: {}", e)))?;
+        tokio::time::timeout(
+            STREAM_READ_TIMEOUT,
+            (&mut stream).take(MAX_MSG_SIZE).read_to_end(&mut buf),
+        )
+        .await
+        .map_err(|_| {
+            tracing::warn!(peer_id = %peer_id, "Response stream read timed out");
+            Error::CborDeserialization("response stream read timed out".to_string())
+        })?
+        .map_err(|e| Error::CborDeserialization(format!("failed to read response: {}", e)))?;
 
         tracing::trace!(
             peer_id = %peer_id,
