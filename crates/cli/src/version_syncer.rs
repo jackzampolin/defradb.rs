@@ -304,8 +304,10 @@ impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static> VersionSyncer
                 }
             }
 
-            // Process through merge handler with recovery metadata
-            let metadata = p2p::sync::BlockMetadata::recovery();
+            // Process through merge handler as a schema block.
+            // CollectionDefinition blocks are not document-level operations and are
+            // governed by NAC (already checked at the call site), not document ACP.
+            let metadata = p2p::sync::BlockMetadata::schema_sync();
             match self
                 .merge_handler
                 .handle_block(&version_cid, &block_data, metadata)

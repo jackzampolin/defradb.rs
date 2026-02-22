@@ -190,12 +190,15 @@ where
         block_data: &[u8],
         metadata: BlockMetadata<'_>,
     ) -> Result<MergeOutcome, Self::Error> {
-        // During recovery, metadata is unavailable - delegate to inner handler
-        // The inner handler is responsible for extracting metadata from block_data
-        if metadata.is_recovery {
+        // Recovery: metadata unavailable after crash - delegate to inner handler.
+        // Schema blocks: doc-level ACP does not apply (governed by NAC).
+        // In both cases, skip ACP and delegate directly.
+        if metadata.is_recovery || metadata.is_schema_block {
             tracing::debug!(
                 cid = %cid,
-                "Recovery mode: delegating to inner handler without ACP check"
+                is_recovery = metadata.is_recovery,
+                is_schema_block = metadata.is_schema_block,
+                "Skipping ACP check: delegating to inner handler"
             );
             return self
                 .inner

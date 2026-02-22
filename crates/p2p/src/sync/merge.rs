@@ -67,6 +67,11 @@ pub struct BlockMetadata<'a> {
     pub creator: Option<&'a str>,
     /// Whether this is a recovery operation (block was stored but not merged before crash)
     pub is_recovery: bool,
+    /// Whether this is a schema-level block (CollectionDefinition, FieldDefinition).
+    ///
+    /// Schema blocks are governed by node-level access control (NAC) rather than
+    /// document-level ACP. Doc-level permission checks must be skipped for schema blocks.
+    pub is_schema_block: bool,
 }
 
 impl<'a> BlockMetadata<'a> {
@@ -77,16 +82,37 @@ impl<'a> BlockMetadata<'a> {
             collection_id: Some(collection_id),
             creator: Some(creator),
             is_recovery: false,
+            is_schema_block: false,
         }
     }
 
-    /// Create metadata for a recovery operation where metadata is unavailable.
+    /// Create metadata for a schema-level block sync (CollectionDefinition, FieldDefinition).
+    ///
+    /// Schema blocks are fetched via Bitswap during normal P2P schema sync. They are
+    /// controlled by node-level access control (NAC) rather than document-level ACP,
+    /// so doc-level permission checks are skipped.
+    pub fn schema_sync() -> Self {
+        Self {
+            doc_id: None,
+            collection_id: None,
+            creator: None,
+            is_recovery: false,
+            is_schema_block: true,
+        }
+    }
+
+    /// Create metadata for a crash recovery operation where metadata is unavailable.
+    ///
+    /// Only use this during the startup recovery phase when processing blocks that
+    /// were stored but not yet merged before a crash. Do NOT use for normal P2P
+    /// block processing.
     pub fn recovery() -> Self {
         Self {
             doc_id: None,
             collection_id: None,
             creator: None,
             is_recovery: true,
+            is_schema_block: false,
         }
     }
 

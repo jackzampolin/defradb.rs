@@ -261,9 +261,10 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
 
                     tracing::debug!("all linked blocks fetched, processing through merge handler");
 
-                    // Process through merge handler with recovery metadata
-                    // (collection definitions don't have doc_id/collection_id in the traditional sense)
-                    let metadata = p2p::sync::BlockMetadata::recovery();
+                    // Process through merge handler as a schema block.
+                    // CollectionDefinition blocks are not document-level operations and are
+                    // governed by NAC (checked above via check_nac_for_node), not document ACP.
+                    let metadata = p2p::sync::BlockMetadata::schema_sync();
 
                     match p2p.merge_handler.handle_block(&version_cid, &block_data, metadata).await {
                         Ok(outcome) => {
