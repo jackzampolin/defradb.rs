@@ -313,3 +313,50 @@ fn test_rejects_long_key() {
     let result = generate_equality_tag(&key, b"id", "col", "field", b"value");
     assert!(result.is_err(), "Long key should be rejected");
 }
+
+/// Go compatibility test vectors with hardcoded expected output.
+///
+/// These vectors pin the exact byte output of the tag generation algorithm.
+/// If the algorithm changes in a way that breaks Go compatibility, these tests
+/// will catch it.
+///
+/// Algorithm: HMAC-SHA256(key, "eq:<identity>:<collection>:<field>" || value)[:16]
+///
+/// Vector 1: key=zeros[32], identity="", collection="test", field="value", value=b"hello"
+/// Domain separator: "eq::test:value"
+#[test]
+fn test_go_compat_vector_1_zeros_key_empty_identity() {
+    let key = [0u8; 32];
+    let tag = generate_equality_tag_str(&key, "", "test", "value", b"hello").unwrap();
+    assert_eq!(
+        hex::encode(tag),
+        "0ad7f64f62f08513e7932113c857fccc",
+        "Vector 1: zeros key, empty identity, collection=test, field=value, value=hello"
+    );
+}
+
+/// Vector 2: key=[0x42; 32], identity="user123", collection="users_v1", field="age", value=b"21"
+/// Domain separator: "eq:user123:users_v1:age"
+#[test]
+fn test_go_compat_vector_2_user_identity() {
+    let key = [0x42u8; 32];
+    let tag = generate_equality_tag_str(&key, "user123", "users_v1", "age", b"21").unwrap();
+    assert_eq!(
+        hex::encode(tag),
+        "4039c6b6aafb7d570da6b24f81d27f5f",
+        "Vector 2: 0x42 key, identity=user123, collection=users_v1, field=age, value=21"
+    );
+}
+
+/// Vector 3: key=[0x01; 32], identity="", collection="col", field="f", value=b"val"
+/// Domain separator: "eq::col:f"
+#[test]
+fn test_go_compat_vector_3_short_inputs() {
+    let key = [0x01u8; 32];
+    let tag = generate_equality_tag_str(&key, "", "col", "f", b"val").unwrap();
+    assert_eq!(
+        hex::encode(tag),
+        "1f5f9dd6227480f147431ac8eeb80505",
+        "Vector 3: 0x01 key, empty identity, collection=col, field=f, value=val"
+    );
+}

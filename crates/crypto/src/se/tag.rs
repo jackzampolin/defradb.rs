@@ -94,6 +94,12 @@ pub fn generate_equality_tag(
     // Build domain separator as raw bytes: b"eq:" + identity_id + b":" + collection_id + b":" + field_name
     // Go uses string(pubKey.Raw()) which preserves raw bytes; using from_utf8_lossy would
     // replace invalid UTF-8 with U+FFFD, producing different HMAC outputs.
+    //
+    // Known limitation (shared with Go): the `:` delimiter is not escaped, so an
+    // identity containing `:` can collide with a different identity+collection pair.
+    // Example: identity="a:b", collection="", field="c" produces the same separator
+    // as identity="a", collection="b", field="c" → both yield "eq:a:b:c".
+    // This is intentionally kept as-is for byte-for-byte Go compatibility.
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
 
     mac.update(b"eq:");
