@@ -39,4 +39,8 @@ pub enum Error {
     /// Pipeline error during document transformation.
     #[error("pipeline error: {0}")]
     Pipeline(String),
+
+    /// File path not allowed (path traversal or HTTP restriction).
+    #[error("file path not allowed: {0}")]
+    PathNotAllowed(String),
 }

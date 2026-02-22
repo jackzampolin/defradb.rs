@@ -21,6 +21,7 @@ events = { path = "../events" }
 defra-core = { path = "../defra-core" }
 defra-version = { path = "../defra-version" }
 crypto = { path = "../crypto" }
+lens = { path = "../lens", default-features = false }
 
 # Encoding
 hex = "0.4"

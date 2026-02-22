@@ -1,18 +1,50 @@
 //! WASM transform execution using wasmtime.
 //!
 //! Provides the runtime for executing Lens WASM modules.
+//! Resource limits (memory, CPU fuel, epoch interruption) are opt-in via
+//! `WasmSandboxConfig` — by default modules run without restrictions.
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::Path;
-use wasmtime::{AsContext, AsContextMut, Engine, Linker, Module, Store as WasmStore, TypedFunc};
+use wasmtime::{
+    AsContext, AsContextMut, Config, Engine, Linker, Module, Store as WasmStore, StoreLimits,
+    StoreLimitsBuilder, TypedFunc,
+};
 
 use tracing::{info, warn};
 
 use crate::store::{LensDocResultStream, LensDocStream, TransformId, TransformStore};
 use crate::{Error, LensConfig, LensDoc, LensModule, Result};
+
+/// Opt-in resource limits for WASM execution.
+///
+/// All fields are optional. When `None`, the corresponding limit is not applied,
+/// giving the WASM module full access to that resource.
+#[derive(Debug, Clone)]
+pub struct WasmSandboxConfig {
+    /// Maximum memory a single WASM instance may allocate (bytes).
+    pub max_memory_bytes: Option<usize>,
+
+    /// Fuel budget per transform execution (roughly maps to instruction count).
+    pub fuel_budget: Option<u64>,
+
+    /// Epoch deadline ticks before interruption.
+    pub epoch_deadline_ticks: Option<u64>,
+}
+
+impl WasmSandboxConfig {
+    /// Recommended defaults for high-security environments.
+    pub fn restrictive() -> Self {
+        Self {
+            max_memory_bytes: Some(64 * 1024 * 1024), // 64 MiB
+            fuel_budget: Some(1_000_000),
+            epoch_deadline_ticks: Some(2),
+        }
+    }
+}
 
 /// WASM-based transform store.
 ///
@@ -21,6 +53,7 @@ pub struct WasmTransformStore {
     engine: Engine,
     modules: RwLock<HashMap<TransformId, CompiledModule>>,
     configs: RwLock<HashMap<TransformId, LensConfig>>,
+    sandbox: Option<WasmSandboxConfig>,
 }
 
 struct CompiledModule {
@@ -32,13 +65,15 @@ struct CompiledModule {
 struct BatchHostState {
     input_docs: Vec<LensDoc>,
     current_index: usize,
+    limits: Option<StoreLimits>,
 }
 
 impl BatchHostState {
-    fn new(docs: Vec<LensDoc>) -> Self {
+    fn new(docs: Vec<LensDoc>, limits: Option<StoreLimits>) -> Self {
         Self {
             input_docs: docs,
             current_index: 0,
+            limits,
         }
     }
 
@@ -55,21 +90,52 @@ impl BatchHostState {
 
 impl WasmTransformStore {
     /// Create a new WASM transform store.
+    ///
+    /// By default, no resource limits are applied. Pass a `WasmSandboxConfig`
+    /// via `with_sandbox` to enable opt-in resource restrictions.
     pub fn new() -> Result<Self> {
-        let engine = Engine::default();
+        Self::with_sandbox(None)
+    }
+
+    /// Create a WASM transform store with optional sandboxing.
+    pub fn with_sandbox(sandbox: Option<WasmSandboxConfig>) -> Result<Self> {
+        let mut config = Config::new();
+        if let Some(ref sb) = sandbox {
+            if sb.fuel_budget.is_some() {
+                config.consume_fuel(true);
+            }
+            if sb.epoch_deadline_ticks.is_some() {
+                config.epoch_interruption(true);
+            }
+        }
+        let engine = Engine::new(&config)
+            .map_err(|e| Error::WasmLoad(format!("failed to create WASM engine: {}", e)))?;
 
         Ok(Self {
             engine,
             modules: RwLock::new(HashMap::new()),
             configs: RwLock::new(HashMap::new()),
+            sandbox,
+        })
+    }
+
+    /// Build store limits when memory sandboxing is configured.
+    fn store_limits(&self) -> Option<StoreLimits> {
+        self.sandbox.as_ref().and_then(|sb| {
+            sb.max_memory_bytes
+                .map(|max| StoreLimitsBuilder::new().memory_size(max).build())
         })
     }
 
     /// Load a WASM module from the given lens configuration.
+    ///
+    /// When loading from a file path, validates the path to prevent traversal
+    /// attacks. The path must be absolute, must not contain `..` segments,
+    /// and must have a `.wasm` extension.
     fn load_module(&self, lens: &LensModule) -> Result<Module> {
         if let Some(ref path_str) = lens.path {
-            // Strip file:// URL scheme if present (Go sends paths as file:// URLs)
             let clean_path = path_str.strip_prefix("file://").unwrap_or(path_str);
+            Self::validate_wasm_path(clean_path)?;
             let path = Path::new(clean_path);
             Module::from_file(&self.engine, path).map_err(|e| {
                 Error::WasmLoad(format!(
@@ -86,6 +152,36 @@ impl WasmTransformStore {
                 "lens module must have either path or module bytes".to_string(),
             ))
         }
+    }
+
+    /// Validate a WASM module file path to prevent path traversal.
+    fn validate_wasm_path(path_str: &str) -> Result<()> {
+        let path = Path::new(path_str);
+
+        if !path.is_absolute() {
+            return Err(Error::PathNotAllowed(
+                "WASM module path must be absolute".to_string(),
+            ));
+        }
+
+        for component in path.components() {
+            if let std::path::Component::ParentDir = component {
+                return Err(Error::PathNotAllowed(
+                    "WASM module path must not contain '..' segments".to_string(),
+                ));
+            }
+        }
+
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("wasm") => {}
+            _ => {
+                return Err(Error::PathNotAllowed(
+                    "WASM module path must have .wasm extension".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -231,6 +327,8 @@ impl TransformStore for WasmTransformStore {
         );
 
         let engine = self.engine.clone();
+        let limits = self.store_limits();
+        let sandbox = self.sandbox.clone();
         let transform_id_str = id.to_string();
 
         info!(
@@ -246,6 +344,8 @@ impl TransformStore for WasmTransformStore {
                 module: Module,
                 arguments: Option<serde_json::Value>,
                 docs: LensDocStream,
+                limits: Option<StoreLimits>,
+                sandbox: Option<WasmSandboxConfig>,
             },
             Yielding {
                 results: Vec<LensDoc>,
@@ -258,6 +358,8 @@ impl TransformStore for WasmTransformStore {
             module,
             arguments,
             docs,
+            limits,
+            sandbox,
         };
 
         Ok(Box::pin(futures::stream::unfold(initial, |phase| async {
@@ -267,9 +369,13 @@ impl TransformStore for WasmTransformStore {
                     module,
                     arguments,
                     docs,
+                    limits,
+                    sandbox,
                 } => {
                     let input_docs: Vec<LensDoc> = docs.collect().await;
-                    match execute_batch_transform(&engine, &module, input_docs, arguments, false) {
+                    match execute_batch_transform(
+                        &engine, &module, input_docs, arguments, false, limits, &sandbox,
+                    ) {
                         Ok(outputs) => {
                             if outputs.is_empty() {
                                 None
@@ -321,6 +427,8 @@ impl TransformStore for WasmTransformStore {
         drop(modules);
 
         let engine = self.engine.clone();
+        let limits = self.store_limits();
+        let sandbox = self.sandbox.clone();
 
         // Batch mode for inverse transforms (same as forward)
         enum Phase {
@@ -329,6 +437,8 @@ impl TransformStore for WasmTransformStore {
                 module: Module,
                 arguments: Option<serde_json::Value>,
                 docs: LensDocStream,
+                limits: Option<StoreLimits>,
+                sandbox: Option<WasmSandboxConfig>,
             },
             Yielding {
                 results: Vec<LensDoc>,
@@ -341,6 +451,8 @@ impl TransformStore for WasmTransformStore {
             module,
             arguments,
             docs,
+            limits,
+            sandbox,
         };
 
         Ok(Box::pin(futures::stream::unfold(initial, |phase| async {
@@ -350,9 +462,13 @@ impl TransformStore for WasmTransformStore {
                     module,
                     arguments,
                     docs,
+                    limits,
+                    sandbox,
                 } => {
                     let input_docs: Vec<LensDoc> = docs.collect().await;
-                    match execute_batch_transform(&engine, &module, input_docs, arguments, true) {
+                    match execute_batch_transform(
+                        &engine, &module, input_docs, arguments, true, limits, &sandbox,
+                    ) {
                         Ok(outputs) => {
                             if outputs.is_empty() {
                                 None
@@ -411,14 +527,34 @@ impl TransformStore for WasmTransformStore {
 /// and all outputs are collected by calling transform/inverse repeatedly until EOS.
 ///
 /// This supports transforms that change document counts (aggregate N→1, multiply 1→N).
+///
+/// When sandbox config is provided, resource limits (memory, fuel, epoch) are applied.
 fn execute_batch_transform(
     engine: &Engine,
     module: &Module,
     input_docs: Vec<LensDoc>,
     arguments: Option<serde_json::Value>,
     inverse: bool,
+    limits: Option<StoreLimits>,
+    sandbox: &Option<WasmSandboxConfig>,
 ) -> Result<Vec<LensDoc>> {
-    let mut store = WasmStore::new(engine, BatchHostState::new(input_docs));
+    let mut store = WasmStore::new(engine, BatchHostState::new(input_docs, limits));
+
+    // Apply opt-in resource limits
+    if store.data().limits.is_some() {
+        store.limiter(|state| state.limits.as_mut().unwrap());
+    }
+    if let Some(ref sb) = sandbox {
+        if let Some(fuel) = sb.fuel_budget {
+            store
+                .set_fuel(fuel)
+                .map_err(|e| Error::WasmExecution(format!("failed to set fuel: {}", e)))?;
+        }
+        if let Some(ticks) = sb.epoch_deadline_ticks {
+            store.set_epoch_deadline(ticks);
+        }
+    }
+
     let mut linker: Linker<BatchHostState> = Linker::new(engine);
 
     // Add lens::next import that returns docs from the queue one at a time
@@ -649,6 +785,12 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_store_with_sandbox() {
+        let store = WasmTransformStore::with_sandbox(Some(WasmSandboxConfig::restrictive()));
+        assert!(store.is_ok());
+    }
+
+    #[test]
     fn test_invalid_lens_config() {
         let store = WasmTransformStore::new().unwrap();
         let config = LensConfig::new("v1", "v2", LensModule::default());
@@ -656,5 +798,35 @@ mod tests {
         let first_lens = config.lens().cloned().unwrap_or_default();
         let result = store.load_module(&first_lens);
         assert!(matches!(result, Err(Error::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn test_validate_wasm_path_rejects_relative() {
+        let result = WasmTransformStore::validate_wasm_path("relative/path.wasm");
+        assert!(matches!(result, Err(Error::PathNotAllowed(_))));
+    }
+
+    #[test]
+    fn test_validate_wasm_path_rejects_traversal() {
+        let result = WasmTransformStore::validate_wasm_path("/safe/../../etc/passwd.wasm");
+        assert!(matches!(result, Err(Error::PathNotAllowed(_))));
+    }
+
+    #[test]
+    fn test_validate_wasm_path_rejects_non_wasm_extension() {
+        let result = WasmTransformStore::validate_wasm_path("/path/to/module.so");
+        assert!(matches!(result, Err(Error::PathNotAllowed(_))));
+    }
+
+    #[test]
+    fn test_validate_wasm_path_accepts_valid() {
+        let result = WasmTransformStore::validate_wasm_path("/path/to/transform.wasm");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_wasm_path_rejects_no_extension() {
+        let result = WasmTransformStore::validate_wasm_path("/path/to/module");
+        assert!(matches!(result, Err(Error::PathNotAllowed(_))));
     }
 }

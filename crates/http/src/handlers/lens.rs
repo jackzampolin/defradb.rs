@@ -5,6 +5,9 @@
 //! - Reload lens modules
 //!
 //! All endpoints enforce NAC permissions when NAC is enabled.
+//!
+//! Security: File-path-based WASM loading is rejected via HTTP unless
+//! dev_mode is enabled. Only inline module bytes are allowed.
 
 use axum::extract::State;
 use axum::Json;
@@ -55,6 +58,14 @@ pub async fn set_migration(
         return Err(HttpError::BadRequest(
             "lens configuration cannot be empty".into(),
         ));
+    }
+
+    if !state.dev_mode {
+        let config: lens::LensConfig = serde_json::from_str(&body)
+            .map_err(|e| HttpError::BadRequest(format!("invalid lens config JSON: {}", e)))?;
+        config
+            .validate_for_http()
+            .map_err(|e| HttpError::BadRequest(e.to_string()))?;
     }
 
     let lens_id = lens
@@ -115,6 +126,14 @@ pub async fn add_lens(
         .ok_or_else(|| HttpError::BadRequest("missing \"lens\" wrapper".into()))?;
     let config_str = serde_json::to_string(inner)
         .map_err(|e| HttpError::BadRequest(format!("failed to serialize lens config: {}", e)))?;
+
+    if !state.dev_mode {
+        let config: lens::LensConfig = serde_json::from_str(&config_str)
+            .map_err(|e| HttpError::BadRequest(format!("invalid lens config JSON: {}", e)))?;
+        config
+            .validate_for_http()
+            .map_err(|e| HttpError::BadRequest(e.to_string()))?;
+    }
 
     let lens_id = lens.add(&config_str).await.map_err(HttpError::BadRequest)?;
 

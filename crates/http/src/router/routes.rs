@@ -161,8 +161,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/export", post(handlers::backup::export))
         .route(
             "/import",
-            post(handlers::backup::import)
-                .layer(DefaultBodyLimit::max(100 * 1024 * 1024)), // 100MB for large backups
+            post(handlers::backup::import).layer(DefaultBodyLimit::max(100 * 1024 * 1024)), // 100MB for large backups
         );
 
     // Block routes
@@ -223,8 +222,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/schema", get(handlers::schema))
         .route(
             "/schema",
-            post(handlers::schema::add_schema)
-                .layer(DefaultBodyLimit::max(1_048_576)), // 1MB for large SDL schemas
+            post(handlers::schema::add_schema).layer(DefaultBodyLimit::max(1_048_576)), // 1MB for large SDL schemas
         )
         .route("/version", get(handlers::version))
         // Transaction endpoints

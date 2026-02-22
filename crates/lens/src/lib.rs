@@ -19,4 +19,4 @@ pub use history::{build_targeted_history, CollectionHistoryLink, TargetedHistory
 pub use pipeline::{Lens, LensInput};
 pub use store::{MemoryTransformStore, TransformId, TransformStore};
 #[cfg(feature = "wasmtime-runtime")]
-pub use wasm::WasmTransformStore;
+pub use wasm::{WasmSandboxConfig, WasmTransformStore};

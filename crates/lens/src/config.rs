@@ -50,6 +50,16 @@ impl LensConfig {
     pub fn lens(&self) -> Option<&LensModule> {
         self.lenses.first()
     }
+
+    /// Validate that this config is safe to use from an HTTP request.
+    ///
+    /// Rejects any lens module that uses file paths (prevents path traversal).
+    pub fn validate_for_http(&self) -> Result<(), crate::Error> {
+        for lens in &self.lenses {
+            lens.validate_for_http()?;
+        }
+        Ok(())
+    }
 }
 
 /// Configuration for a Lens WASM module.
@@ -106,6 +116,22 @@ impl LensModule {
     pub fn with_arguments(mut self, arguments: serde_json::Value) -> Self {
         self.arguments = Some(arguments);
         self
+    }
+
+    /// Validate that this module is safe to load from an HTTP request.
+    ///
+    /// HTTP requests must not use file paths to load WASM modules (prevents
+    /// path traversal attacks). Only inline module bytes are allowed via HTTP.
+    /// File path loading is permitted only via CLI or when dev_mode is enabled.
+    pub fn validate_for_http(&self) -> Result<(), crate::Error> {
+        if self.path.is_some() {
+            return Err(crate::Error::PathNotAllowed(
+                "file path WASM loading is not allowed via HTTP API; \
+                 use inline module bytes instead"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -203,5 +229,33 @@ mod tests {
         });
         let module = LensModule::from_path("/path/to/transform.wasm").with_arguments(args.clone());
         assert_eq!(module.arguments, Some(args));
+    }
+
+    #[test]
+    fn test_validate_for_http_rejects_file_path() {
+        let module = LensModule::from_path("/path/to/transform.wasm");
+        assert!(module.validate_for_http().is_err());
+    }
+
+    #[test]
+    fn test_validate_for_http_accepts_bytes() {
+        let module = LensModule::from_bytes(vec![0x00, 0x61, 0x73, 0x6d]);
+        assert!(module.validate_for_http().is_ok());
+    }
+
+    #[test]
+    fn test_config_validate_for_http_rejects_file_path() {
+        let config = LensConfig::new("v1", "v2", LensModule::from_path("/path/to/transform.wasm"));
+        assert!(config.validate_for_http().is_err());
+    }
+
+    #[test]
+    fn test_config_validate_for_http_accepts_bytes() {
+        let config = LensConfig::new(
+            "v1",
+            "v2",
+            LensModule::from_bytes(vec![0x00, 0x61, 0x73, 0x6d]),
+        );
+        assert!(config.validate_for_http().is_ok());
     }
 }
