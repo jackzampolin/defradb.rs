@@ -1049,7 +1049,7 @@ async fn test_composite_multi_field_atomicity() {
     let store = MemoryStore::new();
     let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
     composite.register_lww_field("name".to_string());
-    composite.register_counter_field("count".to_string());
+    composite.register_counter_field("count".to_string(), true, NumericKind::Int64);
     let mut txn = store.new_txn(false).await.unwrap();
 
     // Create composite delta with multiple fields

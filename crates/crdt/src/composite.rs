@@ -3,6 +3,7 @@
 //! The Composite CRDT manages document-level state by coordinating
 //! multiple field-level CRDTs (LWW, Counter, etc).
 
+use crate::counter::NumericKind;
 use crate::priority::{decode_priority, encode_priority};
 use crate::traits::{Context, Delta, MergeResult, ReplicatedData};
 use async_trait::async_trait;
@@ -130,7 +131,10 @@ pub struct CompositeDAG {
 #[derive(Debug, Clone)]
 enum FieldCrdtType {
     Lww,
-    Counter,
+    Counter {
+        allow_decrement: bool,
+        kind: NumericKind,
+    },
 }
 
 impl CompositeDAG {
@@ -149,9 +153,19 @@ impl CompositeDAG {
     }
 
     /// Register a field as Counter
-    pub fn register_counter_field(&mut self, field_name: String) {
-        self.field_managers
-            .insert(field_name, FieldCrdtType::Counter);
+    pub fn register_counter_field(
+        &mut self,
+        field_name: String,
+        allow_decrement: bool,
+        kind: NumericKind,
+    ) {
+        self.field_managers.insert(
+            field_name,
+            FieldCrdtType::Counter {
+                allow_decrement,
+                kind,
+            },
+        );
     }
 
     /// Build the value key for a field
@@ -261,7 +275,10 @@ impl CompositeDAG {
                 Ok(MergeResult::Applied)
             }
             (
-                FieldCrdtType::Counter,
+                FieldCrdtType::Counter {
+                    allow_decrement,
+                    kind,
+                },
                 FieldDelta::Counter {
                     priority: _,
                     nonce,
@@ -284,28 +301,6 @@ impl CompositeDAG {
                     return Ok(MergeResult::SkippedAlreadyApplied { nonce: *nonce });
                 }
 
-                // Apply increment
-                let current = if is_create {
-                    0
-                } else {
-                    match rw
-                        .get(&value_key)
-                        .await
-                        .map_err(|e| Error::Storage(e.to_string()))?
-                    {
-                        Some(bytes) => {
-                            if bytes.len() != 8 {
-                                return Err(Error::MergeError(format!(
-                                    "invalid counter data length for field '{}': expected 8 bytes, got {}",
-                                    field_name, bytes.len()
-                                )));
-                            }
-                            i64::from_be_bytes(bytes[..8].try_into().unwrap())
-                        }
-                        None => 0,
-                    }
-                };
-
                 if data.len() != 8 {
                     return Err(Error::MergeError(format!(
                         "invalid counter increment data for field '{}': expected 8 bytes, got {}",
@@ -314,12 +309,91 @@ impl CompositeDAG {
                     )));
                 }
 
-                let increment = i64::from_be_bytes(data[..8].try_into().unwrap());
-                let new_value = current.wrapping_add(increment);
-                rw.set(&value_key, &new_value.to_be_bytes())
+                // Dispatch on numeric kind, enforcing allow_decrement for each type.
+                // Nonce is marked FIRST, then value updated — matching standalone Counter
+                // crash-recovery semantics (under-count on crash is safer than double-count).
+                let new_value_bytes: Vec<u8> = match kind {
+                    NumericKind::Int64 => {
+                        let increment = i64::from_be_bytes(data[..8].try_into().unwrap());
+                        if !allow_decrement && increment < 0 {
+                            return Err(Error::MergeError("decrement not allowed".into()));
+                        }
+                        let current: i64 = if is_create {
+                            0
+                        } else {
+                            match rw
+                                .get(&value_key)
+                                .await
+                                .map_err(|e| Error::Storage(e.to_string()))?
+                            {
+                                Some(bytes) => {
+                                    if bytes.len() != 8 {
+                                        return Err(Error::MergeError(format!(
+                                            "invalid counter data length for field '{}': expected 8 bytes, got {}",
+                                            field_name, bytes.len()
+                                        )));
+                                    }
+                                    i64::from_be_bytes(bytes[..8].try_into().unwrap())
+                                }
+                                None => 0,
+                            }
+                        };
+                        current.wrapping_add(increment).to_be_bytes().to_vec()
+                    }
+                    NumericKind::Float64 => {
+                        let increment = f64::from_be_bytes(data[..8].try_into().unwrap());
+                        if !increment.is_finite() {
+                            return Err(Error::MergeError(format!(
+                                "invalid float64 increment for field '{}': {}",
+                                field_name, increment
+                            )));
+                        }
+                        if !allow_decrement && increment < 0.0 {
+                            return Err(Error::MergeError("decrement not allowed".into()));
+                        }
+                        let current: f64 = if is_create {
+                            0.0
+                        } else {
+                            match rw
+                                .get(&value_key)
+                                .await
+                                .map_err(|e| Error::Storage(e.to_string()))?
+                            {
+                                Some(bytes) => {
+                                    if bytes.len() != 8 {
+                                        return Err(Error::MergeError(format!(
+                                            "invalid counter data length for field '{}': expected 8 bytes, got {}",
+                                            field_name, bytes.len()
+                                        )));
+                                    }
+                                    f64::from_be_bytes(bytes[..8].try_into().unwrap())
+                                }
+                                None => 0.0,
+                            }
+                        };
+                        if !current.is_finite() {
+                            return Err(Error::MergeError(format!(
+                                "invalid float64 current value for field '{}': {}",
+                                field_name, current
+                            )));
+                        }
+                        let result = current + increment;
+                        if !result.is_finite() {
+                            return Err(Error::MergeError(format!(
+                                "float64 overflow for field '{}': {} + {} = {}",
+                                field_name, current, increment, result
+                            )));
+                        }
+                        result.to_be_bytes().to_vec()
+                    }
+                };
+
+                // Mark nonce FIRST to prevent double-counting on crash recovery
+                rw.set(&nonce_key, &[1])
                     .await
                     .map_err(|e| Error::Storage(e.to_string()))?;
-                rw.set(&nonce_key, &[1])
+                // Then update value
+                rw.set(&value_key, &new_value_bytes)
                     .await
                     .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -415,8 +489,8 @@ impl ReplicatedData for CompositeDAG {
             match (crdt_type, field_delta) {
                 (FieldCrdtType::Lww, FieldDelta::Lww { .. })
                 | (FieldCrdtType::Lww, FieldDelta::Delete { .. })
-                | (FieldCrdtType::Counter, FieldDelta::Counter { .. })
-                | (FieldCrdtType::Counter, FieldDelta::Delete { .. }) => {
+                | (FieldCrdtType::Counter { .. }, FieldDelta::Counter { .. })
+                | (FieldCrdtType::Counter { .. }, FieldDelta::Delete { .. }) => {
                     // Types match
                 }
                 _ => {

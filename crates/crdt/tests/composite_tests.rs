@@ -7,6 +7,7 @@
 //! - Document/schema validation
 
 use crdt::composite::{CompositeDAG, CompositeDelta, FieldDelta};
+use crdt::counter::NumericKind;
 use crdt::traits::{Context, ReplicatedData};
 use defra_core::types::DocId;
 use std::collections::HashMap;
@@ -19,7 +20,7 @@ async fn test_composite_multiple_fields() {
 
     // Register fields
     composite.register_lww_field("name".to_string());
-    composite.register_counter_field("count".to_string());
+    composite.register_counter_field("count".to_string(), true, NumericKind::Int64);
 
     let ctx = Context {
         doc_id: DocId::new("doc1"),
@@ -109,7 +110,7 @@ async fn test_composite_field_type_mismatch_counter_to_lww() {
     let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
 
     // Register field as Counter
-    composite.register_counter_field("count".to_string());
+    composite.register_counter_field("count".to_string(), true, NumericKind::Int64);
 
     let ctx = Context {
         doc_id: DocId::new("doc1"),

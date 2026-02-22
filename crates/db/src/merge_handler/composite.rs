@@ -429,27 +429,29 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                             )
                                             .await
                                         {
-                                            tracing::warn!(
-                                                doc_id = %doc_id_str,
-                                                error = %e,
-                                                "Failed to delete indexes after merge"
-                                            );
+                                            process_error = Some(MergeError::MergeFailed(format!(
+                                                "Failed to delete indexes after merge: {}",
+                                                e
+                                            )));
                                         }
                                     }
                                 }
                             }
 
-                            let deleted_key =
-                                build_deleted_key(collection.collection_id(), &doc_id_str);
-                            if let Err(e) = datastore.set(&deleted_key, &[DELETED_MARKER]).await {
-                                process_error =
-                                    Some(MergeError::Database(crate::error::Error::Storage(e)));
-                            } else {
-                                tracing::info!(
-                                    doc_id = %doc_id_str,
-                                    collection = %collection.name(),
-                                    "Deletion marker set after P2P merge"
-                                );
+                            if process_error.is_none() {
+                                let deleted_key =
+                                    build_deleted_key(collection.collection_id(), &doc_id_str);
+                                if let Err(e) = datastore.set(&deleted_key, &[DELETED_MARKER]).await
+                                {
+                                    process_error =
+                                        Some(MergeError::Database(crate::error::Error::Storage(e)));
+                                } else {
+                                    tracing::info!(
+                                        doc_id = %doc_id_str,
+                                        collection = %collection.name(),
+                                        "Deletion marker set after P2P merge"
+                                    );
+                                }
                             }
                         } else if !field_values.is_empty() {
                             // Store the reconstructed document within the same transaction.
@@ -505,7 +507,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                     {
                                         process_error = Some(MergeError::Database(e));
                                     } else {
-                                        // Update indexes for the merged document
+                                        // Update indexes for the merged document.
+                                        // Index failure blocks the transaction — index and document
+                                        // storage must remain consistent.
                                         let short_id =
                                             collection_short_id(collection.collection_id());
                                         if let Ok(index_manager) = IndexManager::from_collection(
@@ -534,21 +538,23 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                                 }
                                             };
                                             if let Err(e) = index_result {
-                                                tracing::warn!(
-                                                    doc_id = %doc_id_str,
-                                                    error = %e,
-                                                    "Failed to update indexes after merge"
-                                                );
+                                                process_error =
+                                                    Some(MergeError::MergeFailed(format!(
+                                                        "Failed to update indexes after merge: {}",
+                                                        e
+                                                    )));
                                             }
                                         }
 
-                                        tracing::info!(
-                                            doc_id = %doc_id_str,
-                                            collection = %collection.name(),
-                                            fields_count = field_values.len(),
-                                            any_applied = any_field_applied,
-                                            "Document stored for queries"
-                                        );
+                                        if process_error.is_none() {
+                                            tracing::info!(
+                                                doc_id = %doc_id_str,
+                                                collection = %collection.name(),
+                                                fields_count = field_values.len(),
+                                                any_applied = any_field_applied,
+                                                "Document stored for queries"
+                                            );
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -982,22 +988,31 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                     if let Ok(index_manager) =
                                         IndexManager::from_collection(short_id, collection.schema())
                                     {
-                                        let _ = index_manager
+                                        if let Err(e) = index_manager
                                             .on_document_delete(
                                                 &datastore,
                                                 &old_doc,
                                                 collection.schema(),
                                             )
-                                            .await;
+                                            .await
+                                        {
+                                            process_error = Some(MergeError::MergeFailed(format!(
+                                                "Failed to delete indexes after batch merge: {}",
+                                                e
+                                            )));
+                                        }
                                     }
                                 }
                             }
 
-                            let deleted_key =
-                                build_deleted_key(collection.collection_id(), &doc_id_str);
-                            if let Err(e) = datastore.set(&deleted_key, &[DELETED_MARKER]).await {
-                                process_error =
-                                    Some(MergeError::Database(crate::error::Error::Storage(e)));
+                            if process_error.is_none() {
+                                let deleted_key =
+                                    build_deleted_key(collection.collection_id(), &doc_id_str);
+                                if let Err(e) = datastore.set(&deleted_key, &[DELETED_MARKER]).await
+                                {
+                                    process_error =
+                                        Some(MergeError::Database(crate::error::Error::Storage(e)));
+                                }
                             }
                         } else if !field_values.is_empty() {
                             match DocID::from_string(&doc_id_str) {
@@ -1041,6 +1056,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                     {
                                         process_error = Some(MergeError::Database(e));
                                     } else {
+                                        // Index failure blocks the transaction — index and document
+                                        // storage must remain consistent.
                                         let short_id =
                                             collection_short_id(collection.collection_id());
                                         if let Ok(index_manager) = IndexManager::from_collection(
@@ -1069,11 +1086,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                                 }
                                             };
                                             if let Err(e) = index_result {
-                                                tracing::warn!(
-                                                    doc_id = %doc_id_str,
-                                                    error = %e,
-                                                    "Failed to update indexes after batch merge"
-                                                );
+                                                process_error = Some(MergeError::MergeFailed(
+                                                    format!("Failed to update indexes after batch merge: {}", e),
+                                                ));
                                             }
                                         }
                                     }
