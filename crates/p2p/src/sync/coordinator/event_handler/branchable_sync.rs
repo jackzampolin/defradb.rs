@@ -20,6 +20,8 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             "Received BranchableSync request"
         );
 
+        self.check_access(&peer_id, &request.collection_id)?;
+
         let heads = match self
             .head_provider
             .get_collection_heads(&request.collection_id)

@@ -50,6 +50,7 @@ impl TwoStreamHandler {
 
         // Try to deserialize as PushLogRequest first
         if let Ok(request) = serde_cbor::from_slice::<PushLogRequest>(&buf) {
+            crate::verify_message(&request)?;
             tracing::info!(
                 peer_id = %peer_id,
                 message_id = %request.metadata.message_id,
@@ -61,6 +62,7 @@ impl TwoStreamHandler {
 
         // Try to deserialize as DocSyncRequest
         if let Ok(request) = serde_cbor::from_slice::<DocSyncRequest>(&buf) {
+            crate::verify_message(&request)?;
             tracing::info!(
                 peer_id = %peer_id,
                 message_id = %request.metadata.message_id,
@@ -72,6 +74,7 @@ impl TwoStreamHandler {
 
         // Try to deserialize as BranchableSyncRequest
         if let Ok(request) = serde_cbor::from_slice::<BranchableSyncRequest>(&buf) {
+            crate::verify_message(&request)?;
             tracing::info!(
                 peer_id = %peer_id,
                 message_id = %request.metadata.message_id,
@@ -130,6 +133,7 @@ impl TwoStreamHandler {
         // Must come before DocSyncReply since serde_cbor ignores unknown fields.
         match serde_cbor::from_slice::<BranchableSyncReply>(&buf) {
             Ok(reply) if !reply.collection_id.is_empty() => {
+                crate::verify_message(&reply)?;
                 tracing::debug!(
                     peer_id = %peer_id,
                     message_id = %reply.message_id,
@@ -154,6 +158,7 @@ impl TwoStreamHandler {
         // (serde_cbor ignores unknown fields), which would silently drop the
         // Results field and misroute the message.
         if let Ok(reply) = serde_cbor::from_slice::<DocSyncReply>(&buf) {
+            crate::verify_message(&reply)?;
             let message_id = reply.message_id.clone();
 
             // Check if there's a pending PushLog channel for this message_id.
@@ -194,6 +199,7 @@ impl TwoStreamHandler {
 
         // Fallback: try PushLogReply in case the message doesn't parse as DocSyncReply
         if let Ok(response) = serde_cbor::from_slice::<PushLogReply>(&buf) {
+            crate::verify_message(&response)?;
             let message_id = response.message_id.clone();
 
             tracing::debug!(

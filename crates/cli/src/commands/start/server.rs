@@ -159,11 +159,18 @@ impl Node {
                 let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
                     Arc::new(p2p::sync::P2PCollectionStore::new(store_for_sync));
 
+                let access_mode = if config.acp.document_type != AcpDocumentType::None {
+                    p2p::bitswap::AccessMode::Controlled
+                } else {
+                    p2p::bitswap::AccessMode::Open
+                };
+
                 let (mut coordinator, sync_events) =
                     p2p::sync::SyncCoordinator::with_collection_store(
                         p2p_handle.clone(),
                         sync_blockstore,
                         p2p::sync::SyncConfig::default(),
+                        access_mode,
                         collection_store,
                     )
                     .await

@@ -15,6 +15,8 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         peer_id: PeerId,
         root_cid: Cid,
     ) -> Result<()> {
+        self.check_peer_is_replicator(&peer_id)?;
+
         let blocks = collect_dag_blocks(self.manager.blockstore().as_ref(), &root_cid).await?;
 
         if blocks.is_empty() {

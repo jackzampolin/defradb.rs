@@ -42,6 +42,30 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         })
     }
 
+    /// Check if a peer is authorized as a replicator for any collection.
+    ///
+    /// Used by handlers (e.g. DocSync) that lack collection context.
+    /// In Open mode, all peers are allowed. In Controlled mode, the peer
+    /// must be a replicator for at least one collection.
+    pub(super) fn check_peer_is_replicator(&self, peer_id: &PeerId) -> Result<()> {
+        if self.access_mode.is_open() {
+            return Ok(());
+        }
+
+        if self.replicators.is_any_replicator(peer_id) {
+            return Ok(());
+        }
+
+        tracing::warn!(
+            peer_id = %peer_id,
+            "Access denied: peer is not a replicator for any collection"
+        );
+        Err(Error::AccessDenied {
+            peer_id: peer_id.to_string(),
+            collection_id: "(any)".to_string(),
+        })
+    }
+
     /// Get the current access mode.
     pub fn access_mode(&self) -> AccessMode {
         self.access_mode

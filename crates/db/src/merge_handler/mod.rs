@@ -345,6 +345,140 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     }
 }
 
+impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
+    /// Verify block signature and creator identity for P2P blocks.
+    ///
+    /// Warns on unsigned blocks or creator/signer mismatches. This is a
+    /// non-blocking check: verification failures are logged but do not
+    /// reject the block, preserving CRDT convergence. Full enforcement
+    /// will gate merges once all peers reliably sign blocks.
+    async fn verify_block_signature(
+        &self,
+        cid: &Cid,
+        block: &Block,
+        _block_data: &[u8],
+        metadata: &BlockMetadata<'_>,
+    ) {
+        let sig_cid = match &block.signature {
+            Some(sig_cid) => sig_cid,
+            None => {
+                tracing::warn!(
+                    cid = %cid,
+                    creator = ?metadata.creator,
+                    "P2P block has no signature — cannot verify authenticity"
+                );
+                return;
+            }
+        };
+
+        let sig_data = match self.blockstore.get(sig_cid).await {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                tracing::warn!(
+                    cid = %cid,
+                    sig_cid = %sig_cid,
+                    "Signature block not found in blockstore"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    cid = %cid,
+                    sig_cid = %sig_cid,
+                    error = %e,
+                    "Failed to load signature block"
+                );
+                return;
+            }
+        };
+
+        let signature = match defra_core::block::Signature::from_dag_cbor(&sig_data) {
+            Ok(sig) => sig,
+            Err(e) => {
+                tracing::warn!(
+                    cid = %cid,
+                    sig_cid = %sig_cid,
+                    error = %e,
+                    "Failed to decode signature block"
+                );
+                return;
+            }
+        };
+
+        let sig_identity = String::from_utf8_lossy(&signature.header.identity);
+
+        // Verify creator metadata matches signature identity
+        if let Some(creator) = metadata.creator {
+            if !creator.is_empty() && sig_identity.as_ref() != creator {
+                tracing::warn!(
+                    cid = %cid,
+                    metadata_creator = %creator,
+                    signature_identity = %sig_identity,
+                    "P2P block creator does not match signature identity"
+                );
+            }
+        }
+
+        // Verify the signature over the block data (block without signature field)
+        let mut block_to_verify = block.clone();
+        block_to_verify.signature = None;
+        match block_to_verify.to_dag_cbor() {
+            Ok(signed_bytes) => {
+                let sig_type = signature.header.sig_type;
+                let key_type = match sig_type {
+                    defra_core::block::SignatureType::ES256K => crypto::KeyType::Secp256k1,
+                    defra_core::block::SignatureType::ES256 => crypto::KeyType::Secp256r1,
+                    defra_core::block::SignatureType::EdDSA => crypto::KeyType::Ed25519,
+                    defra_core::block::SignatureType::BLS => {
+                        tracing::debug!(
+                            cid = %cid,
+                            "BLS signature verification not yet supported in merge path"
+                        );
+                        return;
+                    }
+                };
+                match crypto::public_key_from_string(key_type, &sig_identity) {
+                    Ok(pub_key) => match pub_key.verify(&signed_bytes, &signature.value) {
+                        Ok(true) => {
+                            tracing::debug!(
+                                cid = %cid,
+                                "Block signature verified successfully"
+                            );
+                        }
+                        Ok(false) => {
+                            tracing::warn!(
+                                cid = %cid,
+                                "Block signature verification FAILED — block may be tampered"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                cid = %cid,
+                                error = %e,
+                                "Block signature verification error"
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(
+                            cid = %cid,
+                            error = %e,
+                            "Failed to parse public key from signature identity"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    cid = %cid,
+                    error = %e,
+                    "Failed to serialize block for signature verification"
+                );
+            }
+        }
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> MergeHandler
@@ -376,6 +510,12 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
             links_count = block.links.as_ref().map(|l| l.len()).unwrap_or(0),
             "Block decoded successfully"
         );
+
+        // Verify block signature for P2P blocks (skip during recovery)
+        if !metadata.is_recovery {
+            self.verify_block_signature(cid, &block, block_data, &metadata)
+                .await;
+        }
 
         // Decrypt delta data if the block has encryption
         let decrypted_block;

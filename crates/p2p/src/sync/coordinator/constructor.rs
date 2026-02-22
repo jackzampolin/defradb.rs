@@ -48,6 +48,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// * `host` - Handle to the P2P host
     /// * `blockstore` - Shared blockstore for storing blocks
     /// * `config` - Sync configuration
+    /// * `access_mode` - Access control mode (Open or Controlled)
     /// * `collection_store` - Persistent storage for P2P collection subscriptions
     ///
     /// This constructor enables persistent storage for P2P collection subscriptions.
@@ -56,13 +57,14 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         host: P2PHostHandle,
         blockstore: Arc<B>,
         config: SyncConfig,
+        access_mode: AccessMode,
         collection_store: Arc<dyn P2PCollectionStorage>,
     ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
         Self::with_access_control(
             host,
             blockstore,
             config,
-            AccessMode::Open,
+            access_mode,
             Arc::new(ReplicatorRegistry::new()),
             collection_store,
         )

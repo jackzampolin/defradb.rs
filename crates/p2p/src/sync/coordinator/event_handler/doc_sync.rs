@@ -21,6 +21,8 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             "Received DocSync request"
         );
 
+        self.check_peer_is_replicator(&peer_id)?;
+
         let mut results: Vec<DocSyncItem> = Vec::new();
         for doc_id in &request.doc_ids {
             tracing::trace!(doc_id = %doc_id, "Looking up heads for document");
