@@ -1,5 +1,6 @@
 //! Core query routing and encrypted search.
 
+use acp::{DocumentACP, DocumentPermission, Identity};
 use identity::Did;
 use serde_json::{Map, Value as JsonValue};
 
@@ -21,7 +22,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<JsonValue> {
         // Handle encrypted search queries (encrypted_<Collection>)
         if select.is_encrypted {
-            return self.execute_encrypted_select(select, fetcher).await;
+            return self
+                .execute_encrypted_select(select, fetcher, caller_identity)
+                .await;
         }
 
         // Handle _commits system collection specially
@@ -297,11 +300,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Execute an encrypted search query (`encrypted_<Collection>`).
     ///
     /// Validates encrypted index exists, then fetches documents, applies _eq filter
-    /// conditions, and returns Go-compatible `[{"docIDs": [...]}]` format.
+    /// conditions, filters through ACP, and returns Go-compatible `[{"docIDs": [...]}]` format.
     async fn execute_encrypted_select(
         &self,
         select: &Select,
         fetcher: &dyn DocFetcher,
+        caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
         // Get collection to check for encrypted indexes
         let collection = self.get_collection(&select.collection_name).await?;
@@ -351,6 +355,55 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .collect()
         };
 
-        Ok(serde_json::json!([{"docIDs": matching_ids}]))
+        // Apply ACP filtering: remove document IDs the caller cannot read.
+        let filtered_ids =
+            Self::filter_ids_by_acp(&matching_ids, &self.acp, &collection, caller_identity).await;
+
+        Ok(serde_json::json!([{"docIDs": filtered_ids}]))
+    }
+
+    /// Filter document IDs through ACP, removing those the caller cannot read.
+    ///
+    /// If no ACP is configured or the collection has no policy, all IDs pass through.
+    /// Fail-closed: any ACP check error results in the document being excluded.
+    async fn filter_ids_by_acp(
+        doc_ids: &[String],
+        acp: &Option<std::sync::Arc<dyn DocumentACP>>,
+        collection: &schema::CollectionVersion,
+        caller_identity: Option<Did>,
+    ) -> Vec<String> {
+        let (acp, policy) = match (acp, &collection.policy) {
+            (Some(acp), Some(policy)) => (acp, policy),
+            _ => return doc_ids.to_vec(),
+        };
+
+        let identity = Identity::from(caller_identity);
+        let mut allowed = Vec::with_capacity(doc_ids.len());
+
+        for doc_id in doc_ids {
+            let has_access = acp
+                .check_doc_access(
+                    &identity,
+                    DocumentPermission::Read,
+                    &policy.id,
+                    &policy.resource_name,
+                    doc_id,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        doc_id = %doc_id,
+                        error = %e,
+                        "ACP check failed for encrypted search result, denying access"
+                    );
+                    false
+                });
+
+            if has_access {
+                allowed.push(doc_id.clone());
+            }
+        }
+
+        allowed
     }
 }

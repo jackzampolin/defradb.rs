@@ -6,6 +6,7 @@ mod filter_prep;
 mod groupby;
 mod index_methods;
 mod scan_setup;
+pub(crate) mod se_detection;
 
 #[cfg(test)]
 mod tests;
@@ -21,7 +22,7 @@ use tracing::{debug, instrument};
 use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
 use crate::mapper::{Requestable, Select};
-use crate::plan::{IndexScanNode, PermissionFilterNode, ScanNode, SelectNode};
+use crate::plan::{IndexScanNode, PermissionFilterNode, SEFilterNode, ScanNode, SelectNode};
 use crate::planner::index_selection::IndexScanParams;
 use crate::planner::PlanNode;
 
@@ -301,6 +302,22 @@ impl Planner {
             }
             Box::new(scan)
         };
+
+        // 1b. Detect encrypted-indexed fields in filter and wrap with SEFilterNode.
+        // This enables the planner to recognize SE indexes and route equality filters
+        // through tag-based matching instead of plaintext comparison on remote nodes.
+        if let Some(ref filter) = select.filter {
+            let se_conditions =
+                se_detection::detect_se_filter_conditions(filter, &collection, &scan_mapping);
+            if !se_conditions.is_empty() {
+                debug!(
+                    collection = %select.collection_name,
+                    encrypted_fields = se_conditions.len(),
+                    "Detected encrypted-indexed fields in filter, adding SEFilterNode"
+                );
+                plan = Box::new(SEFilterNode::new(plan, se_conditions));
+            }
+        }
 
         // 2. Apply join nodes BEFORE SelectNode (matches Go DefraDB plan construction order).
         // TypeJoin nodes wrap the raw ScanNode, and SelectNode wraps the join result.
