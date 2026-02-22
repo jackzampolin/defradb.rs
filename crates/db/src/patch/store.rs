@@ -49,6 +49,15 @@ impl<S: Store> crate::database::DB<S> {
         // (e.g., relation field requires relation_name, policy format validation)
         new_schema.validate()?;
 
+        // Block unsafe policy transitions (protected→open, resource name change).
+        // These transitions can silently expose previously protected documents.
+        crate::collection_acp::block_unsafe_policy_transition(
+            actual_name,
+            old_schema.policy.as_ref(),
+            new_schema.policy.as_ref(),
+            false,
+        )?;
+
         // Auto-create unique indexes for one-to-one relations added via patch.
         // This runs AFTER validation (which rejects index mutations on existing schemas)
         // but BEFORE CID generation (since indexes are part of the schema content).

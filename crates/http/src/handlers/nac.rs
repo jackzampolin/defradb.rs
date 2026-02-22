@@ -56,14 +56,34 @@ pub struct AdminResponse {
 ///
 /// Enable NAC with the given owner identity.
 /// Go DefraDB format: `{"OwnerDID": "did:key:..."}`
+///
+/// The caller must authenticate as the owner DID being registered.
+/// This prevents unauthorized parties from hijacking NAC initialization.
 pub async fn enable(
     State(state): State<AppState>,
+    identity: ExtractIdentity,
     Json(body): Json<EnableNacRequest>,
 ) -> Result<impl IntoResponse, HttpError> {
     let nac = state.require_nac()?;
 
     let owner = identity::Did::new(&body.owner_did)
         .map_err(|e| HttpError::BadRequest(format!("invalid OwnerDID: {}", e)))?;
+
+    let caller = identity
+        .did()
+        .cloned()
+        .ok_or_else(|| HttpError::Forbidden("authentication required to enable NAC".into()))?;
+
+    if caller != owner {
+        tracing::warn!(
+            caller = %caller,
+            owner = %owner,
+            "NAC enable rejected: caller identity does not match OwnerDID"
+        );
+        return Err(HttpError::Forbidden(
+            "caller identity must match OwnerDID".into(),
+        ));
+    }
 
     nac.enable(&owner).await.map_err(|e| {
         tracing::warn!(error = %e, "NAC enable operation failed");

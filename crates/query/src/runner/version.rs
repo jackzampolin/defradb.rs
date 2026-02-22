@@ -5,6 +5,7 @@
 //! - `execute_query_with_version()` - Query with version/time-travel support
 //! - `resolve_relation_target_name()` - Resolve relation target collection names
 
+use acp::{DocumentPermission, Identity};
 use identity::Did;
 use schema::CollectionVersion;
 use serde_json::Value as JsonValue;
@@ -24,11 +25,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// CID queries require `cid` argument and optionally `docID` for validation.
     /// For document CIDs, returns a single-element array. For collection CIDs
     /// (branchable collections), returns all documents visible at that state.
+    ///
+    /// ACP filtering is applied after document reconstruction: documents the
+    /// caller lacks read permission for are excluded from results.
     pub(crate) async fn execute_cid_query_with_version(
         &self,
         select: &Select,
         fetcher: &dyn DocFetcher,
-        _caller_identity: Option<Did>,
+        caller_identity: Option<Did>,
         version_selection: Option<&Select>,
     ) -> Result<JsonValue> {
         let cid = select.cid.as_ref().ok_or_else(|| {
@@ -59,6 +63,47 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Get collection schema for building the mapping
         let collection = self.get_collection(&select.collection_name).await?;
+
+        // Apply ACP filtering: check read permission for each reconstructed document.
+        // CID-based time-travel queries must enforce the same ACP rules as regular queries.
+        // Documents the caller lacks read permission for are silently excluded (Go behavior).
+        let documents = if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+            let identity = Identity::from(caller_identity);
+            let mut permitted = Vec::with_capacity(documents.len());
+            for doc in documents {
+                let doc_id = match doc.id() {
+                    Some(id) => id.to_string(),
+                    None => continue,
+                };
+                match acp
+                    .check_doc_access(
+                        &identity,
+                        DocumentPermission::Read,
+                        &policy.id,
+                        &policy.resource_name,
+                        &doc_id,
+                    )
+                    .await
+                {
+                    Ok(true) => permitted.push(doc),
+                    Ok(false) => {
+                        tracing::debug!(
+                            target: "acp::audit",
+                            event = "cid_query_permission_denied",
+                            doc_id = %doc_id,
+                            identity = %identity,
+                            "CID time-travel query: document excluded by ACP"
+                        );
+                    }
+                    Err(e) => {
+                        return Err(QueryError::acp_check_failed("read", doc_id, e.to_string()));
+                    }
+                }
+            }
+            permitted
+        } else {
+            documents
+        };
 
         // Separate nested selects (relation fields) from scalar fields.
         // build_mapping can't handle nested selects, so we strip them and resolve relations separately.

@@ -128,7 +128,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
                         break;
                     }
                     Ok(false) => continue,
-                    Err(_) => continue,
+                    Err(e) => return Err(Error::from(e)),
                 }
             }
             result
