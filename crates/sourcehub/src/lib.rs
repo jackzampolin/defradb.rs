@@ -1,6 +1,8 @@
+mod circuit_breaker;
 mod client;
 mod cosmos;
 mod dac;
+mod policy_cache;
 mod provider;
 mod tx;
 

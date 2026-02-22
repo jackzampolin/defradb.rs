@@ -1,3 +1,7 @@
+/// Aggressive timeout for SourceHub network calls to ensure fail-closed behaviour
+/// when SourceHub is slow or unreachable.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Client for SourceHub ACP gRPC/REST queries and CometBFT tx broadcast.
 ///
 /// Uses the Cosmos LCD REST API for queries (avoids proto compilation)
@@ -7,16 +11,20 @@ pub(crate) struct SourceHubClient {
     grpc_address: String,
     /// CometBFT RPC address for broadcast_tx_sync
     comet_rpc_address: String,
-    /// HTTP client for REST queries
+    /// HTTP client for REST queries (configured with per-request timeout)
     http: reqwest::Client,
 }
 
 impl SourceHubClient {
     pub(crate) fn new(grpc_address: String, comet_rpc_address: String) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap_or_default();
         Self {
             grpc_address,
             comet_rpc_address,
-            http: reqwest::Client::new(),
+            http,
         }
     }
 
@@ -116,14 +124,20 @@ impl SourceHubClient {
         }
         let body: serde_json::Value = resp.json().await?;
 
-        // Check ABCI response code
+        // Check ABCI response code.
+        // Code 0 means success; any other code means the query itself failed
+        // (invalid request, chain error, etc.) — NOT an access denial.
+        // Returning Ok(false) here would fail-open on SourceHub errors.
         let abci_code = body["result"]["response"]["code"].as_u64().unwrap_or(0);
         if abci_code != 0 {
             let log = body["result"]["response"]["log"]
                 .as_str()
                 .unwrap_or("unknown");
-            tracing::debug!(abci_code, log, "verify_access ABCI error");
-            return Ok(false);
+            tracing::warn!(abci_code, log, "verify_access ABCI query failed");
+            return Err(ClientError::QueryFailed(format!(
+                "ABCI code {}: {}",
+                abci_code, log
+            )));
         }
 
         // Decode base64-encoded protobuf response
@@ -272,7 +286,7 @@ pub(crate) struct PolicyInfo {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ClientError {
     #[error("HTTP request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(reqwest::Error),
 
     #[error("query failed: {0}")]
     QueryFailed(String),
@@ -286,8 +300,21 @@ pub(crate) enum ClientError {
     #[error("transaction timeout waiting for hash: {0}")]
     TxTimeout(String),
 
+    #[error("SourceHub unreachable (timeout): {0}")]
+    Timeout(String),
+
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl From<reqwest::Error> for ClientError {
+    fn from(e: reqwest::Error) -> Self {
+        if e.is_timeout() || e.is_connect() {
+            ClientError::Timeout(e.to_string())
+        } else {
+            ClientError::Http(e)
+        }
+    }
 }
 
 // === Protobuf encoding helpers for ABCI queries ===

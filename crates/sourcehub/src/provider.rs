@@ -21,6 +21,11 @@ pub enum ProviderError {
 
     #[error("config error: {0}")]
     Config(String),
+
+    /// SourceHub is temporarily unreachable (circuit breaker open or timeout).
+    /// All access decisions must fail-closed when this is returned.
+    #[error("SourceHub unavailable: {0}")]
+    Unavailable(String),
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

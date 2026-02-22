@@ -57,13 +57,14 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         host: P2PHostHandle,
         blockstore: Arc<B>,
         config: SyncConfig,
+        access_mode: AccessMode,
         collection_store: Arc<dyn P2PCollectionStorage>,
     ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
         Self::with_access_control(
             host,
             blockstore,
             config,
-            AccessMode::Open,
+            access_mode,
             Arc::new(ReplicatorRegistry::new()),
             collection_store,
         )

@@ -39,8 +39,17 @@ impl SourceHubDocumentACP {
     ///
     /// Looks up the identity's signing config from the global store,
     /// creates a JWT with `authorized_account` set to the provider's account.
+    ///
+    /// If no signing config is found for the DID, the identity may have been
+    /// unregistered remotely. A clear warning is logged and access is denied
+    /// rather than proceeding with an invalid or absent identity.
     fn create_bearer_token(&self, did: &str) -> std::result::Result<String, acp::Error> {
         let signing_config = defra_core::signing::get_identity(did).ok_or_else(|| {
+            tracing::warn!(
+                did,
+                "SourceHub bearer token creation failed: no signing config for DID. \
+                 The identity may have been unregistered. Denying access."
+            );
             acp::Error::PermissionDenied(format!("no signing config found for DID: {}", did))
         })?;
 
