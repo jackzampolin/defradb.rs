@@ -79,16 +79,17 @@ pub fn generate_equality_tag(
     field_name: &str,
     value: &[u8],
 ) -> [u8; SEARCH_TAG_SIZE] {
-    // Build domain separator: "eq:<identityID>:<collectionID>:<fieldName>"
-    // Use String::from_utf8_lossy for identity since it may be raw bytes
-    let identity_str = String::from_utf8_lossy(identity_id);
-    let domain_separator = format!("eq:{}:{}:{}", identity_str, collection_id, field_name);
-
-    // Create HMAC-SHA256 instance
+    // Build domain separator as raw bytes: b"eq:" + identity_id + b":" + collection_id + b":" + field_name
+    // Go uses string(pubKey.Raw()) which preserves raw bytes; using from_utf8_lossy would
+    // replace invalid UTF-8 with U+FFFD, producing different HMAC outputs.
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
 
-    // Feed domain separator and value
-    mac.update(domain_separator.as_bytes());
+    mac.update(b"eq:");
+    mac.update(identity_id);
+    mac.update(b":");
+    mac.update(collection_id.as_bytes());
+    mac.update(b":");
+    mac.update(field_name.as_bytes());
     mac.update(value);
 
     // Finalize and truncate to 16 bytes

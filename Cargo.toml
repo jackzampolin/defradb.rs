@@ -64,7 +64,7 @@ fjall = "3"
 rocksdb = "0.22"
 
 # Cryptography
-ed25519-dalek = { version = "2.1", features = ["serde"] }
+ed25519-dalek = { version = "2.1", features = ["serde", "zeroize"] }
 uuid = { version = "1.0", features = ["v4"] }
 k256 = { version = "0.13", features = ["ecdsa", "serde"] }
 sha2 = { version = "0.10", features = ["asm"] }

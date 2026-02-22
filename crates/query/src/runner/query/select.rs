@@ -26,7 +26,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Handle _commits system collection specially
         if select.collection_name == "_commits" {
-            return self.execute_commits_query(select).await;
+            return self.execute_commits_query(select, caller_identity).await;
         }
 
         // Check if _version is selected - it needs special handling since it's commit data

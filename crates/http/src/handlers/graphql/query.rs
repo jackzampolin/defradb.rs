@@ -23,10 +23,11 @@ use query::{parse_request, ParsedOperation};
 
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
+use crate::nac_guard::require_permission;
 use crate::query_context::{
     execute_in_txn_with_context, execute_with_context, execute_with_resolved_context,
 };
-use crate::router::AppState;
+use crate::router::{AppState, NodePermission};
 
 use super::TX_HEADER_NAME;
 
@@ -79,6 +80,29 @@ fn wants_sse(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+/// Determine the NAC permission required for a GraphQL query string.
+///
+/// - Query operations → `DocumentRead`
+/// - Delete mutations → `DocumentDelete`
+/// - Other mutations → `DocumentUpdate`
+/// - Subscriptions → `DocumentRead`
+/// - Introspection → `DocumentRead`
+fn graphql_required_permission(query: &str) -> NodePermission {
+    match parse_request(query) {
+        Ok(ParsedOperation::Mutation { mutations, .. }) => {
+            if mutations
+                .iter()
+                .any(|m| m.mutation_type == query::MutationType::Delete)
+            {
+                NodePermission::DocumentDelete
+            } else {
+                NodePermission::DocumentUpdate
+            }
+        }
+        _ => NodePermission::DocumentRead,
+    }
+}
+
 /// GraphQL POST request handler.
 ///
 /// Accepts JSON body: { query, operationName?, variables? }
@@ -100,6 +124,10 @@ pub async fn graphql(
 ) -> Result<Json<QueryResponse>, HttpError> {
     // Validate encrypted field queries require P2P
     check_encrypted_fields(&state, &request.query)?;
+
+    // Enforce NAC permission before executing the query
+    let permission = graphql_required_permission(&request.query);
+    require_permission(&state, &identity, permission).await?;
 
     // Wire identity from Authorization header into the request
     request.identity = identity.did().cloned();
@@ -132,6 +160,9 @@ pub async fn graphql_get(
 ) -> Result<Json<QueryResponse>, HttpError> {
     // Validate encrypted field queries require P2P
     check_encrypted_fields(&state, &params.query)?;
+
+    // GET is always a read operation
+    require_permission(&state, &identity, NodePermission::DocumentRead).await?;
 
     let variables: Option<JsonValue> = match params.variables {
         Some(v) => match serde_json::from_str(&v) {
@@ -204,6 +235,10 @@ pub async fn graphql_transactional(
 ) -> Result<axum::response::Response, HttpError> {
     // Validate encrypted field queries require P2P
     check_encrypted_fields(&state, &request.query)?;
+
+    // Enforce NAC permission before executing the query
+    let permission = graphql_required_permission(&request.query);
+    require_permission(&state, &identity, permission).await?;
 
     // Check if this is a subscription query.
     // Fast path: skip the full GraphQL parse for mutations/queries (the common case).
