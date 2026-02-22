@@ -3,6 +3,7 @@ name = "integration-test"
 version = "0.1.0"
 edition = "2021"
 description = "Integration test harness for defradb"
+license = "Apache-2.0 OR MIT"
 
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }

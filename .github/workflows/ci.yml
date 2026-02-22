@@ -41,3 +41,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler
       - run: cargo test --workspace
+
+  deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  cbindgen:
+    name: CBIndgen Header Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler
+      - name: Install cbindgen
+        run: cargo install cbindgen
+      - name: Generate header
+        run: cbindgen --config crates/ffi/cbindgen.toml --crate ffi --output defra.h.generated
+      - name: Verify header matches
+        run: diff -u defra.h defra.h.generated || (echo "Generated header does not match committed header"; exit 1)

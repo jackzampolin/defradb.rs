@@ -1,0 +1,44 @@
+[advisories]
+ignore = [
+    # Unmaintained transitive dependencies - acceptable for now
+    "RUSTSEC-2024-0388",  # derivative
+    "RUSTSEC-2025-0057",  # fxhash
+    "RUSTSEC-2024-0384",  # instant
+    "RUSTSEC-2024-0387",  # opentelemetry_api
+    "RUSTSEC-2024-0436",  # paste
+    "RUSTSEC-2024-0370",  # proc-macro-error
+    "RUSTSEC-2025-0134",  # rustls-pemfile
+    "RUSTSEC-2021-0127",  # serde_cbor
+    "RUSTSEC-2025-0046",  # wasmtime fd_renumber
+    "RUSTSEC-2025-0118",  # wasmtime linear memory
+    "RUSTSEC-2024-0320",  # wasmtime related
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+allow = []
+deny = []
+highlight = "lowest-version"
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    "https://github.com/sourcenetwork/beetle",
+]

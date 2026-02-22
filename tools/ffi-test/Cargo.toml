@@ -3,6 +3,7 @@ name = "ffi-test"
 version = "0.1.0"
 edition = "2021"
 description = "FFI compatibility testing tool for defradb.rs"
+license = "Apache-2.0 OR MIT"
 
 [[bin]]
 name = "ffi-test"
