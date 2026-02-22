@@ -213,6 +213,91 @@ engines.
 - **Secure data generation**: All data an agent produces in DefraDB is
   encrypted to its identity and the identities of authorized consumers.
 
+## Use Case: Multi-Tenant ML Training on Sensitive Data
+
+A concrete application of this architecture: a customer support platform
+where multiple companies' voice data must be segmented during storage,
+model training, and inference serving.
+
+### The Problem
+
+A platform processes customer support calls for many companies. Each
+company's voice data is sensitive. The platform wants to:
+
+1. Store each company's data with strict tenant isolation.
+2. Train small models (QLoRA adapters) on each company's data without
+   cross-tenant leakage.
+3. Serve the resulting adapters back to each company's infrastructure.
+4. Provide cryptographic proof that data never left its tenant boundary.
+
+### How This Architecture Solves It
+
+```
+Company A's voice data              Company B's voice data
+        │                                   │
+        ▼                                   ▼
+DefraDB (encrypted to A's            DefraDB (encrypted to B's
+ Orbis identity, ACP policy)          Orbis identity, ACP policy)
+        │                                   │
+        ▼                                   ▼
+Training agent (identity              Training agent (identity
+ authorized by A's policy)             authorized by B's policy)
+        │                                   │
+        ▼                                   ▼
+QLoRA adapter committed to            QLoRA adapter committed to
+ encrypted Git repo (A's keys)        encrypted Git repo (B's keys)
+        │                                   │
+        ▼                                   ▼
+Serving node (A's identity)           Serving node (B's identity)
+ decrypts + loads adapter              decrypts + loads adapter
+```
+
+**Data ingestion**: Each company's voice data is stored in DefraDB, encrypted
+to that company's Orbis identity. Source Hub ACP policies enforce that only
+identities authorized by Company A can read Company A's data. The data is
+physically co-located but cryptographically isolated — even a database
+administrator without the right Orbis identity cannot decrypt it.
+
+**Model training**: A training agent receives an Orbis identity authorized
+by Company A's Source Hub policy. It pulls Company A's data from DefraDB
+(decrypted via its authorized identity), trains a QLoRA adapter, and commits
+the resulting weights to an encrypted Git repo. The adapter repo is encrypted
+to Company A's identities. The training agent's identity cannot access
+Company B's data — the smudge filter will refuse to decrypt.
+
+**Adapter as artifact**: The QLoRA adapter weights are sensitive because they
+contain a compressed representation of the training data. Storing them in an
+encrypted Git repo means:
+- The weights are ciphertext at rest and in transit.
+- Only Company A's authorized identities can decrypt and load them.
+- The commit history provides full provenance: which agent trained it,
+  on which data version, at what time, authorized by which policy.
+
+**Model serving**: Company A's serving infrastructure has an Orbis identity
+authorized to read the adapter repo. It clones, the smudge filter decrypts
+the weights, and the adapter is loaded for inference. Company B's serving
+nodes cannot decrypt Company A's adapter — the encryption enforces what the
+policy declares.
+
+### Auditability
+
+Every step in the pipeline is a signed Git commit:
+
+| Step              | Committed By               | Contains                      |
+|-------------------|----------------------------|-------------------------------|
+| Data ingestion    | Ingestion agent (signed)   | Data manifest, schema version |
+| Preprocessing     | Preprocessing agent        | Feature extraction config     |
+| Training run      | Training agent             | Hyperparameters, metrics      |
+| Adapter output    | Training agent             | QLoRA weights, eval results   |
+| Deployment        | Serving agent              | Deployment config, model hash |
+
+Each commit is signed by a real Orbis identity via DKG. The full provenance
+chain is cryptographically verifiable: this adapter was trained by this
+agent, on this data version, authorized by this policy, and deployed to
+this serving node. This is the level of auditability that regulated
+industries (healthcare, finance, customer voice data) require for
+compliance.
+
 ## Existing Crate Mapping
 
 | Concern               | Existing Crate     | Extension Needed                          |
