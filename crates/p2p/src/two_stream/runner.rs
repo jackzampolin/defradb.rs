@@ -157,9 +157,10 @@ impl TwoStreamRunner {
                         }
                     });
                 }
-                // Handle incoming SE request streams (Rust receiving SE artifacts - log for now)
+                // Handle incoming SE request streams (deserialize and forward for storage)
                 Some((peer_id, mut stream)) = self.se_request_streams.next() => {
                     let sem = self.semaphore.clone();
+                    let event_tx = self.event_tx.clone();
                     tokio::spawn(async move {
                         let _permit = sem.acquire().await.expect("semaphore closed");
                         let mut buf = Vec::new();
@@ -175,11 +176,28 @@ impl TwoStreamRunner {
                                 tracing::warn!(peer_id = %peer_id, error = %e, "Failed to read SE request stream");
                             }
                             Ok(Ok(_)) => {
-                                tracing::info!(
-                                    peer_id = %peer_id,
-                                    buf_len = buf.len(),
-                                    "Received SE request stream (Rust as receiver not yet implemented)"
-                                );
+                                match serde_cbor::from_slice::<crate::message::PushSEArtifactsRequest>(&buf) {
+                                    Ok(request) => {
+                                        tracing::info!(
+                                            peer_id = %peer_id,
+                                            collection_id = %request.collection_id,
+                                            artifact_count = request.artifacts.len(),
+                                            "Received SE artifacts from peer"
+                                        );
+                                        let _ = event_tx.send(TwoStreamEvent::SEArtifactsReceived {
+                                            peer_id,
+                                            request,
+                                        }).await;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            peer_id = %peer_id,
+                                            error = %e,
+                                            buf_len = buf.len(),
+                                            "Failed to deserialize SE artifacts request"
+                                        );
+                                    }
+                                }
                             }
                         }
                     });

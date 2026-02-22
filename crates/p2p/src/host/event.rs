@@ -104,4 +104,11 @@ pub enum HostEvent {
         root_cid: Cid,
         car_data: Vec<u8>,
     },
+
+    /// Received SE artifacts from a peer.
+    SEArtifactsReceived {
+        peer_id: PeerId,
+        /// Raw CBOR bytes of the PushSEArtifactsRequest for the db layer to process.
+        data: Vec<u8>,
+    },
 }

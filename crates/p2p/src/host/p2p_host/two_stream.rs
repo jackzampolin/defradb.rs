@@ -153,6 +153,34 @@ impl<S: Store> P2PHost<S> {
                     error!(peer_id = %peer_id, "Failed to send CarFetchResponse event");
                 }
             }
+            TwoStreamEvent::SEArtifactsReceived { peer_id, request } => {
+                info!(
+                    peer_id = %peer_id,
+                    collection_id = %request.collection_id,
+                    artifact_count = request.artifacts.len(),
+                    "Host received SE artifacts via two-stream protocol"
+                );
+                // Re-encode to CBOR for the db layer receiver
+                match serde_cbor::to_vec(&request) {
+                    Ok(data) => {
+                        if self
+                            .event_tx
+                            .send(HostEvent::SEArtifactsReceived { peer_id, data })
+                            .await
+                            .is_err()
+                        {
+                            error!(peer_id = %peer_id, "Failed to send SEArtifactsReceived event");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            peer_id = %peer_id,
+                            error = %e,
+                            "Failed to re-encode SE artifacts for forwarding"
+                        );
+                    }
+                }
+            }
             TwoStreamEvent::DecodeError { peer_id, error } => {
                 warn!(
                     peer_id = %peer_id,

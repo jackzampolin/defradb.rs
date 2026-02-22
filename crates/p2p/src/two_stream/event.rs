@@ -5,6 +5,7 @@ use libp2p::PeerId;
 
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogRequest,
+    PushSEArtifactsRequest,
 };
 
 /// Event emitted by the two-stream handler.
@@ -42,6 +43,11 @@ pub enum TwoStreamEvent {
         peer_id: PeerId,
         root_cid: Cid,
         car_data: Vec<u8>,
+    },
+    /// Received SE artifacts from a peer (push request).
+    SEArtifactsReceived {
+        peer_id: PeerId,
+        request: PushSEArtifactsRequest,
     },
     /// Failed to decode an incoming message.
     DecodeError { peer_id: PeerId, error: String },

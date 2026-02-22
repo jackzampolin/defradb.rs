@@ -28,8 +28,12 @@
 
 mod artifact_gen;
 mod coordinator;
+pub mod receiver;
 mod storage;
+pub mod validate;
 
 pub use artifact_gen::{generate_doc_artifacts, generate_field_artifact};
 pub use coordinator::{FieldValueQuery, SECoordinator};
+pub use receiver::{deserialize_artifacts, receive_and_store};
 pub use storage::{fetch_doc_ids, store_artifacts, FieldQuery};
+pub use validate::validate_artifact;

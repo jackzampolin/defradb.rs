@@ -547,6 +547,26 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                         }
 
                                         if process_error.is_none() {
+                                            // Generate SE artifacts for replicated doc
+                                            if let Some(enc_key) = self.se_enc_key() {
+                                                if let Err(e) = se_merge::generate_merge_artifacts(
+                                                    &mut datastore,
+                                                    collection.schema(),
+                                                    &doc_id_str,
+                                                    &field_values,
+                                                    enc_key,
+                                                    None,
+                                                )
+                                                .await
+                                                {
+                                                    tracing::warn!(
+                                                        doc_id = %doc_id_str,
+                                                        error = %e,
+                                                        "Failed to generate SE artifacts after merge"
+                                                    );
+                                                }
+                                            }
+
                                             tracing::info!(
                                                 doc_id = %doc_id_str,
                                                 collection = %collection.name(),
@@ -1089,6 +1109,28 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                                 process_error = Some(MergeError::MergeFailed(
                                                     format!("Failed to update indexes after batch merge: {}", e),
                                                 ));
+                                            }
+                                        }
+
+                                        // Generate SE artifacts for replicated doc (batch path)
+                                        if process_error.is_none() {
+                                            if let Some(enc_key) = self.se_enc_key() {
+                                                if let Err(e) = se_merge::generate_merge_artifacts(
+                                                    &mut datastore,
+                                                    collection.schema(),
+                                                    &doc_id_str,
+                                                    &field_values,
+                                                    enc_key,
+                                                    None,
+                                                )
+                                                .await
+                                                {
+                                                    tracing::warn!(
+                                                        doc_id = %doc_id_str,
+                                                        error = %e,
+                                                        "Failed to generate SE artifacts after batch merge"
+                                                    );
+                                                }
                                             }
                                         }
                                     }

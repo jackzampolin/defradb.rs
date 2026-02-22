@@ -9,6 +9,7 @@ mod composite;
 mod counter;
 mod definition;
 mod lww;
+pub(crate) mod se_merge;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -137,6 +138,10 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// duplicate processing from concurrent dual-broadcast paths (doc topic
     /// + collection topic). Matches Go's `loadComposites` dedup guard.
     merged_composites: std::sync::Mutex<HashSet<Cid>>,
+    /// Optional SE encryption key for generating search artifacts on replicated documents.
+    /// When set, the merge handler generates SE artifacts after merging documents
+    /// that belong to collections with encrypted indexes.
+    se_enc_key: std::sync::OnceLock<Vec<u8>>,
 }
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
@@ -147,6 +152,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             blockstore,
             document_acp: std::sync::OnceLock::new(),
             merged_composites: std::sync::Mutex::new(HashSet::new()),
+            se_enc_key: std::sync::OnceLock::new(),
         }
     }
 
@@ -159,6 +165,16 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     /// Set the DocumentACP after construction (when merge handler is already in Arc).
     pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
         let _ = self.document_acp.set(acp);
+    }
+
+    /// Set the SE encryption key for generating artifacts on replicated documents.
+    pub fn set_se_enc_key(&self, key: Vec<u8>) {
+        let _ = self.se_enc_key.set(key);
+    }
+
+    /// Get the SE encryption key, if configured.
+    pub(crate) fn se_enc_key(&self) -> Option<&[u8]> {
+        self.se_enc_key.get().map(|k| k.as_slice())
     }
 
     /// Get reference to blockstore.
