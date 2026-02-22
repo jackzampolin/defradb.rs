@@ -47,7 +47,20 @@ pub async fn get_node_identity(
 /// GET /api/v0/debug/dump
 ///
 /// Dumps all database key/value pairs for debugging.
-pub async fn dump(State(state): State<AppState>) -> Result<Json<Vec<String>>, HttpError> {
+///
+/// Only available in development mode. Requires `DocumentRead` permission when NAC is enabled.
+pub async fn dump(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<Vec<String>>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DocumentRead).await?;
+
+    if !state.dev_mode {
+        return Err(HttpError::BadRequest(
+            "dump is only available in development mode".into(),
+        ));
+    }
+
     let dump_ops = state.require_dump()?;
     let lines = dump_ops.print_dump().await.map_err(HttpError::Internal)?;
     Ok(Json(lines))

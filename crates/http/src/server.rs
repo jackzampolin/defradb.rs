@@ -4,9 +4,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::http::{header, HeaderValue, Method};
+use axum::error_handling::HandleErrorLayer;
+use axum::extract::DefaultBodyLimit;
+use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::Router;
 use tokio::net::TcpListener;
+use tower::limit::ConcurrencyLimitLayer;
+use tower::timeout::TimeoutLayer;
+use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -400,7 +405,22 @@ impl Server {
         let state = builder.build();
         let router = create_router_with_state(state);
 
-        Ok(router.layer(TraceLayer::new_for_http()).layer(cors))
+        let middleware = ServiceBuilder::new()
+            .layer(HandleErrorLayer::new(|err: axum::BoxError| async move {
+                if err.is::<tower::timeout::error::Elapsed>() {
+                    StatusCode::REQUEST_TIMEOUT
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            }))
+            .layer(TimeoutLayer::new(Duration::from_secs(60)))
+            .layer(ConcurrencyLimitLayer::new(1000))
+            .layer(TraceLayer::new_for_http())
+            .layer(cors);
+
+        Ok(router
+            .layer(DefaultBodyLimit::max(256 * 1024)) // 256KB global default
+            .layer(middleware))
     }
 
     /// Build CORS layer matching Go DefraDB behavior.

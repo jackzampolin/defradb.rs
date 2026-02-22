@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{delete, get, patch, post},
     Router,
 };
@@ -158,7 +159,11 @@ pub fn create_router_with_state(state: AppState) -> Router {
     // Backup routes (POST for both to match Go DefraDB)
     let backup_routes = Router::new()
         .route("/export", post(handlers::backup::export))
-        .route("/import", post(handlers::backup::import));
+        .route(
+            "/import",
+            post(handlers::backup::import)
+                .layer(DefaultBodyLimit::max(100 * 1024 * 1024)), // 100MB for large backups
+        );
 
     // Block routes
     let block_routes =
@@ -216,7 +221,11 @@ pub fn create_router_with_state(state: AppState) -> Router {
             axum::routing::any(handlers::graphql_ws_handler),
         )
         .route("/schema", get(handlers::schema))
-        .route("/schema", post(handlers::schema::add_schema))
+        .route(
+            "/schema",
+            post(handlers::schema::add_schema)
+                .layer(DefaultBodyLimit::max(1_048_576)), // 1MB for large SDL schemas
+        )
         .route("/version", get(handlers::version))
         // Transaction endpoints
         .nest("/tx", tx_routes)
