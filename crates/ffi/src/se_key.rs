@@ -2,6 +2,8 @@
 //!
 //! Allows Go to pass the searchable encryption key to the Rust FFI node.
 
+use zeroize::Zeroizing;
+
 use crate::ffi_entry;
 use crate::state::NODES;
 use crate::types::FfiResult;
@@ -33,7 +35,7 @@ pub unsafe extern "C" fn set_se_encryption_key(
             ));
         }
 
-        let key = std::slice::from_raw_parts(key_ptr, key_len).to_vec();
+        let key = Zeroizing::new(std::slice::from_raw_parts(key_ptr, key_len).to_vec());
 
         let found = NODES.get_mut(node_ptr, |state| {
             state.se_encryption_key = Some(key);

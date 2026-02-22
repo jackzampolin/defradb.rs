@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use storage::MemoryStore;
+use zeroize::Zeroizing;
 
 use blockstore::DefraBlockstore;
 
@@ -105,9 +106,9 @@ pub struct NodeState {
     /// SourceHub ACP (optional - only set when using SourceHub for document ACP).
     /// Used by add_dac_policy to route policy creation through SourceHub transactions.
     pub sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
-    /// Searchable encryption key (32-byte AES-256 key).
+    /// Searchable encryption key (32-byte AES-256 key). Zeroized on drop.
     /// Set via `set_se_encryption_key` FFI when SE is enabled in test config.
-    pub se_encryption_key: Option<Vec<u8>>,
+    pub se_encryption_key: Option<Zeroizing<Vec<u8>>>,
 }
 
 /// State held for each FFI subscription.

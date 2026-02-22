@@ -19,7 +19,7 @@ fn test_system_keyring_set_get() {
     // Set and get
     keyring.set(key_name, b"test-data").unwrap();
     let retrieved = keyring.get(key_name).unwrap();
-    assert_eq!(retrieved, b"test-data");
+    assert_eq!(&retrieved[..], b"test-data");
 
     // Cleanup
     keyring.delete(key_name).unwrap();
@@ -76,7 +76,7 @@ fn test_system_keyring_binary_data() {
     keyring.set(key_name, &binary_data).unwrap();
 
     let retrieved = keyring.get(key_name).unwrap();
-    assert_eq!(retrieved, binary_data);
+    assert_eq!(&retrieved[..], binary_data.as_slice());
 
     // Cleanup
     keyring.delete(key_name).unwrap();
@@ -93,11 +93,11 @@ fn test_system_keyring_overwrite() {
 
     // Set initial value
     keyring.set(key_name, b"first-value").unwrap();
-    assert_eq!(keyring.get(key_name).unwrap(), b"first-value");
+    assert_eq!(&keyring.get(key_name).unwrap()[..], b"first-value");
 
     // Overwrite
     keyring.set(key_name, b"second-value").unwrap();
-    assert_eq!(keyring.get(key_name).unwrap(), b"second-value");
+    assert_eq!(&keyring.get(key_name).unwrap()[..], b"second-value");
 
     // Cleanup
     keyring.delete(key_name).unwrap();

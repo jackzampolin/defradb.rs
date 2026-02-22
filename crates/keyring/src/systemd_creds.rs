@@ -8,6 +8,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use zeroize::Zeroizing;
+
 use crate::error::{Error, Result};
 use crate::key_name::KeyName;
 use crate::keyring::Keyring;
@@ -135,7 +137,7 @@ impl Keyring for SystemdCredsKeyring {
         Ok(())
     }
 
-    fn get(&self, name: &str) -> Result<Vec<u8>> {
+    fn get(&self, name: &str) -> Result<Zeroizing<Vec<u8>>> {
         let path = self.key_path(name)?;
         let encrypted = fs::read(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -144,7 +146,8 @@ impl Keyring for SystemdCredsKeyring {
                 Error::Io(e)
             }
         })?;
-        self.decrypt(&encrypted)
+        let decrypted = self.decrypt(&encrypted)?;
+        Ok(Zeroizing::new(decrypted))
     }
 
     fn delete(&self, name: &str) -> Result<()> {

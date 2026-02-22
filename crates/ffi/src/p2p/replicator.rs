@@ -100,9 +100,21 @@ pub unsafe extern "C" fn p2p_add_replicator(
                     let push_collections = effective_collections;
                     let push_event_bus = state.event_bus.clone();
                     let push_se_key = state.se_encryption_key.clone();
+                    let push_identity = state.node_identity_did.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) = super::push::push_existing_docs(&push_handle, &push_db, push_peer_id, &push_collections, push_se_key.as_deref()).await {
+                        let identity_bytes: Option<Vec<u8>> =
+                            push_identity.as_deref().map(|s| s.as_bytes().to_vec());
+                        if let Err(e) = super::push::push_existing_docs(
+                            &push_handle,
+                            &push_db,
+                            push_peer_id,
+                            &push_collections,
+                            push_se_key.as_ref().map(|k| k.as_slice()),
+                            identity_bytes.as_deref(),
+                        )
+                        .await
+                        {
                             tracing::error!(error = %e, "Failed to push existing docs to replicator");
                         }
                         tracing::debug!("publishing ReplicatorCompleted event");

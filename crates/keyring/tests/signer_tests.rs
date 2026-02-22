@@ -104,7 +104,7 @@ fn test_key_handle_get_key_bytes() {
 
     let handle = KeyHandle::new(keyring, "my-key", KeyType::Secp256k1).unwrap();
     let retrieved = handle.get_key_bytes().unwrap();
-    assert_eq!(retrieved, key_data);
+    assert_eq!(&retrieved[..], key_data.as_slice());
 }
 
 #[test]

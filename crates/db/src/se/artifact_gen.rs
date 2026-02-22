@@ -49,7 +49,8 @@ pub fn generate_field_artifact(
             collection_id,
             &enc_idx.field_name,
             &value_bytes,
-        ),
+        )
+        .map_err(|e| storage::corekv::Error::Other(e.to_string()))?,
     };
 
     Ok(Artifact::new(

@@ -1,5 +1,7 @@
 //! Core Keyring trait
 
+use zeroize::Zeroizing;
+
 use crate::error::Result;
 
 /// Keyring provides a simple set/get interface for a keyring service.
@@ -15,7 +17,8 @@ pub trait Keyring: Send + Sync {
     /// Returns the key with the given name from the keystore.
     ///
     /// Returns `Error::NotFound` if no key with that name exists.
-    fn get(&self, name: &str) -> Result<Vec<u8>>;
+    /// The returned value is wrapped in `Zeroizing` to ensure key material is securely cleared on drop.
+    fn get(&self, name: &str) -> Result<Zeroizing<Vec<u8>>>;
 
     /// Removes the key with the given name from the keystore.
     ///

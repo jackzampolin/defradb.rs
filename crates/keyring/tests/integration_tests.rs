@@ -33,11 +33,11 @@ fn test_file_keyring_full_lifecycle() {
 
     // Verify retrieval
     assert_eq!(
-        keyring.get("peer_key").unwrap(),
+        &keyring.get("peer_key").unwrap()[..],
         b"peer-key-data-32-bytes-exactly!"
     );
     assert_eq!(
-        keyring.get("node_key").unwrap(),
+        &keyring.get("node_key").unwrap()[..],
         b"node-key-data-32-bytes-exactly!"
     );
 
@@ -71,7 +71,7 @@ fn test_file_keyring_persistence() {
     {
         let keyring = FileKeyring::open(temp_dir.path(), password).unwrap();
         let data = keyring.get("persistent_key").unwrap();
-        assert_eq!(data, b"this-data-should-persist!!!!");
+        assert_eq!(&data[..], b"this-data-should-persist!!!!");
     }
 }
 
@@ -102,7 +102,7 @@ fn test_file_keyring_concurrent_access() {
                     let expected = format!("data_{}", i);
                     let data = keyring.get(&key_name).unwrap();
                     assert_eq!(
-                        data,
+                        &data[..],
                         expected.as_bytes(),
                         "Thread {} failed to read key {}",
                         thread_id,
@@ -142,10 +142,10 @@ fn test_key_handle_integration() {
     // Retrieve keys multiple times (simulating multiple operations)
     for _ in 0..10 {
         let key = secp_handle.get_key_bytes().unwrap();
-        assert_eq!(key, secp256k1_key);
+        assert_eq!(&key[..], secp256k1_key.as_slice());
 
         let key = ed_handle.get_key_bytes().unwrap();
-        assert_eq!(key, ed25519_key);
+        assert_eq!(&key[..], ed25519_key.as_slice());
     }
 }
 
@@ -179,7 +179,7 @@ fn test_file_keyring_binary_data() {
     keyring.set("binary_key", &binary_data).unwrap();
 
     let retrieved = keyring.get("binary_key").unwrap();
-    assert_eq!(retrieved, binary_data);
+    assert_eq!(&retrieved[..], binary_data.as_slice());
 }
 
 /// Test empty key data
@@ -205,7 +205,7 @@ fn test_file_keyring_large_data() {
 
     let retrieved = keyring.get("large_key").unwrap();
     assert_eq!(retrieved.len(), large_data.len());
-    assert_eq!(retrieved, large_data);
+    assert_eq!(&retrieved[..], large_data.as_slice());
 }
 
 /// Test special characters in key names

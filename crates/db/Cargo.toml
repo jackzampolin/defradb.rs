@@ -25,6 +25,9 @@ serde_json.workspace = true
 serde_cbor.workspace = true
 ciborium.workspace = true
 
+# Memory zeroization for sensitive key material
+zeroize = "1"
+
 # Error handling
 thiserror.workspace = true
 

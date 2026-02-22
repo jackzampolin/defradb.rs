@@ -11,6 +11,7 @@ use crypto::se::Artifact;
 use document::NormalValue;
 use schema::EncryptedIndexDescription;
 use storage::corekv::Result;
+use zeroize::Zeroizing;
 
 use super::artifact_gen::generate_field_artifact;
 use super::storage::FieldQuery;
@@ -54,8 +55,8 @@ impl FieldValueQuery {
 /// Configuration for the SE coordinator.
 #[derive(Debug, Clone)]
 pub struct SECoordinatorConfig {
-    /// SE encryption key (32 bytes).
-    pub enc_key: Vec<u8>,
+    /// SE encryption key (32 bytes). Zeroized on drop.
+    pub enc_key: Zeroizing<Vec<u8>>,
     /// Identity's public key for tag isolation.
     pub identity_pubkey: Option<Vec<u8>>,
     /// Maximum number of retry attempts.
@@ -65,7 +66,7 @@ pub struct SECoordinatorConfig {
 impl Default for SECoordinatorConfig {
     fn default() -> Self {
         Self {
-            enc_key: vec![0u8; 32],
+            enc_key: Zeroizing::new(vec![0u8; 32]),
             identity_pubkey: None,
             max_retries: 5,
         }
@@ -91,8 +92,17 @@ impl SECoordinator {
     /// Create a coordinator with just an encryption key.
     pub fn with_key(enc_key: Vec<u8>) -> Self {
         Self::new(SECoordinatorConfig {
-            enc_key,
+            enc_key: Zeroizing::new(enc_key),
             ..Default::default()
+        })
+    }
+
+    /// Create a coordinator with an encryption key and identity pubkey.
+    pub fn with_key_and_identity(enc_key: Vec<u8>, identity_pubkey: Vec<u8>) -> Self {
+        Self::new(SECoordinatorConfig {
+            enc_key: Zeroizing::new(enc_key),
+            identity_pubkey: Some(identity_pubkey),
+            max_retries: 5,
         })
     }
 
@@ -188,13 +198,22 @@ mod tests {
     #[test]
     fn test_coordinator_with_identity() {
         let config = SECoordinatorConfig {
-            enc_key: vec![1u8; 32],
+            enc_key: Zeroizing::new(vec![1u8; 32]),
             identity_pubkey: Some(b"user_pubkey".to_vec()),
             max_retries: 3,
         };
         let coordinator = SECoordinator::new(config);
 
         assert!(coordinator.identity_pubkey().is_some());
+        assert_eq!(coordinator.identity_pubkey().unwrap(), b"user_pubkey");
+    }
+
+    #[test]
+    fn test_coordinator_with_key_and_identity() {
+        let coordinator =
+            SECoordinator::with_key_and_identity(vec![1u8; 32], b"user_pubkey".to_vec());
+
+        assert_eq!(coordinator.enc_key(), &[1u8; 32]);
         assert_eq!(coordinator.identity_pubkey().unwrap(), b"user_pubkey");
     }
 

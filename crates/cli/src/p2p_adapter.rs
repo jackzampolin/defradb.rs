@@ -31,6 +31,7 @@ pub trait DocPusher: Send + Sync {
         peer_id: libp2p::PeerId,
         collections: &[String],
         se_key: Option<&[u8]>,
+        se_identity_pubkey: Option<&[u8]>,
     ) -> Result<(), String>;
 
     fn get_collection_id(&self, name: &str) -> Option<String>;
@@ -90,8 +91,17 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         peer_id: libp2p::PeerId,
         collections: &[String],
         se_key: Option<&[u8]>,
+        se_identity_pubkey: Option<&[u8]>,
     ) -> Result<(), String> {
-        db::push_existing_docs(handle, &self.db, peer_id, collections, se_key).await
+        db::push_existing_docs(
+            handle,
+            &self.db,
+            peer_id,
+            collections,
+            se_key,
+            se_identity_pubkey,
+        )
+        .await
     }
 
     fn get_collection_id(&self, name: &str) -> Option<String> {
@@ -370,6 +380,7 @@ impl DocPusher for LookupOnlyDocPusher {
         _peer_id: libp2p::PeerId,
         _collections: &[String],
         _se_key: Option<&[u8]>,
+        _se_identity_pubkey: Option<&[u8]>,
     ) -> Result<(), String> {
         Err("push_existing_docs not available (no database context)".to_string())
     }
@@ -582,7 +593,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
             tokio::spawn(async move {
                 if let Err(e) = push_pusher
-                    .push_existing_docs(&push_handle, peer_id, &push_collections, None)
+                    .push_existing_docs(&push_handle, peer_id, &push_collections, None, None)
                     .await
                 {
                     tracing::error!(error = %e, "Failed to push existing docs to replicator");

@@ -5,6 +5,8 @@
 //! - System keyring (OS-provided key management)
 //! - systemd-creds encryption (Linux, requires systemd 250+)
 
+use zeroize::Zeroizing;
+
 mod error;
 mod file;
 mod key_name;
@@ -40,18 +42,23 @@ pub const SEARCHABLE_ENCRYPTION_KEY: &str = "searchable-encryption-key";
 /// Loads the keyring secret from the DEFRA_KEYRING_SECRET environment variable.
 ///
 /// Returns `Error::SecretNotSet` if the environment variable is not set.
-pub fn load_secret_from_env() -> Result<Vec<u8>> {
-    std::env::var(KEYRING_SECRET_ENV)
-        .map(|s| s.into_bytes())
-        .map_err(|_| Error::SecretNotSet)
+/// The returned value is wrapped in `Zeroizing` to ensure the secret is securely cleared on drop.
+pub fn load_secret_from_env() -> Result<Zeroizing<Vec<u8>>> {
+    let secret = Zeroizing::new(
+        std::env::var(KEYRING_SECRET_ENV)
+            .map(|s| s.into_bytes())
+            .map_err(|_| Error::SecretNotSet)?,
+    );
+    Ok(secret)
 }
 
 /// Opens a file keyring using the secret from DEFRA_KEYRING_SECRET.
 ///
 /// Convenience function that combines `load_secret_from_env` with `FileKeyring::open`.
+/// The secret is automatically zeroed after use.
 pub fn open_file_keyring(dir: impl AsRef<std::path::Path>) -> Result<FileKeyring> {
     let secret = load_secret_from_env()?;
-    FileKeyring::open(dir, secret)
+    FileKeyring::open(dir, &secret[..])
 }
 
 #[cfg(test)]
@@ -67,7 +74,7 @@ mod tests {
         let result = load_secret_from_env();
         env::remove_var(KEYRING_SECRET_ENV);
 
-        assert_eq!(result.unwrap(), test_secret.as_bytes());
+        assert_eq!(&result.unwrap()[..], test_secret.as_bytes());
     }
 
     #[test]
@@ -90,6 +97,6 @@ mod tests {
 
         let keyring = keyring.unwrap();
         keyring.set("test", b"data").unwrap();
-        assert_eq!(keyring.get("test").unwrap(), b"data");
+        assert_eq!(&keyring.get("test").unwrap()[..], b"data");
     }
 }

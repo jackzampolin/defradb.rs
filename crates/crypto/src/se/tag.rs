@@ -5,10 +5,14 @@
 //!
 //! Matches Go's internal/se/core/tag.go
 
+use defra_core::Error;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Required length for the SE HMAC key in bytes (AES-256).
+pub const SE_KEY_LEN: usize = 32;
 
 /// Size of the search tag in bytes (16 bytes = 128 bits).
 ///
@@ -56,7 +60,7 @@ pub const SEARCH_TAG_SIZE: usize = 16;
 ///
 /// # Returns
 ///
-/// A 16-byte deterministic search tag.
+/// A 16-byte deterministic search tag, or an error if the key is not 32 bytes.
 ///
 /// # Example
 ///
@@ -69,7 +73,7 @@ pub const SEARCH_TAG_SIZE: usize = 16;
 /// let field = "age";
 /// let value = &[0x88, 0x15]; // Encoded integer 21
 ///
-/// let tag = generate_equality_tag(&key, identity, collection, field, value);
+/// let tag = generate_equality_tag(&key, identity, collection, field, value).unwrap();
 /// assert_eq!(tag.len(), 16);
 /// ```
 pub fn generate_equality_tag(
@@ -78,7 +82,15 @@ pub fn generate_equality_tag(
     collection_id: &str,
     field_name: &str,
     value: &[u8],
-) -> [u8; SEARCH_TAG_SIZE] {
+) -> Result<[u8; SEARCH_TAG_SIZE], Error> {
+    if key.len() != SE_KEY_LEN {
+        return Err(Error::Crypto(format!(
+            "SE HMAC key must be {} bytes, got {}",
+            SE_KEY_LEN,
+            key.len()
+        )));
+    }
+
     // Build domain separator as raw bytes: b"eq:" + identity_id + b":" + collection_id + b":" + field_name
     // Go uses string(pubKey.Raw()) which preserves raw bytes; using from_utf8_lossy would
     // replace invalid UTF-8 with U+FFFD, producing different HMAC outputs.
@@ -98,7 +110,7 @@ pub fn generate_equality_tag(
 
     let mut tag = [0u8; SEARCH_TAG_SIZE];
     tag.copy_from_slice(&full_tag[..SEARCH_TAG_SIZE]);
-    tag
+    Ok(tag)
 }
 
 /// Generate an equality search tag using a string identity.
@@ -110,7 +122,7 @@ pub fn generate_equality_tag_str(
     collection_id: &str,
     field_name: &str,
     value: &[u8],
-) -> [u8; SEARCH_TAG_SIZE] {
+) -> Result<[u8; SEARCH_TAG_SIZE], Error> {
     generate_equality_tag(
         key,
         identity_id.as_bytes(),
@@ -127,47 +139,48 @@ mod tests {
     #[test]
     fn test_tag_length() {
         let key = [0u8; 32];
-        let tag = generate_equality_tag(&key, b"identity", "collection", "field", b"value");
+        let tag =
+            generate_equality_tag(&key, b"identity", "collection", "field", b"value").unwrap();
         assert_eq!(tag.len(), SEARCH_TAG_SIZE);
     }
 
     #[test]
     fn test_deterministic() {
         let key = [1u8; 32];
-        let tag1 = generate_equality_tag(&key, b"id", "col", "field", b"value");
-        let tag2 = generate_equality_tag(&key, b"id", "col", "field", b"value");
+        let tag1 = generate_equality_tag(&key, b"id", "col", "field", b"value").unwrap();
+        let tag2 = generate_equality_tag(&key, b"id", "col", "field", b"value").unwrap();
         assert_eq!(tag1, tag2);
     }
 
     #[test]
     fn test_different_values_different_tags() {
         let key = [1u8; 32];
-        let tag1 = generate_equality_tag(&key, b"id", "col", "field", b"value1");
-        let tag2 = generate_equality_tag(&key, b"id", "col", "field", b"value2");
+        let tag1 = generate_equality_tag(&key, b"id", "col", "field", b"value1").unwrap();
+        let tag2 = generate_equality_tag(&key, b"id", "col", "field", b"value2").unwrap();
         assert_ne!(tag1, tag2);
     }
 
     #[test]
     fn test_different_fields_different_tags() {
         let key = [1u8; 32];
-        let tag1 = generate_equality_tag(&key, b"id", "col", "field1", b"value");
-        let tag2 = generate_equality_tag(&key, b"id", "col", "field2", b"value");
+        let tag1 = generate_equality_tag(&key, b"id", "col", "field1", b"value").unwrap();
+        let tag2 = generate_equality_tag(&key, b"id", "col", "field2", b"value").unwrap();
         assert_ne!(tag1, tag2);
     }
 
     #[test]
     fn test_different_collections_different_tags() {
         let key = [1u8; 32];
-        let tag1 = generate_equality_tag(&key, b"id", "col1", "field", b"value");
-        let tag2 = generate_equality_tag(&key, b"id", "col2", "field", b"value");
+        let tag1 = generate_equality_tag(&key, b"id", "col1", "field", b"value").unwrap();
+        let tag2 = generate_equality_tag(&key, b"id", "col2", "field", b"value").unwrap();
         assert_ne!(tag1, tag2);
     }
 
     #[test]
     fn test_different_identities_different_tags() {
         let key = [1u8; 32];
-        let tag1 = generate_equality_tag(&key, b"id1", "col", "field", b"value");
-        let tag2 = generate_equality_tag(&key, b"id2", "col", "field", b"value");
+        let tag1 = generate_equality_tag(&key, b"id1", "col", "field", b"value").unwrap();
+        let tag2 = generate_equality_tag(&key, b"id2", "col", "field", b"value").unwrap();
         assert_ne!(tag1, tag2);
     }
 
@@ -175,32 +188,51 @@ mod tests {
     fn test_different_keys_different_tags() {
         let key1 = [1u8; 32];
         let key2 = [2u8; 32];
-        let tag1 = generate_equality_tag(&key1, b"id", "col", "field", b"value");
-        let tag2 = generate_equality_tag(&key2, b"id", "col", "field", b"value");
+        let tag1 = generate_equality_tag(&key1, b"id", "col", "field", b"value").unwrap();
+        let tag2 = generate_equality_tag(&key2, b"id", "col", "field", b"value").unwrap();
         assert_ne!(tag1, tag2);
     }
 
     #[test]
     fn test_empty_identity() {
-        // Empty identity should still produce valid tag
         let key = [1u8; 32];
-        let tag = generate_equality_tag(&key, b"", "col", "field", b"value");
+        let tag = generate_equality_tag(&key, b"", "col", "field", b"value").unwrap();
         assert_eq!(tag.len(), SEARCH_TAG_SIZE);
     }
 
     #[test]
     fn test_empty_value() {
-        // Empty value should still produce valid tag
         let key = [1u8; 32];
-        let tag = generate_equality_tag(&key, b"id", "col", "field", b"");
+        let tag = generate_equality_tag(&key, b"id", "col", "field", b"").unwrap();
         assert_eq!(tag.len(), SEARCH_TAG_SIZE);
     }
 
     #[test]
     fn test_string_wrapper() {
         let key = [1u8; 32];
-        let tag1 = generate_equality_tag(&key, b"identity", "col", "field", b"value");
-        let tag2 = generate_equality_tag_str(&key, "identity", "col", "field", b"value");
+        let tag1 = generate_equality_tag(&key, b"identity", "col", "field", b"value").unwrap();
+        let tag2 = generate_equality_tag_str(&key, "identity", "col", "field", b"value").unwrap();
         assert_eq!(tag1, tag2);
+    }
+
+    #[test]
+    fn test_key_length_validation_rejects_short_key() {
+        let key = [1u8; 16];
+        let result = generate_equality_tag(&key, b"id", "col", "field", b"value");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_key_length_validation_rejects_long_key() {
+        let key = [1u8; 64];
+        let result = generate_equality_tag(&key, b"id", "col", "field", b"value");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_key_length_validation_accepts_32_bytes() {
+        let key = [1u8; 32];
+        let result = generate_equality_tag(&key, b"id", "col", "field", b"value");
+        assert!(result.is_ok());
     }
 }

@@ -9,14 +9,25 @@ use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 /// Push existing documents to a replicator peer.
 ///
 /// Delegates to `db::push_existing_docs` which contains the shared logic.
+/// The node identity DID is passed as the SE identity pubkey to ensure
+/// per-identity tag isolation in SE artifact generation.
 pub(crate) async fn push_existing_docs(
     handle: &p2p::P2PHostHandle,
     db: &crate::state::FfiDatabase,
     peer_id: libp2p::PeerId,
     collections: &[String],
     se_encryption_key: Option<&[u8]>,
+    se_identity_pubkey: Option<&[u8]>,
 ) -> Result<(), String> {
-    db::push_existing_docs(handle, db, peer_id, collections, se_encryption_key).await
+    db::push_existing_docs(
+        handle,
+        db,
+        peer_id,
+        collections,
+        se_encryption_key,
+        se_identity_pubkey,
+    )
+    .await
 }
 
 /// Retry pushing existing documents to all registered replicators.
@@ -72,14 +83,18 @@ pub unsafe extern "C" fn p2p_retry_replicators(node_ptr: usize) -> FfiResult {
                         let push_db = Arc::clone(db);
                         let push_collections = all_collections.clone();
                         let push_se_key = state.se_encryption_key.clone();
+                        let push_identity = state.node_identity_did.clone();
 
                         push_handles.push(tokio::spawn(async move {
+                            let identity_bytes: Option<Vec<u8>> =
+                                push_identity.as_deref().map(|s| s.as_bytes().to_vec());
                             if let Err(e) = push_existing_docs(
                                 &push_handle,
                                 &push_db,
                                 peer_id,
                                 &push_collections,
-                                push_se_key.as_deref(),
+                                push_se_key.as_ref().map(|k| k.as_slice()),
+                                identity_bytes.as_deref(),
                             )
                             .await
                             {

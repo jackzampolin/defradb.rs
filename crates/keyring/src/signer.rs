@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use zeroize::Zeroizing;
+
 use crate::error::{Error, Result};
 use crate::key_name::KeyName;
 use crate::Keyring;
@@ -129,8 +131,9 @@ impl KeyHandle {
     /// Get the raw key bytes from the keyring.
     ///
     /// Returns an error if the key doesn't exist or can't be decrypted.
-    /// The key is fetched fresh from the keyring on each call.
-    pub fn get_key_bytes(&self) -> Result<Vec<u8>> {
+    /// The key is fetched fresh from the keyring on each call, wrapped in Zeroizing
+    /// to ensure the key material is securely cleared on drop.
+    pub fn get_key_bytes(&self) -> Result<Zeroizing<Vec<u8>>> {
         self.keyring.get(self.key_name.as_str())
     }
 }

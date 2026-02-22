@@ -10,13 +10,15 @@ use crate::database::DB;
 /// Matches Go's `pushHeadsForAllDocs`: for each collection, iterate all docs,
 /// get composite heads from headstore, load blocks, send PushLog to peer.
 /// If an SE encryption key is provided, also generates and pushes SE artifacts
-/// for collections with encrypted indexes.
+/// for collections with encrypted indexes. The identity pubkey is threaded
+/// through SE artifact generation to ensure per-identity tag isolation.
 pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
     handle: &p2p::P2PHostHandle,
     db: &DB<S>,
     peer_id: libp2p::PeerId,
     collections: &[String],
     se_encryption_key: Option<&[u8]>,
+    se_identity_pubkey: Option<&[u8]>,
 ) -> Result<(), String> {
     // Wait for the connection to be fully established (dial is non-blocking).
     // After a node restart, re-establishing connectivity can take longer than
@@ -209,7 +211,12 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
 
     // Generate and push SE artifacts for collections with encrypted indexes.
     if let Some(se_key) = se_encryption_key {
-        let coordinator = crate::se::SECoordinator::with_key(se_key.to_vec());
+        let coordinator = match se_identity_pubkey {
+            Some(pubkey) => {
+                crate::se::SECoordinator::with_key_and_identity(se_key.to_vec(), pubkey.to_vec())
+            }
+            None => crate::se::SECoordinator::with_key(se_key.to_vec()),
+        };
 
         for col_name in collections {
             let collection = match db.get_collection(col_name) {

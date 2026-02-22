@@ -27,6 +27,7 @@ hkdf = "0.12"             # HKDF key derivation for ECIES
 hmac = "0.12"             # HMAC authentication for ECIES
 rand = "0.8"              # Random number generation for keys and nonces
 subtle = "2.5"            # Constant-time operations for key comparison
+zeroize = "1.8"           # Secure memory zeroing for sensitive data
 
 # Encoding and serialization
 hex = "0.4"               # Hex encoding/decoding

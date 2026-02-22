@@ -1718,6 +1718,7 @@ dependencies = [
  "tokio",
  "unsigned-varint 0.8.0",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -1976,6 +1977,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -2062,6 +2064,7 @@ dependencies = [
  "hex",
  "hyper 1.8.1",
  "identity",
+ "lens",
  "query",
  "schema",
  "serde",
@@ -2604,6 +2607,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

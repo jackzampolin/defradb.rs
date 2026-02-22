@@ -14,7 +14,7 @@ fn test_systemd_creds_set_get_roundtrip() {
     kr.set("test-key", data).unwrap();
 
     let retrieved = kr.get("test-key").unwrap();
-    assert_eq!(retrieved, data);
+    assert_eq!(&retrieved[..], data);
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn test_systemd_creds_overwrite() {
     kr.set("key", b"updated").unwrap();
 
     let retrieved = kr.get("key").unwrap();
-    assert_eq!(retrieved, b"updated");
+    assert_eq!(&retrieved[..], b"updated");
 }
 
 #[test]
@@ -114,5 +114,5 @@ fn test_systemd_creds_binary_data() {
     kr.set("binary-key", &binary_data).unwrap();
 
     let retrieved = kr.get("binary-key").unwrap();
-    assert_eq!(retrieved, binary_data);
+    assert_eq!(&retrieved[..], binary_data.as_slice());
 }

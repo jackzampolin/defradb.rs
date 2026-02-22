@@ -44,7 +44,7 @@
 //! let field = "age";
 //! let value = &[0x88, 0x15]; // Encoded integer 21
 //!
-//! let tag = generate_equality_tag(&key, identity, collection, field, value);
+//! let tag = generate_equality_tag(&key, identity, collection, field, value).unwrap();
 //!
 //! // Create an artifact for replication
 //! let artifact = Artifact::new(collection, "bae123", field, tag.to_vec());
@@ -60,4 +60,4 @@ mod artifact;
 mod tag;
 
 pub use artifact::{Artifact, ArtifactBatch, ArtifactType, OperationType};
-pub use tag::{generate_equality_tag, generate_equality_tag_str, SEARCH_TAG_SIZE};
+pub use tag::{generate_equality_tag, generate_equality_tag_str, SEARCH_TAG_SIZE, SE_KEY_LEN};

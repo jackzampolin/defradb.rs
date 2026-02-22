@@ -37,7 +37,7 @@ pub(crate) fn open_keyring(config: &Config) -> Result<Box<dyn keyring::Keyring>>
             let path = resolve_keyring_path(config)?;
             let secret =
                 keyring::load_secret_from_env().map_err(|e| Error::Keyring(e.to_string()))?;
-            let kr = keyring::FileKeyring::open(&path, secret)
+            let kr = keyring::FileKeyring::open(&path, &secret[..])
                 .map_err(|e| Error::Keyring(e.to_string()))?;
             Ok(Box::new(kr))
         }

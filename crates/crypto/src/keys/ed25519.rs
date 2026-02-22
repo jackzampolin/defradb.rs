@@ -8,6 +8,7 @@
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 use defra_core::Result;
 
@@ -86,7 +87,7 @@ impl Ed25519PrivateKey {
 
         // ed25519-dalek expects 32 bytes for SigningKey (the seed)
         // The first 32 bytes are the seed
-        let seed: [u8; 32] = bytes[..32]
+        let mut seed: [u8; 32] = bytes[..32]
             .try_into()
             .map_err(|_| crypto_error("failed to extract Ed25519 seed from key bytes"))?;
         let key = SigningKey::from_bytes(&seed);
@@ -96,11 +97,13 @@ impl Ed25519PrivateKey {
         let derived_public = key.verifying_key().to_bytes();
         let provided_public = &bytes[32..64];
         if derived_public != provided_public {
+            seed.zeroize();
             return Err(crypto_error(
                 "Ed25519 public key portion does not match derived key from seed",
             ));
         }
 
+        seed.zeroize();
         Ok(Self { key })
     }
 
@@ -250,7 +253,7 @@ impl PublicKey for Ed25519PublicKey {
 /// (32-byte seed + 32-byte derived public key). This function takes just the
 /// seed and derives the full keypair bytes. Used for JWK import.
 pub fn ed25519_key_from_seed(seed: &[u8]) -> Result<Vec<u8>> {
-    let seed_array: [u8; 32] = seed
+    let mut seed_array: [u8; 32] = seed
         .try_into()
         .map_err(|_| crypto_error("ed25519 seed must be exactly 32 bytes"))?;
     let signing_key = SigningKey::from_bytes(&seed_array);
@@ -258,6 +261,7 @@ pub fn ed25519_key_from_seed(seed: &[u8]) -> Result<Vec<u8>> {
     let mut full_key = Vec::with_capacity(64);
     full_key.extend_from_slice(seed);
     full_key.extend_from_slice(verifying_key.as_bytes());
+    seed_array.zeroize();
     Ok(full_key)
 }
 

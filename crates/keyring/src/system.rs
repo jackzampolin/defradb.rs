@@ -5,6 +5,8 @@
 //! - Linux: Secret Service (GNOME Keyring, KWallet)
 //! - Windows: Credential Manager
 
+use zeroize::Zeroizing;
+
 use crate::error::{Error, Result};
 use crate::keyring::Keyring;
 
@@ -47,7 +49,7 @@ impl Keyring for SystemKeyring {
             .map_err(|e| Error::SystemKeyring(format!("failed to store key: {}", e)))
     }
 
-    fn get(&self, name: &str) -> Result<Vec<u8>> {
+    fn get(&self, name: &str) -> Result<Zeroizing<Vec<u8>>> {
         use base64::Engine;
 
         let entry = self
@@ -59,9 +61,10 @@ impl Keyring for SystemKeyring {
             _ => Error::SystemKeyring(format!("failed to retrieve key: {}", e)),
         })?;
 
-        base64::engine::general_purpose::STANDARD
+        let decoded = base64::engine::general_purpose::STANDARD
             .decode(&encoded)
-            .map_err(|e| Error::Decryption(format!("invalid base64: {}", e)))
+            .map_err(|e| Error::Decryption(format!("invalid base64: {}", e)))?;
+        Ok(Zeroizing::new(decoded))
     }
 
     fn delete(&self, name: &str) -> Result<()> {

@@ -44,7 +44,7 @@ fn test_matches_manual_hmac() {
     let value = b"21";
 
     let expected = compute_expected_tag(&key, identity, collection, field, value);
-    let actual = generate_equality_tag_str(&key, identity, collection, field, value);
+    let actual = generate_equality_tag_str(&key, identity, collection, field, value).unwrap();
 
     assert_eq!(
         actual, expected,
@@ -62,7 +62,7 @@ fn test_empty_identity_matches_expected() {
 
     // Domain separator becomes "eq::col:f"
     let expected = compute_expected_tag(&key, "", collection, field, value);
-    let actual = generate_equality_tag_str(&key, "", collection, field, value);
+    let actual = generate_equality_tag_str(&key, "", collection, field, value).unwrap();
 
     assert_eq!(actual, expected);
 }
@@ -76,10 +76,10 @@ fn test_binary_identity() {
     let field = "content";
     let value = b"hello";
 
-    let actual = generate_equality_tag(&key, identity, collection, field, value);
+    let actual = generate_equality_tag(&key, identity, collection, field, value).unwrap();
 
     // Verify determinism
-    let actual2 = generate_equality_tag(&key, identity, collection, field, value);
+    let actual2 = generate_equality_tag(&key, identity, collection, field, value).unwrap();
     assert_eq!(actual, actual2);
 
     // Verify it's 16 bytes
@@ -92,9 +92,9 @@ fn test_domain_separator_format() {
     let key = [0x00u8; 32];
 
     // Different components should produce different tags
-    let tag1 = generate_equality_tag_str(&key, "a", "b", "c", b"v");
-    let tag2 = generate_equality_tag_str(&key, "a:b", "", "c", b"v"); // Different parsing
-    let tag3 = generate_equality_tag_str(&key, "", "a:b", "c", b"v");
+    let tag1 = generate_equality_tag_str(&key, "a", "b", "c", b"v").unwrap();
+    let tag2 = generate_equality_tag_str(&key, "a:b", "", "c", b"v").unwrap();
+    let tag3 = generate_equality_tag_str(&key, "", "a:b", "c", b"v").unwrap();
 
     // These should all be different because the domain separator string differs
     assert_ne!(
@@ -120,8 +120,8 @@ fn test_value_appended_to_domain() {
     let field = "f";
 
     // Value "abc" should differ from values "ab" + suffix
-    let tag1 = generate_equality_tag_str(&key, identity, collection, field, b"abc");
-    let tag2 = generate_equality_tag_str(&key, identity, collection, field, b"ab");
+    let tag1 = generate_equality_tag_str(&key, identity, collection, field, b"abc").unwrap();
+    let tag2 = generate_equality_tag_str(&key, identity, collection, field, b"ab").unwrap();
 
     assert_ne!(tag1, tag2);
 }
@@ -140,11 +140,11 @@ fn test_with_encoded_integer() {
     // intZero = 0x88 (136), so 21 encodes to [0x88 + 21] = [0x9d]
     // Actually for values <= intSmall (109), it's just intZero + value = 136 + 21 = 157 = 0x9d
     let encoded_21 = vec![0x9d]; // EncodeVarintAscending(21)
-    let tag = generate_equality_tag_str(&key, identity, collection, field, &encoded_21);
+    let tag = generate_equality_tag_str(&key, identity, collection, field, &encoded_21).unwrap();
 
     // Different value should produce different tag
     let encoded_22 = vec![0x9e]; // EncodeVarintAscending(22)
-    let tag2 = generate_equality_tag_str(&key, identity, collection, field, &encoded_22);
+    let tag2 = generate_equality_tag_str(&key, identity, collection, field, &encoded_22).unwrap();
 
     assert_ne!(tag, tag2);
     assert_eq!(tag.len(), SEARCH_TAG_SIZE);
@@ -164,7 +164,7 @@ fn test_with_encoded_string() {
     // 0x06 = bytesMarker
     // 0x00, 0x01 = escaped terminator
     let encoded_alice = vec![0x06, b'A', b'l', b'i', b'c', b'e', 0x00, 0x01];
-    let tag = generate_equality_tag_str(&key, identity, collection, field, &encoded_alice);
+    let tag = generate_equality_tag_str(&key, identity, collection, field, &encoded_alice).unwrap();
 
     assert_eq!(tag.len(), SEARCH_TAG_SIZE);
 }
@@ -177,7 +177,7 @@ fn test_output_size_is_16_bytes() {
     // Test with various input sizes
     for i in 0..100 {
         let value = vec![i as u8; i];
-        let tag = generate_equality_tag_str(&key, "id", "col", "field", &value);
+        let tag = generate_equality_tag_str(&key, "id", "col", "field", &value).unwrap();
         assert_eq!(
             tag.len(),
             SEARCH_TAG_SIZE,
@@ -197,7 +197,7 @@ fn test_large_inputs() {
     let field = "c".repeat(1000);
     let value = vec![0xBB; 10000];
 
-    let tag = generate_equality_tag_str(&key, &identity, &collection, &field, &value);
+    let tag = generate_equality_tag_str(&key, &identity, &collection, &field, &value).unwrap();
     assert_eq!(tag.len(), SEARCH_TAG_SIZE);
 }
 
@@ -208,8 +208,8 @@ fn test_key_sensitivity() {
     let mut key2 = [0x00u8; 32];
     key2[0] = 0x01; // Flip one bit
 
-    let tag1 = generate_equality_tag_str(&key1, "id", "col", "f", b"v");
-    let tag2 = generate_equality_tag_str(&key2, "id", "col", "f", b"v");
+    let tag1 = generate_equality_tag_str(&key1, "id", "col", "f", b"v").unwrap();
+    let tag2 = generate_equality_tag_str(&key2, "id", "col", "f", b"v").unwrap();
 
     // Tags should be completely different (avalanche effect)
     let diff_bits: u32 = tag1
@@ -235,7 +235,7 @@ fn test_truncation_uniqueness() {
     // Generate 1000 tags and ensure no collisions
     for i in 0..1000 {
         let value = format!("value_{}", i);
-        let tag = generate_equality_tag_str(&key, "id", "col", "field", value.as_bytes());
+        let tag = generate_equality_tag_str(&key, "id", "col", "field", value.as_bytes()).unwrap();
         assert!(
             seen_tags.insert(tag),
             "Collision detected at iteration {}",
@@ -258,7 +258,7 @@ fn test_known_vector_simple() {
     // Domain separator: "eq::test:value"
     // HMAC-SHA256(zeros[32], "eq::test:value" || "hello")
     let expected = compute_expected_tag(&key, identity, collection, field, value);
-    let actual = generate_equality_tag_str(&key, identity, collection, field, value);
+    let actual = generate_equality_tag_str(&key, identity, collection, field, value).unwrap();
 
     assert_eq!(
         hex::encode(actual),
@@ -278,22 +278,38 @@ fn test_utf8_identity() {
     let value = b"secret_value";
 
     let expected = compute_expected_tag(&key, identity, collection, field, value);
-    let actual = generate_equality_tag_str(&key, identity, collection, field, value);
+    let actual = generate_equality_tag_str(&key, identity, collection, field, value).unwrap();
 
     assert_eq!(actual, expected);
 }
 
-/// Test that binary identity bytes are converted to UTF-8 lossy
+/// Test that binary identity bytes are handled correctly
 #[test]
-fn test_binary_identity_utf8_lossy() {
+fn test_binary_identity_raw_bytes() {
     let key = [0x33u8; 32];
     // Invalid UTF-8 sequence
     let identity_bytes = &[0xFF, 0xFE, 0x00, 0x01];
 
-    let tag = generate_equality_tag(&key, identity_bytes, "col", "f", b"v");
+    let tag = generate_equality_tag(&key, identity_bytes, "col", "f", b"v").unwrap();
     assert_eq!(tag.len(), SEARCH_TAG_SIZE);
 
     // Verify it's deterministic
-    let tag2 = generate_equality_tag(&key, identity_bytes, "col", "f", b"v");
+    let tag2 = generate_equality_tag(&key, identity_bytes, "col", "f", b"v").unwrap();
     assert_eq!(tag, tag2);
+}
+
+/// Test that keys shorter than 32 bytes are rejected
+#[test]
+fn test_rejects_short_key() {
+    let key = [0x01u8; 16]; // Too short
+    let result = generate_equality_tag(&key, b"id", "col", "field", b"value");
+    assert!(result.is_err(), "Short key should be rejected");
+}
+
+/// Test that keys longer than 32 bytes are rejected
+#[test]
+fn test_rejects_long_key() {
+    let key = [0x01u8; 64]; // Too long
+    let result = generate_equality_tag(&key, b"id", "col", "field", b"value");
+    assert!(result.is_err(), "Long key should be rejected");
 }

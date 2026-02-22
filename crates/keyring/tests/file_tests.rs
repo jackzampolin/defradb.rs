@@ -11,7 +11,7 @@ fn test_file_keyring_set_get() {
     keyring.set("test-key", key_data).unwrap();
 
     let retrieved = keyring.get("test-key").unwrap();
-    assert_eq!(retrieved, key_data);
+    assert_eq!(&retrieved[..], key_data);
 }
 
 #[test]
@@ -76,7 +76,7 @@ fn test_file_keyring_overwrite() {
     keyring.set("key", b"updated").unwrap();
 
     let retrieved = keyring.get("key").unwrap();
-    assert_eq!(retrieved, b"updated");
+    assert_eq!(&retrieved[..], b"updated");
 }
 
 #[test]

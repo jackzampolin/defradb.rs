@@ -65,5 +65,5 @@ pub use merkle_proof::{
 // Re-export searchable encryption types
 pub use se::{
     generate_equality_tag, generate_equality_tag_str, Artifact, ArtifactBatch, ArtifactType,
-    OperationType, SEARCH_TAG_SIZE,
+    OperationType, SEARCH_TAG_SIZE, SE_KEY_LEN,
 };

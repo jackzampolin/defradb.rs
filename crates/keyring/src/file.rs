@@ -120,7 +120,7 @@ impl Keyring for FileKeyring {
         Ok(())
     }
 
-    fn get(&self, name: &str) -> Result<Vec<u8>> {
+    fn get(&self, name: &str) -> Result<Zeroizing<Vec<u8>>> {
         let path = self.key_path(name)?;
         let cipher = fs::read(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -129,7 +129,8 @@ impl Keyring for FileKeyring {
                 Error::Io(e)
             }
         })?;
-        self.decrypt(&cipher)
+        let decrypted = self.decrypt(&cipher)?;
+        Ok(Zeroizing::new(decrypted))
     }
 
     fn delete(&self, name: &str) -> Result<()> {
