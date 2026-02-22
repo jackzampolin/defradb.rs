@@ -22,3 +22,7 @@ cosmrs = { version = "0.22", features = ["rpc"] }
 
 [dev-dependencies]
 tempfile = "3.17"
+identity = { path = "../../crates/identity" }
+crypto = { path = "../../crates/crypto" }
+base64 = "0.22"
+hex = "0.4"

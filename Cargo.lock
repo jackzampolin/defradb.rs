@@ -3688,9 +3688,13 @@ name = "integration-test"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "cosmrs",
+ "crypto",
  "defra-version",
  "futures",
+ "hex",
+ "identity",
  "libc",
  "paste",
  "rand 0.8.5",
