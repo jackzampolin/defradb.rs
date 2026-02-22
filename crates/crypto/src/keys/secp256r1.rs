@@ -96,6 +96,10 @@ impl PrivateKey for Secp256r1PrivateKey {
 
         let signature: Signature = self.key.sign_digest(hasher);
 
+        // Normalize S to low-S form for compatibility with Go verifiers and
+        // to prevent signature malleability (ECDSA signatures are malleable without this).
+        let signature = signature.normalize_s().unwrap_or(signature);
+
         Ok(signature.to_der().as_bytes().to_vec())
     }
 
