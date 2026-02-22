@@ -5,7 +5,7 @@ use acp::nac::NodePermission;
 use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::types::{c_str_to_string, FfiResult};
-use crate::{ffi_async, try_ffi};
+use crate::{ffi_async, ffi_entry, try_ffi};
 use query::select_to_go_json;
 
 /// Add a view to the database.
@@ -35,98 +35,100 @@ pub unsafe extern "C" fn add_view(
     sdl: *const c_char,
     transform: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::CollectionPatch
-    ));
-    let query_str = try_ffi!(require_c_str(gql_query, "gql_query"));
-    let sdl_str = try_ffi!(require_c_str(sdl, "sdl"));
-    let transform_opt = c_str_to_string(transform);
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::CollectionPatch
+        ));
+        let query_str = try_ffi!(require_c_str(gql_query, "gql_query"));
+        let sdl_str = try_ffi!(require_c_str(sdl, "sdl"));
+        let transform_opt = c_str_to_string(transform);
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    ffi_async!(rt, {
-        // Get existing collection names so the SDL parser can resolve external type references
-        let known_types: std::collections::HashSet<String> = database
-            .list_collections()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        ffi_async!(rt, {
+            // Get existing collection names so the SDL parser can resolve external type references
+            let known_types: std::collections::HashSet<String> = database
+                .list_collections()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
 
-        // Parse the SDL into collection versions, passing known types for resolution
-        let collections = query::parse_sdl_with_known_types(&sdl_str, known_types)
-            .map_err(|e| format!("failed to parse view SDL: {}", e))?;
+            // Parse the SDL into collection versions, passing known types for resolution
+            let collections = query::parse_sdl_with_known_types(&sdl_str, known_types)
+                .map_err(|e| format!("failed to parse view SDL: {}", e))?;
 
-        // Parse the GQL query into a Select, matching Go's `addView` behavior:
-        // Go wraps query as `query { <input> }` then parses to request.Select
-        let wrapped_query = format!("query {{ {} }}", &query_str);
-        let selects = query::parse_query(&wrapped_query)
-            .map_err(|e| format!("failed to parse view query: {}", e))?;
-        if selects.is_empty() {
-            return Err("invalid view query: no selections found".to_string());
-        }
-        let select_json = select_to_go_json(&selects[0]);
+            // Parse the GQL query into a Select, matching Go's `addView` behavior:
+            // Go wraps query as `query { <input> }` then parses to request.Select
+            let wrapped_query = format!("query {{ {} }}", &query_str);
+            let selects = query::parse_query(&wrapped_query)
+                .map_err(|e| format!("failed to parse view query: {}", e))?;
+            if selects.is_empty() {
+                return Err("invalid view query: no selections found".to_string());
+            }
+            let select_json = select_to_go_json(&selects[0]);
 
-        // Validate transform CID exists in the lens store if provided
-        if let Some(ref t) = transform_opt {
-            let lens_store = database.lens_store();
-            // Check each transform ID (may be comma-separated for chained transforms)
-            for cid in t.split(',') {
-                let cid = cid.trim();
-                if !cid.is_empty() {
-                    let tid = lens::TransformId::new(cid);
-                    if !lens_store.has_transform(&tid) {
-                        return Err("lens CID not found".to_string());
+            // Validate transform CID exists in the lens store if provided
+            if let Some(ref t) = transform_opt {
+                let lens_store = database.lens_store();
+                // Check each transform ID (may be comma-separated for chained transforms)
+                for cid in t.split(',') {
+                    let cid = cid.trim();
+                    if !cid.is_empty() {
+                        let tid = lens::TransformId::new(cid);
+                        if !lens_store.has_transform(&tid) {
+                            return Err("lens CID not found".to_string());
+                        }
                     }
                 }
             }
-        }
 
-        // Build the query source with Go-compatible Select JSON
-        let mut query_source = schema::QuerySource::new(select_json);
-        if let Some(ref t) = transform_opt {
-            query_source = query_source.with_transform(t);
-        }
+            // Build the query source with Go-compatible Select JSON
+            let mut query_source = schema::QuerySource::new(select_json);
+            if let Some(ref t) = transform_opt {
+                query_source = query_source.with_transform(t);
+            }
 
-        // Attach query source to all collections
-        let view_collections: Vec<_> = collections
-            .into_iter()
-            .map(|mut col_version| {
-                col_version.query = Some(query_source.clone());
-                col_version
-            })
-            .collect();
+            // Attach query source to all collections
+            let view_collections: Vec<_> = collections
+                .into_iter()
+                .map(|mut col_version| {
+                    col_version.query = Some(query_source.clone());
+                    col_version
+                })
+                .collect();
 
-        // Create all view collections atomically (all-or-nothing)
-        let created_versions = database
-            .create_collections_atomic(view_collections)
-            .await
-            .map_err(|e| format!("failed to create view collection: {}", e))?;
-
-        // Auto-refresh materialized views after creation
-        // Exclude embedded-only types (interfaces) - they can't be queried
-        let materialized_names: Vec<String> = created_versions
-            .iter()
-            .filter(|col| col.is_materialized && !col.is_embedded_only)
-            .map(|col| col.name.clone())
-            .collect();
-
-        if !materialized_names.is_empty() {
-            database
-                .refresh_views(Some(db::RefreshViewsOptions::with_names(
-                    materialized_names,
-                )))
+            // Create all view collections atomically (all-or-nothing)
+            let created_versions = database
+                .create_collections_atomic(view_collections)
                 .await
-                .map_err(|e| format!("failed to refresh materialized views: {}", e))?;
-        }
+                .map_err(|e| format!("failed to create view collection: {}", e))?;
 
-        let json = serde_json::to_string(&created_versions)
-            .map_err(|e| format!("failed to serialize result: {}", e))?;
+            // Auto-refresh materialized views after creation
+            // Exclude embedded-only types (interfaces) - they can't be queried
+            let materialized_names: Vec<String> = created_versions
+                .iter()
+                .filter(|col| col.is_materialized && !col.is_embedded_only)
+                .map(|col| col.name.clone())
+                .collect();
 
-        Ok(json)
-    })
+            if !materialized_names.is_empty() {
+                database
+                    .refresh_views(Some(db::RefreshViewsOptions::with_names(
+                        materialized_names,
+                    )))
+                    .await
+                    .map_err(|e| format!("failed to refresh materialized views: {}", e))?;
+            }
+
+            let json = serde_json::to_string(&created_versions)
+                .map_err(|e| format!("failed to serialize result: {}", e))?;
+
+            Ok(json)
+        })
+    }
 }
 
 /// Refresh view caches.
@@ -148,35 +150,37 @@ pub unsafe extern "C" fn add_view(
 /// `options` must be null or a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn refresh_views(node_ptr: usize, options: *const c_char) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    // Parse options if provided
-    let refresh_options = if let Some(opts_str) = c_str_to_string(options) {
-        // Parse JSON options
-        match serde_json::from_str::<serde_json::Value>(&opts_str) {
-            Ok(json) => {
-                let names = json.get("Names").and_then(|n| n.as_array()).map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect::<Vec<_>>()
-                });
-                names.map(db::RefreshViewsOptions::with_names)
+        // Parse options if provided
+        let refresh_options = if let Some(opts_str) = c_str_to_string(options) {
+            // Parse JSON options
+            match serde_json::from_str::<serde_json::Value>(&opts_str) {
+                Ok(json) => {
+                    let names = json.get("Names").and_then(|n| n.as_array()).map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<_>>()
+                    });
+                    names.map(db::RefreshViewsOptions::with_names)
+                }
+                Err(_) => None,
             }
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
-    ffi_async!(rt, {
-        database
-            .refresh_views(refresh_options)
-            .await
-            .map_err(|e| format!("failed to refresh views: {}", e))?;
+        ffi_async!(rt, {
+            database
+                .refresh_views(refresh_options)
+                .await
+                .map_err(|e| format!("failed to refresh views: {}", e))?;
 
-        Ok("{}".to_string())
-    })
+            Ok("{}".to_string())
+        })
+    }
 }
 
 #[cfg(test)]

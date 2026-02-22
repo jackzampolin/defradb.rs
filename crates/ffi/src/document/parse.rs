@@ -2,6 +2,7 @@ use std::ffi::c_char;
 
 use serde_json::Value as JsonValue;
 
+use crate::ffi_entry;
 use crate::types::{c_str_to_string, FfiResult};
 
 /// Check if a JSON string represents an array.
@@ -11,18 +12,20 @@ use crate::types::{c_str_to_string, FfiResult};
 /// `json_data` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn is_json_array(json_data: *const c_char) -> FfiResult {
-    let json_str = match c_str_to_string(json_data) {
-        Some(s) => s,
-        None => return FfiResult::error("json_data is null"),
-    };
+    ffi_entry! {
+        let json_str = match c_str_to_string(json_data) {
+            Some(s) => s,
+            None => return FfiResult::error("json_data is null"),
+        };
 
-    // Try to parse to detect type
-    let parsed: JsonValue = match serde_json::from_str(&json_str) {
-        Ok(v) => v,
-        Err(e) => return FfiResult::error(format!("invalid JSON: {}", e)),
-    };
+        // Try to parse to detect type
+        let parsed: JsonValue = match serde_json::from_str(&json_str) {
+            Ok(v) => v,
+            Err(e) => return FfiResult::error(format!("invalid JSON: {}", e)),
+        };
 
-    FfiResult::success(parsed.is_array().to_string())
+        FfiResult::success(parsed.is_array().to_string())
+    }
 }
 
 /// Parse a Go-style duration string into nanoseconds.
@@ -35,19 +38,21 @@ pub unsafe extern "C" fn is_json_array(json_data: *const c_char) -> FfiResult {
 /// `duration_str` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn parse_duration(duration_str: *const c_char) -> FfiResult {
-    let input = match c_str_to_string(duration_str) {
-        Some(s) => s,
-        None => return FfiResult::error("duration_str is null"),
-    };
+    ffi_entry! {
+        let input = match c_str_to_string(duration_str) {
+            Some(s) => s,
+            None => return FfiResult::error("duration_str is null"),
+        };
 
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return FfiResult::success("0");
-    }
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return FfiResult::success("0");
+        }
 
-    match parse_go_duration(trimmed) {
-        Ok(nanos) => FfiResult::success(nanos.to_string()),
-        Err(e) => FfiResult::error(e),
+        match parse_go_duration(trimmed) {
+            Ok(nanos) => FfiResult::success(nanos.to_string()),
+            Err(e) => FfiResult::error(e),
+        }
     }
 }
 
@@ -139,40 +144,42 @@ fn parse_go_duration(s: &str) -> Result<i64, String> {
 /// `input` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn parse_string_array(input: *const c_char) -> FfiResult {
-    let input_str = match c_str_to_string(input) {
-        Some(s) => s,
-        None => return FfiResult::error("input is null"),
-    };
+    ffi_entry! {
+        let input_str = match c_str_to_string(input) {
+            Some(s) => s,
+            None => return FfiResult::error("input is null"),
+        };
 
-    let trimmed = input_str.trim();
+        let trimmed = input_str.trim();
 
-    // Empty input returns empty array
-    if trimmed.is_empty() {
-        return FfiResult::success("[]");
-    }
+        // Empty input returns empty array
+        if trimmed.is_empty() {
+            return FfiResult::success("[]");
+        }
 
-    // Try to parse as JSON array first
-    if trimmed.starts_with('[') {
-        match serde_json::from_str::<Vec<String>>(trimmed) {
-            Ok(arr) => {
-                let json = serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string());
-                return FfiResult::success(json);
-            }
-            Err(e) => {
-                return FfiResult::error(format!("invalid JSON array: {}", e));
+        // Try to parse as JSON array first
+        if trimmed.starts_with('[') {
+            match serde_json::from_str::<Vec<String>>(trimmed) {
+                Ok(arr) => {
+                    let json = serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string());
+                    return FfiResult::success(json);
+                }
+                Err(e) => {
+                    return FfiResult::error(format!("invalid JSON array: {}", e));
+                }
             }
         }
+
+        // Fall back to comma-separated parsing
+        let parts: Vec<String> = trimmed
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let json = serde_json::to_string(&parts).unwrap_or_else(|_| "[]".to_string());
+        FfiResult::success(json)
     }
-
-    // Fall back to comma-separated parsing
-    let parts: Vec<String> = trimmed
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    let json = serde_json::to_string(&parts).unwrap_or_else(|_| "[]".to_string());
-    FfiResult::success(json)
 }
 
 #[cfg(test)]

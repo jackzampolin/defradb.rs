@@ -186,6 +186,32 @@ impl Default for NodeInitOptions {
     }
 }
 
+/// Trait for FFI return types that can represent a panic error.
+///
+/// Used by the `ffi_entry!` macro to convert caught panics into
+/// error results instead of unwinding across the FFI boundary.
+pub trait FfiPanicResult {
+    fn from_panic(msg: String) -> Self;
+}
+
+impl FfiPanicResult for FfiResult {
+    fn from_panic(msg: String) -> Self {
+        FfiResult::error(msg)
+    }
+}
+
+impl FfiPanicResult for NewNodeResult {
+    fn from_panic(msg: String) -> Self {
+        NewNodeResult::error(msg)
+    }
+}
+
+impl FfiPanicResult for NewTxnResult {
+    fn from_panic(msg: String) -> Self {
+        NewTxnResult::error(msg)
+    }
+}
+
 /// Convert a string to a CString, sanitizing null bytes.
 ///
 /// If the string contains embedded null bytes, they are replaced with the

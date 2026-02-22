@@ -2,7 +2,7 @@ use std::ffi::c_char;
 
 use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::types::FfiResult;
-use crate::{ffi_async, try_ffi};
+use crate::{ffi_async, ffi_entry, try_ffi};
 
 use db::auto_commit_mutator::AutoCommitMutator;
 use document::DocID;
@@ -34,32 +34,34 @@ pub unsafe extern "C" fn delete_documents(
     collection_name: *const c_char,
     doc_ids_json: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    let col_name = try_ffi!(require_c_str(collection_name, "collection_name"));
-    let ids_json = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        let col_name = try_ffi!(require_c_str(collection_name, "collection_name"));
+        let ids_json = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    // Parse JSON array of docID strings
-    let doc_id_strings: Vec<String> = try_ffi!(serde_json::from_str(&ids_json)
-        .map_err(|e| FfiResult::error(format!("invalid doc_ids_json: {}", e))));
+        // Parse JSON array of docID strings
+        let doc_id_strings: Vec<String> = try_ffi!(serde_json::from_str(&ids_json)
+            .map_err(|e| FfiResult::error(format!("invalid doc_ids_json: {}", e))));
 
-    ffi_async!(rt, {
-        let mutator = AutoCommitMutator::new(database.clone());
+        ffi_async!(rt, {
+            let mutator = AutoCommitMutator::new(database.clone());
 
-        let doc_ids: Vec<DocID> = doc_id_strings
-            .iter()
-            .map(|s| DocID::from_string(s).map_err(|e| format!("invalid docID '{}': {}", s, e)))
-            .collect::<Result<Vec<_>, _>>()?;
+            let doc_ids: Vec<DocID> = doc_id_strings
+                .iter()
+                .map(|s| DocID::from_string(s).map_err(|e| format!("invalid docID '{}': {}", s, e)))
+                .collect::<Result<Vec<_>, _>>()?;
 
-        let results = mutator
-            .delete_many_impl(&col_name, &doc_ids)
-            .await
-            .map_err(|e| format!("batch delete failed: {}", e))?;
+            let results = mutator
+                .delete_many_impl(&col_name, &doc_ids)
+                .await
+                .map_err(|e| format!("batch delete failed: {}", e))?;
 
-        let deleted: u64 = results.iter().filter(|r| r.existed).count() as u64;
+            let deleted: u64 = results.iter().filter(|r| r.existed).count() as u64;
 
-        Ok(format!("{{\"deleted\":{}}}", deleted))
-    })
+            Ok(format!("{{\"deleted\":{}}}", deleted))
+        })
+    }
 }
 
 #[cfg(test)]

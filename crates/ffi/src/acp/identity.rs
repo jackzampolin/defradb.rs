@@ -4,7 +4,7 @@ use identity::Identity;
 
 use crate::helpers::{get_node_database, get_rt};
 use crate::types::{c_str_to_string, FfiResult};
-use crate::{ffi_async, try_ffi};
+use crate::{ffi_async, ffi_entry, try_ffi};
 
 /// Get the node's identity (DID).
 ///
@@ -16,21 +16,23 @@ use crate::{ffi_async, try_ffi};
 /// Returns an error if no node identity is configured.
 #[no_mangle]
 pub extern "C" fn get_node_identity(node_ptr: usize) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    ffi_async!(rt, {
-        let identity = database
-            .node_identity()
-            .ok_or_else(|| "node identity not configured".to_string())?;
+        ffi_async!(rt, {
+            let identity = database
+                .node_identity()
+                .ok_or_else(|| "node identity not configured".to_string())?;
 
-        let did = identity
-            .did()
-            .map_err(|e| format!("failed to get DID: {}", e))?;
+            let did = identity
+                .did()
+                .map_err(|e| format!("failed to get DID: {}", e))?;
 
-        let json = serde_json::json!({ "did": did.to_string() }).to_string();
-        Ok(json)
-    })
+            let json = serde_json::json!({ "did": did.to_string() }).to_string();
+            Ok(json)
+        })
+    }
 }
 
 /// Register an existing identity for block signing.
@@ -54,40 +56,42 @@ pub extern "C" fn RegisterIdentity(
     public_key_hex: *const c_char,
     key_type: *const c_char,
 ) -> FfiResult {
-    let result = (|| {
-        // SAFETY: These pointers come from Go/C FFI and are valid C strings.
-        let did_str = unsafe { c_str_to_string(did) }.ok_or("invalid did parameter")?;
-        let priv_hex = unsafe { c_str_to_string(private_key_hex) }
-            .ok_or("invalid private_key_hex parameter")?;
-        let pub_hex =
-            unsafe { c_str_to_string(public_key_hex) }.ok_or("invalid public_key_hex parameter")?;
-        let key_type_str =
-            unsafe { c_str_to_string(key_type) }.unwrap_or_else(|| "secp256k1".to_string());
+    ffi_entry! {
+        let result = (|| {
+            // SAFETY: These pointers come from Go/C FFI and are valid C strings.
+            let did_str = unsafe { c_str_to_string(did) }.ok_or("invalid did parameter")?;
+            let priv_hex = unsafe { c_str_to_string(private_key_hex) }
+                .ok_or("invalid private_key_hex parameter")?;
+            let pub_hex =
+                unsafe { c_str_to_string(public_key_hex) }.ok_or("invalid public_key_hex parameter")?;
+            let key_type_str =
+                unsafe { c_str_to_string(key_type) }.unwrap_or_else(|| "secp256k1".to_string());
 
-        let private_key_bytes =
-            hex::decode(&priv_hex).map_err(|e| format!("invalid private key hex: {}", e))?;
-        let public_key_bytes =
-            hex::decode(&pub_hex).map_err(|e| format!("invalid public key hex: {}", e))?;
+            let private_key_bytes =
+                hex::decode(&priv_hex).map_err(|e| format!("invalid private key hex: {}", e))?;
+            let public_key_bytes =
+                hex::decode(&pub_hex).map_err(|e| format!("invalid public key hex: {}", e))?;
 
-        tracing::debug!(did = %did_str, key_type = %key_type_str, "registering identity");
+            tracing::debug!(did = %did_str, key_type = %key_type_str, "registering identity");
 
-        defra_core::signing::store_identity(
-            &did_str,
-            defra_core::signing::SigningConfig {
-                key_type: key_type_str,
-                private_key_bytes,
-                public_key_bytes,
-                public_key_hex: pub_hex,
-                remote_signer: None,
-            },
-        );
+            defra_core::signing::store_identity(
+                &did_str,
+                defra_core::signing::SigningConfig {
+                    key_type: key_type_str,
+                    private_key_bytes,
+                    public_key_bytes,
+                    public_key_hex: pub_hex,
+                    remote_signer: None,
+                },
+            );
 
-        Ok::<String, String>("{}".to_string())
-    })();
+            Ok::<String, String>("{}".to_string())
+        })();
 
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
+        match result {
+            Ok(json) => FfiResult::success(json),
+            Err(e) => FfiResult::error(e),
+        }
     }
 }
 
@@ -106,46 +110,48 @@ pub extern "C" fn RegisterIdentity(
 /// ```
 #[no_mangle]
 pub extern "C" fn create_identity() -> FfiResult {
-    let result = (|| {
-        let private_key = crypto::generate_ed25519()
-            .map_err(|e| format!("failed to generate Ed25519 key: {}", e))?;
+    ffi_entry! {
+        let result = (|| {
+            let private_key = crypto::generate_ed25519()
+                .map_err(|e| format!("failed to generate Ed25519 key: {}", e))?;
 
-        let identity = identity::RawIdentity::from_ed25519(private_key)
-            .map_err(|e| format!("failed to create identity: {}", e))?;
+            let identity = identity::RawIdentity::from_ed25519(private_key)
+                .map_err(|e| format!("failed to create identity: {}", e))?;
 
-        let did = identity
-            .did()
-            .map_err(|e| format!("failed to derive DID: {}", e))?;
+            let did = identity
+                .did()
+                .map_err(|e| format!("failed to derive DID: {}", e))?;
 
-        let private_key_hex = hex::encode(identity.private_key_bytes());
-        let public_key_hex = hex::encode(identity.public_key_bytes());
+            let private_key_hex = hex::encode(identity.private_key_bytes());
+            let public_key_hex = hex::encode(identity.public_key_bytes());
 
-        // Store identity in global store so block signing can look up the
-        // private key from just a DID string during mutations.
-        defra_core::signing::store_identity(
-            did.as_ref(),
-            defra_core::signing::SigningConfig {
-                key_type: "ed25519".to_string(),
-                private_key_bytes: identity.private_key_bytes().to_vec(),
-                public_key_bytes: identity.public_key_bytes().to_vec(),
-                public_key_hex,
-                remote_signer: None,
-            },
-        );
+            // Store identity in global store so block signing can look up the
+            // private key from just a DID string during mutations.
+            defra_core::signing::store_identity(
+                did.as_ref(),
+                defra_core::signing::SigningConfig {
+                    key_type: "ed25519".to_string(),
+                    private_key_bytes: identity.private_key_bytes().to_vec(),
+                    public_key_bytes: identity.public_key_bytes().to_vec(),
+                    public_key_hex,
+                    remote_signer: None,
+                },
+            );
 
-        let json = serde_json::json!({
-            "did": did.to_string(),
-            "privateKeyHex": private_key_hex,
-            "keyType": "ed25519"
-        })
-        .to_string();
+            let json = serde_json::json!({
+                "did": did.to_string(),
+                "privateKeyHex": private_key_hex,
+                "keyType": "ed25519"
+            })
+            .to_string();
 
-        Ok::<String, String>(json)
-    })();
+            Ok::<String, String>(json)
+        })();
 
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
+        match result {
+            Ok(json) => FfiResult::success(json),
+            Err(e) => FfiResult::error(e),
+        }
     }
 }
 

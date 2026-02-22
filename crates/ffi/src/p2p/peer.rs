@@ -1,5 +1,6 @@
 use std::ffi::c_char;
 
+use crate::ffi_entry;
 use acp::nac::NodePermission;
 
 use crate::helpers::{get_rt, require_c_str};
@@ -20,46 +21,48 @@ use super::parse_multiaddr_with_peer_id;
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::P2pPeerInfo
-    ));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::P2pPeerInfo
+        ));
 
-    let result = NODES
-        .get(node_ptr, |state| {
-            let p2p = match &state.p2p {
-                Some(p2p) => p2p,
-                None => return Ok("[]".to_string()),
-            };
+        let result = NODES
+            .get(node_ptr, |state| {
+                let p2p = match &state.p2p {
+                    Some(p2p) => p2p,
+                    None => return Ok("[]".to_string()),
+                };
 
-            rt.block_on(async {
-                let peer_id = p2p
-                    .handle
-                    .local_peer_id()
-                    .await
-                    .map_err(|e| format!("failed to get peer ID: {}", e))?;
-                let addresses = p2p
-                    .handle
-                    .listen_addresses()
-                    .await
-                    .map_err(|e| format!("failed to get addresses: {}", e))?;
-                let full_addrs: Vec<String> = addresses
-                    .into_iter()
-                    .map(|addr| format!("{}/p2p/{}", addr, peer_id))
-                    .collect();
-                serde_json::to_string(&full_addrs)
-                    .map_err(|e| format!("failed to serialize peer info: {}", e))
+                rt.block_on(async {
+                    let peer_id = p2p
+                        .handle
+                        .local_peer_id()
+                        .await
+                        .map_err(|e| format!("failed to get peer ID: {}", e))?;
+                    let addresses = p2p
+                        .handle
+                        .listen_addresses()
+                        .await
+                        .map_err(|e| format!("failed to get addresses: {}", e))?;
+                    let full_addrs: Vec<String> = addresses
+                        .into_iter()
+                        .map(|addr| format!("{}/p2p/{}", addr, peer_id))
+                        .collect();
+                    serde_json::to_string(&full_addrs)
+                        .map_err(|e| format!("failed to serialize peer info: {}", e))
+                })
             })
-        })
-        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
-        .and_then(|r| r);
+            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .and_then(|r| r);
 
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
+        match result {
+            Ok(json) => FfiResult::success(json),
+            Err(e) => FfiResult::error(e),
+        }
     }
 }
 
@@ -72,58 +75,60 @@ pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_c
 /// The caller must free the returned string with `defra_free_string`.
 #[no_mangle]
 pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
-    let rt = try_ffi!(get_rt());
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
 
-    let result = NODES
-        .get(node_ptr, |state| {
-            let p2p = match &state.p2p {
-                Some(p2p) => p2p,
-                None => return Err("no p2p system configured".to_string()),
-            };
+        let result = NODES
+            .get(node_ptr, |state| {
+                let p2p = match &state.p2p {
+                    Some(p2p) => p2p,
+                    None => return Err("no p2p system configured".to_string()),
+                };
 
-            rt.block_on(async {
-                let local_pid = p2p
-                    .handle
-                    .local_peer_id()
-                    .await
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|_| "unknown".to_string());
-                let connected = p2p
-                    .handle
-                    .connected_peers()
-                    .await
-                    .map_err(|e| format!("failed to get connected peers: {}", e))?;
-                tracing::debug!(
-                    node = &local_pid[local_pid.len().saturating_sub(8)..],
-                    node_ptr,
-                    connected = connected.len(),
-                    "active peers query"
-                );
+                rt.block_on(async {
+                    let local_pid = p2p
+                        .handle
+                        .local_peer_id()
+                        .await
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|_| "unknown".to_string());
+                    let connected = p2p
+                        .handle
+                        .connected_peers()
+                        .await
+                        .map_err(|e| format!("failed to get connected peers: {}", e))?;
+                    tracing::debug!(
+                        node = &local_pid[local_pid.len().saturating_sub(8)..],
+                        node_ptr,
+                        connected = connected.len(),
+                        "active peers query"
+                    );
 
-                let all_addrs = p2p
-                    .handle
-                    .resolve_peer_addresses(&connected, |pid| {
-                        p2p.get_peer_address(pid).map(|s| s.to_string())
-                    })
-                    .await
-                    .map_err(|e| format!("{}", e))?;
+                    let all_addrs = p2p
+                        .handle
+                        .resolve_peer_addresses(&connected, |pid| {
+                            p2p.get_peer_address(pid).map(|s| s.to_string())
+                        })
+                        .await
+                        .map_err(|e| format!("{}", e))?;
 
-                tracing::debug!(
-                    connected = connected.len(),
-                    all_addrs = all_addrs.len(),
-                    "active peers resolved"
-                );
+                    tracing::debug!(
+                        connected = connected.len(),
+                        all_addrs = all_addrs.len(),
+                        "active peers resolved"
+                    );
 
-                serde_json::to_string(&all_addrs)
-                    .map_err(|e| format!("failed to serialize peer list: {}", e))
+                    serde_json::to_string(&all_addrs)
+                        .map_err(|e| format!("failed to serialize peer list: {}", e))
+                })
             })
-        })
-        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
-        .and_then(|r| r);
+            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .and_then(|r| r);
 
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(e) => FfiResult::error(e),
+        match result {
+            Ok(json) => FfiResult::success(json),
+            Err(e) => FfiResult::error(e),
+        }
     }
 }
 
@@ -143,44 +148,46 @@ pub unsafe extern "C" fn p2p_connect(
     identity_did: *const c_char,
     addr: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::P2pPeerConnect
-    ));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::P2pPeerConnect
+        ));
 
-    let addr_str = try_ffi!(require_c_str(addr, "addr"));
+        let addr_str = try_ffi!(require_c_str(addr, "addr"));
 
-    let result = NODES
-        .get(node_ptr, |state| {
-            let p2p = match &state.p2p {
-                Some(p2p) => p2p,
-                None => return Err("no p2p system configured".to_string()),
-            };
+        let result = NODES
+            .get(node_ptr, |state| {
+                let p2p = match &state.p2p {
+                    Some(p2p) => p2p,
+                    None => return Err("no p2p system configured".to_string()),
+                };
 
-            rt.block_on(async {
-                let parsed = parse_multiaddr_with_peer_id(&addr_str)?;
-                p2p.handle
-                    .dial(parsed.peer_id, vec![parsed.transport_addr])
-                    .await
-                    .map_err(|e| format!("failed to connect: {}", e))?;
+                rt.block_on(async {
+                    let parsed = parse_multiaddr_with_peer_id(&addr_str)?;
+                    p2p.handle
+                        .dial(parsed.peer_id, vec![parsed.transport_addr])
+                        .await
+                        .map_err(|e| format!("failed to connect: {}", e))?;
 
-                p2p.handle
-                    .poll_until_connected(parsed.peer_id, std::time::Duration::from_secs(10))
-                    .await
-                    .map_err(|e| e.to_string())?;
+                    p2p.handle
+                        .poll_until_connected(parsed.peer_id, std::time::Duration::from_secs(10))
+                        .await
+                        .map_err(|e| e.to_string())?;
 
-                p2p.set_peer_address(&parsed.peer_id.to_string(), &addr_str);
-                Ok(())
+                    p2p.set_peer_address(&parsed.peer_id.to_string(), &addr_str);
+                    Ok(())
+                })
             })
-        })
-        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
-        .and_then(|r| r);
+            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .and_then(|r| r);
 
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(e),
+        match result {
+            Ok(()) => FfiResult::ok(),
+            Err(e) => FfiResult::error(e),
+        }
     }
 }

@@ -1,6 +1,7 @@
 use std::ffi::c_char;
 use std::fs;
 
+use crate::ffi_entry;
 use crate::helpers::{get_rt, require_c_str};
 use crate::state::NODES;
 use crate::types::FfiResult;
@@ -26,37 +27,39 @@ use super::BackupConfig;
 /// `config_json` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn basic_export(node_ptr: usize, config_json: *const c_char) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    let config_str = try_ffi!(require_c_str(config_json, "config_json"));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        let config_str = try_ffi!(require_c_str(config_json, "config_json"));
 
-    let config: BackupConfig = match serde_json::from_str(&config_str) {
-        Ok(c) => c,
-        Err(e) => return FfiResult::error(format!("failed to parse backup config: {}", e)),
-    };
+        let config: BackupConfig = match serde_json::from_str(&config_str) {
+            Ok(c) => c,
+            Err(e) => return FfiResult::error(format!("failed to parse backup config: {}", e)),
+        };
 
-    let (database, runner) = match NODES.get(node_ptr, |state| {
-        (state.database.clone(), state.query_runner.clone())
-    }) {
-        Some(r) => r,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
+        let (database, runner) = match NODES.get(node_ptr, |state| {
+            (state.database.clone(), state.query_runner.clone())
+        }) {
+            Some(r) => r,
+            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
 
-    ffi_async_ok!(rt, {
-        let json_output =
-            db::backup::export_database(&database, &runner, &config.collections, config.pretty)
-                .await?;
+        ffi_async_ok!(rt, {
+            let json_output =
+                db::backup::export_database(&database, &runner, &config.collections, config.pretty)
+                    .await?;
 
-        // Write via temp file for atomic operation
-        let temp_path = format!("{}.temp", config.filepath);
-        fs::write(&temp_path, &json_output)
-            .map_err(|e| format!("failed to create file '{}': {}", temp_path, e))?;
-        fs::rename(&temp_path, &config.filepath).map_err(|e| {
-            let _ = fs::remove_file(&temp_path);
-            format!("failed to rename temp file: {}", e)
-        })?;
+            // Write via temp file for atomic operation
+            let temp_path = format!("{}.temp", config.filepath);
+            fs::write(&temp_path, &json_output)
+                .map_err(|e| format!("failed to create file '{}': {}", temp_path, e))?;
+            fs::rename(&temp_path, &config.filepath).map_err(|e| {
+                let _ = fs::remove_file(&temp_path);
+                format!("failed to rename temp file: {}", e)
+            })?;
 
-        Ok(())
-    })
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]

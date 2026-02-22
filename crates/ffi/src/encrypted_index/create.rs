@@ -6,7 +6,7 @@ use storage::corekv::Key;
 use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::types::FfiResult;
-use crate::{ffi_async, try_ffi};
+use crate::{ffi_async, ffi_entry, try_ffi};
 
 /// Add a new encrypted index on a collection field.
 ///
@@ -20,101 +20,103 @@ pub unsafe extern "C" fn add_encrypted_index(
     collection_name: *const c_char,
     field_name: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::EncryptedIndexAdd
-    ));
-    let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
-    let field_name_str = try_ffi!(require_c_str(field_name, "field_name"));
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::EncryptedIndexAdd
+        ));
+        let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+        let field_name_str = try_ffi!(require_c_str(field_name, "field_name"));
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    ffi_async!(rt, {
-        // Get the collection
-        let collection = database
-            .get_collection(&collection_name_str)
-            .map_err(|e| format!("failed to get collection: {}", e))?
-            .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
+        ffi_async!(rt, {
+            // Get the collection
+            let collection = database
+                .get_collection(&collection_name_str)
+                .map_err(|e| format!("failed to get collection: {}", e))?
+                .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
 
-        let schema = collection.schema();
+            let schema = collection.schema();
 
-        // Check if field exists in the collection
-        let field_exists = schema.fields.iter().any(|f| f.name == field_name_str);
-        if !field_exists {
-            return Err(format!(
-                "encrypted index on non-existent field. Field: {}",
-                field_name_str
-            ));
-        }
+            // Check if field exists in the collection
+            let field_exists = schema.fields.iter().any(|f| f.name == field_name_str);
+            if !field_exists {
+                return Err(format!(
+                    "encrypted index on non-existent field. Field: {}",
+                    field_name_str
+                ));
+            }
 
-        // Check if encrypted index already exists for this field
-        let index_exists = schema
-            .encrypted_indexes
-            .iter()
-            .any(|idx| idx.field_name == field_name_str);
-        if index_exists {
-            return Err(format!(
-                "encrypted index already exists on this field. Field: {}",
-                field_name_str
-            ));
-        }
+            // Check if encrypted index already exists for this field
+            let index_exists = schema
+                .encrypted_indexes
+                .iter()
+                .any(|idx| idx.field_name == field_name_str);
+            if index_exists {
+                return Err(format!(
+                    "encrypted index already exists on this field. Field: {}",
+                    field_name_str
+                ));
+            }
 
-        // Create the encrypted index description
-        let enc_idx = schema::EncryptedIndexDescription::new(&field_name_str);
+            // Create the encrypted index description
+            let enc_idx = schema::EncryptedIndexDescription::new(&field_name_str);
 
-        // Create a transaction
-        let txn = database
-            .new_txn(false)
-            .await
-            .map_err(|e| format!("failed to create transaction: {}", e))?;
-
-        // Update the collection schema with the new encrypted index
-        {
-            let mut updated_schema = schema.clone();
-            updated_schema.encrypted_indexes.push(enc_idx.clone());
-
-            // Save the updated schema at /collection/id/{version_id}
-            let collection_key =
-                storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
-            let schema_data = serde_json::to_vec(&updated_schema)
-                .map_err(|e| format!("failed to serialize schema: {}", e))?;
-
-            let systemstore = txn
-                .systemstore()
-                .map_err(|e| format!("failed to get systemstore: {}", e))?;
-
-            systemstore
-                .set(&collection_key.bytes(), &schema_data)
+            // Create a transaction
+            let txn = database
+                .new_txn(false)
                 .await
-                .map_err(|e| format!("failed to save schema: {}", e))?;
+                .map_err(|e| format!("failed to create transaction: {}", e))?;
 
-            // Update the name → version_id mapping at /collection/name/{name}
-            let name_key = storage::keys::systemstore::CollectionNameKey::new(&collection_name_str);
-            systemstore
-                .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
+            // Update the collection schema with the new encrypted index
+            {
+                let mut updated_schema = schema.clone();
+                updated_schema.encrypted_indexes.push(enc_idx.clone());
+
+                // Save the updated schema at /collection/id/{version_id}
+                let collection_key =
+                    storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
+                let schema_data = serde_json::to_vec(&updated_schema)
+                    .map_err(|e| format!("failed to serialize schema: {}", e))?;
+
+                let systemstore = txn
+                    .systemstore()
+                    .map_err(|e| format!("failed to get systemstore: {}", e))?;
+
+                systemstore
+                    .set(&collection_key.bytes(), &schema_data)
+                    .await
+                    .map_err(|e| format!("failed to save schema: {}", e))?;
+
+                // Update the name → version_id mapping at /collection/name/{name}
+                let name_key = storage::keys::systemstore::CollectionNameKey::new(&collection_name_str);
+                systemstore
+                    .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
+                    .await
+                    .map_err(|e| format!("failed to save name mapping: {}", e))?;
+            }
+
+            // Commit the transaction
+            txn.commit()
                 .await
-                .map_err(|e| format!("failed to save name mapping: {}", e))?;
-        }
+                .map_err(|e| format!("failed to commit: {}", e))?;
 
-        // Commit the transaction
-        txn.commit()
-            .await
-            .map_err(|e| format!("failed to commit: {}", e))?;
+            // Reload the collection cache
+            database
+                .reload_cache()
+                .await
+                .map_err(|e| format!("failed to reload cache: {}", e))?;
 
-        // Reload the collection cache
-        database
-            .reload_cache()
-            .await
-            .map_err(|e| format!("failed to reload cache: {}", e))?;
+            // Return the created encrypted index description
+            let json = serde_json::to_string(&enc_idx)
+                .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        // Return the created encrypted index description
-        let json = serde_json::to_string(&enc_idx)
-            .map_err(|e| format!("failed to serialize result: {}", e))?;
-
-        Ok(json)
-    })
+            Ok(json)
+        })
+    }
 }
 
 /// Delete an encrypted index from a collection.
@@ -129,87 +131,89 @@ pub unsafe extern "C" fn delete_encrypted_index(
     collection_name: *const c_char,
     field_name: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::EncryptedIndexDelete
-    ));
-    let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
-    let field_name_str = try_ffi!(require_c_str(field_name, "field_name"));
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::EncryptedIndexDelete
+        ));
+        let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+        let field_name_str = try_ffi!(require_c_str(field_name, "field_name"));
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    ffi_async!(rt, {
-        // Get the collection
-        let collection = database
-            .get_collection(&collection_name_str)
-            .map_err(|e| format!("failed to get collection: {}", e))?
-            .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
+        ffi_async!(rt, {
+            // Get the collection
+            let collection = database
+                .get_collection(&collection_name_str)
+                .map_err(|e| format!("failed to get collection: {}", e))?
+                .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
 
-        let schema = collection.schema();
+            let schema = collection.schema();
 
-        // Check if encrypted index exists for this field
-        let index_exists = schema
-            .encrypted_indexes
-            .iter()
-            .any(|idx| idx.field_name == field_name_str);
-        if !index_exists {
-            return Err(format!(
-                "encrypted index does not exist on this field. Field: {}",
-                field_name_str
-            ));
-        }
-
-        // Create a transaction
-        let txn = database
-            .new_txn(false)
-            .await
-            .map_err(|e| format!("failed to create transaction: {}", e))?;
-
-        // Update the collection schema to remove the encrypted index
-        {
-            let mut updated_schema = schema.clone();
-            updated_schema
+            // Check if encrypted index exists for this field
+            let index_exists = schema
                 .encrypted_indexes
-                .retain(|idx| idx.field_name != field_name_str);
+                .iter()
+                .any(|idx| idx.field_name == field_name_str);
+            if !index_exists {
+                return Err(format!(
+                    "encrypted index does not exist on this field. Field: {}",
+                    field_name_str
+                ));
+            }
 
-            // Save the updated schema at /collection/id/{version_id}
-            let collection_key =
-                storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
-            let schema_data = serde_json::to_vec(&updated_schema)
-                .map_err(|e| format!("failed to serialize schema: {}", e))?;
-
-            let systemstore = txn
-                .systemstore()
-                .map_err(|e| format!("failed to get systemstore: {}", e))?;
-
-            systemstore
-                .set(&collection_key.bytes(), &schema_data)
+            // Create a transaction
+            let txn = database
+                .new_txn(false)
                 .await
-                .map_err(|e| format!("failed to save schema: {}", e))?;
+                .map_err(|e| format!("failed to create transaction: {}", e))?;
 
-            // Update the name → version_id mapping at /collection/name/{name}
-            let name_key = storage::keys::systemstore::CollectionNameKey::new(&collection_name_str);
-            systemstore
-                .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
+            // Update the collection schema to remove the encrypted index
+            {
+                let mut updated_schema = schema.clone();
+                updated_schema
+                    .encrypted_indexes
+                    .retain(|idx| idx.field_name != field_name_str);
+
+                // Save the updated schema at /collection/id/{version_id}
+                let collection_key =
+                    storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
+                let schema_data = serde_json::to_vec(&updated_schema)
+                    .map_err(|e| format!("failed to serialize schema: {}", e))?;
+
+                let systemstore = txn
+                    .systemstore()
+                    .map_err(|e| format!("failed to get systemstore: {}", e))?;
+
+                systemstore
+                    .set(&collection_key.bytes(), &schema_data)
+                    .await
+                    .map_err(|e| format!("failed to save schema: {}", e))?;
+
+                // Update the name → version_id mapping at /collection/name/{name}
+                let name_key = storage::keys::systemstore::CollectionNameKey::new(&collection_name_str);
+                systemstore
+                    .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
+                    .await
+                    .map_err(|e| format!("failed to save name mapping: {}", e))?;
+            }
+
+            // Commit the transaction
+            txn.commit()
                 .await
-                .map_err(|e| format!("failed to save name mapping: {}", e))?;
-        }
+                .map_err(|e| format!("failed to commit: {}", e))?;
 
-        // Commit the transaction
-        txn.commit()
-            .await
-            .map_err(|e| format!("failed to commit: {}", e))?;
+            // Reload the collection cache
+            database
+                .reload_cache()
+                .await
+                .map_err(|e| format!("failed to reload cache: {}", e))?;
 
-        // Reload the collection cache
-        database
-            .reload_cache()
-            .await
-            .map_err(|e| format!("failed to reload cache: {}", e))?;
-
-        Ok("{}".to_string())
-    })
+            Ok("{}".to_string())
+        })
+    }
 }
 
 #[cfg(test)]

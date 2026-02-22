@@ -2,6 +2,7 @@
 //!
 //! Allows Go to pass the searchable encryption key to the Rust FFI node.
 
+use crate::ffi_entry;
 use crate::state::NODES;
 use crate::types::FfiResult;
 
@@ -20,26 +21,28 @@ pub unsafe extern "C" fn set_se_encryption_key(
     key_ptr: *const u8,
     key_len: usize,
 ) -> FfiResult {
-    if key_ptr.is_null() || key_len == 0 {
-        return FfiResult::error("se encryption key is null or empty");
+    ffi_entry! {
+        if key_ptr.is_null() || key_len == 0 {
+            return FfiResult::error("se encryption key is null or empty");
+        }
+
+        if key_len != 32 {
+            return FfiResult::error(format!(
+                "se encryption key must be 32 bytes, got {}",
+                key_len
+            ));
+        }
+
+        let key = std::slice::from_raw_parts(key_ptr, key_len).to_vec();
+
+        let found = NODES.get_mut(node_ptr, |state| {
+            state.se_encryption_key = Some(key);
+        });
+
+        if found.is_none() {
+            return FfiResult::error(crate::ERR_INVALID_NODE_HANDLE);
+        }
+
+        FfiResult::ok()
     }
-
-    let key = std::slice::from_raw_parts(key_ptr, key_len).to_vec();
-
-    if key.len() != 32 {
-        return FfiResult::error(format!(
-            "se encryption key must be 32 bytes, got {}",
-            key.len()
-        ));
-    }
-
-    let found = NODES.get_mut(node_ptr, |state| {
-        state.se_encryption_key = Some(key);
-    });
-
-    if found.is_none() {
-        return FfiResult::error(crate::ERR_INVALID_NODE_HANDLE);
-    }
-
-    FfiResult::ok()
 }

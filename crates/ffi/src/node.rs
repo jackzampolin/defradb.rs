@@ -8,10 +8,15 @@ use std::sync::Arc;
 use identity::Identity;
 use sourcehub::SourceHubProvider;
 
+use crate::ffi_entry;
 use crate::state::{FfiStore, NodeState, PolicyStore, NODES};
 use crate::try_ffi;
 use crate::types::{c_str_to_string, FfiResult, NewNodeResult, NodeInitOptions};
 use crate::ERR_INVALID_NODE_HANDLE;
+
+/// Maximum length for private key byte slices passed via FFI.
+/// Generous upper bound covering all supported key types (ed25519=32/64, secp256k1=32).
+const MAX_PRIVATE_KEY_LEN: usize = 128;
 
 /// Create a new DefraDB node.
 ///
@@ -23,291 +28,305 @@ use crate::ERR_INVALID_NODE_HANDLE;
 /// The returned `node_ptr` must be freed by calling `node_close`.
 #[no_mangle]
 pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
-    let rt = match crate::runtime::RUNTIME.get() {
-        Some(rt) => rt,
-        None => return NewNodeResult::error("runtime not initialized - call defra_init() first"),
-    };
-
-    let enable_signing = options.enable_signing != 0;
-
-    let result = rt.block_on(async {
-        // Create storage backend based on options
-        let db_path_opt: Option<String>;
-        let backend_name = unsafe { c_str_to_string(options.datastore_backend) }
-            .unwrap_or_default()
-            .to_lowercase();
-
-        let store: Arc<FfiStore> = if options.in_memory != 0
-            || backend_name == "memory"
-            || options.db_path.is_null()
-        {
-            db_path_opt = None;
-            Arc::new(FfiStore::Memory(storage::MemoryStore::new()))
-        } else {
-            let path = unsafe { c_str_to_string(options.db_path) }
-                .ok_or_else(|| "db_path is not valid UTF-8".to_string())?;
-            db_path_opt = Some(path.clone());
-
-            // Pick backend: explicit choice > compile-time default
-            let effective_backend = if backend_name.is_empty() {
-                "redb"
-            } else {
-                &backend_name
-            };
-
-            match effective_backend {
-                "redb" => {
-                    let redb = storage::RedbStore::open(&path)
-                        .map_err(|e| format!("failed to open redb store at '{}': {}", path, e))?;
-                    Arc::new(FfiStore::Redb(redb))
-                }
-                #[cfg(feature = "fjall")]
-                "fjall" => {
-                    let fjall = storage::FjallStore::open(&path)
-                        .map_err(|e| format!("failed to open fjall store at '{}': {}", path, e))?;
-                    Arc::new(FfiStore::Fjall(fjall))
-                }
-                #[cfg(not(feature = "fjall"))]
-                "fjall" => {
-                    return Err("fjall backend not enabled. Rebuild with --features fjall".into());
-                }
-                #[cfg(feature = "rocksdb")]
-                "rocksdb" => {
-                    let opts = storage::RocksDbStoreOptions::from_env();
-                    let rocks =
-                        storage::RocksDbStore::open_with_options(&path, opts).map_err(|e| {
-                            format!("failed to open rocksdb store at '{}': {}", path, e)
-                        })?;
-                    Arc::new(FfiStore::RocksDb(rocks))
-                }
-                #[cfg(not(feature = "rocksdb"))]
-                "rocksdb" => {
-                    return Err(
-                        "rocksdb backend not enabled. Rebuild with --features rocksdb".into(),
-                    );
-                }
-                other => {
-                    return Err(format!(
-                        "unknown datastore backend '{}'. Supported: redb, fjall, rocksdb, memory",
-                        other
-                    ));
-                }
-            }
+    ffi_entry! {
+        let rt = match crate::runtime::RUNTIME.get() {
+            Some(rt) => rt,
+            None => return NewNodeResult::error("runtime not initialized - call defra_init() first"),
         };
 
-        // Create event bus for subscriptions (created early so it can be wired to database)
-        let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::default());
+        let enable_signing = options.enable_signing != 0;
 
-        // Generate or load node identity BEFORE opening database so it can be passed via options.
-        // This enables `get_node_identity()` to return the correct DID.
-        tracing::debug!(enable_signing, "new_node: signing configuration");
-        let (raw_identity_opt, node_identity_did) = if enable_signing {
-            // Check if a signing key was provided by the caller
-            let raw_identity = if !options.signing_private_key.is_null()
-                && options.signing_private_key_len > 0
+        let result = rt.block_on(async {
+            // Create storage backend based on options
+            let db_path_opt: Option<String>;
+            let backend_name = unsafe { c_str_to_string(options.datastore_backend) }
+                .unwrap_or_default()
+                .to_lowercase();
+
+            let store: Arc<FfiStore> = if options.in_memory != 0
+                || backend_name == "memory"
+                || options.db_path.is_null()
             {
-                let key_bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        options.signing_private_key,
-                        options.signing_private_key_len,
-                    )
-                };
-                let key_type = unsafe { crate::types::c_str_to_string(options.signing_key_type) }
-                    .unwrap_or_else(|| "secp256k1".to_string());
+                db_path_opt = None;
+                Arc::new(FfiStore::Memory(storage::MemoryStore::new()))
+            } else {
+                let path = unsafe { c_str_to_string(options.db_path) }
+                    .ok_or_else(|| "db_path is not valid UTF-8".to_string())?;
+                db_path_opt = Some(path.clone());
 
-                match key_type.as_str() {
-                    "secp256k1" => {
-                        let private_key = crypto::Secp256k1PrivateKey::from_bytes(key_bytes)
-                            .map_err(|e| format!("failed to load secp256k1 key: {}", e))?;
-                        identity::RawIdentity::from_secp256k1(private_key)
-                            .map_err(|e| format!("failed to create node identity: {}", e))?
+                // Pick backend: explicit choice > compile-time default
+                let effective_backend = if backend_name.is_empty() {
+                    "redb"
+                } else {
+                    &backend_name
+                };
+
+                match effective_backend {
+                    "redb" => {
+                        let redb = storage::RedbStore::open(&path)
+                            .map_err(|e| format!("failed to open redb store at '{}': {}", path, e))?;
+                        Arc::new(FfiStore::Redb(redb))
                     }
-                    "ed25519" => {
-                        let private_key = crypto::Ed25519PrivateKey::from_bytes(key_bytes)
-                            .map_err(|e| format!("failed to load ed25519 key: {}", e))?;
-                        identity::RawIdentity::from_ed25519(private_key)
-                            .map_err(|e| format!("failed to create node identity: {}", e))?
+                    #[cfg(feature = "fjall")]
+                    "fjall" => {
+                        let fjall = storage::FjallStore::open(&path)
+                            .map_err(|e| format!("failed to open fjall store at '{}': {}", path, e))?;
+                        Arc::new(FfiStore::Fjall(fjall))
+                    }
+                    #[cfg(not(feature = "fjall"))]
+                    "fjall" => {
+                        return Err("fjall backend not enabled. Rebuild with --features fjall".into());
+                    }
+                    #[cfg(feature = "rocksdb")]
+                    "rocksdb" => {
+                        let opts = storage::RocksDbStoreOptions::from_env();
+                        let rocks =
+                            storage::RocksDbStore::open_with_options(&path, opts).map_err(|e| {
+                                format!("failed to open rocksdb store at '{}': {}", path, e)
+                            })?;
+                        Arc::new(FfiStore::RocksDb(rocks))
+                    }
+                    #[cfg(not(feature = "rocksdb"))]
+                    "rocksdb" => {
+                        return Err(
+                            "rocksdb backend not enabled. Rebuild with --features rocksdb".into(),
+                        );
                     }
                     other => {
-                        return Err(format!("unsupported signing key type: {}", other));
+                        return Err(format!(
+                            "unknown datastore backend '{}'. Supported: redb, fjall, rocksdb, memory",
+                            other
+                        ));
                     }
                 }
-            } else {
-                // Auto-generate secp256k1 key
-                let private_key = crypto::generate_secp256k1()
-                    .map_err(|e| format!("failed to generate node signing key: {}", e))?;
-                identity::RawIdentity::from_secp256k1(private_key)
-                    .map_err(|e| format!("failed to create node identity: {}", e))?
             };
 
-            let did = raw_identity
-                .did()
-                .map_err(|e| format!("failed to derive node DID: {}", e))?;
-            let did_str = did.to_string();
+            // Create event bus for subscriptions (created early so it can be wired to database)
+            let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::default());
 
-            let key_type = if !options.signing_private_key.is_null() {
-                unsafe { crate::types::c_str_to_string(options.signing_key_type) }
-                    .unwrap_or_else(|| "secp256k1".to_string())
-            } else {
-                "secp256k1".to_string()
-            };
+            // Generate or load node identity BEFORE opening database so it can be passed via options.
+            // This enables `get_node_identity()` to return the correct DID.
+            tracing::debug!(enable_signing, "new_node: signing configuration");
+            let (raw_identity_opt, node_identity_did) = if enable_signing {
+                // Check if a signing key was provided by the caller
+                let raw_identity = if !options.signing_private_key.is_null()
+                    && options.signing_private_key_len > 0
+                {
+                    if options.signing_private_key_len > MAX_PRIVATE_KEY_LEN {
+                        return Err(format!(
+                            "signing_private_key_len {} exceeds maximum {}",
+                            options.signing_private_key_len, MAX_PRIVATE_KEY_LEN
+                        ));
+                    }
+                    let key_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            options.signing_private_key,
+                            options.signing_private_key_len,
+                        )
+                    };
+                    let key_type = unsafe { crate::types::c_str_to_string(options.signing_key_type) }
+                        .unwrap_or_else(|| "secp256k1".to_string());
 
-            // Store in global identity store so exec_request can look up the signing config
-            defra_core::signing::store_identity(
-                &did_str,
-                defra_core::signing::SigningConfig {
-                    key_type,
-                    private_key_bytes: raw_identity.private_key_bytes().to_vec(),
-                    public_key_bytes: raw_identity.public_key_bytes().to_vec(),
-                    public_key_hex: hex::encode(raw_identity.public_key_bytes()),
-                    remote_signer: None,
-                },
-            );
+                    match key_type.as_str() {
+                        "secp256k1" => {
+                            let private_key = crypto::Secp256k1PrivateKey::from_bytes(key_bytes)
+                                .map_err(|e| format!("failed to load secp256k1 key: {}", e))?;
+                            identity::RawIdentity::from_secp256k1(private_key)
+                                .map_err(|e| format!("failed to create node identity: {}", e))?
+                        }
+                        "ed25519" => {
+                            let private_key = crypto::Ed25519PrivateKey::from_bytes(key_bytes)
+                                .map_err(|e| format!("failed to load ed25519 key: {}", e))?;
+                            identity::RawIdentity::from_ed25519(private_key)
+                                .map_err(|e| format!("failed to create node identity: {}", e))?
+                        }
+                        other => {
+                            return Err(format!("unsupported signing key type: {}", other));
+                        }
+                    }
+                } else {
+                    // Auto-generate secp256k1 key
+                    let private_key = crypto::generate_secp256k1()
+                        .map_err(|e| format!("failed to generate node signing key: {}", e))?;
+                    identity::RawIdentity::from_secp256k1(private_key)
+                        .map_err(|e| format!("failed to create node identity: {}", e))?
+                };
 
-            tracing::debug!(did = %did_str, "node identity created");
-            (Some(raw_identity), Some(did_str))
-        } else {
-            (None, None)
-        };
+                let did = raw_identity
+                    .did()
+                    .map_err(|e| format!("failed to derive node DID: {}", e))?;
+                let did_str = did.to_string();
 
-        // Open database with node identity (if signing enabled)
-        let mut db_options = db::DbOptions::default();
-        if let Some(raw_id) = raw_identity_opt {
-            db_options = db_options.with_node_identity(raw_id);
-        }
+                let key_type = if !options.signing_private_key.is_null() {
+                    unsafe { crate::types::c_str_to_string(options.signing_key_type) }
+                        .unwrap_or_else(|| "secp256k1".to_string())
+                } else {
+                    "secp256k1".to_string()
+                };
 
-        let mut database = db::DB::open_from_arc_with_options(store.clone(), db_options)
-            .await
-            .map_err(|e| format!("failed to open database: {}", e))?;
-
-        // Wire event bus to database so mutations publish events
-        database.set_event_bus(event_bus.clone());
-
-        let database = Arc::new(database);
-
-        // Create lensed auto-committing fetcher for non-transactional queries
-        // This applies schema migrations during document fetch
-        let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
-
-        // Create collection provider for on-demand schema resolution
-        let collection_provider: Arc<dyn query::CollectionProvider> =
-            db::DbCollectionProvider::new_arc(database.clone());
-
-        // Create transaction registry for explicit transaction support
-        let registry = Arc::new(db::DbTransactionRegistry::new(database.clone()));
-
-        // Create mutator for mutations
-        let mutator: Arc<dyn query::DocMutator> =
-            Arc::new(db::AutoCommitMutator::new(database.clone()));
-
-        // Create document-level access control: SourceHub (on-chain) or Local (in-memory)
-        let (document_acp, sourcehub_acp): (
-            Arc<dyn acp::DocumentACP>,
-            Option<Arc<sourcehub::SourceHubDocumentACP>>,
-        ) = if !options.sourcehub_grpc_address.is_null() {
-            let grpc_addr = unsafe { c_str_to_string(options.sourcehub_grpc_address) }
-                .ok_or_else(|| "sourcehub_grpc_address is not valid UTF-8".to_string())?;
-            let comet_addr = unsafe { c_str_to_string(options.sourcehub_comet_rpc_address) }
-                .ok_or_else(|| "sourcehub_comet_rpc_address is not valid UTF-8".to_string())?;
-            let chain_id = unsafe { c_str_to_string(options.sourcehub_chain_id) }
-                .ok_or_else(|| "sourcehub_chain_id is not valid UTF-8".to_string())?;
-            let signer_key = if !options.sourcehub_signer_key.is_null()
-                && options.sourcehub_signer_key_len > 0
-            {
-                unsafe {
-                    std::slice::from_raw_parts(
-                        options.sourcehub_signer_key,
-                        options.sourcehub_signer_key_len,
-                    )
-                }
-            } else {
-                return Err(
-                    "sourcehub_signer_key is required when SourceHub is configured".to_string(),
+                // Store in global identity store so exec_request can look up the signing config
+                defra_core::signing::store_identity(
+                    &did_str,
+                    defra_core::signing::SigningConfig {
+                        key_type,
+                        private_key_bytes: raw_identity.private_key_bytes().to_vec(),
+                        public_key_bytes: raw_identity.public_key_bytes().to_vec(),
+                        public_key_hex: hex::encode(raw_identity.public_key_bytes()),
+                        remote_signer: None,
+                    },
                 );
+
+                tracing::debug!(did = %did_str, "node identity created");
+                (Some(raw_identity), Some(did_str))
+            } else {
+                (None, None)
             };
-            let provider = Arc::new(
-                sourcehub::CosmosProvider::new(grpc_addr, comet_addr, signer_key, &chain_id)
-                    .map_err(|e| format!("failed to create SourceHub provider: {}", e))?,
-            );
-            tracing::debug!(validator = %provider.authorized_account(), "SourceHub ACP configured");
-            let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider));
-            (sh_acp.clone() as Arc<dyn acp::DocumentACP>, Some(sh_acp))
-        } else if db_path_opt.is_some() {
-            // File-based storage: use persistent ACP store (namespace isolated in main DB)
-            let acp_store: Arc<dyn acp::AcpStore> =
-                Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
-            (
-                Arc::new(acp::LocalDocumentACP::new(acp_store)) as Arc<dyn acp::DocumentACP>,
-                None,
-            )
-        } else {
-            let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
-            (
-                Arc::new(acp::LocalDocumentACP::new(acp_store)) as Arc<dyn acp::DocumentACP>,
-                None,
-            )
-        };
 
-        // Create NAC manager for node-level access control
-        // Use persistent store when file-based storage is configured
-        let nac_manager: Arc<dyn db::NacManagerApi> = if db_path_opt.is_some() {
-            // File-based storage: use persistent NAC store (namespace isolated in main DB)
-            let nac_store = Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
-            let nac_config = db::NacConfig::new().with_dev_mode();
-            let mgr = Arc::new(db::NacManager::new(nac_store, nac_config));
-            mgr.initialize(None)
+            // Open database with node identity (if signing enabled)
+            let mut db_options = db::DbOptions::default();
+            if let Some(raw_id) = raw_identity_opt {
+                db_options = db_options.with_node_identity(raw_id);
+            }
+
+            let mut database = db::DB::open_from_arc_with_options(store.clone(), db_options)
                 .await
-                .map_err(|e| format!("failed to initialize NAC from persistent store: {}", e))?;
-            mgr as Arc<dyn db::NacManagerApi>
-        } else {
-            let nac_store = Arc::new(acp::MemoryZanzibarStore::new());
-            let nac_config = db::NacConfig::new().with_dev_mode();
-            Arc::new(db::NacManager::new(nac_store, nac_config))
-        };
+                .map_err(|e| format!("failed to open database: {}", e))?;
 
-        // Encryption key for CRDT delta encryption (test key matching Go DefraDB)
-        let encryption_key = b"examplekey1234567890examplekey12".to_vec();
+            // Wire event bus to database so mutations publish events
+            database.set_event_bus(event_bus.clone());
 
-        // Create query runner with transaction, mutation, ACP, lens, and encryption support
-        let query_runner = query::QueryRunner::with_arc_registry_and_provider(
-            fetcher,
-            collection_provider,
-            registry.clone(),
-        )
-        .with_mutator(mutator)
-        .with_acp(document_acp.clone())
-        .with_encryption_key(encryption_key)
-        .with_lens_store(database.lens_store().clone());
+            let database = Arc::new(database);
 
-        let runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
+            // Create lensed auto-committing fetcher for non-transactional queries
+            // This applies schema migrations during document fetch
+            let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
 
-        // Create policy store for DAC policies
-        let policy_store = Arc::new(PolicyStore::new());
+            // Create collection provider for on-demand schema resolution
+            let collection_provider: Arc<dyn query::CollectionProvider> =
+                db::DbCollectionProvider::new_arc(database.clone());
 
-        // Create node state
-        // P2P is disabled by default in FFI - use new_node_with_p2p for P2P-enabled nodes
-        let state = NodeState {
-            database,
-            txn_registry: registry,
-            query_runner: runner,
-            nac_manager,
-            document_acp,
-            event_bus,
-            policy_store,
-            p2p: None,
-            node_identity_did,
-            sourcehub_acp,
-            se_encryption_key: None,
-        };
+            // Create transaction registry for explicit transaction support
+            let registry = Arc::new(db::DbTransactionRegistry::new(database.clone()));
 
-        // Register and get handle
-        let handle = NODES.insert(state);
-        Ok::<usize, String>(handle)
-    });
+            // Create mutator for mutations
+            let mutator: Arc<dyn query::DocMutator> =
+                Arc::new(db::AutoCommitMutator::new(database.clone()));
 
-    match result {
-        Ok(handle) => NewNodeResult::success(handle),
-        Err(e) => NewNodeResult::error(e),
+            // Create document-level access control: SourceHub (on-chain) or Local (in-memory)
+            let (document_acp, sourcehub_acp): (
+                Arc<dyn acp::DocumentACP>,
+                Option<Arc<sourcehub::SourceHubDocumentACP>>,
+            ) = if !options.sourcehub_grpc_address.is_null() {
+                let grpc_addr = unsafe { c_str_to_string(options.sourcehub_grpc_address) }
+                    .ok_or_else(|| "sourcehub_grpc_address is not valid UTF-8".to_string())?;
+                let comet_addr = unsafe { c_str_to_string(options.sourcehub_comet_rpc_address) }
+                    .ok_or_else(|| "sourcehub_comet_rpc_address is not valid UTF-8".to_string())?;
+                let chain_id = unsafe { c_str_to_string(options.sourcehub_chain_id) }
+                    .ok_or_else(|| "sourcehub_chain_id is not valid UTF-8".to_string())?;
+                let signer_key = if !options.sourcehub_signer_key.is_null()
+                    && options.sourcehub_signer_key_len > 0
+                {
+                    if options.sourcehub_signer_key_len > MAX_PRIVATE_KEY_LEN {
+                        return Err(format!(
+                            "sourcehub_signer_key_len {} exceeds maximum {}",
+                            options.sourcehub_signer_key_len, MAX_PRIVATE_KEY_LEN
+                        ));
+                    }
+                    unsafe {
+                        std::slice::from_raw_parts(
+                            options.sourcehub_signer_key,
+                            options.sourcehub_signer_key_len,
+                        )
+                    }
+                } else {
+                    return Err(
+                        "sourcehub_signer_key is required when SourceHub is configured".to_string(),
+                    );
+                };
+                let provider = Arc::new(
+                    sourcehub::CosmosProvider::new(grpc_addr, comet_addr, signer_key, &chain_id)
+                        .map_err(|e| format!("failed to create SourceHub provider: {}", e))?,
+                );
+                tracing::debug!(validator = %provider.authorized_account(), "SourceHub ACP configured");
+                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider));
+                (sh_acp.clone() as Arc<dyn acp::DocumentACP>, Some(sh_acp))
+            } else if db_path_opt.is_some() {
+                // File-based storage: use persistent ACP store (namespace isolated in main DB)
+                let acp_store: Arc<dyn acp::AcpStore> =
+                    Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
+                (
+                    Arc::new(acp::LocalDocumentACP::new(acp_store)) as Arc<dyn acp::DocumentACP>,
+                    None,
+                )
+            } else {
+                let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
+                (
+                    Arc::new(acp::LocalDocumentACP::new(acp_store)) as Arc<dyn acp::DocumentACP>,
+                    None,
+                )
+            };
+
+            // Create NAC manager for node-level access control
+            // Use persistent store when file-based storage is configured
+            let nac_manager: Arc<dyn db::NacManagerApi> = if db_path_opt.is_some() {
+                // File-based storage: use persistent NAC store (namespace isolated in main DB)
+                let nac_store = Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
+                let nac_config = db::NacConfig::new().with_dev_mode();
+                let mgr = Arc::new(db::NacManager::new(nac_store, nac_config));
+                mgr.initialize(None)
+                    .await
+                    .map_err(|e| format!("failed to initialize NAC from persistent store: {}", e))?;
+                mgr as Arc<dyn db::NacManagerApi>
+            } else {
+                let nac_store = Arc::new(acp::MemoryZanzibarStore::new());
+                let nac_config = db::NacConfig::new().with_dev_mode();
+                Arc::new(db::NacManager::new(nac_store, nac_config))
+            };
+
+            // Encryption key for CRDT delta encryption (test key matching Go DefraDB)
+            let encryption_key = b"examplekey1234567890examplekey12".to_vec();
+
+            // Create query runner with transaction, mutation, ACP, lens, and encryption support
+            let query_runner = query::QueryRunner::with_arc_registry_and_provider(
+                fetcher,
+                collection_provider,
+                registry.clone(),
+            )
+            .with_mutator(mutator)
+            .with_acp(document_acp.clone())
+            .with_encryption_key(encryption_key)
+            .with_lens_store(database.lens_store().clone());
+
+            let runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
+
+            // Create policy store for DAC policies
+            let policy_store = Arc::new(PolicyStore::new());
+
+            // Create node state
+            // P2P is disabled by default in FFI - use new_node_with_p2p for P2P-enabled nodes
+            let state = NodeState {
+                database,
+                txn_registry: registry,
+                query_runner: runner,
+                nac_manager,
+                document_acp,
+                event_bus,
+                policy_store,
+                p2p: None,
+                node_identity_did,
+                sourcehub_acp,
+                se_encryption_key: None,
+            };
+
+            // Register and get handle
+            let handle = NODES.insert(state);
+            Ok::<usize, String>(handle)
+        });
+
+        match result {
+            Ok(handle) => NewNodeResult::success(handle),
+            Err(e) => NewNodeResult::error(e),
+        }
     }
 }
 
@@ -320,50 +339,52 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
 /// All subscriptions associated with this node will be closed.
 #[no_mangle]
 pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
-    use crate::state::{GRAPHQL_SUBSCRIPTIONS, SUBSCRIPTIONS};
+    ffi_entry! {
+        use crate::state::{GRAPHQL_SUBSCRIPTIONS, SUBSCRIPTIONS};
 
-    let rt = try_ffi!(crate::helpers::get_rt());
+        let rt = try_ffi!(crate::helpers::get_rt());
 
-    // Remove all raw subscriptions for this node
-    let removed_subs = SUBSCRIPTIONS.remove_for_node(node_ptr);
-    for sub_state in removed_subs {
-        NODES.get(node_ptr, |state| {
-            state.event_bus.unsubscribe(sub_state.subscription.id());
-        });
-    }
+        // Remove all raw subscriptions for this node
+        let removed_subs = SUBSCRIPTIONS.remove_for_node(node_ptr);
+        for sub_state in removed_subs {
+            NODES.get(node_ptr, |state| {
+                state.event_bus.unsubscribe(sub_state.subscription.id());
+            });
+        }
 
-    // Remove all GraphQL subscriptions for this node
-    let removed_gql_subs = GRAPHQL_SUBSCRIPTIONS.remove_for_node(node_ptr);
-    for sub_state in removed_gql_subs {
-        sub_state.task_abort.abort();
-        NODES.get(node_ptr, |state| {
-            state.event_bus.unsubscribe(sub_state.event_sub_id);
-        });
-    }
+        // Remove all GraphQL subscriptions for this node
+        let removed_gql_subs = GRAPHQL_SUBSCRIPTIONS.remove_for_node(node_ptr);
+        for sub_state in removed_gql_subs {
+            sub_state.task_abort.abort();
+            NODES.get(node_ptr, |state| {
+                state.event_bus.unsubscribe(sub_state.event_sub_id);
+            });
+        }
 
-    // Remove from registry
-    let state = match NODES.remove(node_ptr) {
-        Some(state) => state,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
+        // Remove from registry
+        let state = match NODES.remove(node_ptr) {
+            Some(state) => state,
+            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
 
-    // Shutdown P2P host if enabled
-    if let Some(ref p2p) = state.p2p {
-        // Abort all background sync pipeline tasks
-        p2p.abort_all_tasks();
-        // Send shutdown command to P2P host
-        let _ = rt.block_on(async { p2p.handle.shutdown().await });
-    }
+        // Shutdown P2P host if enabled
+        if let Some(ref p2p) = state.p2p {
+            // Abort all background sync pipeline tasks
+            p2p.abort_all_tasks();
+            // Send shutdown command to P2P host
+            let _ = rt.block_on(async { p2p.handle.shutdown().await });
+        }
 
-    // Close the event bus
-    state.event_bus.close();
+        // Close the event bus
+        state.event_bus.close();
 
-    // Close the database
-    let result = rt.block_on(async { state.database.close().await });
+        // Close the database
+        let result = rt.block_on(async { state.database.close().await });
 
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(format!("failed to close database: {}", e)),
+        match result {
+            Ok(()) => FfiResult::ok(),
+            Err(e) => FfiResult::error(format!("failed to close database: {}", e)),
+        }
     }
 }
 

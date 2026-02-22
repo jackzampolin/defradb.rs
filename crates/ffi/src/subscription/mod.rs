@@ -15,7 +15,7 @@ mod tests;
 use std::ffi::{c_char, c_int};
 use std::ptr;
 
-use crate::types::sanitize_to_cstring;
+use crate::types::{sanitize_to_cstring, FfiPanicResult};
 
 pub(crate) use create::response_has_data;
 pub use create::{create_merge_complete_subscription, create_subscription};
@@ -32,6 +32,12 @@ pub struct CreateSubscriptionResult {
     pub error: *mut c_char,
     /// Subscription handle (0 on error).
     pub subscription_handle: usize,
+}
+
+impl FfiPanicResult for CreateSubscriptionResult {
+    fn from_panic(msg: String) -> Self {
+        CreateSubscriptionResult::error(msg)
+    }
 }
 
 impl CreateSubscriptionResult {
@@ -70,6 +76,12 @@ pub struct PollSubscriptionResult {
     /// Number of events dropped due to buffer overflow since last poll.
     /// When non-zero, the client should re-fetch data to ensure consistency.
     pub dropped_count: u64,
+}
+
+impl FfiPanicResult for PollSubscriptionResult {
+    fn from_panic(msg: String) -> Self {
+        PollSubscriptionResult::error(msg)
+    }
 }
 
 impl PollSubscriptionResult {
@@ -117,6 +129,12 @@ pub struct CloseSubscriptionResult {
     pub status: c_int,
     /// Error message (null on success). Caller must free with `defra_free_string`.
     pub error: *mut c_char,
+}
+
+impl FfiPanicResult for CloseSubscriptionResult {
+    fn from_panic(msg: String) -> Self {
+        CloseSubscriptionResult::error(msg)
+    }
 }
 
 impl CloseSubscriptionResult {

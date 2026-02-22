@@ -1,6 +1,7 @@
 use std::ffi::c_char;
 use std::sync::Arc;
 
+use crate::ffi_entry;
 use acp::nac::NodePermission;
 use blockstore::{Blockstore, DefraBlockstore};
 use defra_core::Block;
@@ -31,33 +32,34 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
     identity_did: *const c_char,
     version_ids_json: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::P2pSyncCollectionVersions
-    ));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::P2pSyncCollectionVersions
+        ));
 
-    let version_ids_str = try_ffi!(require_c_str(version_ids_json, "version_ids_json"));
+        let version_ids_str = try_ffi!(require_c_str(version_ids_json, "version_ids_json"));
 
-    tracing::debug!(version_ids = %version_ids_str, "p2p_sync_collection_versions called");
+        tracing::debug!(version_ids = %version_ids_str, "p2p_sync_collection_versions called");
 
-    // Parse the JSON array of version IDs
-    let version_ids: Vec<String> = match serde_json::from_str(&version_ids_str) {
-        Ok(ids) => ids,
-        Err(e) => return FfiResult::error(format!("failed to parse version_ids_json: {}", e)),
-    };
+        // Parse the JSON array of version IDs
+        let version_ids: Vec<String> = match serde_json::from_str(&version_ids_str) {
+            Ok(ids) => ids,
+            Err(e) => return FfiResult::error(format!("failed to parse version_ids_json: {}", e)),
+        };
 
-    if version_ids.is_empty() {
-        tracing::debug!("no version IDs provided, returning early");
-        return FfiResult::ok();
-    }
+        if version_ids.is_empty() {
+            tracing::debug!("no version IDs provided, returning early");
+            return FfiResult::ok();
+        }
 
-    tracing::debug!(count = version_ids.len(), "parsed version IDs to sync");
+        tracing::debug!(count = version_ids.len(), "parsed version IDs to sync");
 
-    let result = NODES
-        .get(node_ptr, |state| {
+        let result = NODES
+            .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
                 None => return Err("no p2p system configured".to_string()),
@@ -293,9 +295,10 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
         .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
         .and_then(|r| r);
 
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(e),
+        match result {
+            Ok(()) => FfiResult::ok(),
+            Err(e) => FfiResult::error(e),
+        }
     }
 }
 

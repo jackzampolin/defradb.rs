@@ -1,5 +1,6 @@
 use std::ffi::c_char;
 
+use crate::ffi_entry;
 use crate::helpers::{get_node_runner, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::query::nac_permission_for_query;
@@ -35,69 +36,71 @@ pub unsafe extern "C" fn exec_request_in_txn(
     variables: *const c_char,
     batch_session_id: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
-    let query_str = try_ffi!(require_c_str(request_query, "request_query"));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
+        let query_str = try_ffi!(require_c_str(request_query, "request_query"));
 
-    let permission = nac_permission_for_query(&query_str);
-    try_ffi!(check_nac_for_node(rt, node_ptr, identity_did, permission));
+        let permission = nac_permission_for_query(&query_str);
+        try_ffi!(check_nac_for_node(rt, node_ptr, identity_did, permission));
 
-    let identity_str = c_str_to_string(identity_did);
-    let op_name = c_str_to_string(operation_name);
-    let vars_str = c_str_to_string(variables);
-    let batch_session = c_str_to_string(batch_session_id);
+        let identity_str = c_str_to_string(identity_did);
+        let op_name = c_str_to_string(operation_name);
+        let vars_str = c_str_to_string(variables);
+        let batch_session = c_str_to_string(batch_session_id);
 
-    // Parse identity DID if provided
-    let did = match identity_str {
-        Some(ref s) if !s.is_empty() => match identity::Did::new(s) {
-            Ok(d) => Some(d),
-            Err(e) => return FfiResult::error(format!("invalid identity DID: {}", e)),
-        },
-        _ => None,
-    };
+        // Parse identity DID if provided
+        let did = match identity_str {
+            Some(ref s) if !s.is_empty() => match identity::Did::new(s) {
+                Ok(d) => Some(d),
+                Err(e) => return FfiResult::error(format!("invalid identity DID: {}", e)),
+            },
+            _ => None,
+        };
 
-    let node_did = NODES
-        .get(node_ptr, |state| state.node_identity_did.clone())
-        .flatten();
-    let signing =
-        defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
-    let session_key = batch_session.or_else(|| signing.as_ref().map(|s| s.public_key_hex.clone()));
-    defra_core::batch_signing::set_batch_session_key(session_key);
-    defra_core::signing::set_signing_config(signing);
+        let node_did = NODES
+            .get(node_ptr, |state| state.node_identity_did.clone())
+            .flatten();
+        let signing =
+            defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
+        let session_key = batch_session.or_else(|| signing.as_ref().map(|s| s.public_key_hex.clone()));
+        defra_core::batch_signing::set_batch_session_key(session_key);
+        defra_core::signing::set_signing_config(signing);
 
-    // Check if identity has DAC bypass (NAC admin/owner can read all documents)
-    crate::query::check_and_set_dac_bypass(rt, node_ptr, identity_did);
+        // Check if identity has DAC bypass (NAC admin/owner can read all documents)
+        crate::query::check_and_set_dac_bypass(rt, node_ptr, identity_did);
 
-    let runner = try_ffi!(get_node_runner(node_ptr));
+        let runner = try_ffi!(get_node_runner(node_ptr));
 
-    ffi_async!(rt, {
-        let handle: query::txn::TransactionHandle = txn_str
-            .parse()
-            .map_err(|e| format!("invalid transaction ID: {}", e))?;
+        ffi_async!(rt, {
+            let handle: query::txn::TransactionHandle = txn_str
+                .parse()
+                .map_err(|e| format!("invalid transaction ID: {}", e))?;
 
-        // Build request
-        let mut request = query::QueryRequest::new(query_str);
-        if did.is_some() {
-            request = request.with_identity(did);
-        }
-        if let Some(op) = op_name {
-            request = request.with_operation_name(op);
-        }
-        if let Some(vars) = vars_str {
-            let vars_json: serde_json::Value = serde_json::from_str(&vars)
-                .map_err(|e| format!("failed to parse variables: {}", e))?;
-            request = request.with_variables(vars_json);
-        }
+            // Build request
+            let mut request = query::QueryRequest::new(query_str);
+            if did.is_some() {
+                request = request.with_identity(did);
+            }
+            if let Some(op) = op_name {
+                request = request.with_operation_name(op);
+            }
+            if let Some(vars) = vars_str {
+                let vars_json: serde_json::Value = serde_json::from_str(&vars)
+                    .map_err(|e| format!("failed to parse variables: {}", e))?;
+                request = request.with_variables(vars_json);
+            }
 
-        // Execute in transaction
-        let response = runner.execute_in_txn(request, &handle).await;
+            // Execute in transaction
+            let response = runner.execute_in_txn(request, &handle).await;
 
-        // Serialize response
-        let json = serde_json::to_string(&response)
-            .map_err(|e| format!("failed to serialize response: {}", e))?;
+            // Serialize response
+            let json = serde_json::to_string(&response)
+                .map_err(|e| format!("failed to serialize response: {}", e))?;
 
-        Ok(json)
-    })
+            Ok(json)
+        })
+    }
 }
 
 #[cfg(test)]

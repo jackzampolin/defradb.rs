@@ -1,5 +1,6 @@
 use std::ffi::c_char;
 
+use crate::ffi_entry;
 use acp::nac::NodePermission;
 
 use crate::helpers::{get_rt, require_c_str};
@@ -33,26 +34,27 @@ pub unsafe extern "C" fn p2p_sync_documents(
     collection_name: *const c_char,
     doc_ids_json: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::P2pSyncDocuments
-    ));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::P2pSyncDocuments
+        ));
 
-    let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
-    let doc_ids_str = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
+        let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+        let doc_ids_str = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
 
-    let doc_ids = match parse_doc_ids_json(&doc_ids_str) {
-        Ok(d) => d,
-        Err(e) => return FfiResult::error(e),
-    };
+        let doc_ids = match parse_doc_ids_json(&doc_ids_str) {
+            Ok(d) => d,
+            Err(e) => return FfiResult::error(e),
+        };
 
-    tracing::debug!(collection = %collection_name_str, doc_ids = ?doc_ids, "p2p_sync_documents called");
+        tracing::debug!(collection = %collection_name_str, doc_ids = ?doc_ids, "p2p_sync_documents called");
 
-    let result = NODES
-        .get(node_ptr, |state| {
+        let result = NODES
+            .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
                 None => return Err("no p2p system configured".to_string()),
@@ -161,9 +163,10 @@ pub unsafe extern "C" fn p2p_sync_documents(
         .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
         .and_then(|r| r);
 
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(e),
+        match result {
+            Ok(()) => FfiResult::ok(),
+            Err(e) => FfiResult::error(e),
+        }
     }
 }
 
@@ -181,20 +184,21 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
     identity_did: *const c_char,
     collection_id: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::P2pSyncBranchableCollection
-    ));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::P2pSyncBranchableCollection
+        ));
 
-    let collection_id_str = try_ffi!(require_c_str(collection_id, "collection_id"));
+        let collection_id_str = try_ffi!(require_c_str(collection_id, "collection_id"));
 
-    tracing::debug!(collection_id = %collection_id_str, "p2p_sync_branchable_collection called");
+        tracing::debug!(collection_id = %collection_id_str, "p2p_sync_branchable_collection called");
 
-    let result = NODES
-        .get(node_ptr, |state| {
+        let result = NODES
+            .get(node_ptr, |state| {
             let p2p = match &state.p2p {
                 Some(p2p) => p2p,
                 None => return Err("no p2p system configured".to_string()),
@@ -273,8 +277,9 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
         .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
         .and_then(|r| r);
 
-    match result {
-        Ok(()) => FfiResult::ok(),
-        Err(e) => FfiResult::error(e),
+        match result {
+            Ok(()) => FfiResult::ok(),
+            Err(e) => FfiResult::error(e),
+        }
     }
 }

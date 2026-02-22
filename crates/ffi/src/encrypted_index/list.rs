@@ -5,7 +5,7 @@ use acp::nac::NodePermission;
 use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::types::FfiResult;
-use crate::{ffi_async, try_ffi};
+use crate::{ffi_async, ffi_entry, try_ffi};
 
 /// List encrypted indexes for a collection.
 ///
@@ -18,29 +18,31 @@ pub unsafe extern "C" fn list_encrypted_indexes(
     identity_did: *const c_char,
     collection_name: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::EncryptedIndexList
-    ));
-    let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::EncryptedIndexList
+        ));
+        let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    ffi_async!(rt, {
-        let collection = database
-            .get_collection(&collection_name_str)
-            .map_err(|e| format!("failed to get collection: {}", e))?
-            .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
+        ffi_async!(rt, {
+            let collection = database
+                .get_collection(&collection_name_str)
+                .map_err(|e| format!("failed to get collection: {}", e))?
+                .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
 
-        let encrypted_indexes = &collection.schema().encrypted_indexes;
+            let encrypted_indexes = &collection.schema().encrypted_indexes;
 
-        let json = serde_json::to_string(encrypted_indexes)
-            .map_err(|e| format!("failed to serialize result: {}", e))?;
+            let json = serde_json::to_string(encrypted_indexes)
+                .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok(json)
-    })
+            Ok(json)
+        })
+    }
 }
 
 /// List all encrypted indexes across all collections.
@@ -53,45 +55,47 @@ pub unsafe extern "C" fn list_all_encrypted_indexes(
     node_ptr: usize,
     identity_did: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::EncryptedIndexListAll
-    ));
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::EncryptedIndexListAll
+        ));
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    ffi_async!(rt, {
-        let names = database
-            .list_collections()
-            .map_err(|e| format!("failed to list collections: {}", e))?;
+        ffi_async!(rt, {
+            let names = database
+                .list_collections()
+                .map_err(|e| format!("failed to list collections: {}", e))?;
 
-        let mut all_encrypted_indexes: std::collections::HashMap<
-            String,
-            Vec<schema::EncryptedIndexDescription>,
-        > = std::collections::HashMap::new();
+            let mut all_encrypted_indexes: std::collections::HashMap<
+                String,
+                Vec<schema::EncryptedIndexDescription>,
+            > = std::collections::HashMap::new();
 
-        for name in names {
-            match database.get_collection(&name) {
-                Ok(Some(collection)) => {
-                    let encrypted_indexes = collection.schema().encrypted_indexes.clone();
-                    if !encrypted_indexes.is_empty() {
-                        all_encrypted_indexes.insert(name, encrypted_indexes);
+            for name in names {
+                match database.get_collection(&name) {
+                    Ok(Some(collection)) => {
+                        let encrypted_indexes = collection.schema().encrypted_indexes.clone();
+                        if !encrypted_indexes.is_empty() {
+                            all_encrypted_indexes.insert(name, encrypted_indexes);
+                        }
+                    }
+                    Ok(None) => continue,
+                    Err(e) => {
+                        return Err(format!("failed to get collection '{}': {}", name, e));
                     }
                 }
-                Ok(None) => continue,
-                Err(e) => {
-                    return Err(format!("failed to get collection '{}': {}", name, e));
-                }
             }
-        }
 
-        let json = serde_json::to_string(&all_encrypted_indexes)
-            .map_err(|e| format!("failed to serialize result: {}", e))?;
+            let json = serde_json::to_string(&all_encrypted_indexes)
+                .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok(json)
-    })
+            Ok(json)
+        })
+    }
 }
 
 #[cfg(test)]

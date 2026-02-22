@@ -2,6 +2,7 @@ use std::ffi::c_char;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::ffi_entry;
 use identity::Identity;
 use sourcehub::SourceHubProvider;
 
@@ -17,6 +18,8 @@ use storage::stores::Peerstore;
 
 use crate::state::{FfiStore, NodeState, P2PState, PolicyStore, NODES};
 use crate::types::{c_str_to_string, NewNodeResult, NodeInitOptions};
+
+const MAX_PRIVATE_KEY_LEN: usize = 128;
 
 /// Create a new DefraDB node with P2P enabled.
 ///
@@ -37,19 +40,20 @@ pub unsafe extern "C" fn new_node_with_p2p(
     options: NodeInitOptions,
     listen_addr: *const c_char,
 ) -> NewNodeResult {
-    let rt = match crate::runtime::RUNTIME.get() {
-        Some(rt) => rt,
-        None => return NewNodeResult::error("runtime not initialized - call defra_init() first"),
-    };
+    ffi_entry! {
+        let rt = match crate::runtime::RUNTIME.get() {
+            Some(rt) => rt,
+            None => return NewNodeResult::error("runtime not initialized - call defra_init() first"),
+        };
 
-    let listen_addr_str = match c_str_to_string(listen_addr) {
-        Some(s) => s,
-        None => return NewNodeResult::error("listen_addr is null"),
-    };
+        let listen_addr_str = match c_str_to_string(listen_addr) {
+            Some(s) => s,
+            None => return NewNodeResult::error("listen_addr is null"),
+        };
 
-    let enable_signing = options.enable_signing != 0;
+        let enable_signing = options.enable_signing != 0;
 
-    let result = rt.block_on(async {
+        let result = rt.block_on(async {
         let db_path_opt: Option<String>;
         let store: Arc<FfiStore> = if options.in_memory == 0 && !options.db_path.is_null() {
             let path = c_str_to_string(options.db_path)
@@ -69,6 +73,12 @@ pub unsafe extern "C" fn new_node_with_p2p(
             let raw_identity = if !options.signing_private_key.is_null()
                 && options.signing_private_key_len > 0
             {
+                if options.signing_private_key_len > MAX_PRIVATE_KEY_LEN {
+                    return Err(format!(
+                        "signing_private_key_len {} exceeds maximum {}",
+                        options.signing_private_key_len, MAX_PRIVATE_KEY_LEN
+                    ));
+                }
                 let key_bytes = unsafe {
                     std::slice::from_raw_parts(
                         options.signing_private_key,
@@ -471,6 +481,12 @@ pub unsafe extern "C" fn new_node_with_p2p(
             let signer_key = if !options.sourcehub_signer_key.is_null()
                 && options.sourcehub_signer_key_len > 0
             {
+                if options.sourcehub_signer_key_len > MAX_PRIVATE_KEY_LEN {
+                    return Err(format!(
+                        "sourcehub_signer_key_len {} exceeds maximum {}",
+                        options.sourcehub_signer_key_len, MAX_PRIVATE_KEY_LEN
+                    ));
+                }
                 unsafe { std::slice::from_raw_parts(options.sourcehub_signer_key, options.sourcehub_signer_key_len) }
             } else {
                 return Err("sourcehub_signer_key is required when SourceHub is configured".to_string());
@@ -537,8 +553,9 @@ pub unsafe extern "C" fn new_node_with_p2p(
         Ok::<usize, String>(handle)
     });
 
-    match result {
-        Ok(handle) => NewNodeResult::success(handle),
-        Err(e) => NewNodeResult::error(e),
+        match result {
+            Ok(handle) => NewNodeResult::success(handle),
+            Err(e) => NewNodeResult::error(e),
+        }
     }
 }

@@ -57,11 +57,47 @@ pub mod txn;
 pub mod types;
 
 pub use helpers::{get_node_database, get_node_runner, get_rt, require_c_str};
+pub use types::FfiPanicResult;
 
 use std::ffi::{c_char, CString};
 
 /// Error message for invalid node handle.
 pub const ERR_INVALID_NODE_HANDLE: &str = "invalid node handle";
+
+/// Extract a human-readable message from a caught panic payload.
+pub fn extract_panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
+    let detail = panic
+        .downcast_ref::<String>()
+        .map(|s| s.as_str())
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("unknown panic");
+    format!("internal error (panic): {}", detail)
+}
+
+/// Wrap an FFI function body in `catch_unwind` to prevent panics from
+/// crossing the FFI boundary.
+///
+/// The return type must implement [`FfiPanicResult`]. Caught panics are
+/// converted to error results via that trait.
+///
+/// With `panic = "abort"` (current release profile), panics abort the
+/// process before unwinding so `catch_unwind` is a no-op. In debug/test
+/// builds (which default to `panic = "unwind"`), panics are caught and
+/// converted to error returns.
+#[macro_export]
+macro_rules! ffi_entry {
+    ($($body:tt)*) => {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            $($body)*
+        })) {
+            Ok(result) => result,
+            Err(panic) => {
+                let msg = $crate::extract_panic_message(&panic);
+                $crate::FfiPanicResult::from_panic(msg)
+            }
+        }
+    };
+}
 
 /// Early-return on `Result<T, FfiResult>::Err`.
 #[macro_export]

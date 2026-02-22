@@ -1,5 +1,6 @@
 use std::ffi::c_char;
 
+use crate::ffi_entry;
 use crate::state::{SubscriptionState, NODES, SUBSCRIPTIONS};
 use crate::types::c_str_to_string;
 use crate::ERR_INVALID_NODE_HANDLE;
@@ -25,27 +26,29 @@ pub unsafe extern "C" fn create_subscription(
     node_ptr: usize,
     collection_filter: *const c_char,
 ) -> CreateSubscriptionResult {
-    let collection = c_str_to_string(collection_filter);
+    ffi_entry! {
+        let collection = c_str_to_string(collection_filter);
 
-    // Get the event bus from the node
-    let subscription = match NODES.get(node_ptr, |state| {
-        // Subscribe to Update events (document changes)
-        state.event_bus.subscribe(&[events::EventName::Update])
-    }) {
-        Some(sub) => sub,
-        None => return CreateSubscriptionResult::error(ERR_INVALID_NODE_HANDLE),
-    };
+        // Get the event bus from the node
+        let subscription = match NODES.get(node_ptr, |state| {
+            // Subscribe to Update events (document changes)
+            state.event_bus.subscribe(&[events::EventName::Update])
+        }) {
+            Some(sub) => sub,
+            None => return CreateSubscriptionResult::error(ERR_INVALID_NODE_HANDLE),
+        };
 
-    // Create subscription state with optional collection filter
-    let state = SubscriptionState {
-        subscription,
-        node_handle: node_ptr,
-        collection_filter: collection,
-    };
+        // Create subscription state with optional collection filter
+        let state = SubscriptionState {
+            subscription,
+            node_handle: node_ptr,
+            collection_filter: collection,
+        };
 
-    // Register and return handle
-    let handle = SUBSCRIPTIONS.insert(state);
-    CreateSubscriptionResult::success(handle)
+        // Register and return handle
+        let handle = SUBSCRIPTIONS.insert(state);
+        CreateSubscriptionResult::success(handle)
+    }
 }
 
 /// Create a subscription to P2P merge complete events.
@@ -60,27 +63,29 @@ pub unsafe extern "C" fn create_subscription(
 /// Events will contain merge complete data (doc_id, cid, collection_id, by_peer).
 #[no_mangle]
 pub extern "C" fn create_merge_complete_subscription(node_ptr: usize) -> CreateSubscriptionResult {
-    // Get the event bus from the node
-    let subscription = match NODES.get(node_ptr, |state| {
-        state.event_bus.subscribe(&[
-            events::EventName::MergeComplete,
-            events::EventName::ReplicatorCompleted,
-            events::EventName::TopicPeerEvent,
-            events::EventName::SEArtifactReceived,
-        ])
-    }) {
-        Some(sub) => sub,
-        None => return CreateSubscriptionResult::error(ERR_INVALID_NODE_HANDLE),
-    };
+    ffi_entry! {
+        // Get the event bus from the node
+        let subscription = match NODES.get(node_ptr, |state| {
+            state.event_bus.subscribe(&[
+                events::EventName::MergeComplete,
+                events::EventName::ReplicatorCompleted,
+                events::EventName::TopicPeerEvent,
+                events::EventName::SEArtifactReceived,
+            ])
+        }) {
+            Some(sub) => sub,
+            None => return CreateSubscriptionResult::error(ERR_INVALID_NODE_HANDLE),
+        };
 
-    let state = SubscriptionState {
-        subscription,
-        node_handle: node_ptr,
-        collection_filter: None,
-    };
+        let state = SubscriptionState {
+            subscription,
+            node_handle: node_ptr,
+            collection_filter: None,
+        };
 
-    let handle = SUBSCRIPTIONS.insert(state);
-    CreateSubscriptionResult::success(handle)
+        let handle = SUBSCRIPTIONS.insert(state);
+        CreateSubscriptionResult::success(handle)
+    }
 }
 
 /// Convert an event message to JSON.

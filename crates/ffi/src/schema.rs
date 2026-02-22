@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use acp::nac::NodePermission;
 
+use crate::ffi_entry;
 use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::policy_yaml;
@@ -39,64 +40,66 @@ pub unsafe extern "C" fn add_schema(
     identity_did: *const c_char,
     schema_sdl: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::CollectionPatch
-    ));
-    let schema_str = try_ffi!(require_c_str(schema_sdl, "schema_sdl"));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::CollectionPatch
+        ));
+        let schema_str = try_ffi!(require_c_str(schema_sdl, "schema_sdl"));
 
-    // Validate node handle and get both database and policy store
-    let (database, policy_store) = match NODES.get(node_ptr, |state| {
-        (state.database.clone(), state.policy_store.clone())
-    }) {
-        Some(pair) => pair,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
+        // Validate node handle and get both database and policy store
+        let (database, policy_store) = match NODES.get(node_ptr, |state| {
+            (state.database.clone(), state.policy_store.clone())
+        }) {
+            Some(pair) => pair,
+            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
 
-    ffi_async!(rt, {
-        // Get existing collection names so the SDL parser can resolve external type references
-        // (e.g., relations to already-created collections)
-        let known_types: std::collections::HashSet<String> = database
-            .list_collections()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        ffi_async!(rt, {
+            // Get existing collection names so the SDL parser can resolve external type references
+            // (e.g., relations to already-created collections)
+            let known_types: std::collections::HashSet<String> = database
+                .list_collections()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
 
-        // Parse the SDL into collection versions, passing known types for resolution
-        let collections = query::parse_sdl_with_known_types(&schema_str, known_types)
-            .map_err(|e| format!("failed to parse schema: {}", e))?;
+            // Parse the SDL into collection versions, passing known types for resolution
+            let collections = query::parse_sdl_with_known_types(&schema_str, known_types)
+                .map_err(|e| format!("failed to parse schema: {}", e))?;
 
-        // Run global validators (embedding type checks, etc.)
-        db::definition_validation::validate_new_collections(&collections)
-            .map_err(|e| format!("failed to validate schema: {}", e))?;
+            // Run global validators (embedding type checks, etc.)
+            db::definition_validation::validate_new_collections(&collections)
+                .map_err(|e| format!("failed to validate schema: {}", e))?;
 
-        // Validate policies on collections before creating them
-        for collection in &collections {
-            if let Some(ref policy) = collection.policy {
-                validate_collection_policy(policy, &policy_store)?;
+            // Validate policies on collections before creating them
+            for collection in &collections {
+                if let Some(ref policy) = collection.policy {
+                    validate_collection_policy(policy, &policy_store)?;
+                }
             }
-        }
 
-        // Create each collection
-        let mut created_versions = Vec::new();
-        for schema in collections {
-            let version = schema.clone();
-            database
-                .create_collection(schema)
-                .await
-                .map_err(|e| format!("failed to create collection: {}", e))?;
-            created_versions.push(version);
-        }
+            // Create each collection
+            let mut created_versions = Vec::new();
+            for schema in collections {
+                let version = schema.clone();
+                database
+                    .create_collection(schema)
+                    .await
+                    .map_err(|e| format!("failed to create collection: {}", e))?;
+                created_versions.push(version);
+            }
 
-        // Return JSON array of created collection versions
-        let json = serde_json::to_string(&created_versions)
-            .map_err(|e| format!("failed to serialize result: {}", e))?;
+            // Return JSON array of created collection versions
+            let json = serde_json::to_string(&created_versions)
+                .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok(json)
-    })
+            Ok(json)
+        })
+    }
 }
 
 /// Get all collections from the database.
@@ -111,29 +114,31 @@ pub unsafe extern "C" fn get_collections(
     node_ptr: usize,
     identity_did: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::CollectionGet
-    ));
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::CollectionGet
+        ));
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    ffi_async!(rt, {
-        // Return all collection versions from the system store (active + inactive + placeholders).
-        // The Go wrapper handles GetInactive filtering on its side.
-        let collections = database
-            .get_all_collection_versions()
-            .await
-            .map_err(|e| format!("failed to get collections: {}", e))?;
+        ffi_async!(rt, {
+            // Return all collection versions from the system store (active + inactive + placeholders).
+            // The Go wrapper handles GetInactive filtering on its side.
+            let collections = database
+                .get_all_collection_versions()
+                .await
+                .map_err(|e| format!("failed to get collections: {}", e))?;
 
-        // Return JSON array
-        let json = serde_json::to_string(&collections)
-            .map_err(|e| format!("failed to serialize result: {}", e))?;
+            // Return JSON array
+            let json = serde_json::to_string(&collections)
+                .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok(json)
-    })
+            Ok(json)
+        })
+    }
 }
 
 /// Get all collection versions visible within a specific transaction.
@@ -150,31 +155,33 @@ pub unsafe extern "C" fn get_collections_in_txn(
     txn_id: *const c_char,
     identity_did: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::CollectionGet
-    ));
-    let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::CollectionGet
+        ));
+        let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
 
-    let registry = match NODES.get(node_ptr, |state| state.txn_registry.clone()) {
-        Some(r) => r,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
+        let registry = match NODES.get(node_ptr, |state| state.txn_registry.clone()) {
+            Some(r) => r,
+            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
 
-    ffi_async!(rt, {
-        let collections = registry
-            .get_collections_in_txn(&txn_str)
-            .await
-            .map_err(|e| format!("failed to get collections in txn: {}", e))?;
+        ffi_async!(rt, {
+            let collections = registry
+                .get_collections_in_txn(&txn_str)
+                .await
+                .map_err(|e| format!("failed to get collections in txn: {}", e))?;
 
-        let json = serde_json::to_string(&collections)
-            .map_err(|e| format!("failed to serialize result: {}", e))?;
+            let json = serde_json::to_string(&collections)
+                .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok(json)
-    })
+            Ok(json)
+        })
+    }
 }
 
 /// Validate that a collection's policy references a valid, well-formed policy.

@@ -7,7 +7,7 @@ use storage::corekv::Key;
 use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::types::FfiResult;
-use crate::{ffi_async, try_ffi};
+use crate::{ffi_async, ffi_entry, try_ffi};
 
 /// Delete an index from a collection.
 ///
@@ -31,98 +31,100 @@ pub unsafe extern "C" fn delete_index(
     collection_name: *const c_char,
     index_name: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::IndexDelete
-    ));
-    let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
-    let index_name_str = try_ffi!(require_c_str(index_name, "index_name"));
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::IndexDelete
+        ));
+        let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+        let index_name_str = try_ffi!(require_c_str(index_name, "index_name"));
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    ffi_async!(rt, {
-        // Get the collection
-        let collection = database
-            .get_collection(&collection_name_str)
-            .map_err(|e| format!("failed to get collection: {}", e))?
-            .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
+        ffi_async!(rt, {
+            // Get the collection
+            let collection = database
+                .get_collection(&collection_name_str)
+                .map_err(|e| format!("failed to get collection: {}", e))?
+                .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
 
-        // Create a transaction
-        let txn = database
-            .new_txn(false)
-            .await
-            .map_err(|e| format!("failed to create transaction: {}", e))?;
-
-        // Do all datastore operations in a scope to delete references before commit
-        {
-            let datastore = txn
-                .datastore()
-                .map_err(|e| format!("failed to get datastore: {}", e))?;
-
-            // Create the index manager
-            let mut index_manager = db::index_manager::IndexManager::from_collection(
-                collection_short_id(collection.schema().collection_id.as_str()),
-                collection.schema(),
-            )
-            .map_err(|e| format!("failed to create index manager: {}", e))?;
-
-            // Delete the index
-            let dropped = index_manager
-                .delete_index(&datastore, &index_name_str)
+            // Create a transaction
+            let txn = database
+                .new_txn(false)
                 .await
-                .map_err(|e| format!("failed to delete index: {}", e))?;
+                .map_err(|e| format!("failed to create transaction: {}", e))?;
 
-            if !dropped {
-                return Err(format!(
-                    "index with name doesn't exists. Name: {}",
-                    index_name_str
-                ));
+            // Do all datastore operations in a scope to delete references before commit
+            {
+                let datastore = txn
+                    .datastore()
+                    .map_err(|e| format!("failed to get datastore: {}", e))?;
+
+                // Create the index manager
+                let mut index_manager = db::index_manager::IndexManager::from_collection(
+                    collection_short_id(collection.schema().collection_id.as_str()),
+                    collection.schema(),
+                )
+                .map_err(|e| format!("failed to create index manager: {}", e))?;
+
+                // Delete the index
+                let dropped = index_manager
+                    .delete_index(&datastore, &index_name_str)
+                    .await
+                    .map_err(|e| format!("failed to delete index: {}", e))?;
+
+                if !dropped {
+                    return Err(format!(
+                        "index with name doesn't exists. Name: {}",
+                        index_name_str
+                    ));
+                }
+
+                // Update the collection schema to remove the index
+                let mut updated_schema = collection.schema().clone();
+                updated_schema
+                    .indexes
+                    .retain(|idx| idx.name != index_name_str);
+
+                // Save the updated schema at /collection/id/{version_id}
+                let collection_key =
+                    storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
+                let schema_data = serde_json::to_vec(&updated_schema)
+                    .map_err(|e| format!("failed to serialize schema: {}", e))?;
+
+                let systemstore = txn
+                    .systemstore()
+                    .map_err(|e| format!("failed to get systemstore: {}", e))?;
+
+                systemstore
+                    .set(&collection_key.bytes(), &schema_data)
+                    .await
+                    .map_err(|e| format!("failed to save schema: {}", e))?;
+
+                // Update the name → version_id mapping at /collection/name/{name}
+                let name_key = storage::keys::systemstore::CollectionNameKey::new(&collection_name_str);
+                systemstore
+                    .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
+                    .await
+                    .map_err(|e| format!("failed to save name mapping: {}", e))?;
             }
 
-            // Update the collection schema to remove the index
-            let mut updated_schema = collection.schema().clone();
-            updated_schema
-                .indexes
-                .retain(|idx| idx.name != index_name_str);
-
-            // Save the updated schema at /collection/id/{version_id}
-            let collection_key =
-                storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
-            let schema_data = serde_json::to_vec(&updated_schema)
-                .map_err(|e| format!("failed to serialize schema: {}", e))?;
-
-            let systemstore = txn
-                .systemstore()
-                .map_err(|e| format!("failed to get systemstore: {}", e))?;
-
-            systemstore
-                .set(&collection_key.bytes(), &schema_data)
+            // Commit the transaction (datastore reference is now dropped)
+            txn.commit()
                 .await
-                .map_err(|e| format!("failed to save schema: {}", e))?;
+                .map_err(|e| format!("failed to commit: {}", e))?;
 
-            // Update the name → version_id mapping at /collection/name/{name}
-            let name_key = storage::keys::systemstore::CollectionNameKey::new(&collection_name_str);
-            systemstore
-                .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
+            // Reload the collection cache
+            database
+                .reload_cache()
                 .await
-                .map_err(|e| format!("failed to save name mapping: {}", e))?;
-        }
+                .map_err(|e| format!("failed to reload cache: {}", e))?;
 
-        // Commit the transaction (datastore reference is now dropped)
-        txn.commit()
-            .await
-            .map_err(|e| format!("failed to commit: {}", e))?;
-
-        // Reload the collection cache
-        database
-            .reload_cache()
-            .await
-            .map_err(|e| format!("failed to reload cache: {}", e))?;
-
-        Ok("{}".to_string())
-    })
+            Ok("{}".to_string())
+        })
+    }
 }
 
 /// Get all indexes for a collection.
@@ -145,32 +147,34 @@ pub unsafe extern "C" fn get_indexes(
     identity_did: *const c_char,
     collection_name: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::IndexList
-    ));
-    let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::IndexList
+        ));
+        let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    ffi_async!(rt, {
-        // Get the collection
-        let collection = database
-            .get_collection(&collection_name_str)
-            .map_err(|e| format!("failed to get collection: {}", e))?
-            .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
+        ffi_async!(rt, {
+            // Get the collection
+            let collection = database
+                .get_collection(&collection_name_str)
+                .map_err(|e| format!("failed to get collection: {}", e))?
+                .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
 
-        // Get indexes from the collection schema
-        let indexes = collection.get_indexes();
+            // Get indexes from the collection schema
+            let indexes = collection.get_indexes();
 
-        // Return JSON array
-        let json = serde_json::to_string(&indexes)
-            .map_err(|e| format!("failed to serialize result: {}", e))?;
+            // Return JSON array
+            let json = serde_json::to_string(&indexes)
+                .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok(json)
-    })
+            Ok(json)
+        })
+    }
 }
 
 /// Get all indexes across all collections.
@@ -191,46 +195,48 @@ pub unsafe extern "C" fn list_all_indexes(
     node_ptr: usize,
     identity_did: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::IndexList
-    ));
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::IndexList
+        ));
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    ffi_async!(rt, {
-        // Get all collection names
-        let names = database
-            .list_collections()
-            .map_err(|e| format!("failed to list collections: {}", e))?;
+        ffi_async!(rt, {
+            // Get all collection names
+            let names = database
+                .list_collections()
+                .map_err(|e| format!("failed to list collections: {}", e))?;
 
-        // Build a map of collection name -> indexes
-        let mut all_indexes: std::collections::HashMap<String, Vec<schema::IndexDescription>> =
-            std::collections::HashMap::new();
+            // Build a map of collection name -> indexes
+            let mut all_indexes: std::collections::HashMap<String, Vec<schema::IndexDescription>> =
+                std::collections::HashMap::new();
 
-        for name in names {
-            match database.get_collection(&name) {
-                Ok(Some(collection)) => {
-                    let indexes = collection.get_indexes();
-                    if !indexes.is_empty() {
-                        all_indexes.insert(name, indexes.to_vec());
+            for name in names {
+                match database.get_collection(&name) {
+                    Ok(Some(collection)) => {
+                        let indexes = collection.get_indexes();
+                        if !indexes.is_empty() {
+                            all_indexes.insert(name, indexes.to_vec());
+                        }
+                    }
+                    Ok(None) => continue,
+                    Err(e) => {
+                        return Err(format!("failed to get collection '{}': {}", name, e));
                     }
                 }
-                Ok(None) => continue,
-                Err(e) => {
-                    return Err(format!("failed to get collection '{}': {}", name, e));
-                }
             }
-        }
 
-        // Return JSON object
-        let json = serde_json::to_string(&all_indexes)
-            .map_err(|e| format!("failed to serialize result: {}", e))?;
+            // Return JSON object
+            let json = serde_json::to_string(&all_indexes)
+                .map_err(|e| format!("failed to serialize result: {}", e))?;
 
-        Ok(json)
-    })
+            Ok(json)
+        })
+    }
 }
 
 #[cfg(test)]

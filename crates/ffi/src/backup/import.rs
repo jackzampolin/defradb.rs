@@ -1,6 +1,7 @@
 use std::ffi::c_char;
 use std::fs;
 
+use crate::ffi_entry;
 use crate::helpers::{get_rt, require_c_str};
 use crate::state::NODES;
 use crate::types::FfiResult;
@@ -24,29 +25,31 @@ use crate::{ffi_async_ok, try_ffi, ERR_INVALID_NODE_HANDLE};
 /// `filepath` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn basic_import(node_ptr: usize, filepath: *const c_char) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    let path_str = try_ffi!(require_c_str(filepath, "filepath"));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        let path_str = try_ffi!(require_c_str(filepath, "filepath"));
 
-    let (database, runner) = match NODES.get(node_ptr, |state| {
-        (state.database.clone(), state.query_runner.clone())
-    }) {
-        Some(r) => r,
-        None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
-    };
+        let (database, runner) = match NODES.get(node_ptr, |state| {
+            (state.database.clone(), state.query_runner.clone())
+        }) {
+            Some(r) => r,
+            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
 
-    ffi_async_ok!(rt, {
-        let content = fs::read_to_string(&path_str).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!("failed to open file '{}': {}", path_str, e)
-            } else {
-                format!("failed to read file '{}': {}", path_str, e)
-            }
-        })?;
+        ffi_async_ok!(rt, {
+            let content = fs::read_to_string(&path_str).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    format!("failed to open file '{}': {}", path_str, e)
+                } else {
+                    format!("failed to read file '{}': {}", path_str, e)
+                }
+            })?;
 
-        db::backup::import_database(&database, &runner, &content)
-            .await
-            .map(|_| ())
-    })
+            db::backup::import_database(&database, &runner, &content)
+                .await
+                .map(|_| ())
+        })
+    }
 }
 
 #[cfg(test)]

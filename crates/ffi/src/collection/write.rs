@@ -5,7 +5,7 @@ use acp::nac::NodePermission;
 use crate::helpers::{get_node_database, get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::types::FfiResult;
-use crate::{ffi_async, try_ffi};
+use crate::{ffi_async, ffi_entry, try_ffi};
 
 /// Delete a collection by name.
 ///
@@ -30,24 +30,26 @@ pub unsafe extern "C" fn delete_collection(
     identity_did: *const c_char,
     name: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::CollectionPatch
-    ));
-    let name_str = try_ffi!(require_c_str(name, "name"));
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::CollectionPatch
+        ));
+        let name_str = try_ffi!(require_c_str(name, "name"));
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    ffi_async!(rt, {
-        database
-            .delete_collection(&name_str)
-            .await
-            .map_err(|e| format!("failed to delete collection: {}", e))?;
+        ffi_async!(rt, {
+            database
+                .delete_collection(&name_str)
+                .await
+                .map_err(|e| format!("failed to delete collection: {}", e))?;
 
-        Ok("{}".to_string())
-    })
+            Ok("{}".to_string())
+        })
+    }
 }
 
 /// Set the active collection version.
@@ -74,24 +76,26 @@ pub unsafe extern "C" fn set_active_collection_version(
     identity_did: *const c_char,
     version_id: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::CollectionPatch
-    ));
-    let version_str = try_ffi!(require_c_str(version_id, "version_id"));
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::CollectionPatch
+        ));
+        let version_str = try_ffi!(require_c_str(version_id, "version_id"));
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    ffi_async!(rt, {
-        database
-            .set_active_collection_version(&version_str)
-            .await
-            .map_err(|e| format!("failed to set active collection version: {}", e))?;
+        ffi_async!(rt, {
+            database
+                .set_active_collection_version(&version_str)
+                .await
+                .map_err(|e| format!("failed to set active collection version: {}", e))?;
 
-        Ok("{}".to_string())
-    })
+            Ok("{}".to_string())
+        })
+    }
 }
 
 /// Patch a collection's schema using JSON patch operations.
@@ -120,28 +124,30 @@ pub unsafe extern "C" fn patch_collection(
     collection_name: *const c_char,
     patch: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::CollectionPatch
-    ));
-    let name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
-    let patch_str = try_ffi!(require_c_str(patch, "patch"));
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::CollectionPatch
+        ));
+        let name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
+        let patch_str = try_ffi!(require_c_str(patch, "patch"));
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    ffi_async!(rt, {
-        let updated_schema = database
-            .patch_collection(&name_str, &patch_str)
-            .await
-            .map_err(|e| format!("failed to patch collection: {}", e))?;
+        ffi_async!(rt, {
+            let updated_schema = database
+                .patch_collection(&name_str, &patch_str)
+                .await
+                .map_err(|e| format!("failed to patch collection: {}", e))?;
 
-        let json = serde_json::to_string(&updated_schema)
-            .map_err(|e| format!("failed to serialize updated schema: {}", e))?;
+            let json = serde_json::to_string(&updated_schema)
+                .map_err(|e| format!("failed to serialize updated schema: {}", e))?;
 
-        Ok(json)
-    })
+            Ok(json)
+        })
+    }
 }
 
 /// Truncate a collection: delete all documents while preserving the schema.
@@ -168,24 +174,26 @@ pub unsafe extern "C" fn truncate_collection(
     identity_did: *const c_char,
     name: *const c_char,
 ) -> FfiResult {
-    let rt = try_ffi!(get_rt());
-    try_ffi!(check_nac_for_node(
-        rt,
-        node_ptr,
-        identity_did,
-        NodePermission::CollectionTruncate
-    ));
-    let name_str = try_ffi!(require_c_str(name, "name"));
-    let database = try_ffi!(get_node_database(node_ptr));
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::CollectionTruncate
+        ));
+        let name_str = try_ffi!(require_c_str(name, "name"));
+        let database = try_ffi!(get_node_database(node_ptr));
 
-    ffi_async!(rt, {
-        database
-            .truncate_collection(&name_str)
-            .await
-            .map_err(|e| format!("failed to truncate collection: {}", e))?;
+        ffi_async!(rt, {
+            database
+                .truncate_collection(&name_str)
+                .await
+                .map_err(|e| format!("failed to truncate collection: {}", e))?;
 
-        Ok("{}".to_string())
-    })
+            Ok("{}".to_string())
+        })
+    }
 }
 
 #[cfg(test)]

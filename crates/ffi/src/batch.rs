@@ -4,6 +4,7 @@
 
 use std::ffi::c_char;
 
+use crate::ffi_entry;
 use crate::helpers::get_rt;
 use crate::state::NODES;
 use crate::try_ffi;
@@ -27,24 +28,26 @@ pub unsafe extern "C" fn batch_start(
     identity_did: *const c_char,
     session_id: *const c_char,
 ) -> FfiResult {
-    let _rt = try_ffi!(get_rt());
-    let identity_str = c_str_to_string(identity_did);
-    let session_str = c_str_to_string(session_id);
+    ffi_entry! {
+        let _rt = try_ffi!(get_rt());
+        let identity_str = c_str_to_string(identity_did);
+        let session_str = c_str_to_string(session_id);
 
-    let node_did = NODES
-        .get(node_ptr, |state| state.node_identity_did.clone())
-        .flatten();
+        let node_did = NODES
+            .get(node_ptr, |state| state.node_identity_did.clone())
+            .flatten();
 
-    let signing =
-        defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
+        let signing =
+            defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
 
-    match signing {
-        Some(config) => {
-            let key = session_str.unwrap_or_else(|| config.public_key_hex.clone());
-            defra_core::batch_signing::batch_start(&key);
-            FfiResult::ok()
+        match signing {
+            Some(config) => {
+                let key = session_str.unwrap_or_else(|| config.public_key_hex.clone());
+                defra_core::batch_signing::batch_start(&key);
+                FfiResult::ok()
+            }
+            None => FfiResult::error("no signing identity available"),
         }
-        None => FfiResult::error("no signing identity available"),
     }
 }
 
@@ -68,37 +71,39 @@ pub unsafe extern "C" fn batch_sign(
     identity_did: *const c_char,
     session_id: *const c_char,
 ) -> FfiResult {
-    let _rt = try_ffi!(get_rt());
-    let identity_str = c_str_to_string(identity_did);
-    let session_str = c_str_to_string(session_id);
+    ffi_entry! {
+        let _rt = try_ffi!(get_rt());
+        let identity_str = c_str_to_string(identity_did);
+        let session_str = c_str_to_string(session_id);
 
-    let node_did = NODES
-        .get(node_ptr, |state| state.node_identity_did.clone())
-        .flatten();
+        let node_did = NODES
+            .get(node_ptr, |state| state.node_identity_did.clone())
+            .flatten();
 
-    let signing =
-        defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
+        let signing =
+            defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
 
-    let config = match signing {
-        Some(c) => c,
-        None => return FfiResult::error("no signing identity available"),
-    };
+        let config = match signing {
+            Some(c) => c,
+            None => return FfiResult::error("no signing identity available"),
+        };
 
-    let key = session_str.unwrap_or_else(|| config.public_key_hex.clone());
-    let cids = match defra_core::batch_signing::batch_take_cids(&key) {
-        Some(c) => c,
-        None => return FfiResult::error("no batch session active"),
-    };
+        let key = session_str.unwrap_or_else(|| config.public_key_hex.clone());
+        let cids = match defra_core::batch_signing::batch_take_cids(&key) {
+            Some(c) => c,
+            None => return FfiResult::error("no batch session active"),
+        };
 
-    if cids.is_empty() {
-        return FfiResult::error("batch has no CIDs");
-    }
+        if cids.is_empty() {
+            return FfiResult::error("batch has no CIDs");
+        }
 
-    match crypto::batch::sign_batch(&cids, &config) {
-        Ok(sig) => match serde_json::to_string(&sig) {
-            Ok(json) => FfiResult::success(json),
-            Err(e) => FfiResult::error(format!("failed to serialize batch signature: {}", e)),
-        },
-        Err(e) => FfiResult::error(format!("batch sign failed: {}", e)),
+        match crypto::batch::sign_batch(&cids, &config) {
+            Ok(sig) => match serde_json::to_string(&sig) {
+                Ok(json) => FfiResult::success(json),
+                Err(e) => FfiResult::error(format!("failed to serialize batch signature: {}", e)),
+            },
+            Err(e) => FfiResult::error(format!("batch sign failed: {}", e)),
+        }
     }
 }
