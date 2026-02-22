@@ -200,6 +200,9 @@ pub extern "C" fn defra_version() -> *mut c_char {
 }
 
 #[cfg(test)]
+mod negative_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::CStr;
