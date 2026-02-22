@@ -1,5 +1,7 @@
 //! Pending DAG registration and retry logic.
 
+use std::time::Instant;
+
 use cid::Cid;
 
 use blockstore::Blockstore;
@@ -7,7 +9,7 @@ use blockstore::Blockstore;
 use crate::error::{Error, Result};
 use crate::sync::manager::events::SyncEvent;
 use crate::sync::manager::links::find_all_missing_links;
-use crate::sync::manager::pending::PendingDag;
+use crate::sync::manager::pending::{PendingDag, MAX_PENDING_DAGS, PENDING_DAG_TTL};
 
 use super::SyncManager;
 
@@ -39,6 +41,26 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .and_then(|dag| dag.source_peer)
     }
 
+    /// Insert a pending DAG entry, enforcing TTL eviction and capacity limits.
+    ///
+    /// Expired entries (older than `PENDING_DAG_TTL`) are removed before checking
+    /// the capacity. If the map is still at `MAX_PENDING_DAGS` after eviction the
+    /// new entry is silently dropped and `false` is returned so callers can log.
+    fn insert_pending_dag(&self, root_cid: Cid, dag: PendingDag) -> bool {
+        let mut pending = self.pending_dags.write();
+        let now = Instant::now();
+
+        // Evict expired entries.
+        pending.retain(|_, v| now.duration_since(v.inserted_at) < PENDING_DAG_TTL);
+
+        if pending.len() >= MAX_PENDING_DAGS {
+            return false;
+        }
+
+        pending.insert(root_cid, dag);
+        true
+    }
+
     /// Register a pending DAG for DocSync.
     ///
     /// This is called when a DocSyncReply contains head CIDs that need to be
@@ -58,8 +80,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             "Registering DocSync pending DAG"
         );
 
-        let mut pending = self.pending_dags.write();
-        pending.insert(
+        if !self.insert_pending_dag(
             root_cid,
             PendingDag {
                 doc_id,
@@ -69,8 +90,15 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 creator: String::new(),
                 missing: std::iter::once(root_cid).collect(),
                 source_peer: Some(source_peer),
+                inserted_at: Instant::now(),
             },
-        );
+        ) {
+            tracing::warn!(
+                cid = %root_cid,
+                max = MAX_PENDING_DAGS,
+                "Pending DAGs at capacity, dropping DocSync registration"
+            );
+        }
     }
 
     /// Register a pending DAG for branchable collection sync.
@@ -90,8 +118,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             "Registering branchable sync pending DAG"
         );
 
-        let mut pending = self.pending_dags.write();
-        pending.insert(
+        if !self.insert_pending_dag(
             root_cid,
             PendingDag {
                 doc_id: String::new(),
@@ -99,8 +126,15 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 creator: String::new(),
                 missing: std::iter::once(root_cid).collect(),
                 source_peer: Some(source_peer),
+                inserted_at: Instant::now(),
             },
-        );
+        ) {
+            tracing::warn!(
+                cid = %root_cid,
+                max = MAX_PENDING_DAGS,
+                "Pending DAGs at capacity, dropping branchable DAG registration"
+            );
+        }
     }
 
     /// Process a pending DAG after Bitswap blocks have been received.
@@ -122,6 +156,16 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             );
             return Ok(false);
         };
+
+        // Check TTL before retrying.
+        if info.inserted_at.elapsed() >= PENDING_DAG_TTL {
+            self.pending_dags.write().remove(root_cid);
+            tracing::warn!(
+                root_cid = %root_cid,
+                "Pending DAG expired (TTL exceeded), dropping"
+            );
+            return Ok(false);
+        }
 
         // Load the root block from blockstore
         let block_data = match self.blockstore.get(root_cid).await {
@@ -171,7 +215,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 missing_count = missing.len(),
                 "Still missing blocks for DAG"
             );
-            // Update the pending info with new missing CIDs
+            // Update the pending info with new missing CIDs (preserve original inserted_at).
             self.pending_dags.write().insert(
                 *root_cid,
                 PendingDag {

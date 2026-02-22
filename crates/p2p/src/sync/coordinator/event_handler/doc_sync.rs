@@ -5,8 +5,8 @@ use cid::Cid;
 use blockstore::Blockstore;
 
 use super::super::SyncCoordinator;
-use crate::error::Result;
-use crate::message::{DocSyncItem, DocSyncReply};
+use crate::error::{Error, Result};
+use crate::message::{DocSyncItem, DocSyncReply, MAX_DOC_IDS};
 
 impl<B: Blockstore + 'static> SyncCoordinator<B> {
     pub(super) async fn handle_doc_sync_request(
@@ -14,14 +14,26 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         peer_id: libp2p::PeerId,
         request: crate::message::DocSyncRequest,
     ) -> Result<()> {
+        if request.doc_ids.len() > MAX_DOC_IDS {
+            tracing::warn!(
+                peer_id = %peer_id,
+                doc_ids_count = request.doc_ids.len(),
+                max = MAX_DOC_IDS,
+                "DocSyncRequest exceeds MAX_DOC_IDS limit, rejecting"
+            );
+            return Err(Error::InvalidConfig(format!(
+                "DocSyncRequest contains {} doc IDs, exceeding the limit of {}",
+                request.doc_ids.len(),
+                MAX_DOC_IDS,
+            )));
+        }
+
         tracing::debug!(
             peer_id = %peer_id,
             doc_ids = ?request.doc_ids,
             message_id = %request.metadata.message_id,
             "Received DocSync request"
         );
-
-        self.check_peer_is_replicator(&peer_id)?;
 
         let mut results: Vec<DocSyncItem> = Vec::new();
         for doc_id in &request.doc_ids {
@@ -142,6 +154,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             let host = self.host.clone();
             let blockstore = self.manager.blockstore().clone();
             let event_tx = self.manager.event_sender();
+            let semaphore = self.dag_fetch_semaphore.clone();
 
             for (root_cid, doc_id) in cids_to_fetch {
                 tracing::debug!(
@@ -153,17 +166,22 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 let host = host.clone();
                 let blockstore = blockstore.clone();
                 let event_tx = event_tx.clone();
+                let semaphore = semaphore.clone();
 
-                tokio::spawn(super::super::dag_fetcher::poll_fetch_dag(
-                    host,
-                    blockstore,
-                    event_tx,
-                    root_cid,
-                    doc_id,
-                    String::new(),
-                    String::new(),
-                    peer_id,
-                ));
+                tokio::spawn(async move {
+                    let _permit = semaphore.acquire_owned().await;
+                    super::super::dag_fetcher::poll_fetch_dag(
+                        host,
+                        blockstore,
+                        event_tx,
+                        root_cid,
+                        doc_id,
+                        String::new(),
+                        String::new(),
+                        peer_id,
+                    )
+                    .await;
+                });
             }
         } else {
             tracing::debug!("No blocks to fetch from DocSync reply (all local)");

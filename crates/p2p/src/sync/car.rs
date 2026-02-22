@@ -10,6 +10,15 @@ use cid::Cid;
 
 use crate::error::{Error, Result};
 
+/// Maximum number of blocks allowed in a single CAR response.
+///
+/// Prevents a malicious or faulty peer from causing the server to collect and
+/// send an arbitrarily large DAG in a single response.
+pub const CAR_MAX_BLOCKS: usize = 1000;
+
+/// Maximum total byte size of a single CAR response (16 MiB).
+pub const CAR_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 /// Encode blocks as a CARv1 byte stream.
 ///
 /// Format: varint-prefixed DAG-CBOR header, then varint-prefixed (CID + data) sections.
@@ -69,13 +78,26 @@ pub fn decode_car(data: &[u8]) -> Result<CarContents> {
 }
 
 /// Traverse DAG from root, collect all reachable blocks from blockstore.
+///
+/// Collection is capped at [`CAR_MAX_BLOCKS`] blocks and [`CAR_MAX_BYTES`] total
+/// bytes.  If either limit is reached the function returns the blocks collected
+/// so far without error; the caller can detect truncation by checking whether
+/// the returned slice represents a complete DAG.
 pub async fn collect_dag_blocks<B: Blockstore>(
     blockstore: &B,
     root_cid: &Cid,
 ) -> Result<Vec<(Cid, Vec<u8>)>> {
     let mut blocks = Vec::new();
     let mut visited = HashSet::new();
-    collect_recursive(blockstore, root_cid, &mut blocks, &mut visited).await?;
+    let mut total_bytes: usize = 0;
+    collect_recursive(
+        blockstore,
+        root_cid,
+        &mut blocks,
+        &mut visited,
+        &mut total_bytes,
+    )
+    .await?;
     Ok(blocks)
 }
 
@@ -84,9 +106,20 @@ fn collect_recursive<'a, B: Blockstore + 'a>(
     cid: &'a Cid,
     blocks: &'a mut Vec<(Cid, Vec<u8>)>,
     visited: &'a mut HashSet<Cid>,
+    total_bytes: &'a mut usize,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(async move {
         if !visited.insert(*cid) {
+            return Ok(());
+        }
+
+        // Enforce limits before fetching each block.
+        if blocks.len() >= CAR_MAX_BLOCKS {
+            tracing::warn!(
+                cid = %cid,
+                limit = CAR_MAX_BLOCKS,
+                "CAR collection reached block limit, truncating"
+            );
             return Ok(());
         }
 
@@ -101,12 +134,22 @@ fn collect_recursive<'a, B: Blockstore + 'a>(
             }
         };
 
+        *total_bytes += data.len();
+        if *total_bytes > CAR_MAX_BYTES {
+            tracing::warn!(
+                cid = %cid,
+                limit_bytes = CAR_MAX_BYTES,
+                "CAR collection reached byte limit, truncating"
+            );
+            return Ok(());
+        }
+
         // Extract child links
         let refs = extract_links(&data);
         blocks.push((*cid, data));
 
         for child_cid in refs {
-            collect_recursive(blockstore, &child_cid, blocks, visited).await?;
+            collect_recursive(blockstore, &child_cid, blocks, visited, total_bytes).await?;
         }
 
         Ok(())

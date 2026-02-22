@@ -6,6 +6,12 @@ use super::cbor::{nullable_bytes, optional_bytes, vec_of_bytes};
 use super::metadata::MetaData;
 use super::traits::Message;
 
+/// Maximum number of document IDs allowed in a single DocSyncRequest.
+///
+/// Enforces an upper bound to prevent memory exhaustion from malicious peers
+/// sending oversized arrays.
+pub const MAX_DOC_IDS: usize = 1000;
+
 /// DocSync request message for pulling specific documents from peers.
 ///
 /// This is used when a node wants to sync specific documents from the network.

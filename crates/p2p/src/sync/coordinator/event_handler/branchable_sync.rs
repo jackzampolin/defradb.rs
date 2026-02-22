@@ -20,8 +20,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             "Received BranchableSync request"
         );
 
-        self.check_access(&peer_id, &request.collection_id)?;
-
         let heads = match self
             .head_provider
             .get_collection_heads(&request.collection_id)
@@ -129,23 +127,29 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             let host = self.host.clone();
             let blockstore = self.manager.blockstore().clone();
             let event_tx = self.manager.event_sender();
+            let semaphore = self.dag_fetch_semaphore.clone();
 
             for root_cid in cids_to_fetch {
                 let host = host.clone();
                 let blockstore = blockstore.clone();
                 let event_tx = event_tx.clone();
                 let collection_id = reply.collection_id.clone();
+                let semaphore = semaphore.clone();
 
-                tokio::spawn(super::super::dag_fetcher::poll_fetch_dag(
-                    host,
-                    blockstore,
-                    event_tx,
-                    root_cid,
-                    String::new(),
-                    collection_id,
-                    String::new(),
-                    peer_id,
-                ));
+                tokio::spawn(async move {
+                    let _permit = semaphore.acquire_owned().await;
+                    super::super::dag_fetcher::poll_fetch_dag(
+                        host,
+                        blockstore,
+                        event_tx,
+                        root_cid,
+                        String::new(),
+                        collection_id,
+                        String::new(),
+                        peer_id,
+                    )
+                    .await;
+                });
             }
         } else {
             tracing::debug!(

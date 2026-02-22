@@ -5,7 +5,7 @@ use std::sync::Arc;
 use blockstore::Blockstore;
 use tokio::sync::mpsc;
 
-use super::SyncCoordinator;
+use super::{SyncCoordinator, MAX_CONCURRENT_DAG_FETCHES};
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Result;
 use crate::host::P2PHostHandle;
@@ -14,6 +14,7 @@ use crate::sync::collection_store::{NoOpCollectionStorage, P2PCollectionStorage}
 use crate::sync::head_provider::{DocumentHeadProvider, NoOpHeadProvider};
 use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager};
 use crate::sync::peer_state::PeerStateTracker;
+use crate::sync::rate_limiter::PeerRateLimiter;
 
 impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// Create a new sync coordinator with default Open access mode.
@@ -48,7 +49,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// * `host` - Handle to the P2P host
     /// * `blockstore` - Shared blockstore for storing blocks
     /// * `config` - Sync configuration
-    /// * `access_mode` - Access control mode (Open or Controlled)
     /// * `collection_store` - Persistent storage for P2P collection subscriptions
     ///
     /// This constructor enables persistent storage for P2P collection subscriptions.
@@ -57,14 +57,13 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         host: P2PHostHandle,
         blockstore: Arc<B>,
         config: SyncConfig,
-        access_mode: AccessMode,
         collection_store: Arc<dyn P2PCollectionStorage>,
     ) -> Result<(Self, mpsc::Receiver<SyncEvent>)> {
         Self::with_access_control(
             host,
             blockstore,
             config,
-            access_mode,
+            AccessMode::Open,
             Arc::new(ReplicatorRegistry::new()),
             collection_store,
         )
@@ -149,6 +148,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 collection_store,
                 head_provider,
                 failure_tx: None,
+                dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                    MAX_CONCURRENT_DAG_FETCHES,
+                )),
+                rate_limiter: Arc::new(PeerRateLimiter::default()),
             },
             events,
         ))

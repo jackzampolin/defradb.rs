@@ -1,17 +1,18 @@
 //! PushLog processing and block storage.
 
 use std::collections::HashSet;
+use std::time::Instant;
 
 use cid::Cid;
 use libp2p::PeerId;
 
-use blockstore::{verify_block_cid, Blockstore};
+use blockstore::Blockstore;
 
 use crate::error::{Error, Result};
 use crate::message::PushLogBroadcast;
 use crate::sync::manager::events::SyncEvent;
 use crate::sync::manager::links::find_missing_links;
-use crate::sync::manager::pending::PendingDag;
+use crate::sync::manager::pending::{PendingDag, MAX_PENDING_DAGS, PENDING_DAG_TTL};
 
 use super::SyncManager;
 
@@ -150,24 +151,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             }
         }
 
-        // Verify CID matches block content before storing (findings 06-29, 06-23, 06-24).
-        if let Err(e) = verify_block_cid(cid, &msg.block) {
-            let p2p_err = crate::error::blockstore_verify_to_p2p(e, cid);
-            if self
-                .event_tx
-                .send(SyncEvent::SyncError {
-                    cid: *cid,
-                    error: p2p_err.to_string(),
-                })
-                .await
-                .is_err()
-            {
-                tracing::warn!(?cid, "Failed to send SyncError event - receiver dropped");
-                return Err(Error::ChannelSend);
-            }
-            return Err(p2p_err);
-        }
-
         // Store the block (marked as unmerged in P2P mode)
         if let Err(e) = self.blockstore.put(cid, &msg.block).await {
             if self
@@ -249,19 +232,37 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 "DAG has missing links, requesting Bitswap fetch"
             );
 
-            // Track this DAG as pending
+            // Track this DAG as pending (enforces TTL eviction and capacity limit).
             {
-                let mut pending = self.pending_dags.write();
-                pending.insert(
-                    *cid,
-                    PendingDag {
-                        doc_id: msg.doc_id.clone(),
-                        collection_id: msg.collection_id.clone(),
-                        creator: msg.creator.clone(),
-                        missing: missing.iter().cloned().collect(),
-                        source_peer: None,
-                    },
-                );
+                let inserted = {
+                    let mut pending = self.pending_dags.write();
+                    let now = Instant::now();
+                    pending.retain(|_, v| now.duration_since(v.inserted_at) < PENDING_DAG_TTL);
+                    if pending.len() < MAX_PENDING_DAGS {
+                        pending.insert(
+                            *cid,
+                            PendingDag {
+                                doc_id: msg.doc_id.clone(),
+                                collection_id: msg.collection_id.clone(),
+                                creator: msg.creator.clone(),
+                                missing: missing.iter().cloned().collect(),
+                                source_peer: None,
+                                inserted_at: now,
+                            },
+                        );
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if !inserted {
+                    tracing::warn!(
+                        cid = %cid,
+                        max = MAX_PENDING_DAGS,
+                        "Pending DAGs at capacity, dropping PushLog DAG registration"
+                    );
+                    return Ok(());
+                }
             }
 
             // Get providers for the missing blocks

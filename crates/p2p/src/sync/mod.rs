@@ -43,6 +43,7 @@ mod manager;
 mod merge;
 mod peer_state;
 mod queue;
+pub(crate) mod rate_limiter;
 mod replication;
 
 pub use broadcaster::{BroadcastResult, Broadcaster};

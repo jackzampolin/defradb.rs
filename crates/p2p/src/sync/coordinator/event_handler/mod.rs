@@ -10,7 +10,7 @@ mod pushlog;
 use blockstore::Blockstore;
 
 use super::SyncCoordinator;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::host::HostEvent;
 
 impl<B: Blockstore + 'static> SyncCoordinator<B> {
@@ -26,6 +26,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             HostEvent::PeerDisconnected(peer_id) => {
                 tracing::debug!(peer_id = %peer_id, "Peer disconnected");
                 self.peer_state.peer_disconnected(&peer_id);
+                self.rate_limiter.remove_peer(&peer_id);
             }
             HostEvent::PeerSubscribed { peer_id, topic } => {
                 tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer subscribed to topic");
@@ -41,6 +42,16 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 topic,
                 ..
             } => {
+                if !self.rate_limiter.check(&propagation_source) {
+                    tracing::warn!(
+                        peer_id = %propagation_source,
+                        "Rate limit exceeded for GossipMessage, dropping"
+                    );
+                    return Err(Error::AccessDenied {
+                        peer_id: propagation_source.to_string(),
+                        collection_id: "rate-limited".into(),
+                    });
+                }
                 self.handle_gossip_message(propagation_source, message, topic)
                     .await?;
             }
@@ -49,6 +60,16 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 request,
                 channel,
             } => {
+                if !self.rate_limiter.check(&peer_id) {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        "Rate limit exceeded for PushLogRequest, dropping"
+                    );
+                    return Err(Error::AccessDenied {
+                        peer_id: peer_id.to_string(),
+                        collection_id: "rate-limited".into(),
+                    });
+                }
                 self.handle_pushlog_request(peer_id, request, channel)
                     .await?;
             }
@@ -72,12 +93,32 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     .await?;
             }
             HostEvent::DocSyncRequest { peer_id, request } => {
+                if !self.rate_limiter.check(&peer_id) {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        "Rate limit exceeded for DocSyncRequest, dropping"
+                    );
+                    return Err(Error::AccessDenied {
+                        peer_id: peer_id.to_string(),
+                        collection_id: "rate-limited".into(),
+                    });
+                }
                 self.handle_doc_sync_request(peer_id, request).await?;
             }
             HostEvent::DocSyncReply { peer_id, reply } => {
                 self.handle_doc_sync_reply(peer_id, reply).await?;
             }
             HostEvent::BranchableSyncRequest { peer_id, request } => {
+                if !self.rate_limiter.check(&peer_id) {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        "Rate limit exceeded for BranchableSyncRequest, dropping"
+                    );
+                    return Err(Error::AccessDenied {
+                        peer_id: peer_id.to_string(),
+                        collection_id: "rate-limited".into(),
+                    });
+                }
                 self.handle_branchable_sync_request(peer_id, request)
                     .await?;
             }
@@ -85,6 +126,16 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 self.handle_branchable_sync_reply(peer_id, reply).await?;
             }
             HostEvent::CarFetchRequest { peer_id, root_cid } => {
+                if !self.rate_limiter.check(&peer_id) {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        "Rate limit exceeded for CarFetchRequest, dropping"
+                    );
+                    return Err(Error::AccessDenied {
+                        peer_id: peer_id.to_string(),
+                        collection_id: "rate-limited".into(),
+                    });
+                }
                 self.handle_car_fetch_request(peer_id, root_cid).await?;
             }
             HostEvent::CarFetchResponse {

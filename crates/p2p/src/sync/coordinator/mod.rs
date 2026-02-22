@@ -76,6 +76,13 @@ use super::collection_store::P2PCollectionStorage;
 use super::head_provider::DocumentHeadProvider;
 use super::manager::SyncManager;
 use super::peer_state::PeerStateTracker;
+use super::rate_limiter::PeerRateLimiter;
+
+/// Maximum number of concurrent DAG fetch tasks spawned by the coordinator.
+///
+/// Caps fan-out from DocSync and BranchableSync replies to prevent resource
+/// exhaustion from a peer advertising a large number of head CIDs.
+pub(crate) const MAX_CONCURRENT_DAG_FETCHES: usize = 16;
 
 /// Coordinator for P2P synchronization.
 ///
@@ -113,6 +120,12 @@ pub struct SyncCoordinator<B: Blockstore> {
 
     /// Channel for reporting push failures to the FFI layer for retry tracking.
     pub(super) failure_tx: Option<tokio::sync::mpsc::UnboundedSender<PushFailure>>,
+
+    /// Semaphore limiting concurrent DAG fetch tasks (capped at MAX_CONCURRENT_DAG_FETCHES).
+    pub(super) dag_fetch_semaphore: Arc<tokio::sync::Semaphore>,
+
+    /// Per-peer rate limiter applied at event dispatch to throttle abusive peers.
+    pub(super) rate_limiter: Arc<PeerRateLimiter>,
 }
 
 #[cfg(test)]

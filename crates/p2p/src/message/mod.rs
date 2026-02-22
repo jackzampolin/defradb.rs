@@ -36,7 +36,7 @@ mod traits;
 
 // Re-export all public types
 pub use branchable::{BranchableSyncReply, BranchableSyncRequest};
-pub use docsync::{DocSyncItem, DocSyncReply, DocSyncRequest};
+pub use docsync::{DocSyncItem, DocSyncReply, DocSyncRequest, MAX_DOC_IDS};
 pub use metadata::MetaData;
 pub use pushlog::{PushLogBroadcast, PushLogReply, PushLogRequest};
 pub use se::{
