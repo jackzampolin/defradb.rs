@@ -2,7 +2,7 @@
 
 use cid::Cid;
 
-use blockstore::Blockstore;
+use blockstore::{verify_block_cid, Blockstore};
 
 use crate::error::{Error, Result};
 use crate::sync::manager::events::SyncEvent;
@@ -130,6 +130,17 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 "Bitswap block already in blockstore (duplicate)"
             );
             return Ok(false);
+        }
+
+        // Verify CID matches block content before storing (findings 06-29, 06-23, 06-24).
+        if let Err(e) = verify_block_cid(cid, data) {
+            let p2p_err = crate::error::blockstore_verify_to_p2p(e, cid);
+            tracing::warn!(
+                cid = %cid,
+                error = %p2p_err,
+                "Bitswap block failed CID verification, discarding"
+            );
+            return Err(p2p_err);
         }
 
         // Store the block

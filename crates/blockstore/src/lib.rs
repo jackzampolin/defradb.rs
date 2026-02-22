@@ -40,9 +40,11 @@
 
 mod error;
 mod traits;
+mod verify;
 
 pub use error::{Error, Result};
 pub use traits::Blockstore;
+pub use verify::verify_block_cid;
 
 use async_trait::async_trait;
 use cid::Cid;

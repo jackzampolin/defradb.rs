@@ -137,6 +137,14 @@ pub enum Error {
     #[error("invalid CID: {0}")]
     InvalidCid(String),
 
+    /// Block CID verification failed — peer sent data that does not match the claimed CID.
+    #[error("block CID verification failed for {cid}: content hash does not match")]
+    BlockCidMismatch { cid: String },
+
+    /// Unsupported hash algorithm in block CID — only SHA2-256 is accepted from peers.
+    #[error("unsupported hash algorithm 0x{code:x} in block CID {cid}: only SHA2-256 is accepted")]
+    UnsupportedBlockHashAlgorithm { code: u64, cid: String },
+
     /// Blockstore error.
     #[error("blockstore error: {0}")]
     BlockstoreError(String),
@@ -192,6 +200,25 @@ pub enum Error {
     /// Storage error during P2P operation.
     #[error("storage error: {0}")]
     Storage(String),
+}
+
+/// Convert a blockstore CID verification error into its P2P counterpart.
+///
+/// Called at each P2P block ingestion boundary so callers get typed errors
+/// instead of the generic `BlockstoreError(String)` variant.
+pub fn blockstore_verify_to_p2p(e: blockstore::Error, cid: &cid::Cid) -> Error {
+    match e {
+        blockstore::Error::CidVerificationFailed { .. } => Error::BlockCidMismatch {
+            cid: cid.to_string(),
+        },
+        blockstore::Error::UnsupportedHashAlgorithm { code, .. } => {
+            Error::UnsupportedBlockHashAlgorithm {
+                code,
+                cid: cid.to_string(),
+            }
+        }
+        other => Error::BlockstoreError(other.to_string()),
+    }
 }
 
 impl From<serde_cbor::Error> for Error {

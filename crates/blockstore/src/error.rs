@@ -24,6 +24,16 @@ pub enum Error {
     #[error("hash mismatch for CID {cid}: data hash doesn't match expected hash")]
     HashMismatch { cid: String },
 
+    /// CID verification failed - block data does not hash to the claimed CID
+    #[error("CID verification failed for {cid}: block content does not match claimed CID")]
+    CidVerificationFailed { cid: String },
+
+    /// Unsupported hash algorithm in CID - only SHA2-256 (0x12) is accepted for P2P blocks
+    #[error(
+        "unsupported hash algorithm 0x{code:x} in CID {cid}: only SHA2-256 (0x12) is accepted"
+    )]
+    UnsupportedHashAlgorithm { code: u64, cid: String },
+
     /// Internal error
     #[error("internal error: {0}")]
     Internal(String),

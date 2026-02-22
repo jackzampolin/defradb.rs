@@ -1,6 +1,6 @@
 //! CAR fetch event handling for the sync coordinator.
 
-use blockstore::Blockstore;
+use blockstore::{verify_block_cid, Blockstore};
 use cid::Cid;
 use libp2p::PeerId;
 
@@ -60,6 +60,21 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 "Received empty CAR response"
             );
             return Ok(());
+        }
+
+        // Verify all block CIDs before storing (finding 03-35).
+        for (cid, data) in &blocks {
+            if let Err(e) = verify_block_cid(cid, data) {
+                let p2p_err = crate::error::blockstore_verify_to_p2p(e, cid);
+                tracing::warn!(
+                    root_cid = %root_cid,
+                    block_cid = %cid,
+                    peer_id = %peer_id,
+                    error = %p2p_err,
+                    "CAR block failed CID verification, rejecting entire response"
+                );
+                return Err(p2p_err);
+            }
         }
 
         let block_refs: Vec<(&Cid, &[u8])> =

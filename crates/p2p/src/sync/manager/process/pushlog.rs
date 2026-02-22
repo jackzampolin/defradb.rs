@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use cid::Cid;
 use libp2p::PeerId;
 
-use blockstore::Blockstore;
+use blockstore::{verify_block_cid, Blockstore};
 
 use crate::error::{Error, Result};
 use crate::message::PushLogBroadcast;
@@ -148,6 +148,24 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 }
                 return Err(Error::BlockstoreError(e.to_string()));
             }
+        }
+
+        // Verify CID matches block content before storing (findings 06-29, 06-23, 06-24).
+        if let Err(e) = verify_block_cid(cid, &msg.block) {
+            let p2p_err = crate::error::blockstore_verify_to_p2p(e, cid);
+            if self
+                .event_tx
+                .send(SyncEvent::SyncError {
+                    cid: *cid,
+                    error: p2p_err.to_string(),
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!(?cid, "Failed to send SyncError event - receiver dropped");
+                return Err(Error::ChannelSend);
+            }
+            return Err(p2p_err);
         }
 
         // Store the block (marked as unmerged in P2P mode)

@@ -1,10 +1,10 @@
 //! Tests for the sync manager module.
 
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use blockstore::{Blockstore, DefraBlockstore};
+use cid::multihash::{Code, MultihashDigest};
 use cid::Cid;
 use storage::backends::MemoryStore;
 
@@ -12,8 +12,17 @@ use p2p::error::Error;
 use p2p::message::PushLogBroadcast;
 use p2p::sync::{PeerStateTracker, SyncConfig, SyncEvent, SyncManager};
 
+/// Compute a valid SHA2-256 CIDv1 for `data`.
+fn cid_for(data: &[u8]) -> Cid {
+    let hash = Code::Sha2_256.digest(data);
+    Cid::new_v1(0x71, hash)
+}
+
+/// Block data used in most tests.
+const BLOCK_DATA: &[u8] = b"block data";
+
 fn test_cid() -> Cid {
-    Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap()
+    cid_for(BLOCK_DATA)
 }
 
 fn test_peer_state() -> Arc<PeerStateTracker> {
@@ -26,7 +35,7 @@ fn create_test_broadcast(cid: &Cid) -> PushLogBroadcast {
         cid.to_bytes(),
         "collection1".to_string(),
         "creator1".to_string(),
-        b"block data".to_vec(),
+        BLOCK_DATA.to_vec(),
     )
 }
 
@@ -74,8 +83,8 @@ async fn test_process_pushlog_already_merged() {
     let cid = test_cid();
     let msg = create_test_broadcast(&cid);
 
-    // Pre-store and merge the block
-    blockstore.put(&cid, &msg.block).await.unwrap();
+    // Pre-store and merge the block directly in the blockstore.
+    blockstore.put(&cid, BLOCK_DATA).await.unwrap();
     blockstore.mark_as_merged(&cid).await.unwrap();
 
     // Process the pushlog
@@ -168,6 +177,27 @@ async fn test_process_pushlog_invalid_cid_returns_error() {
         }
         other => panic!("Expected InvalidCid error, got {:?}", other),
     }
+}
+
+#[tokio::test]
+async fn test_process_pushlog_cid_mismatch_returns_error() {
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (manager, _events) = SyncManager::new(blockstore, test_peer_state(), SyncConfig::default());
+
+    // CID is for "block data" but we send different block content.
+    let cid = test_cid();
+    let msg = PushLogBroadcast::new(
+        "doc123".to_string(),
+        cid.to_bytes(),
+        "collection1".to_string(),
+        "creator1".to_string(),
+        b"tampered content".to_vec(),
+    );
+
+    let result = manager.process_pushlog(&msg).await;
+    assert!(result.is_err());
+    assert!(matches!(result, Err(Error::BlockCidMismatch { .. })));
 }
 
 #[tokio::test]
@@ -265,8 +295,8 @@ async fn test_already_merged_returns_error_when_receiver_dropped() {
     let cid = test_cid();
     let msg = create_test_broadcast(&cid);
 
-    // Pre-store and merge the block
-    blockstore.put(&cid, &msg.block).await.unwrap();
+    // Pre-store and merge the block directly in the blockstore.
+    blockstore.put(&cid, BLOCK_DATA).await.unwrap();
     blockstore.mark_as_merged(&cid).await.unwrap();
 
     // Drop the event receiver
@@ -329,8 +359,9 @@ async fn test_blockstore_accessor() {
     let (manager, _events) =
         SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
 
-    // Verify blockstore accessor returns the same blockstore
+    // Verify blockstore accessor returns the same blockstore.
+    // Use the computed CID so the put succeeds.
     let cid = test_cid();
-    manager.blockstore().put(&cid, b"test").await.unwrap();
+    manager.blockstore().put(&cid, BLOCK_DATA).await.unwrap();
     assert!(blockstore.has(&cid).await.unwrap());
 }
