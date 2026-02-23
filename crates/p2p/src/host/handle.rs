@@ -596,6 +596,21 @@ impl P2PHostHandle {
         Ok(host_addrs)
     }
 
+    /// Create a test handle with a dummy channel (for unit tests only).
+    #[cfg(test)]
+    pub(crate) fn test_handle() -> Self {
+        let keypair = Keypair::generate_ed25519();
+        let local_peer_id = keypair.public().to_peer_id();
+        let public_key_proto = keypair.public().encode_protobuf();
+        let (command_tx, _rx) = mpsc::channel(1);
+        Self {
+            command_tx,
+            local_public_key_proto: public_key_proto,
+            local_peer_id,
+            keypair,
+        }
+    }
+
     /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
     pub async fn peer_addresses(&self) -> Result<Vec<String>> {
         let (response_tx, response_rx) = oneshot::channel();

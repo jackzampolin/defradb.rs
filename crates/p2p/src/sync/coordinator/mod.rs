@@ -138,7 +138,4 @@ pub struct SyncCoordinator<B: Blockstore> {
 }
 
 #[cfg(test)]
-mod tests {
-    // Integration tests are in tests/integration.rs
-    // Unit tests for individual components are in their respective modules
-}
+mod access_tests;
