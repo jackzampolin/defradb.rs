@@ -1,7 +1,6 @@
 use integration_test::TestCluster;
 
 #[tokio::test]
-#[ignore]
 async fn version_json_has_all_fields() {
     let root = integration_test::workspace_root();
     let binary = root.join("target/debug/defra");
@@ -29,7 +28,6 @@ async fn version_json_has_all_fields() {
 }
 
 #[tokio::test]
-#[ignore] // Run with: cargo test -p integration-test -- --ignored
 async fn smoke_single_rust_node() {
     // 1. Start cluster with 1 Rust node (no P2P)
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();

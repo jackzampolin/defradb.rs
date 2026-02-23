@@ -24,10 +24,27 @@ async fn dump_test(cluster: TestCluster) {
     );
 }
 
-// Rust-only: Go's dump endpoint has a CID parsing bug with stored data.
+#[tokio::test]
+async fn rust_dump() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_development()
+        .build()
+        .await
+        .unwrap();
+    dump_test(cluster).await;
+}
+
+/// Go has a CID parsing bug in the dump endpoint: "invalid cid: trailing bytes
+/// in data buffer passed to cid Cast". Ignored until fixed upstream.
 #[tokio::test]
 #[ignore]
-async fn rust_dump() {
-    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+async fn go_dump() {
+    let cluster = TestCluster::builder()
+        .go_nodes(1)
+        .with_development()
+        .build()
+        .await
+        .unwrap();
     dump_test(cluster).await;
 }

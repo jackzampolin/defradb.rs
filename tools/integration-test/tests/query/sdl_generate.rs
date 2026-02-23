@@ -13,7 +13,6 @@ fn defra_binary() -> PathBuf {
 }
 
 #[test]
-#[ignore] // Run with: cargo test -p integration-test --test sdl_generate -- --ignored
 fn sdl_generate_basic() {
     let tmp = tempfile::tempdir().unwrap();
     let input_path = tmp.path().join("input.graphql");
@@ -55,7 +54,6 @@ fn sdl_generate_basic() {
 }
 
 #[test]
-#[ignore]
 fn sdl_generate_stdout() {
     let tmp = tempfile::tempdir().unwrap();
     let input_path = tmp.path().join("input.graphql");
@@ -82,7 +80,6 @@ fn sdl_generate_stdout() {
 }
 
 #[test]
-#[ignore]
 fn sdl_generate_no_overwrite() {
     let tmp = tempfile::tempdir().unwrap();
     let input_path = tmp.path().join("input.graphql");

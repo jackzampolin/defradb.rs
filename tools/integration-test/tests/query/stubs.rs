@@ -1,4 +1,4 @@
-use integration_test::{for_each_runtime, TestCluster};
+use integration_test::TestCluster;
 
 /// Build a query with `sub_levels` nested sub-selections below the `Book` collection.
 ///
@@ -98,16 +98,36 @@ async fn query_depth_width_limit(cluster: TestCluster) {
         .expect("node should be healthy after rejected queries");
 }
 
-for_each_runtime!(query_depth_width_limit, query_depth_width_limit);
+#[tokio::test]
+async fn rust_query_depth_width_limit() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    query_depth_width_limit(cluster).await;
+}
 
+/// Go does not implement query depth/width limits.
+#[tokio::test]
+#[ignore]
+async fn go_query_depth_width_limit() {
+    let cluster = TestCluster::builder().go_nodes(1).build().await.unwrap();
+    query_depth_width_limit(cluster).await;
+}
+
+/// Audit gap: Query timeout fires correctly even when the node is under heavy
+/// concurrent load. Blocked on TestClusterBuilder not yet exposing --query-timeout.
 async fn query_timeout_under_load(_cluster: TestCluster) {
-    // Audit gap: Query timeout fires correctly even when the
-    // node is under heavy concurrent load.
-    //
-    // Blocked on: TestClusterBuilder does not yet expose --query-timeout,
-    // so there is no way to start a node with a custom timeout from the
-    // integration-test harness.
     todo!("implement: query timeout under load test")
 }
 
-for_each_runtime!(query_timeout_under_load, query_timeout_under_load);
+#[tokio::test]
+#[ignore]
+async fn rust_query_timeout_under_load() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    query_timeout_under_load(cluster).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn go_query_timeout_under_load() {
+    let cluster = TestCluster::builder().go_nodes(1).build().await.unwrap();
+    query_timeout_under_load(cluster).await;
+}

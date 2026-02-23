@@ -95,7 +95,7 @@ fn did_from_jwk_stdout(output: &std::process::Output) -> String {
 }
 
 #[test]
-#[ignore] // Run with: cargo test -p integration-test --test identity_lifecycle -- --ignored
+
 fn new_output_key_delete_reimport_secp256k1() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
@@ -124,7 +124,7 @@ fn new_output_key_delete_reimport_secp256k1() {
 }
 
 #[test]
-#[ignore]
+
 fn new_output_key_delete_reimport_ed25519() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
@@ -152,7 +152,7 @@ fn new_output_key_delete_reimport_ed25519() {
 }
 
 #[test]
-#[ignore]
+
 fn export_delete_reimport_preserves_did() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
@@ -187,7 +187,7 @@ fn export_delete_reimport_preserves_did() {
 }
 
 #[test]
-#[ignore]
+
 fn delete_removes_key() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
@@ -210,7 +210,7 @@ fn delete_removes_key() {
 }
 
 #[test]
-#[ignore]
+
 fn import_rejects_malformed_json() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
@@ -221,7 +221,7 @@ fn import_rejects_malformed_json() {
 }
 
 #[test]
-#[ignore]
+
 fn import_rejects_missing_d_field() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
@@ -233,7 +233,7 @@ fn import_rejects_missing_d_field() {
 }
 
 #[test]
-#[ignore]
+
 fn import_rejects_unsupported_curve() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
@@ -245,7 +245,7 @@ fn import_rejects_unsupported_curve() {
 }
 
 #[test]
-#[ignore]
+
 fn new_output_key_delete_reimport_secp256r1() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
@@ -286,7 +286,7 @@ fn new_output_key_delete_reimport_secp256r1() {
 }
 
 #[test]
-#[ignore]
+
 fn identity_new_secp256r1_json_rust() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
@@ -322,7 +322,7 @@ fn identity_new_secp256r1_json_rust() {
 }
 
 #[test]
-#[ignore]
+
 fn identity_new_json_format_rust() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
@@ -358,7 +358,7 @@ fn identity_new_json_format_rust() {
 }
 
 #[test]
-#[ignore]
+
 fn identity_new_ed25519_json_rust() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
@@ -384,7 +384,7 @@ fn identity_new_ed25519_json_rust() {
 }
 
 #[test]
-#[ignore]
+
 fn identity_new_default_is_json_rust() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();

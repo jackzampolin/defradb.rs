@@ -3,7 +3,6 @@ use std::time::Duration;
 use integration_test::TestCluster;
 
 #[tokio::test]
-#[ignore]
 async fn rust_lens_survives_restart() {
     let mut cluster = TestCluster::builder()
         .rust_nodes(1)
