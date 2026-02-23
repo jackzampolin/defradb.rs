@@ -95,6 +95,15 @@ impl TestCluster {
         self.source_hub.as_ref()
     }
 
+    /// Stop the SourceHub process. Drops the node, sending SIGTERM.
+    pub fn stop_source_hub(&mut self) -> Result<()> {
+        if self.source_hub.take().is_some() {
+            Ok(())
+        } else {
+            anyhow::bail!("no SourceHub node to stop")
+        }
+    }
+
     /// Wait for a named log pattern on the node at `index`.
     pub async fn wait_for_log(
         &self,

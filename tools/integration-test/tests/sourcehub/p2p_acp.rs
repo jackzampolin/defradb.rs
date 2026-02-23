@@ -11,7 +11,6 @@ use integration_test::{generate_identity, users_schema_with_policy, TestCluster,
 ///
 /// The cluster is started with Jack's identity so SourceHub transactions work.
 #[tokio::test]
-#[ignore]
 async fn rust_sourcehub_p2p_acp() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");

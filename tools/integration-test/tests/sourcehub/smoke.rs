@@ -12,7 +12,6 @@ use integration_test::node::{DefraNode, RustNode};
 /// The node must be started with Jack's identity so the SourceHub TxSigner
 /// can create bearer tokens for Jack's DID.
 #[tokio::test]
-#[ignore]
 async fn rust_sourcehub_smoke() {
     // Pre-generate Jack's identity so the node starts with his key
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
