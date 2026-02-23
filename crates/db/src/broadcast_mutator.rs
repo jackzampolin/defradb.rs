@@ -112,21 +112,34 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
             field_cids: vec![],
         };
 
+        // Read broadcast creator DID: when the mutation was initiated with an
+        // identity (ACP owner), PushLog messages carry the owner DID so the
+        // receiving node can register the document in its local ACP.
+        let creator_did = defra_core::signing::get_broadcast_creator_did();
+        let creator_ref = creator_did.as_deref();
+
         // Push the full DAG (field blocks + composite) to replicators.
         // Field blocks are sent first so the receiver has them when the composite arrives,
         // avoiding Bitswap fetches (which can fail after node restarts).
         self.sync
-            .push_dag_to_replicators(
+            .push_dag_to_replicators_with_creator(
                 &block_result.cid,
                 &block_result.block,
                 &block_result.doc_id,
                 &collection_id,
+                creator_ref,
             )
             .await;
 
         // Broadcast composite via GossipSub with retry for InsufficientPeers
-        let broadcast_status =
-            broadcast_with_retry(&self.sync, &block_result, &collection_id, collection_name).await;
+        let broadcast_status = broadcast_with_retry_with_creator(
+            &self.sync,
+            &block_result,
+            &collection_id,
+            collection_name,
+            creator_ref,
+        )
+        .await;
 
         // For branchable collections, also broadcast the collection block so receivers
         // get the sender's exact collection CID (critical for CID consistency across nodes).
@@ -141,18 +154,20 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
                 field_cids: vec![],
             };
             self.sync
-                .push_to_replicators(
+                .push_to_replicators_with_creator(
                     &col_block_result.cid,
                     &col_block_result.block,
                     &col_block_result.doc_id,
                     &collection_id,
+                    creator_ref,
                 )
                 .await;
-            let _ = broadcast_with_retry(
+            let _ = broadcast_with_retry_with_creator(
                 &self.sync,
                 &col_block_result,
                 &collection_id,
                 collection_name,
+                creator_ref,
             )
             .await;
         }
@@ -181,6 +196,10 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
 
         // Delegate to inner (single transaction for all docs)
         let results = self.inner.create_many(collection_name, docs).await?;
+
+        // Read broadcast creator DID for P2P ACP propagation
+        let creator_did = defra_core::signing::get_broadcast_creator_did();
+        let creator_ref = creator_did.as_deref();
 
         // Broadcast each result
         let mut broadcast_results = Vec::with_capacity(results.len());
@@ -223,17 +242,23 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
             };
 
             self.sync
-                .push_to_replicators(
+                .push_to_replicators_with_creator(
                     &block_result.cid,
                     &block_result.block,
                     &block_result.doc_id,
                     &collection_id,
+                    creator_ref,
                 )
                 .await;
 
-            let broadcast_status =
-                broadcast_with_retry(&self.sync, &block_result, &collection_id, collection_name)
-                    .await;
+            let broadcast_status = broadcast_with_retry_with_creator(
+                &self.sync,
+                &block_result,
+                &collection_id,
+                collection_name,
+                creator_ref,
+            )
+            .await;
 
             if let (Some(col_cid), Some(col_block)) =
                 (result.broadcast_cid, result.broadcast_block.as_ref())
@@ -245,18 +270,20 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
                     field_cids: vec![],
                 };
                 self.sync
-                    .push_to_replicators(
+                    .push_to_replicators_with_creator(
                         &col_block_result.cid,
                         &col_block_result.block,
                         &col_block_result.doc_id,
                         &collection_id,
+                        creator_ref,
                     )
                     .await;
-                let _ = broadcast_with_retry(
+                let _ = broadcast_with_retry_with_creator(
                     &self.sync,
                     &col_block_result,
                     &collection_id,
                     collection_name,
+                    creator_ref,
                 )
                 .await;
             }
@@ -330,19 +357,30 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
             field_cids: vec![],
         };
 
+        // Read broadcast creator DID for P2P ACP propagation
+        let creator_did = defra_core::signing::get_broadcast_creator_did();
+        let creator_ref = creator_did.as_deref();
+
         // Push the full DAG (field blocks + composite) to replicators.
         self.sync
-            .push_dag_to_replicators(
+            .push_dag_to_replicators_with_creator(
                 &block_result.cid,
                 &block_result.block,
                 &block_result.doc_id,
                 &collection_id,
+                creator_ref,
             )
             .await;
 
         // Broadcast composite via GossipSub with retry for InsufficientPeers
-        let broadcast_status =
-            broadcast_with_retry(&self.sync, &block_result, &collection_id, collection_name).await;
+        let broadcast_status = broadcast_with_retry_with_creator(
+            &self.sync,
+            &block_result,
+            &collection_id,
+            collection_name,
+            creator_ref,
+        )
+        .await;
 
         // For branchable collections, also broadcast the collection block so receivers
         // get the sender's exact collection CID (critical for CID consistency across nodes).
@@ -356,18 +394,20 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
                 field_cids: vec![],
             };
             self.sync
-                .push_to_replicators(
+                .push_to_replicators_with_creator(
                     &col_block_result.cid,
                     &col_block_result.block,
                     &col_block_result.doc_id,
                     &collection_id,
+                    creator_ref,
                 )
                 .await;
-            let _ = broadcast_with_retry(
+            let _ = broadcast_with_retry_with_creator(
                 &self.sync,
                 &col_block_result,
                 &collection_id,
                 collection_name,
+                creator_ref,
             )
             .await;
         }
@@ -414,18 +454,29 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
             }
         };
 
+        // Read broadcast creator DID for P2P ACP propagation
+        let creator_did = defra_core::signing::get_broadcast_creator_did();
+        let creator_ref = creator_did.as_deref();
+
         // Push to replicators and broadcast via GossipSub
         self.sync
-            .push_to_replicators(
+            .push_to_replicators_with_creator(
                 &block_result.cid,
                 &block_result.block,
                 &block_result.doc_id,
                 &collection_id,
+                creator_ref,
             )
             .await;
 
-        let broadcast_status =
-            broadcast_with_retry(&self.sync, &block_result, &collection_id, collection_name).await;
+        let broadcast_status = broadcast_with_retry_with_creator(
+            &self.sync,
+            &block_result,
+            &collection_id,
+            collection_name,
+            creator_ref,
+        )
+        .await;
 
         Ok(DeleteResult::with_broadcast(
             result.doc_id,
@@ -449,15 +500,13 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
 
 use crate::block_builder::BlockResult;
 
-/// Broadcast via GossipSub with retry for InsufficientPeers errors.
-///
-/// Uses exponential backoff (100ms * 2^attempt, max 3.2s) with up to 10 retries.
-/// This matches the FFI broadcast_task behavior.
-async fn broadcast_with_retry<B: Blockstore + 'static>(
+/// Broadcast via GossipSub with retry, optionally overriding the creator DID.
+async fn broadcast_with_retry_with_creator<B: Blockstore + 'static>(
     sync: &SyncCoordinator<B>,
     block_result: &BlockResult,
     collection_id: &str,
     collection_name: &str,
+    creator_override: Option<&str>,
 ) -> BroadcastStatus {
     const MAX_RETRIES: u32 = 10;
     let mut attempt = 0u32;
@@ -465,11 +514,12 @@ async fn broadcast_with_retry<B: Blockstore + 'static>(
     loop {
         attempt += 1;
         match sync
-            .broadcast_local_update(
+            .broadcast_local_update_with_creator(
                 &block_result.cid,
                 &block_result.block,
                 &block_result.doc_id,
                 collection_id,
+                creator_override,
             )
             .await
         {
@@ -478,7 +528,6 @@ async fn broadcast_with_retry<B: Blockstore + 'static>(
                     doc_id = %block_result.doc_id,
                     cid = %block_result.cid,
                     collection = %collection_name,
-                    field_blocks = block_result.field_cids.len(),
                     attempts = attempt,
                     "Broadcast document to P2P network"
                 );
@@ -511,7 +560,6 @@ async fn broadcast_with_retry<B: Blockstore + 'static>(
             Err(e) => {
                 let err_str = e.to_string();
                 if err_str.contains("InsufficientPeers") && attempt <= MAX_RETRIES {
-                    // Exponential backoff: 100ms, 200ms, 400ms, ... capped at 3.2s
                     let delay_ms = 100 * (1u64 << attempt.min(5));
                     tracing::trace!(
                         doc_id = %block_result.doc_id,

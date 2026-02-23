@@ -291,6 +291,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             defra_core::encryption::set_encryption_config(None);
         }
 
+        // Set broadcast identity for P2P: PushLog Creator field will carry this
+        // DID instead of the node PeerId, enabling ACP owner registration on the
+        // receiving node during merge.
+        if let Some(ref did) = caller_identity {
+            defra_core::signing::set_broadcast_creator_did(Some(did.to_string()));
+        }
+
         // Build and execute the appropriate mutation plan
         let mut plan: Box<dyn PlanNode> = match mutation.mutation_type {
             MutationType::Create => {
@@ -421,6 +428,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         defra_core::encryption::set_encryption_config(None);
 
         plan.close().await.map_err(&map_doc_not_found)?;
+
+        // Clear broadcast identity after plan execution
+        defra_core::signing::set_broadcast_creator_did(None);
 
         // For CREATE/UPSERT operations with caller_identity: register created docs with ACP
         if matches!(

@@ -104,3 +104,30 @@ pub fn clear_identity_store() {
         store.clear();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Broadcast Creator DID — thread-local for P2P ACP propagation
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static BROADCAST_CREATOR_DID: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Set the broadcast creator DID for the current thread.
+///
+/// When set, P2P broadcasts use this DID as the Creator field instead of
+/// the node's PeerId. This enables ACP registration on the receiving node:
+/// the merge handler registers the document with this DID as owner.
+pub fn set_broadcast_creator_did(did: Option<String>) {
+    BROADCAST_CREATOR_DID.with(|c| {
+        *c.borrow_mut() = did;
+    });
+}
+
+/// Get the broadcast creator DID for this thread.
+///
+/// Returns the DID set by `set_broadcast_creator_did`, or None if no
+/// identity override is active (broadcasts will use the node PeerId).
+pub fn get_broadcast_creator_did() -> Option<String> {
+    BROADCAST_CREATOR_DID.with(|c| c.borrow().clone())
+}

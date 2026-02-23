@@ -152,9 +152,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(
                     MAX_CONCURRENT_DAG_FETCHES,
                 )),
-                push_semaphore: Arc::new(tokio::sync::Semaphore::new(
-                    MAX_CONCURRENT_PUSH_TASKS,
-                )),
+                push_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PUSH_TASKS)),
                 rate_limiter: Arc::new(PeerRateLimiter::default()),
             },
             events,

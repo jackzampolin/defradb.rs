@@ -23,7 +23,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         );
 
         // Access control check
-        if let Err(e) = self.check_access(&propagation_source, &message.collection_id).await {
+        if let Err(e) = self
+            .check_access(&propagation_source, &message.collection_id)
+            .await
+        {
             tracing::warn!(
                 peer_id = %propagation_source,
                 collection_id = %message.collection_id,

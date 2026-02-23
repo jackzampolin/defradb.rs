@@ -279,14 +279,8 @@ async fn anonymous_create_is_public_test(cluster: TestCluster) {
     let anon_read = node
         .query("query { User { _docID name } }")
         .expect("anonymous read");
-    let anon_count = anon_read["User"]
-        .as_array()
-        .map(|a| a.len())
-        .unwrap_or(0);
-    assert!(
-        anon_count >= 1,
-        "anonymous doc should be publicly readable"
-    );
+    let anon_count = anon_read["User"].as_array().map(|a| a.len()).unwrap_or(0);
+    assert!(anon_count >= 1, "anonymous doc should be publicly readable");
 
     // Alice can also create normally — her doc IS registered with ACP
     let alice_create = node

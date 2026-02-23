@@ -467,7 +467,9 @@ mod tests {
         let public_key = keypair.public();
         let store = MockBitswapStore::new();
 
-        let behaviour = DefraBehaviour::new(peer_id, public_key, keypair, store, true).await;
+        let config = crate::P2PHostConfig::default();
+        let behaviour =
+            DefraBehaviour::new(peer_id, public_key, keypair, store, true, &config).await;
         assert!(behaviour.is_ok());
     }
 
@@ -489,7 +491,9 @@ mod tests {
         let public_key = keypair.public();
         let store = MockBitswapStore::new();
 
-        let behaviour = DefraBehaviour::new(peer_id, public_key, keypair, store, false).await;
+        let config = crate::P2PHostConfig::default();
+        let behaviour =
+            DefraBehaviour::new(peer_id, public_key, keypair, store, false, &config).await;
         assert!(behaviour.is_ok());
         let behaviour = behaviour.unwrap();
         assert!(behaviour.gossipsub.as_ref().is_none());

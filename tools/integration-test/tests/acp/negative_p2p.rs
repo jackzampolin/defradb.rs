@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use integration_test::{
-    for_each_p2p_topology_ignored, for_each_runtime, generate_identity, poll_until,
+    for_each_p2p_topology, for_each_runtime, generate_identity, poll_until,
     users_schema_with_policy, TestCluster, USER_ACP_POLICY,
 };
 
@@ -91,12 +91,15 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
         "Bob must see the document on node0 after explicit grant"
     );
 
-    // Wait for the document to replicate to node1
+    // Wait for the document to replicate to node1.
+    // Use Alice's identity: after the ACP fix, anonymous queries cannot see
+    // ACP-registered documents, so we poll as the owner.
     let node1_ref = &node1;
+    let alice_key = alice.private_key_hex.clone();
     poll_until(
         || {
             node1_ref
-                .query("query { User { _docID } }")
+                .query_with_identity("query { User { _docID } }", &alice_key)
                 .ok()
                 .and_then(|v| v["User"].as_array().map(|a| !a.is_empty()))
                 .unwrap_or(false)
@@ -129,10 +132,7 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
     );
 }
 
-/// ACP relationship grants currently replicate alongside document data, allowing
-/// Bob to read on node1 without an explicit local grant. This is a known behavioral
-/// gap — merge-denial is not yet enforced. All topologies fail consistently.
-for_each_p2p_topology_ignored!(p2p_merge_denial, p2p_merge_denial_test, .with_p2p().with_acp_local());
+for_each_p2p_topology!(p2p_merge_denial, p2p_merge_denial_test, .with_p2p().with_acp_local());
 
 /// 02-28: Policy transition guard — revoking access before a schema policy change
 /// correctly blocks the formerly-authorized user.

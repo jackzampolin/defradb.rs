@@ -704,6 +704,49 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     "Composite delta processed and committed successfully"
                 );
 
+                // Register document in local ACP if creator is a DID and
+                // collection has an ACP policy. This enables merge-denial:
+                // replicated docs are registered with the original owner DID
+                // so that access checks work on the receiving node.
+                if let Some(creator) = metadata.creator {
+                    if creator.starts_with("did:key:") {
+                        if let Some(ref col) = collection_for_acp {
+                            if let Some(ref policy) = col.schema().policy {
+                                if let Some(acp) = self.document_acp.get() {
+                                    let did = identity::Did::new(creator);
+                                    if let Ok(did) = did {
+                                        match acp
+                                            .register_doc_object(
+                                                &did,
+                                                &policy.id,
+                                                &policy.resource_name,
+                                                &doc_id_str,
+                                            )
+                                            .await
+                                        {
+                                            Ok(()) => {
+                                                tracing::info!(
+                                                    doc_id = %doc_id_str,
+                                                    creator = %creator,
+                                                    "Registered replicated document in local ACP"
+                                                );
+                                            }
+                                            Err(e) => {
+                                                tracing::debug!(
+                                                    doc_id = %doc_id_str,
+                                                    creator = %creator,
+                                                    error = %e,
+                                                    "ACP registration for replicated doc (may already exist)"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Emit update event for subscriptions (P2P relay)
                 if let Some(bus) = self.db.event_bus() {
                     let update = Update::new(
@@ -1224,6 +1267,35 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 {
                     let mut bm = batch_merged.lock().unwrap();
                     bm.insert(*cid);
+                }
+
+                // Register document in local ACP (batch path)
+                if let Some(creator) = metadata.creator {
+                    if creator.starts_with("did:key:") {
+                        if let Some(ref col) = collection_for_acp {
+                            if let Some(ref policy) = col.schema().policy {
+                                if let Some(acp) = self.document_acp.get() {
+                                    if let Ok(did) = identity::Did::new(creator) {
+                                        if let Err(e) = acp
+                                            .register_doc_object(
+                                                &did,
+                                                &policy.id,
+                                                &policy.resource_name,
+                                                &doc_id_str,
+                                            )
+                                            .await
+                                        {
+                                            tracing::debug!(
+                                                doc_id = %doc_id_str,
+                                                error = %e,
+                                                "ACP registration for replicated doc in batch (may already exist)"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Collect events for deferred publishing

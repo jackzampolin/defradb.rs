@@ -35,8 +35,25 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         doc_id: &str,
         collection_id: &str,
     ) -> Result<BroadcastResult> {
-        let broadcast =
-            Broadcaster::create_broadcast(cid, block, doc_id, collection_id, &self.local_peer_id);
+        self.broadcast_local_update_with_creator(cid, block, doc_id, collection_id, None)
+            .await
+    }
+
+    /// Broadcast a local update with an optional creator override.
+    ///
+    /// When `creator_override` is Some, the PushLog Creator field uses the
+    /// given DID instead of this node's PeerId. This enables ACP owner
+    /// registration on the receiving node during merge.
+    pub async fn broadcast_local_update_with_creator(
+        &self,
+        cid: &Cid,
+        block: &[u8],
+        doc_id: &str,
+        collection_id: &str,
+        creator_override: Option<&str>,
+    ) -> Result<BroadcastResult> {
+        let creator = creator_override.unwrap_or(&self.local_peer_id);
+        let broadcast = Broadcaster::create_broadcast(cid, block, doc_id, collection_id, creator);
         self.broadcaster.broadcast_update(&broadcast).await
     }
 
@@ -53,6 +70,20 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         doc_id: &str,
         collection_id: &str,
     ) {
+        self.push_dag_to_replicators_with_creator(cid, block, doc_id, collection_id, None)
+            .await
+    }
+
+    /// Push a composite block and field blocks to replicators with optional creator override.
+    pub async fn push_dag_to_replicators_with_creator(
+        &self,
+        cid: &Cid,
+        block: &[u8],
+        doc_id: &str,
+        collection_id: &str,
+        creator_override: Option<&str>,
+    ) {
+        let creator = creator_override.unwrap_or(&self.local_peer_id);
         let replicators = match self.host.list_replicators().await {
             Ok(r) => r,
             Err(e) => {
@@ -97,7 +128,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     doc_id.to_string(),
                     field_cid.to_bytes(),
                     collection_id.to_string(),
-                    self.local_peer_id.clone(),
+                    creator.to_string(),
                     field_data.clone(),
                 );
                 if sign_message(self.host.keypair(), &mut req).is_ok() {
@@ -110,7 +141,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 doc_id.to_string(),
                 cid.to_bytes(),
                 collection_id.to_string(),
-                self.local_peer_id.clone(),
+                creator.to_string(),
                 block.to_vec(),
             );
             if let Err(e) = sign_message(self.host.keypair(), &mut composite_req) {
@@ -153,6 +184,20 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         doc_id: &str,
         collection_id: &str,
     ) {
+        self.push_to_replicators_with_creator(cid, block, doc_id, collection_id, None)
+            .await
+    }
+
+    /// Push a single block to replicators with optional creator override.
+    pub async fn push_to_replicators_with_creator(
+        &self,
+        cid: &Cid,
+        block: &[u8],
+        doc_id: &str,
+        collection_id: &str,
+        creator_override: Option<&str>,
+    ) {
+        let creator = creator_override.unwrap_or(&self.local_peer_id);
         let replicators = match self.host.list_replicators().await {
             Ok(r) => r,
             Err(e) => {
@@ -176,7 +221,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 doc_id.to_string(),
                 cid.to_bytes(),
                 collection_id.to_string(),
-                self.local_peer_id.clone(),
+                creator.to_string(),
                 block.to_vec(),
             );
 

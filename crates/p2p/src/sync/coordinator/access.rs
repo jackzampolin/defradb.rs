@@ -22,11 +22,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// one-directional (source registers target), but both sides accept
     /// messages from connected peers on subscribed topics. Document-level
     /// ACP still applies independently at merge time.
-    pub(super) async fn check_access(
-        &self,
-        peer_id: &PeerId,
-        collection_id: &str,
-    ) -> Result<()> {
+    pub(super) async fn check_access(&self, peer_id: &PeerId, collection_id: &str) -> Result<()> {
         if self.access_mode.is_open() {
             return Ok(());
         }
