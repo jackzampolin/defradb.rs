@@ -32,6 +32,7 @@ use schema::{
 };
 use storage::corekv::{Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
+use zeroize::Zeroizing;
 
 use crate::collection::collection_short_id;
 use crate::database::DB;
@@ -141,7 +142,7 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// Optional SE encryption key for generating search artifacts on replicated documents.
     /// When set, the merge handler generates SE artifacts after merging documents
     /// that belong to collections with encrypted indexes.
-    se_enc_key: std::sync::OnceLock<Vec<u8>>,
+    se_enc_key: std::sync::OnceLock<Zeroizing<Vec<u8>>>,
 }
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
@@ -169,7 +170,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
     /// Set the SE encryption key for generating artifacts on replicated documents.
     pub fn set_se_enc_key(&self, key: Vec<u8>) {
-        let _ = self.se_enc_key.set(key);
+        let _ = self.se_enc_key.set(Zeroizing::new(key));
     }
 
     /// Get the SE encryption key, if configured.

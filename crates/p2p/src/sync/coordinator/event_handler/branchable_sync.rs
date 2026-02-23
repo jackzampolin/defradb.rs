@@ -14,6 +14,8 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         peer_id: libp2p::PeerId,
         request: crate::message::BranchableSyncRequest,
     ) -> Result<()> {
+        self.check_access(&peer_id, &request.collection_id).await?;
+
         tracing::debug!(
             peer_id = %peer_id,
             collection_id = %request.collection_id,

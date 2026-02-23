@@ -338,8 +338,11 @@ impl<S: Store> DB<S> {
     /// Create the appropriate lens transform store for the current platform.
     #[cfg(feature = "native")]
     fn create_lens_store() -> Result<Arc<dyn TransformStore>> {
-        let store = WasmTransformStore::new()
-            .map_err(|e| Error::Lens(format!("failed to create lens transform store: {}", e)))?;
+        let store =
+            WasmTransformStore::with_sandbox(Some(lens::WasmSandboxConfig::restrictive()))
+                .map_err(|e| {
+                    Error::Lens(format!("failed to create lens transform store: {}", e))
+                })?;
         Ok(Arc::new(store))
     }
 

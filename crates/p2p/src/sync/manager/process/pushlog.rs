@@ -6,7 +6,7 @@ use std::time::Instant;
 use cid::Cid;
 use libp2p::PeerId;
 
-use blockstore::Blockstore;
+use blockstore::{verify_block_cid, Blockstore};
 
 use crate::error::{Error, Result};
 use crate::message::PushLogBroadcast;
@@ -149,6 +149,17 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 }
                 return Err(Error::BlockstoreError(e.to_string()));
             }
+        }
+
+        // Verify CID matches block content before storing (finding 06-29).
+        if let Err(e) = verify_block_cid(cid, &msg.block) {
+            let p2p_err = crate::error::blockstore_verify_to_p2p(e, cid);
+            tracing::warn!(
+                cid = %cid,
+                error = %p2p_err,
+                "PushLog block failed CID verification, discarding"
+            );
+            return Err(p2p_err);
         }
 
         // Store the block (marked as unmerged in P2P mode)
