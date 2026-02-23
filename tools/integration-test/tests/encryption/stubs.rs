@@ -92,9 +92,10 @@ async fn se_key_rotation_test(cluster: TestCluster) {
         "should have 1 encrypted index after re-add"
     );
 
-    // Create a third document with the same value as doc1
+    // Create a third document with a distinct value (must differ from doc1/doc2
+    // because DefraDB is content-addressed — same content = same docID)
     let data3 = node
-        .query(r#"mutation { create_Entry(input: {value: "hello"}) { _docID } }"#)
+        .query(r#"mutation { create_Entry(input: {value: "rotated"}) { _docID } }"#)
         .expect("create entry 3 after rotation");
     let doc3_id = data3["create_Entry"]
         .as_array()

@@ -239,9 +239,13 @@ async fn mutation_denial_precise_test(cluster: TestCluster) {
 
 for_each_runtime!(mutation_denial_precise, mutation_denial_precise_test, .with_acp_local());
 
-/// 02-27: Unauthorized create is blocked — creating a document without an identity
-/// on an ACP-protected collection must fail or produce no visible document.
-async fn unauthorized_create_blocked_test(cluster: TestCluster) {
+/// Anonymous create on an ACP-protected collection (DAC only, no NAC) succeeds
+/// but the document is unregistered with ACP — effectively public.
+///
+/// Go intentionally allows this: `RegisterDocOnCollectionWithDocumentACP` skips
+/// registration when identity is empty.  Only NAC (node-level access control)
+/// blocks anonymous operations.
+async fn anonymous_create_is_public_test(cluster: TestCluster) {
     let node = cluster.client(0);
     let binary = node.binary_path().to_path_buf();
 
@@ -258,43 +262,47 @@ async fn unauthorized_create_blocked_test(cluster: TestCluster) {
     node.schema_add_with_identity(&schema, &alice.private_key_hex)
         .expect("add schema");
 
-    // Anonymous create on an ACP-protected collection must be denied.
-    // If allowed, the document has no owner and can never be deleted or updated.
-    let anon_create =
-        node.query(r#"mutation { create_User(input: {name: "Ghost", age: 0}) { _docID } }"#);
-    match anon_create {
-        Err(_) => {
-            // Hard error from the node — acceptable denial
-        }
-        Ok(val) => {
-            // Soft denial: the mutation returns but created 0 documents
-            let created = val["create_User"].as_array().map(|a| a.len()).unwrap_or(0);
-            assert_eq!(
-                created, 0,
-                "anonymous create on ACP-protected collection must produce 0 documents, got {:?}",
-                val
-            );
-        }
-    }
+    // Anonymous create succeeds — the document is created but unregistered with ACP
+    let anon_create = node
+        .query(r#"mutation { create_User(input: {name: "Ghost", age: 0}) { _docID } }"#)
+        .expect("anonymous create should succeed in DAC-only mode");
+    let created = anon_create["create_User"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
+    assert_eq!(
+        created, 1,
+        "anonymous create produces 1 document (unregistered with ACP)"
+    );
 
-    // Alice can still create normally
-    let alice_create = node.query_with_identity(
-        r#"mutation { create_User(input: {name: "Legit", age: 1}) { _docID } }"#,
-        &alice.private_key_hex,
-    );
+    // The unregistered document is publicly readable (even by anonymous queries)
+    let anon_read = node
+        .query("query { User { _docID name } }")
+        .expect("anonymous read");
+    let anon_count = anon_read["User"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
     assert!(
-        alice_create.is_ok(),
-        "authorized create must succeed: {:?}",
-        alice_create.err()
+        anon_count >= 1,
+        "anonymous doc should be publicly readable"
     );
-    let alice_count = alice_create.unwrap()["create_User"]
+
+    // Alice can also create normally — her doc IS registered with ACP
+    let alice_create = node
+        .query_with_identity(
+            r#"mutation { create_User(input: {name: "Legit", age: 1}) { _docID } }"#,
+            &alice.private_key_hex,
+        )
+        .expect("authorized create must succeed");
+    let alice_count = alice_create["create_User"]
         .as_array()
         .map(|a| a.len())
         .unwrap_or(0);
     assert_eq!(alice_count, 1, "Alice's create must produce 1 document");
 }
 
-for_each_runtime!(unauthorized_create_blocked, unauthorized_create_blocked_test, .with_acp_local());
+for_each_runtime!(anonymous_create_is_public, anonymous_create_is_public_test, .with_acp_local());
 
 /// 02-25: NAC enforcement applies to GraphQL queries — a user without NAC admin
 /// access sees an empty result even if they supply a valid identity.
@@ -336,21 +344,26 @@ async fn nac_graphql_enforcement_test(cluster: TestCluster) {
         "NAC admin must see the document"
     );
 
-    // Outsider with a valid identity but no NAC admin grant must be blocked
-    let outsider_result = node
-        .query_with_identity(
-            "query { User { _docID name age } }",
-            &outsider.private_key_hex,
-        )
-        .expect("outsider query returned transport-level success");
-    let outsider_count = outsider_result["User"]
-        .as_array()
-        .map(|a| a.len())
-        .unwrap_or(0);
-    assert_eq!(
-        outsider_count, 0,
-        "non-NAC-admin identity must be blocked by NAC from seeing any documents"
+    // Outsider with a valid identity but no NAC admin grant must be blocked.
+    // Go returns 200 with empty results; Rust returns HTTP 401.  Both are
+    // valid enforcement — the outsider sees no data either way.
+    let outsider_result = node.query_with_identity(
+        "query { User { _docID name age } }",
+        &outsider.private_key_hex,
     );
+    match outsider_result {
+        Err(_) => {
+            // Rust returns 401 — strict NAC enforcement at HTTP layer
+        }
+        Ok(val) => {
+            // Go returns 200 with empty results — NAC enforcement in query engine
+            let outsider_count = val["User"].as_array().map(|a| a.len()).unwrap_or(0);
+            assert_eq!(
+                outsider_count, 0,
+                "non-NAC-admin identity must see 0 documents"
+            );
+        }
+    }
 }
 
 for_each_runtime!(nac_graphql_enforcement, nac_graphql_enforcement_test, .with_acp_local().with_nac());
