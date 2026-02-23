@@ -171,6 +171,10 @@ pub struct StartArgs {
     /// Max DAG recursion depth for merge operations (default: 1024)
     #[arg(long)]
     pub max_merge_depth: Option<usize>,
+
+    /// Query execution timeout in seconds (0 = no timeout, default: 30)
+    #[arg(long)]
+    pub query_timeout: Option<u64>,
 }
 
 impl StartArgs {
@@ -401,6 +405,9 @@ impl StartArgs {
         }
         if let Some(depth) = self.max_merge_depth {
             config.datastore.max_merge_depth = depth;
+        }
+        if let Some(timeout) = self.query_timeout {
+            config.api.query_timeout = timeout;
         }
         Ok(())
     }

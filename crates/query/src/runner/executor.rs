@@ -16,11 +16,6 @@ use crate::txn::{GetTransactionResult, TransactionHandle, TransactionRegistry};
 
 use super::{DocFetcher, QueryRunner};
 
-/// Maximum wall-clock time allowed for a single query execution.
-///
-/// Queries that exceed this duration are cancelled and return a timeout error.
-const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// Map a parsed operation to the required NAC permission.
 fn permission_for_operation(parsed: &ParsedOperation) -> NodePermission {
     match parsed {
@@ -168,21 +163,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
-        let result = match tokio::time::timeout(QUERY_TIMEOUT, execution).await {
-            Ok(r) => r,
-            Err(_) => {
-                return QueryResponse {
-                    data: None,
-                    errors: vec![QueryResponseError {
-                        message: format!(
-                            "query execution timed out after {} seconds",
-                            QUERY_TIMEOUT.as_secs()
-                        ),
-                        path: None,
-                        locations: None,
-                    }],
-                };
+        let result = if self.query_timeout > 0 {
+            let timeout = Duration::from_secs(self.query_timeout);
+            match tokio::time::timeout(timeout, execution).await {
+                Ok(r) => r,
+                Err(_) => {
+                    return QueryResponse {
+                        data: None,
+                        errors: vec![QueryResponseError {
+                            message: format!(
+                                "query execution timed out after {} seconds",
+                                self.query_timeout
+                            ),
+                            path: None,
+                            locations: None,
+                        }],
+                    };
+                }
             }
+        } else {
+            execution.await
         };
 
         match result {
@@ -331,21 +331,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
-        let result = match tokio::time::timeout(QUERY_TIMEOUT, execution).await {
-            Ok(r) => r,
-            Err(_) => {
-                return QueryResponse {
-                    data: None,
-                    errors: vec![QueryResponseError {
-                        message: format!(
-                            "query execution timed out after {} seconds",
-                            QUERY_TIMEOUT.as_secs()
-                        ),
-                        path: None,
-                        locations: None,
-                    }],
-                };
+        let result = if self.query_timeout > 0 {
+            let timeout = Duration::from_secs(self.query_timeout);
+            match tokio::time::timeout(timeout, execution).await {
+                Ok(r) => r,
+                Err(_) => {
+                    return QueryResponse {
+                        data: None,
+                        errors: vec![QueryResponseError {
+                            message: format!(
+                                "query execution timed out after {} seconds",
+                                self.query_timeout
+                            ),
+                            path: None,
+                            locations: None,
+                        }],
+                    };
+                }
             }
+        } else {
+            execution.await
         };
 
         match result {

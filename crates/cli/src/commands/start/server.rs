@@ -549,7 +549,8 @@ impl Node {
             )
             .with_mutator(mutator)
             .with_acp(document_acp)
-            .with_lens_store(database.lens_store().clone());
+            .with_lens_store(database.lens_store().clone())
+            .with_query_timeout(config.api.query_timeout);
 
             // Wire CRDT delta encryption key (matches FFI behavior)
             if !config.datastore.no_encryption {

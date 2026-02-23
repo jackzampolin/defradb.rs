@@ -63,6 +63,9 @@ pub struct ApiConfig {
     /// Max concurrent requests (0 = unlimited). Default: 1000.
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent_requests: usize,
+    /// Query execution timeout in seconds (0 = no timeout). Default: 30.
+    #[serde(default = "default_query_timeout")]
+    pub query_timeout: u64,
 }
 
 fn default_request_timeout() -> u64 {
@@ -71,6 +74,10 @@ fn default_request_timeout() -> u64 {
 
 fn default_max_concurrent() -> usize {
     1000
+}
+
+fn default_query_timeout() -> u64 {
+    30
 }
 
 impl Default for ApiConfig {
@@ -85,6 +92,7 @@ impl Default for ApiConfig {
             max_backup_size: 0,
             request_timeout: default_request_timeout(),
             max_concurrent_requests: default_max_concurrent(),
+            query_timeout: default_query_timeout(),
         }
     }
 }

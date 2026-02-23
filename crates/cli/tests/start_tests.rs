@@ -41,6 +41,7 @@ fn default_start_args() -> StartArgs {
         max_connections_out: None,
         max_connections_per_peer: None,
         max_merge_depth: None,
+        query_timeout: None,
     }
 }
 
@@ -116,6 +117,7 @@ fn test_apply_to_config_all_flags() {
         max_connections_out: Some(800),
         max_connections_per_peer: Some(8),
         max_merge_depth: Some(2048),
+        query_timeout: Some(45),
     };
 
     let result = args.apply_to_config(&mut config);
@@ -150,4 +152,5 @@ fn test_apply_to_config_all_flags() {
     assert_eq!(config.datastore.default_key_type, "ed25519");
     assert!(config.datastore.no_searchable_encryption);
     assert_eq!(config.replicator_retry_intervals, vec![10, 20, 30]);
+    assert_eq!(config.api.query_timeout, 45);
 }

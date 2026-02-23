@@ -81,6 +81,8 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     pub(crate) lens_store: Option<Arc<dyn lens::TransformStore>>,
     /// Optional NAC checker for query-level enforcement.
     pub(crate) nac: Option<Arc<dyn NacChecker>>,
+    /// Query execution timeout in seconds (0 = no timeout). Default: 30.
+    pub(crate) query_timeout: u64,
 }
 
 impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
@@ -99,6 +101,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             encryption_key: None,
             lens_store: None,
             nac: None,
+            query_timeout: 30,
         }
     }
 
@@ -117,6 +120,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             encryption_key: None,
             lens_store: None,
             nac: None,
+            query_timeout: 30,
         }
     }
 }
@@ -137,6 +141,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             encryption_key: None,
             lens_store: None,
             nac: None,
+            query_timeout: 30,
         }
     }
 
@@ -160,6 +165,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             encryption_key: None,
             lens_store: None,
             nac: None,
+            query_timeout: 30,
         }
     }
 
@@ -182,6 +188,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             encryption_key: None,
             lens_store: None,
             nac: None,
+            query_timeout: 30,
         }
     }
 
@@ -233,6 +240,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Set the encryption key for CRDT delta encryption.
     pub fn with_encryption_key(mut self, key: Vec<u8>) -> Self {
         self.encryption_key = Some(key);
+        self
+    }
+
+    /// Set query execution timeout in seconds (0 = no timeout).
+    pub fn with_query_timeout(mut self, timeout_secs: u64) -> Self {
+        self.query_timeout = timeout_secs;
         self
     }
 
