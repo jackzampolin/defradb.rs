@@ -110,29 +110,32 @@ Each worktree is isolated, no branch switching overhead.
 # Run all integration tests
 cargo test -p integration-test
 
-# Run specific test file
-cargo test -p integration-test --test smoke
-cargo test -p integration-test --test replication
-cargo test -p integration-test --test acp_basic
+# Run a specific area
+cargo test -p integration-test --test acp
+cargo test -p integration-test --test p2p
+cargo test -p integration-test --test basic
 
-# Run specific test
-cargo test -p integration-test --test smoke -- test_name
+# Run a specific submodule within an area
+cargo test -p integration-test --test acp -- negative::
+
+# Run a specific test
+cargo test -p integration-test --test acp -- basic::rust_acp_basic
 ```
 
 Integration tests live in `tools/integration-test/tests/` and exercise the full
-Rust node via CLI + HTTP API. Test areas:
+Rust node via CLI + HTTP API. Each area is a `[[test]]` binary with submodules:
 
-| Area | Files |
-|------|-------|
-| Core | smoke, document_lifecycle, transactions, collection_management |
-| Query | view, lens, sdl_generate, index_management |
-| ACP | acp_basic, acp_multi_identity, acp_multi_role, acp_revoke_lifecycle, acp_node_access, acp_p2p |
-| NAC | nac_document_acp, cross_compartment_isolation, policy_evolution |
-| P2P | p2p_document, p2p_sync, p2p_management, p2p_trust_boundary, replication, replication_advanced |
-| Encryption | encrypted_index, encrypted_acp, block_verify |
-| Identity | identity_lifecycle, identity_types, node_identity, keyring_lifecycle |
-| Backup | backup_restore, dump, purge |
-| SourceHub | sourcehub_smoke, sourcehub_compartments, sourcehub_p2p_acp, sourcehub_policy_lifecycle |
+| Area | Binary | Modules |
+|------|--------|---------|
+| Basic | `--test basic` | smoke, document_lifecycle, transactions, collection_management, multi_collection, truncate_parallel |
+| Query | `--test query` | view, lens, lens_persistence, sdl_generate, index_management, explain_nested, subscription_docid, stubs |
+| ACP | `--test acp` | basic, multi_identity, multi_role, revoke_lifecycle, node_access, p2p, negative, negative_p2p, xarchive_access_matrix, stubs |
+| NAC | `--test nac` | document_acp, operations, core_operations, p2p_management, relation_admin, cross_compartment_isolation, policy_evolution |
+| P2P | `--test p2p` | document, sync, management, trust_boundary, replication, replication_advanced, stubs |
+| Encryption | `--test encryption` | index, acp, block_verify, stubs |
+| Identity | `--test identity` | lifecycle, types, negative, node_identity, keyring_lifecycle |
+| Backup | `--test backup` | restore, dump, purge |
+| SourceHub | `--test sourcehub` | smoke, compartments, p2p_acp, policy_lifecycle, stubs |
 
 ### Rust Commands
 

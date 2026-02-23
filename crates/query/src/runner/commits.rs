@@ -386,6 +386,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ///
     /// This handles queries to the special _commits collection which fetches
     /// commit history from the headstore and blockstore.
+    ///
+    /// ACP enforcement: after fetching, commits are filtered per-document using
+    /// the same `check_doc_access` gate as regular queries. Commits for documents
+    /// the caller lacks read permission on are silently excluded (Go semantics).
     pub(crate) async fn execute_commits_query(
         &self,
         select: &Select,
@@ -411,6 +415,90 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Fetch commits using the fetcher
         let mut commits = self.fetcher.get_commits(&options).await?;
+
+        // ACP filtering: check read permission for each commit's document.
+        // _commits must enforce the same ACP rules as regular document queries.
+        if let Some(ref acp) = self.acp {
+            use acp::{DocumentPermission, Identity};
+
+            let identity = Identity::from(caller_identity.clone());
+
+            // Build a map of collection policies for ACP-protected collections.
+            let collections = self.collections_map().await?;
+            let policies: Vec<(&str, &str)> = collections
+                .values()
+                .filter_map(|c| {
+                    c.policy
+                        .as_ref()
+                        .map(|p| (p.id.as_str(), p.resource_name.as_str()))
+                })
+                .collect();
+
+            if !policies.is_empty() {
+                // Collect the set of doc_ids that the caller is allowed to read.
+                // For each doc_id, check against every ACP policy — the doc belongs
+                // to exactly one collection, and only that policy's check will be
+                // authoritative (others will return Ok(false) for unknown docs).
+                let mut denied_doc_ids: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                let mut checked_doc_ids: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+
+                for commit in &commits {
+                    let doc_id = match commit.get("docID").and_then(|v| v.as_str()) {
+                        Some(id) => id.to_string(),
+                        None => continue,
+                    };
+                    if checked_doc_ids.contains(&doc_id) {
+                        continue;
+                    }
+                    checked_doc_ids.insert(doc_id.clone());
+
+                    // Check against all policies — at least one must grant access.
+                    let mut any_granted = false;
+                    for &(policy_id, resource_name) in &policies {
+                        match acp
+                            .check_doc_access(
+                                &identity,
+                                DocumentPermission::Read,
+                                policy_id,
+                                resource_name,
+                                &doc_id,
+                            )
+                            .await
+                        {
+                            Ok(true) => {
+                                any_granted = true;
+                                break;
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                tracing::debug!(
+                                    target: "acp::audit",
+                                    event = "commits_acp_check_error",
+                                    doc_id = %doc_id,
+                                    error = %e,
+                                    "ACP check error during _commits query, denying access"
+                                );
+                            }
+                        }
+                    }
+                    if !any_granted {
+                        denied_doc_ids.insert(doc_id);
+                    }
+                }
+
+                if !denied_doc_ids.is_empty() {
+                    commits.retain(|commit| {
+                        commit
+                            .get("docID")
+                            .and_then(|v| v.as_str())
+                            .map(|id| !denied_doc_ids.contains(id))
+                            .unwrap_or(true)
+                    });
+                }
+            }
+        }
 
         // Build a mapping for commit fields (needed for filter evaluation)
         let mapping = Self::build_commits_mapping();

@@ -74,7 +74,29 @@ async fn commits_acp_denied_test(cluster: TestCluster) {
     );
 }
 
-for_each_runtime!(commits_acp_denied, commits_acp_denied_test, .with_acp_local());
+#[tokio::test]
+async fn rust_commits_acp_denied() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+    commits_acp_denied_test(cluster).await;
+}
+
+/// Known upstream bug: Go DefraDB does not filter _commits by ACP.
+#[tokio::test]
+#[ignore]
+async fn go_commits_acp_denied() {
+    let cluster = TestCluster::builder()
+        .go_nodes(1)
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+    commits_acp_denied_test(cluster).await;
+}
 
 /// 02-23: Dump endpoint requires authentication — anonymous dump is denied.
 ///

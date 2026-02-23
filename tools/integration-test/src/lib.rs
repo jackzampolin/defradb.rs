@@ -44,14 +44,12 @@ macro_rules! for_each_runtime {
     ($name:ident, $inner:ident) => {
         ::paste::paste! {
             #[tokio::test]
-            #[ignore]
             async fn [<rust_ $name>]() {
                 let cluster = $crate::TestCluster::builder().rust_nodes(1).build().await.unwrap();
                 $inner(cluster).await;
             }
 
             #[tokio::test]
-            #[ignore]
             async fn [<go_ $name>]() {
                 let cluster = $crate::TestCluster::builder().go_nodes(1).build().await.unwrap();
                 $inner(cluster).await;
@@ -61,14 +59,12 @@ macro_rules! for_each_runtime {
     ($name:ident, $inner:ident, $($modifier:tt)+) => {
         ::paste::paste! {
             #[tokio::test]
-            #[ignore]
             async fn [<rust_ $name>]() {
                 let cluster = $crate::TestCluster::builder().rust_nodes(1) $($modifier)+ .build().await.unwrap();
                 $inner(cluster).await;
             }
 
             #[tokio::test]
-            #[ignore]
             async fn [<go_ $name>]() {
                 let cluster = $crate::TestCluster::builder().go_nodes(1) $($modifier)+ .build().await.unwrap();
                 $inner(cluster).await;
@@ -86,23 +82,49 @@ macro_rules! for_each_p2p_topology {
     ($name:ident, $inner:ident, $($modifier:tt)+) => {
         ::paste::paste! {
             #[tokio::test]
-            #[ignore]
             async fn [<rust_rust_ $name>]() {
                 let cluster = $crate::TestCluster::builder().rust_nodes(2) $($modifier)+ .build().await.unwrap();
                 $inner(cluster).await;
             }
 
             #[tokio::test]
-            #[ignore]
             async fn [<go_go_ $name>]() {
                 let cluster = $crate::TestCluster::builder().go_nodes(2) $($modifier)+ .build().await.unwrap();
                 $inner(cluster).await;
             }
 
             #[tokio::test]
-            #[ignore]
             async fn [<go_rust_ $name>]() {
                 let cluster = $crate::TestCluster::builder().rust_nodes(1).go_nodes(1) $($modifier)+ .build().await.unwrap();
+                $inner(cluster).await;
+            }
+        }
+    };
+}
+
+/// Generate `rust_rust_<name>`, `go_go_<name>`, and `go_rust_<name>` test wrappers
+/// for a 3-node P2P test (node0=target, node1=flooder, node2=legitimate).
+///
+/// Usage: `for_each_p2p_topology_3!(name, inner_fn, .with_p2p());`
+#[macro_export]
+macro_rules! for_each_p2p_topology_3 {
+    ($name:ident, $inner:ident, $($modifier:tt)+) => {
+        ::paste::paste! {
+            #[tokio::test]
+            async fn [<rust_rust_ $name>]() {
+                let cluster = $crate::TestCluster::builder().rust_nodes(3) $($modifier)+ .build().await.unwrap();
+                $inner(cluster).await;
+            }
+
+            #[tokio::test]
+            async fn [<go_go_ $name>]() {
+                let cluster = $crate::TestCluster::builder().go_nodes(3) $($modifier)+ .build().await.unwrap();
+                $inner(cluster).await;
+            }
+
+            #[tokio::test]
+            async fn [<go_rust_ $name>]() {
+                let cluster = $crate::TestCluster::builder().rust_nodes(2).go_nodes(1) $($modifier)+ .build().await.unwrap();
                 $inner(cluster).await;
             }
         }

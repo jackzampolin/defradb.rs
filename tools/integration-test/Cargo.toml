@@ -4,6 +4,43 @@ version = "0.1.0"
 edition = "2021"
 description = "Integration test harness for defradb"
 license = "Apache-2.0 OR MIT"
+autotests = false
+
+[[test]]
+name = "basic"
+path = "tests/basic.rs"
+
+[[test]]
+name = "query"
+path = "tests/query.rs"
+
+[[test]]
+name = "acp"
+path = "tests/acp.rs"
+
+[[test]]
+name = "nac"
+path = "tests/nac.rs"
+
+[[test]]
+name = "p2p"
+path = "tests/p2p.rs"
+
+[[test]]
+name = "encryption"
+path = "tests/encryption.rs"
+
+[[test]]
+name = "identity"
+path = "tests/identity.rs"
+
+[[test]]
+name = "backup"
+path = "tests/backup.rs"
+
+[[test]]
+name = "sourcehub"
+path = "tests/sourcehub.rs"
 
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
