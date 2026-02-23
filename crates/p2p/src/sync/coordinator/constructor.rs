@@ -5,7 +5,7 @@ use std::sync::Arc;
 use blockstore::Blockstore;
 use tokio::sync::mpsc;
 
-use super::{SyncCoordinator, MAX_CONCURRENT_DAG_FETCHES};
+use super::{SyncCoordinator, MAX_CONCURRENT_DAG_FETCHES, MAX_CONCURRENT_PUSH_TASKS};
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Result;
 use crate::host::P2PHostHandle;
@@ -151,6 +151,9 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 failure_tx: None,
                 dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(
                     MAX_CONCURRENT_DAG_FETCHES,
+                )),
+                push_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                    MAX_CONCURRENT_PUSH_TASKS,
                 )),
                 rate_limiter: Arc::new(PeerRateLimiter::default()),
             },

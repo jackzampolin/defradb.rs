@@ -84,6 +84,12 @@ use super::rate_limiter::PeerRateLimiter;
 /// exhaustion from a peer advertising a large number of head CIDs.
 pub(crate) const MAX_CONCURRENT_DAG_FETCHES: usize = 16;
 
+/// Maximum number of concurrent push tasks for sending blocks to replicators.
+///
+/// Caps fan-out from `push_dag_to_replicators` and `push_to_replicators` to
+/// prevent resource exhaustion when many documents are created in a burst.
+pub(crate) const MAX_CONCURRENT_PUSH_TASKS: usize = 32;
+
 /// Coordinator for P2P synchronization.
 ///
 /// This is the main integration point between the P2P layer and the database.
@@ -123,6 +129,9 @@ pub struct SyncCoordinator<B: Blockstore> {
 
     /// Semaphore limiting concurrent DAG fetch tasks (capped at MAX_CONCURRENT_DAG_FETCHES).
     pub(super) dag_fetch_semaphore: Arc<tokio::sync::Semaphore>,
+
+    /// Semaphore limiting concurrent push tasks (capped at MAX_CONCURRENT_PUSH_TASKS).
+    pub(super) push_semaphore: Arc<tokio::sync::Semaphore>,
 
     /// Per-peer rate limiter applied at event dispatch to throttle abusive peers.
     pub(super) rate_limiter: Arc<PeerRateLimiter>,

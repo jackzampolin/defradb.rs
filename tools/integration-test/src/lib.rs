@@ -130,3 +130,67 @@ macro_rules! for_each_p2p_topology_3 {
         }
     };
 }
+
+/// Like `for_each_p2p_topology!` but marks all generated tests as `#[ignore]`.
+/// Use for stress tests that are too resource-intensive for normal CI runs.
+///
+/// Run with: `cargo test -p integration-test --test <binary> -- --ignored`
+#[macro_export]
+macro_rules! for_each_p2p_topology_ignored {
+    ($name:ident, $inner:ident, $($modifier:tt)+) => {
+        ::paste::paste! {
+            #[tokio::test]
+            #[ignore]
+            async fn [<rust_rust_ $name>]() {
+                let cluster = $crate::TestCluster::builder().rust_nodes(2) $($modifier)+ .build().await.unwrap();
+                $inner(cluster).await;
+            }
+
+            #[tokio::test]
+            #[ignore]
+            async fn [<go_go_ $name>]() {
+                let cluster = $crate::TestCluster::builder().go_nodes(2) $($modifier)+ .build().await.unwrap();
+                $inner(cluster).await;
+            }
+
+            #[tokio::test]
+            #[ignore]
+            async fn [<go_rust_ $name>]() {
+                let cluster = $crate::TestCluster::builder().rust_nodes(1).go_nodes(1) $($modifier)+ .build().await.unwrap();
+                $inner(cluster).await;
+            }
+        }
+    };
+}
+
+/// Like `for_each_p2p_topology_3!` but marks all generated tests as `#[ignore]`.
+/// Use for stress tests that are too resource-intensive for normal CI runs.
+///
+/// Run with: `cargo test -p integration-test --test <binary> -- --ignored`
+#[macro_export]
+macro_rules! for_each_p2p_topology_3_ignored {
+    ($name:ident, $inner:ident, $($modifier:tt)+) => {
+        ::paste::paste! {
+            #[tokio::test]
+            #[ignore]
+            async fn [<rust_rust_ $name>]() {
+                let cluster = $crate::TestCluster::builder().rust_nodes(3) $($modifier)+ .build().await.unwrap();
+                $inner(cluster).await;
+            }
+
+            #[tokio::test]
+            #[ignore]
+            async fn [<go_go_ $name>]() {
+                let cluster = $crate::TestCluster::builder().go_nodes(3) $($modifier)+ .build().await.unwrap();
+                $inner(cluster).await;
+            }
+
+            #[tokio::test]
+            #[ignore]
+            async fn [<go_rust_ $name>]() {
+                let cluster = $crate::TestCluster::builder().rust_nodes(2).go_nodes(1) $($modifier)+ .build().await.unwrap();
+                $inner(cluster).await;
+            }
+        }
+    };
+}

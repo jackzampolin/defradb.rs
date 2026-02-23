@@ -15,22 +15,37 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// Access rules:
     /// 1. If mode is Open → allow all
     /// 2. If peer is a replicator for the collection → allow
-    /// 3. Otherwise → deny
+    /// 3. If peer is connected and the collection is subscribed → allow
+    /// 4. Otherwise → deny
     ///
-    /// This follows the Go DefraDB security model where each replicator is authorized
-    /// per-collection. A peer authorized for collection A cannot access collection B.
-    pub(super) fn check_access(&self, peer_id: &PeerId, collection_id: &str) -> Result<()> {
-        // Fast path: Open mode allows all access
+    /// Rule 3 matches Go DefraDB behavior: replicator registration is
+    /// one-directional (source registers target), but both sides accept
+    /// messages from connected peers on subscribed topics. Document-level
+    /// ACP still applies independently at merge time.
+    pub(super) async fn check_access(
+        &self,
+        peer_id: &PeerId,
+        collection_id: &str,
+    ) -> Result<()> {
         if self.access_mode.is_open() {
             return Ok(());
         }
 
-        // Check if peer is a replicator for this specific collection
         if self.replicators.is_replicator(collection_id, peer_id) {
             return Ok(());
         }
 
-        // Access denied - peer is not authorized for this collection
+        // Accept messages from connected peers for collections we're subscribed to.
+        // Connected peers are already authenticated via libp2p noise. The replicator
+        // registry controls what WE push; it shouldn't gate what we ACCEPT from
+        // authenticated peers on topics we've subscribed to.
+        if self.peer_state.is_connected(peer_id) {
+            let subscribed = self.subscribed_collections.read().await;
+            if subscribed.contains(collection_id) {
+                return Ok(());
+            }
+        }
+
         tracing::warn!(
             peer_id = %peer_id,
             collection_id = %collection_id,
@@ -46,13 +61,17 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     ///
     /// Used by handlers (e.g. DocSync) that lack collection context.
     /// In Open mode, all peers are allowed. In Controlled mode, the peer
-    /// must be a replicator for at least one collection.
+    /// must be a connected peer or a replicator for at least one collection.
     pub(super) fn check_peer_is_replicator(&self, peer_id: &PeerId) -> Result<()> {
         if self.access_mode.is_open() {
             return Ok(());
         }
 
         if self.replicators.is_any_replicator(peer_id) {
+            return Ok(());
+        }
+
+        if self.peer_state.is_connected(peer_id) {
             return Ok(());
         }
 

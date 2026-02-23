@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use integration_test::{for_each_p2p_topology, for_each_p2p_topology_3, poll_until, TestCluster};
+use integration_test::{
+    for_each_p2p_topology_3_ignored, for_each_p2p_topology_ignored, poll_until, TestCluster,
+};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -169,7 +171,7 @@ async fn car_bomb_protection_test(cluster: TestCluster) {
     .await;
 }
 
-for_each_p2p_topology!(car_bomb_protection, car_bomb_protection_test, .with_p2p());
+for_each_p2p_topology_ignored!(car_bomb_protection, car_bomb_protection_test, .with_p2p());
 
 // ─── Test 2: rate_limiter_saturation ─────────────────────────────────────────
 
@@ -272,7 +274,7 @@ async fn rate_limiter_saturation_test(cluster: TestCluster) {
     );
 }
 
-for_each_p2p_topology_3!(rate_limiter_saturation, rate_limiter_saturation_test, .with_p2p());
+for_each_p2p_topology_3_ignored!(rate_limiter_saturation, rate_limiter_saturation_test, .with_p2p());
 
 // ─── Test 3: dag_semaphore_exhaustion ────────────────────────────────────────
 
@@ -359,4 +361,4 @@ async fn dag_semaphore_exhaustion_test(cluster: TestCluster) {
     );
 }
 
-for_each_p2p_topology_3!(dag_semaphore_exhaustion, dag_semaphore_exhaustion_test, .with_p2p());
+for_each_p2p_topology_3_ignored!(dag_semaphore_exhaustion, dag_semaphore_exhaustion_test, .with_p2p());

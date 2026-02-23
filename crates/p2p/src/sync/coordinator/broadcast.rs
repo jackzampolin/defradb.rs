@@ -119,12 +119,15 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             }
             requests.push((*cid, composite_req));
 
-            // Fire-and-forget: spawn a task per peer that sends blocks in order.
+            // Spawn a task per peer, bounded by push_semaphore to prevent
+            // resource exhaustion during document creation bursts.
             let host = self.host.clone();
             let failure_tx = self.failure_tx.clone();
             let doc_id_owned = doc_id.to_string();
             let collection_id_owned = collection_id.to_string();
+            let semaphore = self.push_semaphore.clone();
             tokio::spawn(async move {
+                let _permit = semaphore.acquire().await;
                 let any_failed = Self::send_ordered_pushlogs(host, peer_id, requests).await;
                 if any_failed {
                     if let Some(tx) = failure_tx {
@@ -187,7 +190,9 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             let failure_tx = self.failure_tx.clone();
             let doc_id_owned = doc_id.to_string();
             let collection_id_owned = collection_id.to_string();
+            let semaphore = self.push_semaphore.clone();
             tokio::spawn(async move {
+                let _permit = semaphore.acquire().await;
                 if let Err(e) = host.send_two_stream_request(peer_id, request).await {
                     tracing::debug!(
                         peer_id = %peer_id,
