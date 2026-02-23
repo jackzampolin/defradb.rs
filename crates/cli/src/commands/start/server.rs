@@ -10,6 +10,9 @@ use crate::config::{AcpDocumentType, Config};
 use crate::error::{Error, Result};
 use identity::Identity;
 
+/// Callback to wire DocumentACP into the merge handler after ACP initialization.
+type SetMergeAcp = Option<Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>>;
+
 impl Node {
     /// Initialize store, database, P2P, and HTTP server.
     ///
@@ -148,6 +151,7 @@ impl Node {
                 failure_recorder_task,
                 retry_loop_task,
                 restored_doc_ids,
+                mut set_merge_handler_acp,
             ) = if let Some(ref p2p_handle) = p2p {
                 let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(
                     store_for_sync.clone(),
@@ -205,8 +209,10 @@ impl Node {
                 let merge_handler =
                     Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
 
-                // Clone merge handler for VersionSyncer (before moving into replication loop)
+                // Clone merge handler for VersionSyncer and ACP wiring
+                // (before moving into replication loop)
                 let merge_handler_for_syncer = merge_handler.clone();
+                let merge_handler_for_acp: Arc<db::DbMergeHandler<_, _>> = merge_handler.clone();
 
                 // Spawn replication loop to process incoming blocks
                 // Track the task handle for graceful shutdown
@@ -449,6 +455,9 @@ impl Node {
                 }
 
                 info!("P2P sync coordinator initialized");
+                let set_acp: SetMergeAcp = Some(Box::new(move |acp| {
+                    merge_handler_for_acp.set_document_acp(acp);
+                }));
                 (
                     Some(coordinator),
                     Some(replication_task),
@@ -458,8 +467,10 @@ impl Node {
                     Some(failure_recorder_task),
                     Some(retry_loop_task),
                     restored_doc_ids,
+                    set_acp,
                 )
             } else {
+                let no_acp: SetMergeAcp = None;
                 (
                     None,
                     None,
@@ -469,6 +480,7 @@ impl Node {
                     None,
                     None,
                     std::collections::HashSet::new(),
+                    no_acp,
                 )
             };
 
@@ -538,6 +550,12 @@ impl Node {
                 )
             };
             let document_acp_for_block = document_acp.clone();
+
+            // Wire DocumentACP into the P2P merge handler so it can register
+            // replicated documents with the original owner DID (merge-denial).
+            if let Some(set_acp) = set_merge_handler_acp.take() {
+                set_acp(document_acp.clone());
+            }
 
             // Create query runner with transaction, mutation, and ACP support
             // Use Arc-shared registry so it can also be used by TxnRegistryAdapter
