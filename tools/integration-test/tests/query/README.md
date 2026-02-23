@@ -24,8 +24,8 @@ cargo test -p integration-test --test query
 | Test | Reason |
 |------|--------|
 | `go_query_depth_width_limit` | Go does not implement query depth/width limits |
-| `rust_query_timeout_under_load` | Blocked: TestCluster doesn't expose `--query-timeout` |
-| `go_query_timeout_under_load` | Same as above |
+| `rust_query_timeout_under_load` | Stub: test body not yet implemented |
+| `go_query_timeout_under_load` | Stub: test body not yet implemented |
 
 ### Note on lens tests
 

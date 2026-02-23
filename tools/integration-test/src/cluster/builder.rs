@@ -28,6 +28,7 @@ pub struct TestClusterBuilder {
     source_hub_enabled: bool,
     development: bool,
     store: Option<String>,
+    query_timeout: Option<u64>,
 }
 
 impl Default for TestClusterBuilder {
@@ -52,6 +53,7 @@ impl TestClusterBuilder {
             source_hub_enabled: false,
             development: false,
             store: None,
+            query_timeout: None,
         }
     }
 
@@ -118,6 +120,11 @@ impl TestClusterBuilder {
 
     pub fn with_store(mut self, store: impl Into<String>) -> Self {
         self.store = Some(store.into());
+        self
+    }
+
+    pub fn with_query_timeout(mut self, secs: u64) -> Self {
+        self.query_timeout = Some(secs);
         self
     }
 
@@ -212,6 +219,7 @@ impl TestClusterBuilder {
                 sh_chain_id.clone(),
                 self.development,
                 self.store.clone(),
+                self.query_timeout,
                 NodeKind::Rust,
             )
             .await
@@ -242,6 +250,7 @@ impl TestClusterBuilder {
                 sh_chain_id.clone(),
                 self.development,
                 self.store.clone(),
+                self.query_timeout,
                 NodeKind::Go,
             )
             .await
@@ -285,6 +294,7 @@ async fn spawn_node(
     source_hub_chain_id: Option<String>,
     development: bool,
     store: Option<String>,
+    query_timeout: Option<u64>,
     kind: NodeKind,
 ) -> Result<RunningNode> {
     let node_dir = run_dir.node_dir(name)?;
@@ -317,6 +327,7 @@ async fn spawn_node(
         source_hub_chain_id,
         development,
         store,
+        query_timeout,
     };
 
     let cmd = node.command(&config);

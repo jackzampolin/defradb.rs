@@ -113,7 +113,7 @@ async fn go_query_depth_width_limit() {
 }
 
 /// Audit gap: Query timeout fires correctly even when the node is under heavy
-/// concurrent load. Blocked on TestClusterBuilder not yet exposing --query-timeout.
+/// concurrent load.
 async fn query_timeout_under_load(_cluster: TestCluster) {
     todo!("implement: query timeout under load test")
 }
@@ -121,13 +121,23 @@ async fn query_timeout_under_load(_cluster: TestCluster) {
 #[tokio::test]
 #[ignore]
 async fn rust_query_timeout_under_load() {
-    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_query_timeout(5)
+        .build()
+        .await
+        .unwrap();
     query_timeout_under_load(cluster).await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn go_query_timeout_under_load() {
-    let cluster = TestCluster::builder().go_nodes(1).build().await.unwrap();
+    let cluster = TestCluster::builder()
+        .go_nodes(1)
+        .with_query_timeout(5)
+        .build()
+        .await
+        .unwrap();
     query_timeout_under_load(cluster).await;
 }

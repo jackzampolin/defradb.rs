@@ -113,6 +113,10 @@ impl DefraNode for RustNode {
             cmd.arg("--development");
         }
 
+        if let Some(timeout) = config.query_timeout {
+            cmd.arg("--query-timeout").arg(timeout.to_string());
+        }
+
         cmd
     }
 

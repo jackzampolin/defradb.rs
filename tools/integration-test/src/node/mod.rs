@@ -27,6 +27,7 @@ pub struct NodeConfig {
     pub source_hub_chain_id: Option<String>,
     pub development: bool,
     pub store: Option<String>,
+    pub query_timeout: Option<u64>,
 }
 
 /// Trait for building a DefraDB command from config.
