@@ -7,20 +7,20 @@ use libp2p::Stream;
 
 use crate::error::{Error, Result};
 use crate::two_stream::event::TwoStreamEvent;
-use crate::two_stream::{MAX_CAR_SIZE, STREAM_READ_TIMEOUT};
 
 use super::TwoStreamHandler;
 
-async fn read_stream(stream: &mut Stream) -> std::io::Result<Vec<u8>> {
+async fn read_stream(
+    stream: &mut Stream,
+    max_size: u64,
+    timeout: std::time::Duration,
+) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
-    tokio::time::timeout(
-        STREAM_READ_TIMEOUT,
-        stream.take(MAX_CAR_SIZE).read_to_end(&mut buf),
-    )
-    .await
-    .map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::TimedOut, "CAR stream read timed out")
-    })??;
+    tokio::time::timeout(timeout, stream.take(max_size).read_to_end(&mut buf))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "CAR stream read timed out")
+        })??;
     Ok(buf)
 }
 
@@ -31,8 +31,10 @@ impl TwoStreamHandler {
     pub async fn handle_car_request_stream(
         peer_id: PeerId,
         mut stream: Stream,
+        max_car_size: u64,
+        stream_read_timeout: std::time::Duration,
     ) -> Result<TwoStreamEvent> {
-        let buf = read_stream(&mut stream)
+        let buf = read_stream(&mut stream, max_car_size, stream_read_timeout)
             .await
             .map_err(|e| Error::Transport(format!("failed to read CAR request: {}", e)))?;
 
@@ -49,8 +51,10 @@ impl TwoStreamHandler {
     pub async fn handle_car_response_stream(
         peer_id: PeerId,
         mut stream: Stream,
+        max_car_size: u64,
+        stream_read_timeout: std::time::Duration,
     ) -> Result<TwoStreamEvent> {
-        let car_data = read_stream(&mut stream)
+        let car_data = read_stream(&mut stream, max_car_size, stream_read_timeout)
             .await
             .map_err(|e| Error::Transport(format!("failed to read CAR response: {}", e)))?;
 

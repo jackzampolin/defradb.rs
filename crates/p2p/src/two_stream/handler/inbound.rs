@@ -5,14 +5,12 @@ use std::sync::Arc;
 use libp2p::{PeerId, Stream};
 use parking_lot::Mutex;
 
+use super::PendingResponses;
 use crate::error::{Error, Result};
 use crate::message::{
     BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogReply,
     PushLogRequest,
 };
-use crate::two_stream::{MAX_MSG_SIZE, STREAM_READ_TIMEOUT};
-
-use super::PendingResponses;
 use crate::two_stream::event::TwoStreamEvent;
 
 use super::TwoStreamHandler;
@@ -25,18 +23,17 @@ impl TwoStreamHandler {
     pub async fn handle_request_stream(
         peer_id: PeerId,
         mut stream: Stream,
+        max_msg_size: u64,
+        stream_read_timeout: std::time::Duration,
     ) -> Result<TwoStreamEvent> {
         use futures::AsyncReadExt;
 
         tracing::info!(peer_id = %peer_id, "Reading message from two-stream request");
 
-        // Read raw bytes from the stream with a size cap and timeout.
-        // The cap prevents OOM from a malicious peer sending unbounded data.
-        // The timeout guards against Slowloris-style stream exhaustion.
         let mut buf = Vec::new();
         tokio::time::timeout(
-            STREAM_READ_TIMEOUT,
-            (&mut stream).take(MAX_MSG_SIZE).read_to_end(&mut buf),
+            stream_read_timeout,
+            (&mut stream).take(max_msg_size).read_to_end(&mut buf),
         )
         .await
         .map_err(|_| {
@@ -106,15 +103,15 @@ impl TwoStreamHandler {
         pending: &Arc<Mutex<PendingResponses>>,
         peer_id: PeerId,
         mut stream: Stream,
+        max_msg_size: u64,
+        stream_read_timeout: std::time::Duration,
     ) -> Result<Option<TwoStreamEvent>> {
         use futures::AsyncReadExt;
 
-        // Read raw bytes first to try different message types.
-        // Size cap and timeout prevent OOM and Slowloris attacks.
         let mut buf = Vec::new();
         tokio::time::timeout(
-            STREAM_READ_TIMEOUT,
-            (&mut stream).take(MAX_MSG_SIZE).read_to_end(&mut buf),
+            stream_read_timeout,
+            (&mut stream).take(max_msg_size).read_to_end(&mut buf),
         )
         .await
         .map_err(|_| {

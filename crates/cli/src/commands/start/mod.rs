@@ -139,6 +139,38 @@ pub struct StartArgs {
     /// Max concurrent HTTP requests (0 = unlimited, default: 1000)
     #[arg(long)]
     pub max_concurrent_requests: Option<usize>,
+
+    /// Max P2P protocol message size in bytes (default: 16777216 = 16MiB)
+    #[arg(long)]
+    pub max_msg_size: Option<u64>,
+
+    /// Max P2P CAR file size in bytes (default: 67108864 = 64MiB)
+    #[arg(long)]
+    pub max_car_size: Option<u64>,
+
+    /// P2P stream read timeout in seconds (default: 30)
+    #[arg(long)]
+    pub stream_timeout: Option<u64>,
+
+    /// Max concurrent P2P stream handler tasks (default: 64)
+    #[arg(long)]
+    pub max_p2p_tasks: Option<usize>,
+
+    /// Max established inbound P2P connections (default: 100)
+    #[arg(long)]
+    pub max_connections_in: Option<u32>,
+
+    /// Max established outbound P2P connections (default: 400)
+    #[arg(long)]
+    pub max_connections_out: Option<u32>,
+
+    /// Max established P2P connections per peer (default: 4)
+    #[arg(long)]
+    pub max_connections_per_peer: Option<u32>,
+
+    /// Max DAG recursion depth for merge operations (default: 1024)
+    #[arg(long)]
+    pub max_merge_depth: Option<usize>,
 }
 
 impl StartArgs {
@@ -345,6 +377,30 @@ impl StartArgs {
         }
         if let Some(max) = self.max_concurrent_requests {
             config.api.max_concurrent_requests = max;
+        }
+        if let Some(size) = self.max_msg_size {
+            config.net.max_msg_size = size;
+        }
+        if let Some(size) = self.max_car_size {
+            config.net.max_car_size = size;
+        }
+        if let Some(timeout) = self.stream_timeout {
+            config.net.stream_timeout = timeout;
+        }
+        if let Some(max) = self.max_p2p_tasks {
+            config.net.max_p2p_tasks = max;
+        }
+        if let Some(max) = self.max_connections_in {
+            config.net.max_connections_in = max;
+        }
+        if let Some(max) = self.max_connections_out {
+            config.net.max_connections_out = max;
+        }
+        if let Some(max) = self.max_connections_per_peer {
+            config.net.max_connections_per_peer = max;
+        }
+        if let Some(depth) = self.max_merge_depth {
+            config.datastore.max_merge_depth = depth;
         }
         Ok(())
     }

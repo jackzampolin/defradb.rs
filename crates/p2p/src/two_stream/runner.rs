@@ -13,14 +13,6 @@ use tokio::sync::{mpsc, Semaphore};
 
 use super::event::TwoStreamEvent;
 use super::handler::{PendingResponses, TwoStreamHandler};
-use crate::two_stream::{MAX_MSG_SIZE, STREAM_READ_TIMEOUT};
-
-/// Maximum number of concurrently active stream handler tasks.
-///
-/// Caps the number of tokio tasks spawned from incoming streams.
-/// Without this, a peer opening many streams rapidly can exhaust memory
-/// and thread-pool capacity via unbounded task creation.
-const MAX_CONCURRENT_STREAM_TASKS: usize = 64;
 
 /// Runner that accepts incoming streams and emits events.
 ///
@@ -46,6 +38,12 @@ pub struct TwoStreamRunner {
     event_tx: mpsc::Sender<TwoStreamEvent>,
     /// Bounds the number of concurrently active stream handler tasks.
     semaphore: Arc<Semaphore>,
+    /// Max protocol message size in bytes.
+    max_msg_size: u64,
+    /// Max CAR file size in bytes.
+    max_car_size: u64,
+    /// Stream read timeout.
+    stream_read_timeout: std::time::Duration,
 }
 
 impl TwoStreamRunner {
@@ -60,6 +58,10 @@ impl TwoStreamRunner {
         car_request_streams: stream::IncomingStreams,
         car_response_streams: stream::IncomingStreams,
         event_tx: mpsc::Sender<TwoStreamEvent>,
+        max_msg_size: u64,
+        max_car_size: u64,
+        stream_timeout_secs: u64,
+        max_concurrent_tasks: usize,
     ) -> Self {
         Self {
             pending,
@@ -70,7 +72,10 @@ impl TwoStreamRunner {
             car_request_streams,
             car_response_streams,
             event_tx,
-            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_STREAM_TASKS)),
+            semaphore: Arc::new(Semaphore::new(max_concurrent_tasks)),
+            max_msg_size,
+            max_car_size,
+            stream_read_timeout: std::time::Duration::from_secs(stream_timeout_secs),
         }
     }
 
@@ -92,9 +97,11 @@ impl TwoStreamRunner {
                     );
                     let event_tx = self.event_tx.clone();
                     let sem = self.semaphore.clone();
+                    let max_msg_size = self.max_msg_size;
+                    let stream_read_timeout = self.stream_read_timeout;
                     tokio::spawn(async move {
                         let _permit = sem.acquire().await.expect("semaphore closed");
-                        match TwoStreamHandler::handle_request_stream(peer_id, stream).await {
+                        match TwoStreamHandler::handle_request_stream(peer_id, stream, max_msg_size, stream_read_timeout).await {
                             Ok(event) => {
                                 tracing::info!(peer_id = %peer_id, "Sending TwoStreamEvent to host channel");
                                 if event_tx.send(event).await.is_err() {
@@ -129,9 +136,11 @@ impl TwoStreamRunner {
                     let pending = self.pending.clone();
                     let event_tx = self.event_tx.clone();
                     let sem = self.semaphore.clone();
+                    let max_msg_size = self.max_msg_size;
+                    let stream_read_timeout = self.stream_read_timeout;
                     tokio::spawn(async move {
                         let _permit = sem.acquire().await.expect("semaphore closed");
-                        match TwoStreamHandler::handle_response_stream(&pending, peer_id, stream).await {
+                        match TwoStreamHandler::handle_response_stream(&pending, peer_id, stream, max_msg_size, stream_read_timeout).await {
                             Ok(Some(event)) => {
                                 // DocSyncReply events should be forwarded to the coordinator
                                 tracing::debug!(peer_id = %peer_id, "Sending DocSyncReply event to host channel");
@@ -161,12 +170,14 @@ impl TwoStreamRunner {
                 Some((peer_id, mut stream)) = self.se_request_streams.next() => {
                     let sem = self.semaphore.clone();
                     let event_tx = self.event_tx.clone();
+                    let max_msg_size = self.max_msg_size;
+                    let stream_read_timeout = self.stream_read_timeout;
                     tokio::spawn(async move {
                         let _permit = sem.acquire().await.expect("semaphore closed");
                         let mut buf = Vec::new();
                         let read_result = tokio::time::timeout(
-                            STREAM_READ_TIMEOUT,
-                            (&mut stream).take(MAX_MSG_SIZE).read_to_end(&mut buf),
+                            stream_read_timeout,
+                            (&mut stream).take(max_msg_size).read_to_end(&mut buf),
                         ).await;
                         match read_result {
                             Err(_) => {
@@ -205,12 +216,14 @@ impl TwoStreamRunner {
                 // Handle incoming SE response streams (replies to our SE pushes)
                 Some((peer_id, mut stream)) = self.se_response_streams.next() => {
                     let sem = self.semaphore.clone();
+                    let max_msg_size = self.max_msg_size;
+                    let stream_read_timeout = self.stream_read_timeout;
                     tokio::spawn(async move {
                         let _permit = sem.acquire().await.expect("semaphore closed");
                         let mut buf = Vec::new();
                         let read_result = tokio::time::timeout(
-                            STREAM_READ_TIMEOUT,
-                            (&mut stream).take(MAX_MSG_SIZE).read_to_end(&mut buf),
+                            stream_read_timeout,
+                            (&mut stream).take(max_msg_size).read_to_end(&mut buf),
                         ).await;
                         match read_result {
                             Err(_) => {
@@ -233,9 +246,11 @@ impl TwoStreamRunner {
                 Some((peer_id, stream)) = self.car_request_streams.next() => {
                     let event_tx = self.event_tx.clone();
                     let sem = self.semaphore.clone();
+                    let max_car_size = self.max_car_size;
+                    let stream_read_timeout = self.stream_read_timeout;
                     tokio::spawn(async move {
                         let _permit = sem.acquire().await.expect("semaphore closed");
-                        match TwoStreamHandler::handle_car_request_stream(peer_id, stream).await {
+                        match TwoStreamHandler::handle_car_request_stream(peer_id, stream, max_car_size, stream_read_timeout).await {
                             Ok(event) => {
                                 if event_tx.send(event).await.is_err() {
                                     tracing::warn!(peer_id = %peer_id, "Failed to send CAR request event");
@@ -251,9 +266,11 @@ impl TwoStreamRunner {
                 Some((peer_id, stream)) = self.car_response_streams.next() => {
                     let event_tx = self.event_tx.clone();
                     let sem = self.semaphore.clone();
+                    let max_car_size = self.max_car_size;
+                    let stream_read_timeout = self.stream_read_timeout;
                     tokio::spawn(async move {
                         let _permit = sem.acquire().await.expect("semaphore closed");
-                        match TwoStreamHandler::handle_car_response_stream(peer_id, stream).await {
+                        match TwoStreamHandler::handle_car_response_stream(peer_id, stream, max_car_size, stream_read_timeout).await {
                             Ok(event) => {
                                 if event_tx.send(event).await.is_err() {
                                     tracing::warn!(peer_id = %peer_id, "Failed to send CAR response event");

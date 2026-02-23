@@ -40,6 +40,20 @@ const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct P2PHostConfig {
     pub enable_pubsub: bool,
     pub enable_relay: bool,
+    /// Max protocol message size in bytes. Default: 16 MiB.
+    pub max_msg_size: u64,
+    /// Max CAR file size in bytes. Default: 64 MiB.
+    pub max_car_size: u64,
+    /// Stream read timeout in seconds. Default: 30.
+    pub stream_timeout: u64,
+    /// Max concurrent stream handler tasks. Default: 64.
+    pub max_p2p_tasks: usize,
+    /// Max established inbound connections. Default: 100.
+    pub max_connections_in: u32,
+    /// Max established outbound connections. Default: 400.
+    pub max_connections_out: u32,
+    /// Max connections per peer. Default: 4.
+    pub max_connections_per_peer: u32,
 }
 
 impl Default for P2PHostConfig {
@@ -47,6 +61,13 @@ impl Default for P2PHostConfig {
         Self {
             enable_pubsub: true,
             enable_relay: false,
+            max_msg_size: 16 * 1024 * 1024,
+            max_car_size: 64 * 1024 * 1024,
+            stream_timeout: 30,
+            max_p2p_tasks: 64,
+            max_connections_in: 100,
+            max_connections_out: 400,
+            max_connections_per_peer: 4,
         }
     }
 }
@@ -175,6 +196,7 @@ impl<S: Store> P2PHost<S> {
             keypair.clone(),
             bitswap_store,
             config.enable_pubsub,
+            &config,
         )
         .await
         .map_err(|e| Error::Behaviour(e.to_string()))?;
@@ -263,6 +285,10 @@ impl<S: Store> P2PHost<S> {
             car_request_streams,
             car_response_streams,
             two_stream_event_tx,
+            config.max_msg_size,
+            config.max_car_size,
+            config.stream_timeout,
+            config.max_p2p_tasks,
         );
         tokio::spawn(runner.run());
 

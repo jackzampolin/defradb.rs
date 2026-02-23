@@ -182,6 +182,7 @@ impl<S: Store> DefraBehaviour<S> {
         keypair: Keypair,
         bitswap_store: S,
         enable_pubsub: bool,
+        config: &super::P2PHostConfig,
     ) -> Result<Self, std::io::Error> {
         // Configure identify behaviour
         let identify_config =
@@ -251,13 +252,12 @@ impl<S: Store> DefraBehaviour<S> {
         // Configure stream behaviour for Go two-stream compatibility
         let stream = stream::Behaviour::new();
 
-        // Configure connection limits — matches Go DefraDB watermarks
         let limits = ConnectionLimits::default()
-            .with_max_pending_incoming(Some(100))
-            .with_max_pending_outgoing(Some(100))
-            .with_max_established_incoming(Some(100))
-            .with_max_established_outgoing(Some(400))
-            .with_max_established_per_peer(Some(4));
+            .with_max_pending_incoming(Some(config.max_connections_in))
+            .with_max_pending_outgoing(Some(config.max_connections_out))
+            .with_max_established_incoming(Some(config.max_connections_in))
+            .with_max_established_outgoing(Some(config.max_connections_out))
+            .with_max_established_per_peer(Some(config.max_connections_per_peer));
         let connection_limits = connection_limits::Behaviour::new(limits);
 
         Ok(Self {

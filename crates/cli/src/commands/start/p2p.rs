@@ -99,6 +99,13 @@ impl Node {
         let p2p_config = p2p::P2PHostConfig {
             enable_pubsub,
             enable_relay: config.net.relay_enabled,
+            max_msg_size: config.net.max_msg_size,
+            max_car_size: config.net.max_car_size,
+            stream_timeout: config.net.stream_timeout,
+            max_p2p_tasks: config.net.max_p2p_tasks,
+            max_connections_in: config.net.max_connections_in,
+            max_connections_out: config.net.max_connections_out,
+            max_connections_per_peer: config.net.max_connections_per_peer,
         };
         let (host, handle, events, _replicators) = match keypair {
             Some(kp) => p2p::P2PHost::with_keypair_and_config(kp, bitswap_store, p2p_config)

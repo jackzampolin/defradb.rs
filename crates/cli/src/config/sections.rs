@@ -128,6 +128,13 @@ pub struct DatastoreConfig {
     /// - `immediate`: fsync on every commit — safe against OS crashes
     #[serde(default)]
     pub durability: DurabilityMode,
+    /// Max DAG recursion depth for merge operations. Default: 1024.
+    #[serde(default = "default_max_merge_depth")]
+    pub max_merge_depth: usize,
+}
+
+fn default_max_merge_depth() -> usize {
+    1024
 }
 
 impl Default for DatastoreConfig {
@@ -142,6 +149,7 @@ impl Default for DatastoreConfig {
             no_signing: false,
             default_key_type: "secp256k1".to_string(),
             durability: DurabilityMode::default(),
+            max_merge_depth: default_max_merge_depth(),
         }
     }
 }
@@ -155,6 +163,49 @@ pub struct NetConfig {
     pub peers: Vec<String>,
     pub pubsub_enabled: bool,
     pub relay_enabled: bool,
+    /// Max P2P protocol message size in bytes. Default: 16 MiB.
+    #[serde(default = "default_max_msg_size")]
+    pub max_msg_size: u64,
+    /// Max P2P CAR file size in bytes. Default: 64 MiB.
+    #[serde(default = "default_max_car_size")]
+    pub max_car_size: u64,
+    /// P2P stream read timeout in seconds. Default: 30.
+    #[serde(default = "default_stream_timeout")]
+    pub stream_timeout: u64,
+    /// Max concurrent P2P stream handler tasks. Default: 64.
+    #[serde(default = "default_max_p2p_tasks")]
+    pub max_p2p_tasks: usize,
+    /// Max established inbound P2P connections. Default: 100.
+    #[serde(default = "default_max_connections_in")]
+    pub max_connections_in: u32,
+    /// Max established outbound P2P connections. Default: 400.
+    #[serde(default = "default_max_connections_out")]
+    pub max_connections_out: u32,
+    /// Max established connections per peer. Default: 4.
+    #[serde(default = "default_max_connections_per_peer")]
+    pub max_connections_per_peer: u32,
+}
+
+fn default_max_msg_size() -> u64 {
+    16 * 1024 * 1024
+}
+fn default_max_car_size() -> u64 {
+    64 * 1024 * 1024
+}
+fn default_stream_timeout() -> u64 {
+    30
+}
+fn default_max_p2p_tasks() -> usize {
+    64
+}
+fn default_max_connections_in() -> u32 {
+    100
+}
+fn default_max_connections_out() -> u32 {
+    400
+}
+fn default_max_connections_per_peer() -> u32 {
+    4
 }
 
 impl Default for NetConfig {
@@ -165,6 +216,13 @@ impl Default for NetConfig {
             peers: Vec::new(),
             pubsub_enabled: true,
             relay_enabled: false,
+            max_msg_size: default_max_msg_size(),
+            max_car_size: default_max_car_size(),
+            stream_timeout: default_stream_timeout(),
+            max_p2p_tasks: default_max_p2p_tasks(),
+            max_connections_in: default_max_connections_in(),
+            max_connections_out: default_max_connections_out(),
+            max_connections_per_peer: default_max_connections_per_peer(),
         }
     }
 }

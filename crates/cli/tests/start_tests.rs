@@ -33,6 +33,14 @@ fn default_start_args() -> StartArgs {
         max_backup_size: None,
         request_timeout: None,
         max_concurrent_requests: None,
+        max_msg_size: None,
+        max_car_size: None,
+        stream_timeout: None,
+        max_p2p_tasks: None,
+        max_connections_in: None,
+        max_connections_out: None,
+        max_connections_per_peer: None,
+        max_merge_depth: None,
     }
 }
 
@@ -100,11 +108,27 @@ fn test_apply_to_config_all_flags() {
         max_backup_size: Some(4096),
         request_timeout: Some(120),
         max_concurrent_requests: Some(500),
+        max_msg_size: Some(32 * 1024 * 1024),
+        max_car_size: Some(128 * 1024 * 1024),
+        stream_timeout: Some(60),
+        max_p2p_tasks: Some(128),
+        max_connections_in: Some(200),
+        max_connections_out: Some(800),
+        max_connections_per_peer: Some(8),
+        max_merge_depth: Some(2048),
     };
 
     let result = args.apply_to_config(&mut config);
     assert!(result.is_ok());
 
+    assert_eq!(config.net.max_msg_size, 32 * 1024 * 1024);
+    assert_eq!(config.net.max_car_size, 128 * 1024 * 1024);
+    assert_eq!(config.net.stream_timeout, 60);
+    assert_eq!(config.net.max_p2p_tasks, 128);
+    assert_eq!(config.net.max_connections_in, 200);
+    assert_eq!(config.net.max_connections_out, 800);
+    assert_eq!(config.net.max_connections_per_peer, 8);
+    assert_eq!(config.datastore.max_merge_depth, 2048);
     assert_eq!(config.api.max_body_size, 1024);
     assert_eq!(config.api.max_schema_size, 2048);
     assert_eq!(config.api.max_backup_size, 4096);
