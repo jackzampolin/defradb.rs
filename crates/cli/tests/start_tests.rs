@@ -28,6 +28,11 @@ fn default_start_args() -> StartArgs {
         signer_orbis_endpoint: None,
         signer_orbis_ring_id: None,
         signer_orbis_derivation: None,
+        max_body_size: None,
+        max_schema_size: None,
+        max_backup_size: None,
+        request_timeout: None,
+        max_concurrent_requests: None,
     }
 }
 
@@ -90,11 +95,21 @@ fn test_apply_to_config_all_flags() {
         signer_orbis_endpoint: None,
         signer_orbis_ring_id: None,
         signer_orbis_derivation: None,
+        max_body_size: Some(1024),
+        max_schema_size: Some(2048),
+        max_backup_size: Some(4096),
+        request_timeout: Some(120),
+        max_concurrent_requests: Some(500),
     };
 
     let result = args.apply_to_config(&mut config);
     assert!(result.is_ok());
 
+    assert_eq!(config.api.max_body_size, 1024);
+    assert_eq!(config.api.max_schema_size, 2048);
+    assert_eq!(config.api.max_backup_size, 4096);
+    assert_eq!(config.api.request_timeout, 120);
+    assert_eq!(config.api.max_concurrent_requests, 500);
     assert_eq!(config.net.peers, vec!["peer1", "peer2"]);
     assert_eq!(config.datastore.max_txn_retries, 10);
     assert_eq!(config.datastore.store, DatastoreType::Memory);

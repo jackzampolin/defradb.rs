@@ -48,6 +48,29 @@ pub struct ApiConfig {
     pub pubkey_path: String,
     #[serde(default)]
     pub privkey_path: String,
+    /// Max request body size in bytes (0 = unlimited). Default: 0 (no limit).
+    #[serde(default)]
+    pub max_body_size: u64,
+    /// Max schema request body size in bytes (0 = unlimited). Default: 0 (no limit).
+    #[serde(default)]
+    pub max_schema_size: u64,
+    /// Max backup import body size in bytes (0 = unlimited). Default: 0 (no limit).
+    #[serde(default)]
+    pub max_backup_size: u64,
+    /// Request timeout in seconds (0 = no timeout). Default: 300 (5 minutes).
+    #[serde(default = "default_request_timeout")]
+    pub request_timeout: u64,
+    /// Max concurrent requests (0 = unlimited). Default: 1000.
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent_requests: usize,
+}
+
+fn default_request_timeout() -> u64 {
+    300
+}
+
+fn default_max_concurrent() -> usize {
+    1000
 }
 
 impl Default for ApiConfig {
@@ -57,6 +80,11 @@ impl Default for ApiConfig {
             allowed_origins: Vec::new(),
             pubkey_path: String::new(),
             privkey_path: String::new(),
+            max_body_size: 0,
+            max_schema_size: 0,
+            max_backup_size: 0,
+            request_timeout: default_request_timeout(),
+            max_concurrent_requests: default_max_concurrent(),
         }
     }
 }

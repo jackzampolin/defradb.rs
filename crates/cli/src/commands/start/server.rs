@@ -127,6 +127,11 @@ impl Node {
             let server_config = defra_http::ServerConfig {
                 address: api_address,
                 allowed_origins: config.api.allowed_origins.clone(),
+                max_body_size: config.api.max_body_size,
+                max_schema_size: config.api.max_schema_size,
+                max_backup_size: config.api.max_backup_size,
+                request_timeout: config.api.request_timeout,
+                max_concurrent_requests: config.api.max_concurrent_requests,
             };
 
             // Create auto-committing fetcher for non-transactional queries

@@ -34,6 +34,16 @@ pub struct ServerConfig {
     /// Allowed CORS origins. Supports "*" for all origins (matches Go DefraDB).
     /// Empty vec = no CORS headers (browsers block cross-origin requests).
     pub allowed_origins: Vec<String>,
+    /// Max request body size in bytes (0 = unlimited).
+    pub max_body_size: u64,
+    /// Max schema request body size in bytes (0 = unlimited).
+    pub max_schema_size: u64,
+    /// Max backup import body size in bytes (0 = unlimited).
+    pub max_backup_size: u64,
+    /// Request timeout in seconds (0 = no timeout).
+    pub request_timeout: u64,
+    /// Max concurrent requests (0 = unlimited).
+    pub max_concurrent_requests: usize,
 }
 
 impl Default for ServerConfig {
@@ -41,6 +51,11 @@ impl Default for ServerConfig {
         Self {
             address: SocketAddr::from(([127, 0, 0, 1], 9181)),
             allowed_origins: Vec::new(),
+            max_body_size: 0,
+            max_schema_size: 0,
+            max_backup_size: 0,
+            request_timeout: 300,
+            max_concurrent_requests: 1000,
         }
     }
 }
@@ -403,24 +418,45 @@ impl Server {
         }
         builder = builder.with_dev_mode(self.dev_mode);
         let state = builder.build();
-        let router = create_router_with_state(state);
+        let mut router = create_router_with_state(state);
 
-        let middleware = ServiceBuilder::new()
-            .layer(HandleErrorLayer::new(|err: axum::BoxError| async move {
-                if err.is::<tower::timeout::error::Elapsed>() {
-                    StatusCode::REQUEST_TIMEOUT
-                } else {
-                    StatusCode::SERVICE_UNAVAILABLE
-                }
-            }))
-            .layer(TimeoutLayer::new(Duration::from_secs(60)))
-            .layer(ConcurrencyLimitLayer::new(1000))
-            .layer(TraceLayer::new_for_http())
-            .layer(cors);
+        // Apply global body limit (0 = unlimited)
+        if self.config.max_body_size > 0 {
+            router = router.layer(DefaultBodyLimit::max(self.config.max_body_size as usize));
+        } else {
+            router = router.layer(DefaultBodyLimit::disable());
+        }
 
-        Ok(router
-            .layer(DefaultBodyLimit::max(256 * 1024)) // 256KB global default
-            .layer(middleware))
+        // Apply concurrency limit (0 = unlimited)
+        if self.config.max_concurrent_requests > 0 {
+            router = router.layer(ConcurrencyLimitLayer::new(
+                self.config.max_concurrent_requests,
+            ));
+        }
+
+        // Apply request timeout (0 = no timeout)
+        // HandleErrorLayer must wrap TimeoutLayer via ServiceBuilder so the
+        // timeout error is converted to an HTTP status before reaching Router
+        // (which requires Error: Into<Infallible>).
+        if self.config.request_timeout > 0 {
+            router = router.layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(|err: axum::BoxError| async move {
+                        if err.is::<tower::timeout::error::Elapsed>() {
+                            StatusCode::REQUEST_TIMEOUT
+                        } else {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        }
+                    }))
+                    .layer(TimeoutLayer::new(Duration::from_secs(
+                        self.config.request_timeout,
+                    ))),
+            );
+        }
+
+        router = router.layer(TraceLayer::new_for_http()).layer(cors);
+
+        Ok(router)
     }
 
     /// Build CORS layer matching Go DefraDB behavior.

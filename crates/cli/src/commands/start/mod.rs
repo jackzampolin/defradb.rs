@@ -119,6 +119,26 @@ pub struct StartArgs {
     /// Orbis derivation label for the ring's derived key (e.g. "x-archive")
     #[arg(long)]
     pub signer_orbis_derivation: Option<String>,
+
+    /// Max request body size in bytes (0 = unlimited, default)
+    #[arg(long)]
+    pub max_body_size: Option<u64>,
+
+    /// Max schema request body size in bytes (0 = unlimited, default)
+    #[arg(long)]
+    pub max_schema_size: Option<u64>,
+
+    /// Max backup import body size in bytes (0 = unlimited, default)
+    #[arg(long)]
+    pub max_backup_size: Option<u64>,
+
+    /// Request timeout in seconds (0 = no timeout, default: 300)
+    #[arg(long)]
+    pub request_timeout: Option<u64>,
+
+    /// Max concurrent HTTP requests (0 = unlimited, default: 1000)
+    #[arg(long)]
+    pub max_concurrent_requests: Option<usize>,
 }
 
 impl StartArgs {
@@ -310,6 +330,21 @@ impl StartArgs {
                     )));
                 }
             };
+        }
+        if let Some(size) = self.max_body_size {
+            config.api.max_body_size = size;
+        }
+        if let Some(size) = self.max_schema_size {
+            config.api.max_schema_size = size;
+        }
+        if let Some(size) = self.max_backup_size {
+            config.api.max_backup_size = size;
+        }
+        if let Some(timeout) = self.request_timeout {
+            config.api.request_timeout = timeout;
+        }
+        if let Some(max) = self.max_concurrent_requests {
+            config.api.max_concurrent_requests = max;
         }
         Ok(())
     }
