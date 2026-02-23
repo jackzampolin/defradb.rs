@@ -14,7 +14,7 @@ cargo test -p integration-test --test p2p
 | `trust_boundary.rs` | 3 | ACP enforcement at P2P trust boundaries |
 | `replication.rs` | 3 | Basic replication lifecycle |
 | `replication_advanced.rs` | 3 | Multi-collection and bidirectional replication |
-| `stubs.rs` | 9 | Stress tests (ignored by default) |
+| `resilience.rs` | 9 | P2P stress tests (ignored by default) |
 
 **22 active tests, 11 ignored.**
 

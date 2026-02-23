@@ -6,8 +6,8 @@ mod management;
 mod replication;
 #[path = "p2p/replication_advanced.rs"]
 mod replication_advanced;
-#[path = "p2p/stubs.rs"]
-mod stubs;
+#[path = "p2p/resilience.rs"]
+mod resilience;
 #[path = "p2p/sync.rs"]
 mod sync;
 #[path = "p2p/trust_boundary.rs"]

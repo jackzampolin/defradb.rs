@@ -8,8 +8,8 @@ mod lens;
 mod lens_persistence;
 #[path = "query/sdl_generate.rs"]
 mod sdl_generate;
-#[path = "query/stubs.rs"]
-mod stubs;
+#[path = "query/limits.rs"]
+mod limits;
 #[path = "query/subscription_docid.rs"]
 mod subscription_docid;
 #[path = "query/view.rs"]

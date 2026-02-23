@@ -6,5 +6,5 @@ mod p2p_acp;
 mod policy_lifecycle;
 #[path = "sourcehub/smoke.rs"]
 mod smoke;
-#[path = "sourcehub/stubs.rs"]
-mod stubs;
+#[path = "sourcehub/resilience.rs"]
+mod resilience;

@@ -14,6 +14,6 @@ Tests start their own SourceHub devnet automatically via `TestCluster::builder()
 | `compartments.rs` | 1 | Multi-identity compartment isolation (5 identities, 3 policies) |
 | `policy_lifecycle.rs` | 1 | Full on-chain policy lifecycle: create, verify, grant, revoke |
 | `p2p_acp.rs` | 1 | ACP enforcement with SourceHub backend over P2P replication |
-| `stubs.rs` | 4 | Circuit breaker fail-closed, policy cache with grant/revoke cycle |
+| `resilience.rs` | 4 | Circuit breaker fail-closed, policy cache with grant/revoke cycle |
 
 **6 active, 2 ignored** (Go+SourceHub not yet supported).

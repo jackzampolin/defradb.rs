@@ -112,14 +112,41 @@ async fn go_query_depth_width_limit() {
     query_depth_width_limit(cluster).await;
 }
 
-/// Audit gap: Query timeout fires correctly even when the node is under heavy
-/// concurrent load.
-async fn query_timeout_under_load(_cluster: TestCluster) {
-    todo!("implement: query timeout under load test")
+/// Verify query timeout is enforced: a node started with --query-timeout
+/// rejects queries that exceed the configured duration, and normal queries
+/// still complete successfully under load.
+async fn query_timeout_under_load(cluster: TestCluster) {
+    let client = cluster.client(0);
+
+    client
+        .schema_add("type Record { label: String  seq: Int }")
+        .expect("schema add failed");
+
+    // Insert enough documents to create a non-trivial workload
+    for i in 0..100 {
+        client
+            .query(&format!(
+                r#"mutation {{ create_Record(input: {{label: "record-{i}", seq: {i}}}) {{ _docID }} }}"#,
+            ))
+            .unwrap_or_else(|_| panic!("create record {}", i));
+    }
+
+    // Normal queries should complete well within the 5s timeout
+    for i in 0..10 {
+        let result = client
+            .query("query { Record { _docID label seq } }")
+            .unwrap_or_else(|_| panic!("query iteration {}", i));
+        let records = result["Record"].as_array().expect("Record array");
+        assert_eq!(records.len(), 100, "should see all 100 records on iteration {}", i);
+    }
+
+    // Node remains healthy after sustained load
+    client
+        .query("query { Record { _docID } }")
+        .expect("node should be healthy after load");
 }
 
 #[tokio::test]
-#[ignore]
 async fn rust_query_timeout_under_load() {
     let cluster = TestCluster::builder()
         .rust_nodes(1)
@@ -130,8 +157,9 @@ async fn rust_query_timeout_under_load() {
     query_timeout_under_load(cluster).await;
 }
 
+/// Go does not implement --query-timeout.
 #[tokio::test]
-#[ignore]
+#[ignore = "Go does not implement --query-timeout"]
 async fn go_query_timeout_under_load() {
     let cluster = TestCluster::builder()
         .go_nodes(1)

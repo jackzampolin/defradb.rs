@@ -4,5 +4,5 @@ mod acp;
 mod block_verify;
 #[path = "encryption/index.rs"]
 mod index;
-#[path = "encryption/stubs.rs"]
-mod stubs;
+#[path = "encryption/key_management.rs"]
+mod key_management;

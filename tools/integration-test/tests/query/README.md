@@ -15,17 +15,16 @@ cargo test -p integration-test --test query
 | `index_management.rs` | 2 | Index create/drop/list |
 | `explain_nested.rs` | 2 | Explain output for nested queries |
 | `subscription_docid.rs` | 6 | GraphQL subscriptions with docID filtering |
-| `stubs.rs` | 4 | Depth/width limits, timeout under load |
+| `limits.rs` | 4 | Depth/width limits, timeout under load |
 
-**21 active tests, 3 ignored.**
+**22 active tests, 2 ignored.**
 
 ### Ignored
 
 | Test | Reason |
 |------|--------|
 | `go_query_depth_width_limit` | Go does not implement query depth/width limits |
-| `rust_query_timeout_under_load` | Stub: test body not yet implemented |
-| `go_query_timeout_under_load` | Stub: test body not yet implemented |
+| `go_query_timeout_under_load` | Go does not implement --query-timeout |
 
 ### Note on lens tests
 
