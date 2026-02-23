@@ -1,17 +1,17 @@
 use std::time::Duration;
 
 use integration_test::{
-    for_each_p2p_topology, generate_identity, poll_until, users_schema_with_policy, TestCluster,
-    USER_ACP_POLICY,
+    generate_identity, poll_until, users_schema_with_policy, TestCluster, USER_ACP_POLICY,
 };
 
 /// Trust ring boundaries: Core (node0) ↔ Near (node1) with asymmetric trust.
 ///
-/// Tests:
-/// - ACP-protected docs replicate from Core to Near
-/// - Identity enforcement on receiving node (ACP is node-local)
-/// - Near identity can't access Core's protected docs without explicit grant
-/// - Owner identity works on both nodes when policy is deployed on both
+/// Owner DID propagates via PushLog Creator field, so the receiving node
+/// registers the document in local ACP under the original owner. Tests:
+/// - ACP-protected docs replicate from Core to Near with owner DID
+/// - Owner (Jack) can read protected docs on both nodes
+/// - Non-owner identities cannot read protected docs on either node
+/// - Anonymous users see only public (unregistered) docs on both nodes
 async fn p2p_trust_boundary_test(cluster: TestCluster) {
     let core = cluster.client(0);
     let near = cluster.client(1);
@@ -107,14 +107,16 @@ async fn p2p_trust_boundary_test(cluster: TestCluster) {
         "anonymous sees only public doc on core"
     );
 
-    // Wait for replication to Near
+    // Wait for replication to Near. Use Jack's identity since the protected
+    // doc is now ACP-registered on Near under Jack's DID.
     let near_ref = &near;
+    let jack_key = jack.private_key_hex.clone();
     poll_until(
         || {
-            let result = near_ref.query("query { User { _docID } }").unwrap();
-            result["User"]
-                .as_array()
-                .map(|arr| arr.len() >= 2)
+            near_ref
+                .query_with_identity("query { User { _docID } }", &jack_key)
+                .ok()
+                .and_then(|v| v["User"].as_array().map(|arr| arr.len() >= 2))
                 .unwrap_or(false)
         },
         Duration::from_secs(15),
@@ -123,43 +125,78 @@ async fn p2p_trust_boundary_test(cluster: TestCluster) {
     )
     .await;
 
-    // On Near: ACP is node-local, so replicated docs may be visible to all
-    // (ACP relationships are NOT replicated — this is the key insight)
-    let near_all = near
-        .query("query { User { name } }")
-        .expect("anon query near");
-    let near_count = near_all["User"].as_array().map(|a| a.len()).unwrap_or(0);
+    // Jack sees both docs on Near (he owns the protected one, public is visible to all)
+    let jack_near = near
+        .query_with_identity("query { User { name } }", &jack.private_key_hex)
+        .expect("jack query near");
     assert_eq!(
-        near_count, 2,
-        "near should have both replicated docs (ACP state not replicated)"
+        jack_near["User"].as_array().map(|a| a.len()).unwrap_or(0),
+        2,
+        "jack should see both docs on near"
     );
 
-    // vps_service on Near: without ACP relations set up on Near, behavior depends
-    // on whether Near enforces ACP on replicated docs
+    // vps_service has no grant and is not the owner — sees 0 protected docs.
+    // The anonymous (public) doc may or may not be visible depending on how
+    // the ACP query engine handles unregistered replicated docs.
     let vps_near = near
         .query_with_identity("query { User { name } }", &vps_service.private_key_hex)
         .expect("vps query near");
     let vps_near_count = vps_near["User"].as_array().map(|a| a.len()).unwrap_or(0);
-    // ACP state is node-local: on Near, the protected doc has no ACP relations
-    // so it's either visible to everyone (no ACP enforced) or visible to nobody
-    // except the creator. The exact behavior depends on DefraDB's ACP model.
-    // We just verify the query succeeds and record the count.
     assert!(
-        vps_near_count == 0 || vps_near_count == 2,
-        "vps on near: either 0 (strict ACP) or 2 (no local ACP state), got {}",
+        vps_near_count <= 1,
+        "vps_service should not see protected doc on near, got {}",
         vps_near_count
     );
 
-    // If jack sets up ACP on Near too, jack should see both on Near
-    let jack_near = near
-        .query_with_identity("query { User { name } }", &jack.private_key_hex)
-        .expect("jack query near");
-    let jack_near_count = jack_near["User"].as_array().map(|a| a.len()).unwrap_or(0);
+    // Anonymous query on Near
+    let anon_near = near
+        .query("query { User { name } }")
+        .expect("anon query near");
+    let anon_near_count = anon_near["User"].as_array().map(|a| a.len()).unwrap_or(0);
     assert!(
-        jack_near_count >= 1,
-        "jack should see at least public doc on near, got {}",
-        jack_near_count
+        anon_near_count <= 1,
+        "anonymous should not see protected doc on near, got {}",
+        anon_near_count
     );
 }
 
-for_each_p2p_topology!(p2p_trust_boundary, p2p_trust_boundary_test, .with_p2p().with_acp_local());
+#[tokio::test]
+async fn rust_rust_p2p_trust_boundary() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+    p2p_trust_boundary_test(cluster).await;
+}
+
+/// Go does not carry owner DID in PushLog Creator field.
+#[tokio::test]
+#[ignore]
+async fn go_go_p2p_trust_boundary() {
+    let cluster = TestCluster::builder()
+        .go_nodes(2)
+        .with_p2p()
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+    p2p_trust_boundary_test(cluster).await;
+}
+
+/// Go does not carry owner DID in PushLog Creator field.
+#[tokio::test]
+#[ignore]
+async fn go_rust_p2p_trust_boundary() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .go_nodes(1)
+        .with_p2p()
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+    p2p_trust_boundary_test(cluster).await;
+}

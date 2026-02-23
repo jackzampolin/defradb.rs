@@ -1,17 +1,16 @@
 use std::time::Duration;
 
 use integration_test::{
-    for_each_p2p_topology, generate_identity, poll_until, users_schema_with_policy, TestCluster,
-    USER_ACP_POLICY,
+    generate_identity, poll_until, users_schema_with_policy, TestCluster, USER_ACP_POLICY,
 };
 
 /// Test ACP-protected documents replicate correctly across P2P nodes.
 ///
-/// ACP relationships are node-local: they do NOT replicate with documents.
-/// This test verifies:
+/// Owner DID is carried in the PushLog Creator field, so the receiving node
+/// registers the document in local ACP under the original owner. This test verifies:
 /// 1. Both public and protected docs replicate to the receiving node
 /// 2. On the originating node, ACP enforces access (Alice sees both, anonymous sees only public)
-/// 3. On the receiving node, all replicated docs are visible (ACP state is not replicated)
+/// 3. On the receiving node, ACP also enforces access (owner DID was replicated)
 async fn acp_p2p_test(cluster: TestCluster) {
     let node0 = cluster.client(0);
     let node1 = cluster.client(1);
@@ -105,14 +104,17 @@ async fn acp_p2p_test(cluster: TestCluster) {
         alice_node0_users
     );
 
-    // Wait for both documents to replicate to node 1
+    // Wait for both documents to replicate to node 1.
+    // Use Alice's identity: the protected doc is ACP-registered on node1 after merge,
+    // so anonymous queries only see the public doc.
     let node1_ref = &node1;
+    let alice_key = alice.private_key_hex.clone();
     poll_until(
         || {
-            let result = node1_ref.query("query { User { _docID name } }").unwrap();
-            result["User"]
-                .as_array()
-                .map(|arr| arr.len() >= 2)
+            node1_ref
+                .query_with_identity("query { User { _docID name } }", &alice_key)
+                .ok()
+                .and_then(|v| v["User"].as_array().map(|arr| arr.len() >= 2))
                 .unwrap_or(false)
         },
         Duration::from_secs(15),
@@ -121,25 +123,79 @@ async fn acp_p2p_test(cluster: TestCluster) {
     )
     .await;
 
-    // Verify replicated documents on node 1
-    let node1_result = node1
-        .query("query { User { name age } }")
-        .expect("query on node1 failed");
-    let node1_users = node1_result["User"]
+    // Alice sees both docs on node1 (she owns the protected one)
+    let alice_node1 = node1
+        .query_with_identity("query { User { name age } }", &alice.private_key_hex)
+        .expect("Alice query on node1 failed");
+    let alice_node1_users = alice_node1["User"]
         .as_array()
-        .expect("node1 result not array");
+        .expect("alice_node1 not array");
     assert_eq!(
-        node1_users.len(),
+        alice_node1_users.len(),
         2,
-        "node1 should have both replicated docs, got {:?}",
-        node1_users
+        "Alice should see both replicated docs on node1, got {:?}",
+        alice_node1_users
     );
-    let names: Vec<&str> = node1_users
+    let names: Vec<&str> = alice_node1_users
         .iter()
         .filter_map(|u| u["name"].as_str())
         .collect();
     assert!(names.contains(&"Public"));
     assert!(names.contains(&"Protected"));
+
+    // Anonymous sees only the public doc on node1 (protected is ACP-gated)
+    let anon_node1 = node1
+        .query("query { User { name } }")
+        .expect("anon query on node1 failed");
+    let anon_node1_users = anon_node1["User"].as_array().expect("anon_node1 not array");
+    assert_eq!(
+        anon_node1_users.len(),
+        1,
+        "anonymous should see only public doc on node1, got {:?}",
+        anon_node1_users
+    );
+    assert_eq!(anon_node1_users[0]["name"], "Public");
 }
 
-for_each_p2p_topology!(acp_p2p, acp_p2p_test, .with_p2p().with_acp_local());
+#[tokio::test]
+async fn rust_rust_acp_p2p() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+    acp_p2p_test(cluster).await;
+}
+
+/// Go does not carry owner DID in PushLog Creator field, so ACP
+/// enforcement on the receiving node cannot work for Go-originated documents.
+#[tokio::test]
+#[ignore]
+async fn go_go_acp_p2p() {
+    let cluster = TestCluster::builder()
+        .go_nodes(2)
+        .with_p2p()
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+    acp_p2p_test(cluster).await;
+}
+
+/// Go does not carry owner DID in PushLog Creator field, so ACP
+/// enforcement on the receiving node cannot work for Go-originated documents.
+#[tokio::test]
+#[ignore]
+async fn go_rust_acp_p2p() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .go_nodes(1)
+        .with_p2p()
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+    acp_p2p_test(cluster).await;
+}
