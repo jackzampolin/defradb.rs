@@ -11,7 +11,7 @@ use document::Document;
 use identity::Did;
 use serde_json::Value as JsonValue;
 
-use crate::error::{QueryError, Result};
+use crate::error::Result;
 use crate::mapper::{Requestable, Select};
 use crate::txn::TransactionRegistry;
 
@@ -395,13 +395,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         select: &Select,
         caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
-        // When ACP is configured, commits queries require authentication.
-        // This prevents unauthenticated access to commit history.
-        if self.acp.is_some() && caller_identity.is_none() {
-            return Err(QueryError::PermissionDenied(
-                "authentication required for _commits queries when ACP is enabled".to_string(),
-            ));
-        }
         use crate::fetcher::CommitsQueryOptions;
         use crate::mapper::{AggregateType, OrderDirection};
 

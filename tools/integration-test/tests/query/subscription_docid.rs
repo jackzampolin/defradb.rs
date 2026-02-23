@@ -214,9 +214,7 @@ async fn commit_subscription_docid_filter_test(cluster: TestCluster) {
     }
 }
 
-/// Rust _commits subscription with docID filter does not fire events.
 #[tokio::test]
-#[ignore]
 async fn rust_commit_subscription_docid_filter() {
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
     commit_subscription_docid_filter_test(cluster).await;

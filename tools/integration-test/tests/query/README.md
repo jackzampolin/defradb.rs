@@ -17,7 +17,7 @@ cargo test -p integration-test --test query
 | `subscription_docid.rs` | 6 | GraphQL subscriptions with docID filtering |
 | `stubs.rs` | 4 | Depth/width limits, timeout under load |
 
-**20 active tests, 4 ignored.**
+**21 active tests, 3 ignored.**
 
 ### Ignored
 
@@ -26,7 +26,6 @@ cargo test -p integration-test --test query
 | `go_query_depth_width_limit` | Go does not implement query depth/width limits |
 | `rust_query_timeout_under_load` | Blocked: TestCluster doesn't expose `--query-timeout` |
 | `go_query_timeout_under_load` | Same as above |
-| `rust_commit_subscription_docid_filter` | Rust `_commits` subscription with docID filter doesn't fire events |
 
 ### Note on lens tests
 
