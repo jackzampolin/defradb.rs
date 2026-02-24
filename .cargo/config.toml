@@ -1,3 +1,6 @@
+[net]
+git-fetch-with-cli = true
+
 [build]
 # Use all available cores
 jobs = 16
