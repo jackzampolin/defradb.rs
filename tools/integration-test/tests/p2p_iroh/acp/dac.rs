@@ -273,12 +273,13 @@ async fn replicator_permissioned_local() {
         )
         .expect("create John");
 
-    // Doc replicates to node1 (local ACP state does NOT replicate)
+    // Doc replicates to node1 (ACP is registered during merge, so poll with owner identity)
     let node1_ref = &node1;
+    let id_key_clone = id_key.to_string();
     poll_until(
         || {
             let r = node1_ref
-                .query("query { Users { name age } }")
+                .query_with_identity("query { Users { name age } }", &id_key_clone)
                 .unwrap_or_default();
             r["Users"]
                 .as_array()

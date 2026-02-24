@@ -22,10 +22,10 @@ pub fn endpoint_id_to_peer_id(id: &EndpointId) -> PeerId {
 
 /// Connection info for a connected peer.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ConnectionInfo {
     pub endpoint_id: EndpointId,
     pub remote_addr: Option<SocketAddr>,
+    pub active_connections: u32,
 }
 
 /// Tracks connected peers and their connection info.
@@ -39,21 +39,50 @@ impl PeerMap {
         Self::default()
     }
 
-    pub fn insert(&mut self, id: EndpointId, info: ConnectionInfo) {
-        self.connections.insert(id, info);
+    /// Increment connection count for a peer. Returns `true` if this is the
+    /// first connection (0 -> 1), meaning PeerConnected should be emitted.
+    pub fn increment_connections(
+        &mut self,
+        id: EndpointId,
+        remote_addr: Option<SocketAddr>,
+    ) -> bool {
+        if let Some(info) = self.connections.get_mut(&id) {
+            info.active_connections += 1;
+            if let Some(addr) = remote_addr {
+                info.remote_addr = Some(addr);
+            }
+            false
+        } else {
+            self.connections.insert(
+                id,
+                ConnectionInfo {
+                    endpoint_id: id,
+                    remote_addr,
+                    active_connections: 1,
+                },
+            );
+            true
+        }
     }
 
-    #[allow(dead_code)]
-    pub fn remove(&mut self, id: &EndpointId) -> Option<ConnectionInfo> {
-        self.connections.remove(id)
+    /// Decrement connection count for a peer. Returns `true` if the count
+    /// reached zero (fully disconnected), meaning PeerDisconnected should be emitted.
+    pub fn decrement_connections(&mut self, id: &EndpointId) -> bool {
+        if let Some(info) = self.connections.get_mut(id) {
+            info.active_connections = info.active_connections.saturating_sub(1);
+            if info.active_connections == 0 {
+                self.connections.remove(id);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     }
 
     pub fn get(&self, id: &EndpointId) -> Option<&ConnectionInfo> {
         self.connections.get(id)
-    }
-
-    pub fn contains(&self, id: &EndpointId) -> bool {
-        self.connections.contains_key(id)
     }
 
     pub fn connected_peers(&self) -> Vec<PeerId> {

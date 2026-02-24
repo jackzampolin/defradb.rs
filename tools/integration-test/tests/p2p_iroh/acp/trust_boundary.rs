@@ -162,12 +162,14 @@ async fn iroh_trust_boundary() {
         "anonymous should only see Public Info on core"
     );
 
-    // Wait for replication to Near
+    // Wait for replication to Near. Poll with Jack's identity since ACP is
+    // registered during merge and anonymous can't see protected docs.
     let near_ref = &near;
+    let jack_key_clone = jack.private_key_hex.clone();
     poll_until(
         || {
             let result = near_ref
-                .query("query { User { _docID } }")
+                .query_with_identity("query { User { _docID } }", &jack_key_clone)
                 .unwrap_or_default();
             result["User"]
                 .as_array()
@@ -180,43 +182,8 @@ async fn iroh_trust_boundary() {
     )
     .await;
 
-    // On Near: ACP state is node-local, both replicated docs visible to anonymous
-    let near_all = near
-        .query("query { User { name } }")
-        .expect("anon query near");
-    let near_names: Vec<&str> = near_all["User"]
-        .as_array()
-        .expect("near result not array")
-        .iter()
-        .filter_map(|u| u["name"].as_str())
-        .collect();
-    assert_eq!(
-        near_names.len(),
-        2,
-        "near should have both replicated docs (ACP state not replicated), got {:?}",
-        near_names
-    );
-    assert!(
-        near_names.contains(&"Core Secret"),
-        "near should have Core Secret doc"
-    );
-    assert!(
-        near_names.contains(&"Public Info"),
-        "near should have Public Info doc"
-    );
-
-    // vps_service on Near: ACP relationships don't replicate, so all docs visible
-    let vps_near = near
-        .query_with_identity("query { User { name } }", &vps_service.private_key_hex)
-        .expect("vps query near");
-    let vps_near_count = vps_near["User"].as_array().map(|a| a.len()).unwrap_or(0);
-    assert_eq!(
-        vps_near_count, 2,
-        "vps on near should see all docs (no local ACP state), got {}",
-        vps_near_count
-    );
-
-    // Jack on Near: ACP relationships don't replicate, sees all docs
+    // On Near: ACP IS registered during merge.
+    // Jack (owner) sees both docs: his protected doc + public doc = 2
     let jack_near = near
         .query_with_identity("query { User { name } }", &jack.private_key_hex)
         .expect("jack query near");
@@ -229,7 +196,7 @@ async fn iroh_trust_boundary() {
     assert_eq!(
         jack_near_names.len(),
         2,
-        "jack should see both docs on near (ACP not replicated), got {:?}",
+        "jack should see both docs on near, got {:?}",
         jack_near_names
     );
     assert!(
@@ -239,5 +206,37 @@ async fn iroh_trust_boundary() {
     assert!(
         jack_near_names.contains(&"Public Info"),
         "jack should see Public Info on near"
+    );
+
+    // vps_service on Near: not the owner, sees only public doc
+    let vps_near = near
+        .query_with_identity("query { User { name } }", &vps_service.private_key_hex)
+        .expect("vps query near");
+    let vps_near_count = vps_near["User"].as_array().map(|a| a.len()).unwrap_or(0);
+    assert_eq!(
+        vps_near_count, 1,
+        "vps on near should see only public doc (ACP registered during merge), got {}",
+        vps_near_count
+    );
+
+    // Anonymous on Near: sees only public doc
+    let anon_near = near
+        .query("query { User { name } }")
+        .expect("anon query near");
+    let anon_near_names: Vec<&str> = anon_near["User"]
+        .as_array()
+        .expect("anon near result not array")
+        .iter()
+        .filter_map(|u| u["name"].as_str())
+        .collect();
+    assert_eq!(
+        anon_near_names.len(),
+        1,
+        "anonymous should see only public doc on near, got {:?}",
+        anon_near_names
+    );
+    assert_eq!(
+        anon_near_names[0], "Public Info",
+        "anonymous should only see Public Info on near"
     );
 }

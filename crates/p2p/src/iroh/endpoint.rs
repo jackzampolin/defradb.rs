@@ -6,6 +6,7 @@
 //! - Commands from the `IrohTransport` facade
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use iroh::endpoint::Connection;
@@ -21,7 +22,7 @@ use crate::transport::{MessageId, PeerAddr, PeerId, TransportEvent};
 use crate::QueryId;
 
 use super::command::IrohCommand;
-use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, ConnectionInfo, PeerMap};
+use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, PeerMap};
 use super::protocols;
 
 /// Handle to a gossip topic subscription.
@@ -109,7 +110,7 @@ async fn run_event_loop(
     mut command_rx: mpsc::Receiver<IrohCommand>,
     event_tx: mpsc::Sender<TransportEvent>,
 ) {
-    let mut peer_map = PeerMap::new();
+    let peer_map = Arc::new(parking_lot::Mutex::new(PeerMap::new()));
     let mut subscriptions: HashMap<String, TopicSubscription> = HashMap::new();
     let mut replicators: HashMap<String, ReplicatorInfo> = HashMap::new();
     let mut active_syncs: HashMap<u64, ActiveSync> = HashMap::new();
@@ -134,7 +135,7 @@ async fn run_event_loop(
                         handle_incoming(
                             incoming,
                             &gossip,
-                            &mut peer_map,
+                            &peer_map,
                             &subscriptions,
                             &event_tx,
                         ).await;
@@ -147,7 +148,7 @@ async fn run_event_loop(
                     cmd,
                     &endpoint,
                     &gossip,
-                    &mut peer_map,
+                    &peer_map,
                     &mut subscriptions,
                     &mut replicators,
                     &mut active_syncs,
@@ -177,7 +178,7 @@ async fn run_event_loop(
 async fn handle_incoming(
     incoming: iroh::endpoint::Incoming,
     gossip: &Gossip,
-    peer_map: &mut PeerMap,
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
     subscriptions: &HashMap<String, TopicSubscription>,
     event_tx: &mpsc::Sender<TransportEvent>,
 ) {
@@ -208,14 +209,7 @@ async fn handle_incoming(
 
     let remote_id = connection.remote_id();
 
-    let is_new = !peer_map.contains(&remote_id);
-    peer_map.insert(
-        remote_id,
-        ConnectionInfo {
-            endpoint_id: remote_id,
-            remote_addr: None,
-        },
-    );
+    let is_new = peer_map.lock().increment_connections(remote_id, None);
 
     if is_new
         && event_tx
@@ -234,19 +228,21 @@ async fn handle_incoming(
 
     // Spawn handler for this connection's streams
     let event_tx = event_tx.clone();
+    let peer_map = Arc::clone(peer_map);
     tokio::spawn(async move {
-        handle_connection_streams(connection, remote_id, conn_alpn, event_tx).await;
+        handle_connection_streams(connection, remote_id, conn_alpn, event_tx, peer_map).await;
     });
 }
 
 /// Process streams on an accepted connection, dispatching by ALPN.
 ///
-/// Emits `PeerDisconnected` when the connection closes.
+/// Emits `PeerDisconnected` only when the last connection for this peer closes.
 async fn handle_connection_streams(
     connection: Connection,
     remote_id: EndpointId,
     alpn: Vec<u8>,
     event_tx: mpsc::Sender<TransportEvent>,
+    peer_map: Arc<parking_lot::Mutex<PeerMap>>,
 ) {
     let peer_id = endpoint_id_to_peer_id(&remote_id);
 
@@ -261,13 +257,17 @@ async fn handle_connection_streams(
         });
     }
 
-    debug!(peer_id = %peer_id, "Connection closed");
-    if event_tx
-        .send(TransportEvent::PeerDisconnected(peer_id))
-        .await
-        .is_err()
-    {
-        debug!("Event channel closed, cannot emit PeerDisconnected");
+    let fully_disconnected = peer_map.lock().decrement_connections(&remote_id);
+    debug!(peer_id = %peer_id, fully_disconnected, "Connection closed");
+
+    if fully_disconnected {
+        if event_tx
+            .send(TransportEvent::PeerDisconnected(peer_id))
+            .await
+            .is_err()
+        {
+            debug!("Event channel closed, cannot emit PeerDisconnected");
+        }
     }
 }
 
@@ -408,7 +408,7 @@ async fn handle_command(
     cmd: IrohCommand,
     endpoint: &Endpoint,
     gossip: &Gossip,
-    peer_map: &mut PeerMap,
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
     subscriptions: &mut HashMap<String, TopicSubscription>,
     replicators: &mut HashMap<String, ReplicatorInfo>,
     active_syncs: &mut HashMap<u64, ActiveSync>,
@@ -430,7 +430,7 @@ async fn handle_command(
             let _ = reply.send(Ok(()));
         }
         IrohCommand::ConnectedPeers { reply } => {
-            let _ = reply.send(Ok(peer_map.connected_peers()));
+            let _ = reply.send(Ok(peer_map.lock().connected_peers()));
         }
         IrohCommand::ListenAddresses { reply } => {
             let addr = endpoint.addr();
@@ -446,7 +446,7 @@ async fn handle_command(
             let _ = reply.send(Ok(addrs));
         }
         IrohCommand::PeerAddresses { reply } => {
-            let _ = reply.send(Ok(peer_map.peer_addresses()));
+            let _ = reply.send(Ok(peer_map.lock().peer_addresses()));
         }
         IrohCommand::Subscribe { topic, reply } => {
             let result = handle_subscribe(gossip, subscriptions, peer_map, topic, event_tx).await;
@@ -485,10 +485,7 @@ async fn handle_command(
             request,
             reply,
         } => {
-            let direct_addr: Option<std::net::SocketAddr> = parse_endpoint_id(&peer_id)
-                .ok()
-                .and_then(|id| peer_map.get(&id))
-                .and_then(|info| info.remote_addr);
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
             let result = handle_request_response(
                 endpoint,
                 &peer_id,
@@ -766,7 +763,7 @@ async fn handle_command(
 /// Keeps the connection alive by spawning a stream handler task.
 async fn handle_dial(
     endpoint: &Endpoint,
-    peer_map: &mut PeerMap,
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
     subscriptions: &HashMap<String, TopicSubscription>,
     peer_id: &PeerId,
     addrs: Vec<PeerAddr>,
@@ -792,14 +789,9 @@ async fn handle_dial(
 
     let conn_alpn = connection.alpn().to_vec();
 
-    let is_new = !peer_map.contains(&endpoint_id);
-    peer_map.insert(
-        endpoint_id,
-        ConnectionInfo {
-            endpoint_id,
-            remote_addr: direct_addresses.first().copied(),
-        },
-    );
+    let is_new = peer_map
+        .lock()
+        .increment_connections(endpoint_id, direct_addresses.first().copied());
 
     if is_new
         && event_tx
@@ -816,8 +808,9 @@ async fn handle_dial(
 
     // Keep connection alive by spawning a handler for incoming streams.
     let event_tx = event_tx.clone();
+    let peer_map = Arc::clone(peer_map);
     tokio::spawn(async move {
-        handle_connection_streams(connection, endpoint_id, conn_alpn, event_tx).await;
+        handle_connection_streams(connection, endpoint_id, conn_alpn, event_tx, peer_map).await;
     });
 
     Ok(())
@@ -831,7 +824,7 @@ async fn handle_dial(
 async fn handle_subscribe(
     gossip: &Gossip,
     subscriptions: &mut HashMap<String, TopicSubscription>,
-    peer_map: &PeerMap,
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
     topic: crate::topics::DefraTopic,
     event_tx: &mpsc::Sender<TransportEvent>,
 ) -> crate::error::Result<bool> {
@@ -843,7 +836,7 @@ async fn handle_subscribe(
     }
 
     let topic_id = topic_to_id(&topic_str);
-    let initial_peers: Vec<iroh::EndpointId> = peer_map.endpoint_ids().collect();
+    let initial_peers: Vec<iroh::EndpointId> = peer_map.lock().endpoint_ids().collect();
     let gossip_topic = gossip
         .subscribe(topic_id, initial_peers)
         .await
@@ -1014,11 +1007,13 @@ where
 }
 
 /// Look up the cached direct socket address for a peer from the peer map.
-fn peer_direct_addr(peer_map: &PeerMap, peer_id: &PeerId) -> Option<std::net::SocketAddr> {
-    parse_endpoint_id(peer_id)
-        .ok()
-        .and_then(|id| peer_map.get(&id))
-        .and_then(|info| info.remote_addr)
+fn peer_direct_addr(
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    peer_id: &PeerId,
+) -> Option<std::net::SocketAddr> {
+    let id = parse_endpoint_id(peer_id).ok()?;
+    let map = peer_map.lock();
+    map.get(&id).and_then(|info| info.remote_addr)
 }
 
 /// Send a message without expecting a response.

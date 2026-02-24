@@ -129,12 +129,15 @@ async fn iroh_acp_replication() {
         "Alice should see Protected doc on node0"
     );
 
-    // Wait for both documents to replicate to node1
+    // Wait for both documents to replicate to node1.
+    // Poll with Alice's identity: she sees her protected doc + public doc = 2.
+    // (Anonymous can't see protected docs — ACP is registered during merge.)
     let node1_ref = &node1;
+    let alice_key_clone = alice.private_key_hex.clone();
     poll_until(
         || {
             let result = node1_ref
-                .query("query { User { _docID name } }")
+                .query_with_identity("query { User { _docID name } }", &alice_key_clone)
                 .unwrap_or_default();
             result["User"]
                 .as_array()
@@ -147,18 +150,18 @@ async fn iroh_acp_replication() {
     )
     .await;
 
-    // Verify replicated documents on node1 with full field checks
-    let node1_result = node1
-        .query("query { User { name age } }")
-        .expect("query on node1");
-    let node1_users = node1_result["User"].as_array().expect("not array");
+    // Verify: Alice sees both docs on node1
+    let alice_node1 = node1
+        .query_with_identity("query { User { name age } }", &alice.private_key_hex)
+        .expect("Alice query on node1");
+    let alice_node1_users = alice_node1["User"].as_array().expect("not array");
     assert_eq!(
-        node1_users.len(),
+        alice_node1_users.len(),
         2,
-        "node1 should have exactly 2 replicated docs, got {:?}",
-        node1_users
+        "Alice should see 2 docs on node1, got {:?}",
+        alice_node1_users
     );
-    let names: Vec<&str> = node1_users
+    let names: Vec<&str> = alice_node1_users
         .iter()
         .filter_map(|u| u["name"].as_str())
         .collect();
@@ -174,13 +177,26 @@ async fn iroh_acp_replication() {
     );
 
     // Verify field values replicated correctly
-    for user in node1_users {
+    for user in alice_node1_users {
         match user["name"].as_str().unwrap() {
             "Public" => assert_eq!(user["age"], 99, "Public doc age mismatch"),
             "Protected" => assert_eq!(user["age"], 42, "Protected doc age mismatch"),
             other => panic!("unexpected user name on node1: {}", other),
         }
     }
+
+    // Anonymous on node1 sees only the public doc (ACP registered during merge)
+    let anon_node1 = node1
+        .query("query { User { name } }")
+        .expect("anon query on node1");
+    let anon_node1_users = anon_node1["User"].as_array().expect("not array");
+    assert_eq!(
+        anon_node1_users.len(),
+        1,
+        "anonymous should see only public doc on node1, got {:?}",
+        anon_node1_users
+    );
+    assert_eq!(anon_node1_users[0]["name"], "Public");
 }
 
 /// Multiple identities with ACP: owner vs non-owner access over iroh.
@@ -333,48 +349,111 @@ async fn iroh_acp_multi_identity() {
         "anonymous should only see public doc"
     );
 
-    // Wait for all 3 docs to replicate to node1
+    // Wait for Alice's docs to replicate (she sees her doc + public = 2).
+    // ACP is registered during merge, so anonymous can't see protected docs.
     let node1_ref = &node1;
+    let alice_key_clone = alice.private_key_hex.clone();
     poll_until(
         || {
             let result = node1_ref
-                .query("query { User { _docID } }")
+                .query_with_identity("query { User { _docID } }", &alice_key_clone)
                 .unwrap_or_default();
             result["User"]
                 .as_array()
-                .map(|arr| arr.len() == 3)
+                .map(|arr| arr.len() == 2)
                 .unwrap_or(false)
         },
         Duration::from_secs(15),
         Duration::from_millis(200),
-        "3 docs did not replicate to node1",
+        "Alice's docs did not replicate to node1",
     )
     .await;
 
-    // On node1: ACP state is not replicated, so all docs should be visible
-    let node1_all = node1.query("query { User { name } }").expect("node1 query");
-    let node1_names: Vec<&str> = node1_all["User"]
+    // Also wait for Bob's doc to replicate (he sees his doc + public = 2).
+    let bob_key_clone = bob.private_key_hex.clone();
+    poll_until(
+        || {
+            let result = node1_ref
+                .query_with_identity("query { User { _docID } }", &bob_key_clone)
+                .unwrap_or_default();
+            result["User"]
+                .as_array()
+                .map(|arr| arr.len() == 2)
+                .unwrap_or(false)
+        },
+        Duration::from_secs(15),
+        Duration::from_millis(200),
+        "Bob's docs did not replicate to node1",
+    )
+    .await;
+
+    // On node1: ACP IS registered during merge.
+    // Alice sees her doc + public = 2
+    let node1_alice = node1
+        .query_with_identity("query { User { name } }", &alice.private_key_hex)
+        .expect("Alice query on node1");
+    let node1_alice_names: Vec<&str> = node1_alice["User"]
         .as_array()
-        .expect("node1 result not array")
+        .expect("Alice node1 result not array")
         .iter()
         .filter_map(|u| u["name"].as_str())
         .collect();
     assert_eq!(
-        node1_names.len(),
-        3,
-        "node1 should have all 3 replicated docs (ACP not replicated), got {:?}",
-        node1_names
+        node1_alice_names.len(),
+        2,
+        "Alice should see 2 docs on node1, got {:?}",
+        node1_alice_names
     );
     assert!(
-        node1_names.contains(&"Alice Secret"),
-        "node1 should have Alice's doc"
+        node1_alice_names.contains(&"Alice Secret"),
+        "Alice should see her own doc on node1"
     );
     assert!(
-        node1_names.contains(&"Bob Secret"),
-        "node1 should have Bob's doc"
+        node1_alice_names.contains(&"Public"),
+        "Alice should see public doc on node1"
+    );
+
+    // Bob sees his doc + public = 2
+    let node1_bob = node1
+        .query_with_identity("query { User { name } }", &bob.private_key_hex)
+        .expect("Bob query on node1");
+    let node1_bob_names: Vec<&str> = node1_bob["User"]
+        .as_array()
+        .expect("Bob node1 result not array")
+        .iter()
+        .filter_map(|u| u["name"].as_str())
+        .collect();
+    assert_eq!(
+        node1_bob_names.len(),
+        2,
+        "Bob should see 2 docs on node1, got {:?}",
+        node1_bob_names
     );
     assert!(
-        node1_names.contains(&"Public"),
-        "node1 should have public doc"
+        node1_bob_names.contains(&"Bob Secret"),
+        "Bob should see his own doc on node1"
+    );
+    assert!(
+        node1_bob_names.contains(&"Public"),
+        "Bob should see public doc on node1"
+    );
+
+    // Anonymous sees only public doc on node1
+    let node1_anon = node1.query("query { User { name } }").expect("anon query on node1");
+    let node1_anon_names: Vec<&str> = node1_anon["User"]
+        .as_array()
+        .expect("anon node1 result not array")
+        .iter()
+        .filter_map(|u| u["name"].as_str())
+        .collect();
+    assert_eq!(
+        node1_anon_names.len(),
+        1,
+        "anonymous should see only public doc on node1, got {:?}",
+        node1_anon_names
+    );
+    assert_eq!(
+        node1_anon_names[0], "Public",
+        "anonymous should only see public doc on node1"
     );
 }
