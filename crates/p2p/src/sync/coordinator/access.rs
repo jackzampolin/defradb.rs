@@ -24,7 +24,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// ACP still applies independently at merge time.
     ///
     /// Uses string-based registry lookup, supporting both libp2p and iroh peer IDs.
-    pub(super) async fn check_access_str(&self, peer_id_str: &str, collection_id: &str) -> Result<()> {
+    pub(super) async fn check_access_str(
+        &self,
+        peer_id_str: &str,
+        collection_id: &str,
+    ) -> Result<()> {
         if self.access_mode.is_open() {
             return Ok(());
         }

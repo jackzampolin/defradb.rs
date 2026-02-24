@@ -74,9 +74,7 @@ impl TestCluster {
 
     /// Return the private key hex used for a specific node (if any).
     pub fn node_identity(&self, index: usize) -> Option<&str> {
-        self.node_identities
-            .get(index)
-            .and_then(|id| id.as_deref())
+        self.node_identities.get(index).and_then(|id| id.as_deref())
     }
 
     pub fn builder() -> super::builder::TestClusterBuilder {

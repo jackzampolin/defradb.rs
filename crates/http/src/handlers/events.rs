@@ -23,9 +23,10 @@ pub async fn events_sse(
     State(state): State<AppState>,
     Query(params): Query<EventsQuery>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, HttpError> {
-    let event_bus = state.event_bus.as_ref().ok_or_else(|| {
-        HttpError::ServiceUnavailable("event bus is not available".to_string())
-    })?;
+    let event_bus = state
+        .event_bus
+        .as_ref()
+        .ok_or_else(|| HttpError::ServiceUnavailable("event bus is not available".to_string()))?;
 
     let filter = match params.event.as_deref() {
         Some("topic-peer-event") => vec![events::EventName::TopicPeerEvent],

@@ -351,5 +351,9 @@ pub fn convert_host_event(event: crate::host::HostEvent) -> TransportEvent {
             root_cid,
             car_data,
         },
+        HostEvent::SEArtifactsReceived { peer_id, data } => TransportEvent::SEArtifactsReceived {
+            peer_id: PeerId::from(peer_id),
+            data,
+        },
     }
 }

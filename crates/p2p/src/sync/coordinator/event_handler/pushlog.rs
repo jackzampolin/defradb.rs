@@ -24,7 +24,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         );
 
         // Access control check
-        if let Err(e) = self.check_access_str(peer_id.as_str(), &request.collection_id).await {
+        if let Err(e) = self
+            .check_access_str(peer_id.as_str(), &request.collection_id)
+            .await
+        {
             tracing::warn!(
                 peer_id = %peer_id,
                 collection_id = %request.collection_id,
@@ -119,7 +122,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         );
 
         // Access control check
-        if let Err(e) = self.check_access_str(peer_id.as_str(), &request.collection_id).await {
+        if let Err(e) = self
+            .check_access_str(peer_id.as_str(), &request.collection_id)
+            .await
+        {
             tracing::warn!(
                 peer_id = %peer_id,
                 collection_id = %request.collection_id,

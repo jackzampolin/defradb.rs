@@ -4,7 +4,7 @@ mod compartments;
 mod p2p_acp;
 #[path = "sourcehub/policy_lifecycle.rs"]
 mod policy_lifecycle;
-#[path = "sourcehub/smoke.rs"]
-mod smoke;
 #[path = "sourcehub/resilience.rs"]
 mod resilience;
+#[path = "sourcehub/smoke.rs"]
+mod smoke;

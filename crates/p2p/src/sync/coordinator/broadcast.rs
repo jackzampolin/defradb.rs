@@ -38,7 +38,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         creator_override: Option<&str>,
     ) -> Result<BroadcastResult> {
         let creator = creator_override.unwrap_or(&self.local_peer_id);
-        let broadcast = Broadcaster::<T>::create_broadcast(cid, block, doc_id, collection_id, creator);
+        let broadcast =
+            Broadcaster::<T>::create_broadcast(cid, block, doc_id, collection_id, creator);
         self.broadcaster.broadcast_update(&broadcast).await
     }
 

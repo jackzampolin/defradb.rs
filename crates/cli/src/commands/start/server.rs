@@ -267,7 +267,8 @@ impl Node {
                     let merge_handler =
                         Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
                     let merge_handler_for_syncer = merge_handler.clone();
-                    let merge_handler_for_acp: Arc<db::DbMergeHandler<_, _>> = merge_handler.clone();
+                    let merge_handler_for_acp: Arc<db::DbMergeHandler<_, _>> =
+                        merge_handler.clone();
 
                     // Spawn replication loop
                     let coordinator_for_replication = coordinator.clone();
@@ -310,23 +311,27 @@ impl Node {
                                 }
                                 p2p::TransportEvent::PeerSubscribed { peer_id, topic } => {
                                     info!("Peer subscribed (iroh): {} on {}", peer_id, topic);
-                                    event_bus_for_handler.publish(events::Message::topic_peer_event(
-                                        events::TopicPeerEventData {
-                                            peer_id: peer_id.to_string(),
-                                            topic: topic.clone(),
-                                            event_type: "JOINED".to_string(),
-                                        },
-                                    ));
+                                    event_bus_for_handler.publish(
+                                        events::Message::topic_peer_event(
+                                            events::TopicPeerEventData {
+                                                peer_id: peer_id.to_string(),
+                                                topic: topic.clone(),
+                                                event_type: "JOINED".to_string(),
+                                            },
+                                        ),
+                                    );
                                 }
                                 p2p::TransportEvent::PeerUnsubscribed { peer_id, topic } => {
                                     info!("Peer unsubscribed (iroh): {} on {}", peer_id, topic);
-                                    event_bus_for_handler.publish(events::Message::topic_peer_event(
-                                        events::TopicPeerEventData {
-                                            peer_id: peer_id.to_string(),
-                                            topic: topic.clone(),
-                                            event_type: "LEFT".to_string(),
-                                        },
-                                    ));
+                                    event_bus_for_handler.publish(
+                                        events::Message::topic_peer_event(
+                                            events::TopicPeerEventData {
+                                                peer_id: peer_id.to_string(),
+                                                topic: topic.clone(),
+                                                event_type: "LEFT".to_string(),
+                                            },
+                                        ),
+                                    );
                                 }
                                 _ => {}
                             }

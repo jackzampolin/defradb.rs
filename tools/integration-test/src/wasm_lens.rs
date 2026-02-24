@@ -77,10 +77,7 @@ impl WasmLens {
         };
 
         let lens_dir = Self::lens_source_dir();
-        let sources = [
-            lens_dir.join("Cargo.toml"),
-            lens_dir.join("src/lib.rs"),
-        ];
+        let sources = [lens_dir.join("Cargo.toml"), lens_dir.join("src/lib.rs")];
 
         for src in &sources {
             if let Ok(meta) = std::fs::metadata(src) {
@@ -102,13 +99,11 @@ impl WasmLens {
 
     /// Path to the lens source directory.
     fn lens_source_dir() -> PathBuf {
-        workspace_root()
-            .join("tools/integration-test/test-lenses/set_default")
+        workspace_root().join("tools/integration-test/test-lenses/set_default")
     }
 
     /// Path to the compiled .wasm file.
     fn wasm_file_path() -> PathBuf {
-        Self::lens_source_dir()
-            .join("target/wasm32-unknown-unknown/debug/set_default_lens.wasm")
+        Self::lens_source_dir().join("target/wasm32-unknown-unknown/debug/set_default_lens.wasm")
     }
 }

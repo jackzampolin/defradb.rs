@@ -114,7 +114,7 @@ fn newest_source_mtime() -> Result<std::time::SystemTime> {
                 walk(&entry.path(), newest)?;
             } else if ft.is_file() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "rs" || e == "toml") {
+                if path.extension().is_some_and(|e| e == "rs" || e == "toml") {
                     if let Ok(meta) = std::fs::metadata(&path) {
                         if let Ok(mtime) = meta.modified() {
                             if mtime > *newest {

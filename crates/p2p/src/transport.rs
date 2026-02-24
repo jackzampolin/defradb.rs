@@ -207,6 +207,10 @@ pub enum TransportEvent {
         root_cid: Cid,
         car_data: Vec<u8>,
     },
+    SEArtifactsReceived {
+        peer_id: PeerId,
+        data: Vec<u8>,
+    },
     Listening(PeerAddr),
 }
 

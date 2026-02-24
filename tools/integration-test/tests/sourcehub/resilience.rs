@@ -133,9 +133,7 @@ async fn rust_policy_cache_ttl_expiry() {
             &alice.private_key_hex,
         )
         .expect("create doc");
-    let doc_id = data["create_User"][0]["_docID"]
-        .as_str()
-        .expect("_docID");
+    let doc_id = data["create_User"][0]["_docID"].as_str().expect("_docID");
 
     // Multiple rapid ACP operations — all should use cached policy
     for i in 0..5 {
