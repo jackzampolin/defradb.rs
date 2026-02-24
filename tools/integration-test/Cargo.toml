@@ -63,3 +63,4 @@ identity = { path = "../../crates/identity" }
 crypto = { path = "../../crates/crypto" }
 base64 = "0.22"
 hex = "0.4"
+serial_test = "3"

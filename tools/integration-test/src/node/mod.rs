@@ -28,6 +28,8 @@ pub struct NodeConfig {
     pub development: bool,
     pub store: Option<String>,
     pub query_timeout: Option<u64>,
+    pub p2p_transport: Option<String>,
+    pub keyring_enabled: bool,
 }
 
 /// Trait for building a DefraDB command from config.

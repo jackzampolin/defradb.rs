@@ -767,6 +767,22 @@ impl DefraClient {
         serde_json::from_str(&out).context("failed to parse view_add output")
     }
 
+    /// Add a view with a lens transform CID via `client view add --query --sdl --lens-cid`.
+    pub fn view_add_with_lens(&self, gql_query: &str, sdl: &str, lens_cid: &str) -> Result<Value> {
+        let out = self.exec(&[
+            "client",
+            "view",
+            "add",
+            "--query",
+            gql_query,
+            "--sdl",
+            sdl,
+            "--lens-cid",
+            lens_cid,
+        ])?;
+        serde_json::from_str(&out).context("failed to parse view_add output")
+    }
+
     /// Refresh views via `client view refresh`.
     pub fn view_refresh(&self, name: Option<&str>) -> Result<Value> {
         let out = if let Some(n) = name {
@@ -809,6 +825,39 @@ impl DefraClient {
         // Fall back to CLI describe (Go CLI returns full CollectionVersion JSON)
         let out = self.exec(&["client", "collection", "describe", "--name", name])?;
         serde_json::from_str(&out).context("failed to parse collection describe output")
+    }
+
+    /// Get collection version info using an identity (for NAC-enabled nodes).
+    pub fn collection_describe_version_with_identity(
+        &self,
+        name: &str,
+        hex_key: &str,
+    ) -> Result<Value> {
+        let out = self.exec_with_identity(
+            hex_key,
+            &["client", "collection", "describe", "--name", name],
+        )?;
+        // Try to parse as JSON; the CLI should return a CollectionVersion object
+        let val: Value =
+            serde_json::from_str(&out).context("failed to parse collection describe output")?;
+        // If the CLI returns a flat object without CollectionID, try the REST endpoint with auth
+        if val.get("CollectionID").is_none() && val.get("VersionID").is_none() {
+            // Try REST endpoint — if NAC requires auth, we can't pass it via curl easily,
+            // so synthesize the fields from the CLI output if possible
+            if let Some(id) = val.get("ID").and_then(|v| v.as_str()) {
+                let mut out_val = val.clone();
+                out_val["CollectionID"] = serde_json::Value::String(id.to_string());
+                if let Some(ver) = val
+                    .get("SchemaVersionID")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| val.get("VersionID").and_then(|v| v.as_str()))
+                {
+                    out_val["VersionID"] = serde_json::Value::String(ver.to_string());
+                }
+                return Ok(out_val);
+            }
+        }
+        Ok(val)
     }
 
     // -- Identity-aware variants for NAC testing --

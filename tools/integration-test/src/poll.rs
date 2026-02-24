@@ -17,3 +17,20 @@ where
         tokio::time::sleep(interval).await;
     }
 }
+
+/// Like `poll_until` but returns `false` instead of panicking on timeout.
+pub async fn try_poll_until<F>(mut f: F, timeout: Duration, interval: Duration) -> bool
+where
+    F: FnMut() -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        if f() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(interval).await;
+    }
+}

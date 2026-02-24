@@ -1,3 +1,4 @@
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -14,6 +15,9 @@ use crate::sourcehub::SourceHubNode;
 use super::health::health_check_all;
 use super::runtime::{NodeKind, RunningNode, TestCluster};
 
+static RUST_BUILD_DONE: OnceLock<()> = OnceLock::new();
+static IROH_BUILD_DONE: OnceLock<()> = OnceLock::new();
+
 pub struct TestClusterBuilder {
     rust_nodes: usize,
     go_nodes: usize,
@@ -22,6 +26,7 @@ pub struct TestClusterBuilder {
     build_rust: bool,
     acp_document_type: Option<String>,
     node_identity: Option<String>,
+    node_identities: Vec<Option<String>>,
     encryption_enabled: bool,
     signing_enabled: bool,
     nac_enabled: bool,
@@ -29,6 +34,8 @@ pub struct TestClusterBuilder {
     development: bool,
     store: Option<String>,
     query_timeout: Option<u64>,
+    p2p_transport: Option<String>,
+    keyring_enabled: bool,
 }
 
 impl Default for TestClusterBuilder {
@@ -47,6 +54,7 @@ impl TestClusterBuilder {
             build_rust: true,
             acp_document_type: None,
             node_identity: None,
+            node_identities: Vec::new(),
             encryption_enabled: false,
             signing_enabled: false,
             nac_enabled: false,
@@ -54,6 +62,8 @@ impl TestClusterBuilder {
             development: false,
             store: None,
             query_timeout: None,
+            p2p_transport: None,
+            keyring_enabled: false,
         }
     }
 
@@ -89,6 +99,15 @@ impl TestClusterBuilder {
 
     pub fn with_identity(mut self, key: impl Into<String>) -> Self {
         self.node_identity = Some(key.into());
+        self
+    }
+
+    /// Set identity for a specific node (by index). Overrides cluster-wide identity.
+    pub fn with_node_identity(mut self, index: usize, key: impl Into<String>) -> Self {
+        while self.node_identities.len() <= index {
+            self.node_identities.push(None);
+        }
+        self.node_identities[index] = Some(key.into());
         self
     }
 
@@ -128,13 +147,34 @@ impl TestClusterBuilder {
         self
     }
 
+    pub fn with_keyring(mut self) -> Self {
+        self.keyring_enabled = true;
+        self
+    }
+
+    pub fn with_iroh_transport(mut self) -> Self {
+        self.p2p_transport = Some("iroh".to_string());
+        self.p2p_enabled = true;
+        self
+    }
+
     pub async fn build(mut self) -> Result<TestCluster> {
         let total = self.rust_nodes + self.go_nodes;
         anyhow::ensure!(total > 0, "must have at least one node");
 
-        // Build Rust binary if needed
+        // Build Rust binary if needed (once per process, even under parallel tests)
+        let is_iroh = self.p2p_transport.as_deref() == Some("iroh");
         if self.rust_nodes > 0 && self.build_rust {
-            RustNode::build().context("failed to build Rust binary")?;
+            if is_iroh {
+                IROH_BUILD_DONE.get_or_init(|| {
+                    RustNode::build_with_features(&["iroh"])
+                        .expect("failed to build Rust binary with iroh feature");
+                });
+            } else {
+                RUST_BUILD_DONE.get_or_init(|| {
+                    RustNode::build().expect("failed to build Rust binary");
+                });
+            }
         }
 
         // Check Go binary if needed
@@ -155,7 +195,7 @@ impl TestClusterBuilder {
         }
 
         // Allocate ports for all nodes
-        let all_ports = allocate_node_ports(total)?;
+        let mut all_ports = allocate_node_ports(total)?;
 
         // Create run directory
         let run_dir = TestRunDir::new()?;
@@ -197,9 +237,17 @@ impl TestClusterBuilder {
         let mut nodes = Vec::with_capacity(total);
 
         // Spawn Rust nodes
-        for (i, ports) in all_ports.iter().enumerate().take(self.rust_nodes) {
+        for (i, ports) in all_ports.iter_mut().enumerate().take(self.rust_nodes) {
             let name = format!("rust-{}", i);
             let node = RustNode::from_workspace();
+            let identity = self
+                .node_identities
+                .get(i)
+                .cloned()
+                .flatten()
+                .or_else(|| self.node_identity.clone());
+            // Release port guards right before spawn so the child process can bind
+            ports.release();
             let running = spawn_node(
                 &name,
                 &node,
@@ -208,9 +256,13 @@ impl TestClusterBuilder {
                 self.p2p_enabled,
                 &run_dir,
                 self.health_timeout,
-                patterns::rust_patterns(),
+                if is_iroh {
+                    patterns::iroh_patterns()
+                } else {
+                    patterns::rust_patterns()
+                },
                 self.acp_document_type.clone(),
-                self.node_identity.clone(),
+                identity,
                 self.encryption_enabled,
                 self.signing_enabled,
                 self.nac_enabled,
@@ -221,6 +273,8 @@ impl TestClusterBuilder {
                 self.store.clone(),
                 self.query_timeout,
                 NodeKind::Rust,
+                self.p2p_transport.clone(),
+                self.keyring_enabled,
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -228,9 +282,18 @@ impl TestClusterBuilder {
         }
 
         // Spawn Go nodes
-        for (i, ports) in all_ports.iter().skip(self.rust_nodes).enumerate() {
+        for (i, ports) in all_ports.iter_mut().skip(self.rust_nodes).enumerate() {
             let name = format!("go-{}", i);
             let node = GoNode::from_path();
+            let go_index = self.rust_nodes + i;
+            let identity = self
+                .node_identities
+                .get(go_index)
+                .cloned()
+                .flatten()
+                .or_else(|| self.node_identity.clone());
+            // Release port guards right before spawn so the child process can bind
+            ports.release();
             let running = spawn_node(
                 &name,
                 &node,
@@ -241,7 +304,7 @@ impl TestClusterBuilder {
                 self.health_timeout,
                 patterns::go_patterns(),
                 self.acp_document_type.clone(),
-                self.node_identity.clone(),
+                identity,
                 self.encryption_enabled,
                 self.signing_enabled,
                 self.nac_enabled,
@@ -252,6 +315,8 @@ impl TestClusterBuilder {
                 self.store.clone(),
                 self.query_timeout,
                 NodeKind::Go,
+                None,
+                false,
             )
             .await
             .with_context(|| format!("failed to start {}", name))?;
@@ -265,10 +330,22 @@ impl TestClusterBuilder {
             .await
             .context("health check failed")?;
 
+        // Collect effective per-node identities for test assertions
+        let effective_identities: Vec<Option<String>> = (0..total)
+            .map(|i| {
+                self.node_identities
+                    .get(i)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| self.node_identity.clone())
+            })
+            .collect();
+
         Ok(TestCluster::new(
             nodes,
             run_dir,
             self.node_identity,
+            effective_identities,
             source_hub,
         ))
     }
@@ -296,6 +373,8 @@ async fn spawn_node(
     store: Option<String>,
     query_timeout: Option<u64>,
     kind: NodeKind,
+    p2p_transport: Option<String>,
+    keyring_enabled: bool,
 ) -> Result<RunningNode> {
     let node_dir = run_dir.node_dir(name)?;
     let log_dir = node_dir.join("logs");
@@ -305,13 +384,14 @@ async fn spawn_node(
     let http_addr = format!("127.0.0.1:{}", http_port);
     let api_url = format!("http://{}", http_addr);
 
+    let is_iroh = p2p_transport.as_deref() == Some("iroh");
     let config = NodeConfig {
         name: name.to_string(),
         rootdir: rootdir.clone(),
         log_dir: log_dir.clone(),
         http_addr: http_addr.clone(),
         p2p_enabled,
-        p2p_addr: if p2p_enabled {
+        p2p_addr: if p2p_enabled && !is_iroh {
             Some(format!("/ip4/127.0.0.1/tcp/{}", p2p_port))
         } else {
             None
@@ -328,6 +408,8 @@ async fn spawn_node(
         development,
         store,
         query_timeout,
+        p2p_transport,
+        keyring_enabled,
     };
 
     let cmd = node.command(&config);
