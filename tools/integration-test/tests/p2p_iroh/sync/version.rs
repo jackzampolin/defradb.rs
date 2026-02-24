@@ -331,6 +331,19 @@ fn require_lens_wasm() {
     );
 }
 
+/// Build a lens config JSON for the copy module using a file path.
+///
+/// Requires nodes to run with `--development` mode (which skips HTTP file-path validation).
+fn copy_lens_config(src: &str, dst: &str) -> String {
+    serde_json::json!({
+        "Lenses": [{
+            "Path": COPY_WASM_PATH,
+            "Arguments": {"src": src, "dst": dst}
+        }]
+    })
+    .to_string()
+}
+
 /// Port: TestSyncColVersion_WithView
 /// Sync a view (derived collection) version to a peer — arrives inactive.
 #[tokio::test]
@@ -341,6 +354,7 @@ async fn with_view() {
     let cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_iroh_transport()
+        .with_development()
         .build()
         .await
         .unwrap();
@@ -363,15 +377,7 @@ async fn with_view() {
         .expect("schema add node0");
 
     // Add copy lens on node0 (copies name → fullName)
-    let lens_config = format!(
-        r#"{{
-            "Lenses": [{{
-                "Path": "{}",
-                "Arguments": {{"src": "name", "dst": "fullName"}}
-            }}]
-        }}"#,
-        COPY_WASM_PATH
-    );
+    let lens_config = copy_lens_config("name", "fullName");
     let lens_result = node0.lens_add(&lens_config).expect("lens_add");
     let lens_cid = lens_result["lensId"]
         .as_str()
@@ -432,6 +438,7 @@ async fn with_view_activated_and_queried() {
     let cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_iroh_transport()
+        .with_development()
         .build()
         .await
         .unwrap();
@@ -457,15 +464,7 @@ async fn with_view_activated_and_queried() {
         .expect("schema add node1");
 
     // Add copy lens on node0
-    let lens_config = format!(
-        r#"{{
-            "Lenses": [{{
-                "Path": "{}",
-                "Arguments": {{"src": "name", "dst": "fullName"}}
-            }}]
-        }}"#,
-        COPY_WASM_PATH
-    );
+    let lens_config = copy_lens_config("name", "fullName");
     let lens_result = node0.lens_add(&lens_config).expect("lens_add");
     let lens_cid = lens_result["lensId"]
         .as_str()

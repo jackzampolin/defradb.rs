@@ -158,6 +158,20 @@ impl PeerStateTracker {
             .unwrap_or(false)
     }
 
+    /// Check if a peer is connected by string ID.
+    ///
+    /// Supports both libp2p and iroh peer IDs by scanning all connected peers
+    /// and comparing their string representation.
+    pub fn is_connected_str(&self, peer_id_str: &str) -> bool {
+        if let Ok(pid) = peer_id_str.parse::<PeerId>() {
+            return self.is_connected(&pid);
+        }
+        let peers = self.peers.read();
+        peers
+            .iter()
+            .any(|(pid, info)| info.connected && pid.to_string() == peer_id_str)
+    }
+
     /// Remove stale peer entries that have been disconnected longer than TTL.
     pub fn cleanup_stale(&self) {
         let mut peers = self.peers.write();

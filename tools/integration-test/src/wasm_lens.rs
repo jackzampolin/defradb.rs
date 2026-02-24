@@ -97,6 +97,11 @@ impl WasmLens {
         format!("file://{}", Self::wasm_file_path().display())
     }
 
+    /// Read the raw compiled WASM bytes.
+    pub fn module_bytes() -> Vec<u8> {
+        std::fs::read(Self::wasm_file_path()).expect("read WASM file")
+    }
+
     /// Path to the lens source directory.
     fn lens_source_dir() -> PathBuf {
         workspace_root().join("tools/integration-test/test-lenses/set_default")

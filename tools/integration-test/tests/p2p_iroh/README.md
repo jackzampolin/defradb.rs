@@ -7,19 +7,30 @@ cargo test -p integration-test --test p2p_iroh
 ```
 
 The CLI binary must be built with `--features iroh` for P2P transport tests.
-Single-node tests (signature verification, schema) work with the default build.
 
 ## Test Suites
 
-| Suite | Tests | Ignored | Description |
-|-------|-------|---------|-------------|
-| connection/ | 18 | 0 | Peer connectivity, smoke tests, signature verification |
-| sync/ | 25 | 0 | Document sync, branchable sync, version sync |
-| replication/ | 40 | 0 | Replicator lifecycle, persistence, filtering |
-| acp/ | 65 | 0 | Access control: local ACP, NAC, DAC |
-| peer/ | 43 | 16 | Peer events, subscriptions, create/update/delete |
-| schema/ | 32 | 27 | Encryption, schema migration |
-| **Total** | **223** | **43** | |
+| Suite | Tests | Pass | Fail | Ignored | Description |
+|-------|-------|------|------|---------|-------------|
+| connection/ | 18 | 18 | 0 | 0 | Peer connectivity, smoke tests, signature verification |
+| sync/ | 25 | 25 | 0 | 0 | Document sync, branchable sync, version sync with views |
+| replication/ | 40 | 40 | 0 | 0 | Replicator lifecycle, persistence, filtering |
+| peer/ | 43 | 42 | 0 | 1 | Peer events, subscriptions, create/update/delete |
+| schema/ | 32 | 25 | 0 | 7 | Encryption, schema migration with lens transforms |
+| acp/ | 65 | 53 | 12 | 0 | Access control: local ACP, NAC, DAC |
+| **Total** | **223** | **203** | **12** | **8** | |
+
+## Known Failures
+
+### ACP replication tests (12 tests)
+
+All 12 failures are in `acp::acp`, `acp::dac`, and `acp::trust_boundary`. They time
+out waiting for documents to replicate. Root cause: main's security audit added
+controlled-mode access checks (`check_access_str`) that use `PeerState.is_connected()`
+with libp2p PeerId keys. Iroh peer IDs are not registered in the libp2p-keyed
+peer state tracker, so connected iroh peers fail the access check in controlled mode.
+
+Tracked in issue #501 (make PeerState string-based).
 
 ## Running Individual Suites
 

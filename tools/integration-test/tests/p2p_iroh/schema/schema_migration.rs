@@ -44,10 +44,13 @@ const ADD_PHONE_PATCH: &str =
     r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"phone","Kind":11}}]"#;
 
 /// Set up a 2-node iroh cluster with schema deployed on both, connected with replicator.
+///
+/// Enables development mode so lens file-path loading works via HTTP API.
 async fn setup_migration_cluster(schema: &str) -> (TestCluster, String) {
     let cluster = TestCluster::builder()
         .rust_nodes(2)
         .with_iroh_transport()
+        .with_development()
         .build()
         .await
         .unwrap();
@@ -370,6 +373,9 @@ fn wasm_lens_path() -> String {
 }
 
 /// Build a lens config JSON for the set_default module.
+///
+/// Uses file path loading — requires nodes to run with `--development` mode
+/// (which skips HTTP file-path validation).
 fn set_default_lens_config(dst: &str, value: &Value) -> String {
     let path = wasm_lens_path();
     serde_json::json!({
