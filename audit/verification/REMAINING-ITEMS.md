@@ -1,26 +1,12 @@
 # Audit Verification: Remaining Items
 
-**Date**: 2026-02-23
+**Date**: 2026-02-24
 **Pass**: First verification re-audit (7 parallel streams)
 **Reports**: `audit/verification/stream-{01..07}-verification.md`
 
 ---
 
-## NOT FIXED (2 items)
-
-### 02-19: P2P Creator Identity from Metadata Not Signature
-- **Severity**: HIGH
-- **Location**: `crates/db/src/acp_merge_handler.rs:211-220`
-- **Issue**: AcpMergeHandler extracts `creator` from PushLog metadata (`metadata.creator`) -- a self-reported value. A compromised peer can sign the PushLog message with their own key while setting `Creator` to someone else's identity.
-- **Fix**: Derive creator from the block's embedded CRDT signature instead of PushLog metadata.
-- **Coupled with**: 02-20
-
-### 02-20: Block Verify Disconnected from Merge Path
-- **Severity**: HIGH
-- **Location**: `crates/db/src/block_verify.rs:15-112`
-- **Issue**: `verify_block_signature()` exists and works correctly but is only called from the HTTP `/api/v0/block/verify` endpoint. Not integrated into `AcpMergeHandler::handle_block()` or any P2P merge pipeline.
-- **Fix**: Call `verify_block_signature()` from the merge handler before processing blocks received via P2P.
-- **Coupled with**: 02-19
+## NOT FIXED (1 item)
 
 ### 07-22: wasmtime 27.0.0 CVEs
 - **Severity**: HIGH
@@ -51,9 +37,13 @@
 
 ---
 
-## QUICK WINS — DONE (commit a9454c38, 61879bb3)
+## FIXED — DONE
 
-All 4 quick wins implemented and tested:
+### Block signature verification in merge path (commit 96d3c835)
+- ~~02-19~~: `verify_block_signature()` now returns verified signer identity as `did:key:` DID. `BlockMetadata.verified_creator` populated after verification. `effective_creator()` prefers verified over self-reported `creator`.
+- ~~02-20~~: `verify_block_signature()` is now blocking — invalid/tampered signatures reject the block with `SignatureVerificationFailed`. Both single-block and batch merge paths verify. 10 new unit tests (6 for verification, 4 for `effective_creator`).
+
+### Quick wins (commits a9454c38, 61879bb3)
 1. ~~06-29~~: `verify_block_cid()` added to PushLog handler + existing unit test
 2. ~~05-31~~: `WasmSandboxConfig::restrictive()` enabled by default + existing unit test
 3. ~~03-21~~: Access checks added to DocSync/BranchableSync + 9 new unit tests
@@ -67,7 +57,6 @@ All 4 quick wins implemented and tested:
 | Item | Fix Complexity | Notes |
 |------|---------------|-------|
 | 07-22 (wasmtime CVEs) | Medium (dependency upgrade) | May have breaking API changes |
-| 02-19 + 02-20 (block verify in merge) | Medium-High | Architectural — coupled pair |
 
 ---
 
