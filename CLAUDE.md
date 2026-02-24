@@ -135,9 +135,7 @@ Rust node via CLI + HTTP API. Each area is a `[[test]]` binary with submodules:
 | Encryption | `--test encryption` | index, acp, block_verify, stubs |
 | Identity | `--test identity` | lifecycle, types, negative, node_identity, keyring_lifecycle |
 | Backup | `--test backup` | restore, dump, purge |
-
-SourceHub tests live in the [backbone](https://github.com/sourcenetwork/backbone) repo
-(`crates/defra-harness/tests/sourcehub/`). Run them with `DEFRA_WORKSPACE_ROOT` pointing here.
+| SourceHub | `--test sourcehub` | smoke, compartments, p2p_acp, policy_lifecycle, resilience |
 
 ### Rust Commands
 

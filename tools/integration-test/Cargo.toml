@@ -39,6 +39,10 @@ name = "backup"
 path = "tests/backup.rs"
 
 [[test]]
+name = "sourcehub"
+path = "tests/sourcehub.rs"
+
+[[test]]
 name = "p2p_iroh"
 path = "tests/p2p_iroh/main.rs"
 
