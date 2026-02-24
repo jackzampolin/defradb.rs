@@ -521,15 +521,59 @@ async fn handle_command(
             reply,
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
-            let result = handle_fire_and_forget(
-                endpoint,
-                &peer_id,
-                protocols::ALPN_DOCSYNC,
-                &request,
-                direct_addr,
-            )
-            .await;
-            let _ = reply.send(result);
+            let result: crate::error::Result<crate::message::DocSyncReply> =
+                handle_request_response(
+                    endpoint,
+                    &peer_id,
+                    protocols::ALPN_DOCSYNC,
+                    &request,
+                    direct_addr,
+                )
+                .await;
+            match result {
+                Ok(doc_reply) => {
+                    let _ = event_tx
+                        .send(TransportEvent::DocSyncReply {
+                            peer_id,
+                            reply: doc_reply,
+                        })
+                        .await;
+                    let _ = reply.send(Ok(()));
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
+            }
+        }
+        IrohCommand::SendBranchableSyncRequest {
+            peer_id,
+            request,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let result: crate::error::Result<crate::message::BranchableSyncReply> =
+                handle_request_response(
+                    endpoint,
+                    &peer_id,
+                    protocols::ALPN_BRANCHABLE,
+                    &request,
+                    direct_addr,
+                )
+                .await;
+            match result {
+                Ok(br_reply) => {
+                    let _ = event_tx
+                        .send(TransportEvent::BranchableSyncReply {
+                            peer_id,
+                            reply: br_reply,
+                        })
+                        .await;
+                    let _ = reply.send(Ok(()));
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
+            }
         }
         IrohCommand::SendDocSyncResponse {
             peer_id,
@@ -542,22 +586,6 @@ async fn handle_command(
                 &peer_id,
                 protocols::ALPN_DOCSYNC_RESP,
                 &reply_msg,
-                direct_addr,
-            )
-            .await;
-            let _ = reply.send(result);
-        }
-        IrohCommand::SendBranchableSyncRequest {
-            peer_id,
-            request,
-            reply,
-        } => {
-            let direct_addr = peer_direct_addr(peer_map, &peer_id);
-            let result = handle_fire_and_forget(
-                endpoint,
-                &peer_id,
-                protocols::ALPN_BRANCHABLE,
-                &request,
                 direct_addr,
             )
             .await;
