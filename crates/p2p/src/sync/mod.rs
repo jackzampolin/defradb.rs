@@ -6,32 +6,6 @@
 //! - Storing blocks in the blockstore with merge tracking
 //! - Applying CRDT merges to integrate remote changes
 //! - Broadcasting local changes to the network
-//!
-//! # Architecture
-//!
-//! The sync flow follows the Go implementation:
-//!
-//! ```text
-//! Network (PubSub/Replicator)
-//!         ↓
-//! PushLogRequest received
-//!         ↓
-//! SyncManager.process_pushlog()
-//!         ↓
-//! ┌───────┴───────┐
-//! │ Process Queue │  ← Deduplicates concurrent syncs for same CID
-//! └───────┬───────┘
-//!         ↓
-//! Check if already merged (blockstore.is_merged())
-//!         ↓ (if not merged)
-//! Store block in blockstore
-//!         ↓
-//! Apply CRDT merge
-//!         ↓
-//! Mark as merged
-//!         ↓
-//! Broadcast to network (optional)
-//! ```
 
 mod broadcaster;
 pub(crate) mod car;
@@ -48,8 +22,11 @@ mod replication;
 
 pub use broadcaster::{BroadcastResult, Broadcaster};
 pub use collection_store::{NoOpCollectionStorage, P2PCollectionStorage, P2PCollectionStore};
+#[cfg(feature = "iroh-transport")]
+pub use coordinator::IrohSyncCoordinator;
 pub use coordinator::{
-    CreateReplicatorResult, LoadReplicatorsResult, PushFailure, SyncCoordinator,
+    CreateReplicatorResult, Libp2pSyncCoordinator, LoadReplicatorsResult, PushFailure,
+    SyncCoordinator,
 };
 pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, SyncPlan};
 pub use head_provider::{DocumentHeadProvider, NoOpHeadProvider};

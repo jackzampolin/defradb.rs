@@ -19,7 +19,7 @@ use crate::error::{Error, Result};
 
 // Re-export types and sections for external use
 pub use sections::{AcpConfig, ApiConfig, DatastoreConfig, KeyringConfig, LogConfig, NetConfig};
-pub use types::{AcpDocumentType, DatastoreType, LogFormat, LogLevel, LogOutput};
+pub use types::{AcpDocumentType, DatastoreType, LogFormat, LogLevel, LogOutput, TransportType};
 // KeyringBackend is available but not currently used externally
 #[allow(unused_imports)]
 pub use types::KeyringBackend;

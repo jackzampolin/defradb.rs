@@ -1,0 +1,16 @@
+# Sync Tests
+
+25 passing, 0 ignored.
+
+## Files
+
+- `branchable.rs` — Branchable collection sync: multi-head, branched versions, error cases (all pass)
+- `doc.rs` — Document sync: single/multi-node, version sync, auto-subscribe behavior (all pass)
+- `sync.rs` — Core iroh sync: document sync, collection version sync, branchable/CID error cases (all pass)
+- `version.rs` — Collection version sync: initial, patch, view with lens transforms (all pass)
+
+## Notes
+
+The `version::with_view` and `version::with_view_activated_and_queried` tests require:
+- The Go repo's copy lens WASM binary (build with `cd ~/go/src/github.com/sourcenetwork/defradb/tests/lenses && make build`)
+- Nodes running in development mode (file-path WASM loading via HTTP is blocked in production mode)

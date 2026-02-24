@@ -33,6 +33,69 @@ impl<S: Store> DB<S> {
         self.lens_store.has_transform(transform_id)
     }
 
+    /// Add a lens, building IPLD blocks and storing them in the blockstore for P2P sync.
+    ///
+    /// This matches Go's lens store behavior: when a lens is added, the WASM bytes
+    /// are serialized into IPLD blocks (LensConfigBlock → LensModuleBlock → LensWasmBlock)
+    /// and stored in the blockstore. The root CID of this DAG becomes the transform ID,
+    /// which is a valid IPLD CID that peers can fetch during version sync.
+    pub async fn add_lens(&self, config: LensConfig) -> Result<TransformId> {
+        let first_lens = config
+            .lens()
+            .ok_or_else(|| Error::Lens("lens config has no modules".into()))?;
+
+        let wasm_bytes = if let Some(ref bytes) = first_lens.module {
+            bytes.clone()
+        } else if let Some(ref path) = first_lens.path {
+            std::fs::read(path)
+                .map_err(|e| Error::Lens(format!("failed to read WASM from {}: {}", path, e)))?
+        } else {
+            return Err(Error::Lens("lens module has neither path nor bytes".into()));
+        };
+
+        let arguments: Vec<(String, String)> = first_lens
+            .arguments
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let (config_cid, blocks) =
+            defra_core::build_lens_ipld_blocks(&wasm_bytes, first_lens.inverse, &arguments)
+                .map_err(|e| Error::Lens(format!("failed to build lens IPLD blocks: {}", e)))?;
+
+        let txn = self.new_txn(false).await?;
+        {
+            let blockstore = txn.blockstore()?;
+            for (cid, data) in &blocks {
+                blockstore
+                    .set(&cid.to_bytes(), data)
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+        }
+        txn.commit().await?;
+
+        let transform_id = TransformId::new(config_cid.to_string());
+
+        self.lens_store
+            .add_with_id(transform_id.clone(), config)
+            .await
+            .map_err(|e| Error::Lens(e.to_string()))?;
+
+        tracing::info!(
+            transform_id = %transform_id,
+            blocks_stored = blocks.len(),
+            "Lens added with IPLD blocks in blockstore"
+        );
+
+        Ok(transform_id)
+    }
+
     /// Reload persisted lens configs from the systemstore into the lens store.
     ///
     /// Called during database open to restore transforms that were registered

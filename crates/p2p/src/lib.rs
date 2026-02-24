@@ -12,6 +12,7 @@
 //! - [`codec`] - CBOR codec for request-response protocol
 //! - [`behaviour`] - Composite NetworkBehaviour
 //! - [`host`] - P2P host that manages the swarm
+//! - [`transport`] - Transport-agnostic trait and types
 //! - [`topics`] - GossipSub topic definitions
 //! - [`error`] - Error types
 //!
@@ -66,14 +67,21 @@ pub mod sync;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testutil;
 pub mod topics;
+pub mod transport;
 pub mod two_stream;
+
+#[cfg(feature = "iroh-transport")]
+pub mod iroh;
 
 // Re-export address parsing
 pub use address::{parse_multiaddr_with_peer_id, ParsedMultiaddr};
 
 // Re-export main types for convenience
 pub use error::{Error, Result};
-pub use host::{HostCommand, HostEvent, P2PHost, P2PHostConfig, P2PHostHandle, ResponseChannel};
+pub use host::{
+    convert_host_event, HostCommand, HostEvent, Libp2pTransport, P2PHost, P2PHostConfig,
+    P2PHostHandle, ResponseChannel,
+};
 pub use message::{Message, MetaData, PushLogBroadcast, PushLogReply, PushLogRequest};
 pub use protocol::{
     BASE_PROTOCOL_ID, CODE, MESSAGE_VERSION, NAME, PROTOCOL_BASE, REP_REQUEST_PROTOCOL,
@@ -85,16 +93,21 @@ pub use protocol::{
 pub use protocol::{PUSHLOG_REQUEST_PROTOCOL, PUSHLOG_RESPONSE_PROTOCOL};
 
 // Re-export signing functions
-pub use signing::{sign_message, sign_message_cloned, verify_message};
+pub use signing::{sign_message, sign_message_cloned, sign_with_transport, verify_message};
 
 // Re-export topic types
 pub use topics::{DefraTopic, DOC_SYNC_TOPIC, ENCRYPTION_TOPIC};
 
+// Re-export transport types
+pub use transport::{P2PTransport, TransportEvent};
+
 // Re-export sync types
+#[cfg(feature = "iroh-transport")]
+pub use sync::IrohSyncCoordinator;
 pub use sync::{
     Broadcaster, CreateReplicatorResult, DagSync, DagSyncConfig, DagSyncState,
-    LoadReplicatorsResult, NeedsFetchData, PeerStateTracker, ProcessQueue, SyncConfig,
-    SyncCoordinator, SyncEvent, SyncManager, SyncPlan,
+    Libp2pSyncCoordinator, LoadReplicatorsResult, NeedsFetchData, PeerStateTracker, ProcessQueue,
+    SyncConfig, SyncCoordinator, SyncEvent, SyncManager, SyncPlan,
 };
 
 // Re-export bitswap types

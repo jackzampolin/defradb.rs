@@ -29,6 +29,7 @@ use super::result::ReplicationResult;
 use crate::sync::coordinator::SyncCoordinator;
 use crate::sync::manager::SyncEvent;
 use crate::sync::merge::MergeHandler;
+use crate::transport::P2PTransport;
 
 /// Replication loop that processes sync events.
 ///
@@ -53,13 +54,14 @@ impl ReplicationLoop {
     /// This method runs until the event channel is closed or a fatal error occurs.
     /// It batches merge-eligible events together for efficient processing with
     /// shared transactions, reducing fsync overhead during P2P catch-up.
-    pub async fn run<B, H>(
-        coordinator: Arc<SyncCoordinator<B>>,
+    pub async fn run<B, T, H>(
+        coordinator: Arc<SyncCoordinator<B, T>>,
         mut events: mpsc::Receiver<SyncEvent>,
         handler: Arc<H>,
         config: ReplicationConfig,
     ) where
         B: Blockstore + 'static,
+        T: P2PTransport,
         H: MergeHandler + 'static,
     {
         tracing::info!(batch_size = config.batch_size, "Starting replication loop");
@@ -133,14 +135,15 @@ impl ReplicationLoop {
     /// Spawns up to `config.max_workers` concurrent tasks via a semaphore.
     /// Each result is passed to `on_result` for caller-specific handling
     /// (e.g., publishing events to an event bus).
-    pub async fn run_parallel<B, H, F>(
-        coordinator: Arc<SyncCoordinator<B>>,
+    pub async fn run_parallel<B, T, H, F>(
+        coordinator: Arc<SyncCoordinator<B, T>>,
         mut events: mpsc::Receiver<SyncEvent>,
         handler: Arc<H>,
         config: ReplicationConfig,
         on_result: F,
     ) where
         B: Blockstore + 'static,
+        T: P2PTransport,
         H: MergeHandler + 'static,
         F: Fn(ReplicationResult) + Send + Sync + 'static,
     {
@@ -183,14 +186,15 @@ impl ReplicationLoop {
     /// This is public so that callers (e.g., FFI layer) can run a custom
     /// replication loop that injects additional behavior (like publishing
     /// MergeComplete events) after each successful merge.
-    pub async fn process_next<B, H>(
-        coordinator: &SyncCoordinator<B>,
+    pub async fn process_next<B, T, H>(
+        coordinator: &SyncCoordinator<B, T>,
         events: &mut mpsc::Receiver<SyncEvent>,
         handler: &H,
         config: &ReplicationConfig,
     ) -> ReplicationResult
     where
         B: Blockstore + 'static,
+        T: P2PTransport,
         H: MergeHandler + ?Sized + 'static,
     {
         let event = match events.recv().await {
@@ -207,14 +211,15 @@ impl ReplicationLoop {
     /// `config.batch_size - 1` more events using `try_recv()`.
     /// Merge-eligible events are batched together for efficient processing;
     /// other events (errors, already-merged, Bitswap) are processed individually.
-    pub async fn process_next_batch<B, H>(
-        coordinator: &SyncCoordinator<B>,
+    pub async fn process_next_batch<B, T, H>(
+        coordinator: &SyncCoordinator<B, T>,
         events: &mut mpsc::Receiver<SyncEvent>,
         handler: &H,
         config: &ReplicationConfig,
     ) -> Vec<ReplicationResult>
     where
         B: Blockstore + 'static,
+        T: P2PTransport,
         H: MergeHandler + ?Sized + 'static,
     {
         // Wait for first event (blocking)
@@ -264,14 +269,15 @@ impl ReplicationLoop {
     /// Process all pending events without blocking.
     ///
     /// Useful for draining events during shutdown or testing.
-    pub async fn drain<B, H>(
-        coordinator: Arc<SyncCoordinator<B>>,
+    pub async fn drain<B, T, H>(
+        coordinator: Arc<SyncCoordinator<B, T>>,
         events: &mut mpsc::Receiver<SyncEvent>,
         handler: Arc<H>,
         config: ReplicationConfig,
     ) -> Vec<ReplicationResult>
     where
         B: Blockstore + 'static,
+        T: P2PTransport,
         H: MergeHandler + 'static,
     {
         let mut results = Vec::new();

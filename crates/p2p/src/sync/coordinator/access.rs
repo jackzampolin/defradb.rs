@@ -1,14 +1,14 @@
 //! Access control for the sync coordinator.
 
 use blockstore::Blockstore;
-use libp2p::PeerId;
 
 use super::SyncCoordinator;
 use crate::bitswap::AccessMode;
 use crate::error::{Error, Result};
+use crate::transport::{P2PTransport, PeerId};
 
-impl<B: Blockstore + 'static> SyncCoordinator<B> {
-    /// Check if a peer has access to sync a collection.
+impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
+    /// Check if a peer (by string ID) has access to sync a collection.
     ///
     /// Returns `Ok(())` if access is granted, or `Err(Error::AccessDenied)` if denied.
     ///
@@ -22,20 +22,26 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     /// one-directional (source registers target), but both sides accept
     /// messages from connected peers on subscribed topics. Document-level
     /// ACP still applies independently at merge time.
-    pub(super) async fn check_access(&self, peer_id: &PeerId, collection_id: &str) -> Result<()> {
+    ///
+    /// Uses string-based registry lookup, supporting both libp2p and iroh peer IDs.
+    pub(super) async fn check_access_str(
+        &self,
+        peer_id_str: &str,
+        collection_id: &str,
+    ) -> Result<()> {
         if self.access_mode.is_open() {
             return Ok(());
         }
 
-        if self.replicators.is_replicator(collection_id, peer_id) {
+        if self.replicators.is_replicator(collection_id, peer_id_str) {
             return Ok(());
         }
 
         // Accept messages from connected peers for collections we're subscribed to.
-        // Connected peers are already authenticated via libp2p noise. The replicator
-        // registry controls what WE push; it shouldn't gate what we ACCEPT from
-        // authenticated peers on topics we've subscribed to.
-        if self.peer_state.is_connected(peer_id) {
+        // Connected peers are already authenticated via transport-level crypto. The
+        // replicator registry controls what WE push; it shouldn't gate what we ACCEPT
+        // from authenticated peers on topics we've subscribed to.
+        if self.peer_state.is_connected(peer_id_str) {
             let subscribed = self.subscribed_collections.read().await;
             if subscribed.contains(collection_id) {
                 return Ok(());
@@ -43,12 +49,12 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         }
 
         tracing::warn!(
-            peer_id = %peer_id,
+            peer_id = %peer_id_str,
             collection_id = %collection_id,
             "Access denied: peer is not a replicator for this collection"
         );
         Err(Error::AccessDenied {
-            peer_id: peer_id.to_string(),
+            peer_id: peer_id_str.to_string(),
             collection_id: collection_id.to_string(),
         })
     }
@@ -63,11 +69,11 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             return Ok(());
         }
 
-        if self.replicators.is_any_replicator(peer_id) {
+        if self.replicators.is_any_replicator(peer_id.as_str()) {
             return Ok(());
         }
 
-        if self.peer_state.is_connected(peer_id) {
+        if self.peer_state.is_connected(peer_id.as_str()) {
             return Ok(());
         }
 

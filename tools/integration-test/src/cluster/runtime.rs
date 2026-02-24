@@ -44,6 +44,7 @@ pub struct TestCluster {
     #[allow(dead_code)]
     run_dir: TestRunDir,
     startup_identity: Option<String>,
+    node_identities: Vec<Option<String>>,
 }
 
 impl TestCluster {
@@ -51,6 +52,7 @@ impl TestCluster {
         nodes: Vec<RunningNode>,
         run_dir: TestRunDir,
         startup_identity: Option<String>,
+        node_identities: Vec<Option<String>>,
         source_hub: Option<SourceHubNode>,
     ) -> Self {
         Self {
@@ -58,6 +60,7 @@ impl TestCluster {
             source_hub,
             run_dir,
             startup_identity,
+            node_identities,
         }
     }
 
@@ -67,6 +70,11 @@ impl TestCluster {
     /// Tests must use this identity for admin operations.
     pub fn startup_identity(&self) -> Option<&str> {
         self.startup_identity.as_deref()
+    }
+
+    /// Return the private key hex used for a specific node (if any).
+    pub fn node_identity(&self, index: usize) -> Option<&str> {
+        self.node_identities.get(index).and_then(|id| id.as_deref())
     }
 
     pub fn builder() -> super::builder::TestClusterBuilder {
@@ -149,7 +157,9 @@ impl TestCluster {
 
         tokio::time::sleep(Duration::from_millis(200)).await;
 
+        let is_iroh = config.p2p_transport.as_deref() == Some("iroh");
         let named_patterns: Vec<NamedPattern> = match kind {
+            NodeKind::Rust if is_iroh => patterns::iroh_patterns(),
             NodeKind::Rust => patterns::rust_patterns(),
             NodeKind::Go => patterns::go_patterns(),
         };

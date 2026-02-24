@@ -7,14 +7,18 @@ use blockstore::Blockstore;
 use super::super::SyncCoordinator;
 use crate::error::Result;
 use crate::message::BranchableSyncReply;
+use crate::signing::sign_with_transport;
+use crate::transport::{P2PTransport, PeerId, ResponseToken};
 
-impl<B: Blockstore + 'static> SyncCoordinator<B> {
+impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub(super) async fn handle_branchable_sync_request(
         &self,
-        peer_id: libp2p::PeerId,
+        peer_id: PeerId,
         request: crate::message::BranchableSyncRequest,
+        token: Option<ResponseToken>,
     ) -> Result<()> {
-        self.check_access(&peer_id, &request.collection_id).await?;
+        self.check_access_str(peer_id.as_str(), &request.collection_id)
+            .await?;
 
         tracing::debug!(
             peer_id = %peer_id,
@@ -51,7 +55,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             heads,
         );
 
-        if let Err(e) = crate::signing::sign_message(self.host.keypair(), &mut reply) {
+        if let Err(e) = sign_with_transport(&self.transport, &mut reply) {
             tracing::error!(
                 peer_id = %peer_id,
                 error = %e,
@@ -60,11 +64,16 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             return Err(e);
         }
 
-        if let Err(e) = self
-            .host
-            .send_branchable_sync_response(peer_id, reply)
-            .await
-        {
+        let send_result = if let Some(token) = token {
+            self.transport
+                .send_branchable_sync_response_token(token, reply)
+                .await
+        } else {
+            self.transport
+                .send_branchable_sync_response(&peer_id, reply)
+                .await
+        };
+        if let Err(e) = send_result {
             tracing::warn!(
                 peer_id = %peer_id,
                 error = %e,
@@ -76,7 +85,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
 
     pub(super) async fn handle_branchable_sync_reply(
         &self,
-        peer_id: libp2p::PeerId,
+        peer_id: PeerId,
         reply: crate::message::BranchableSyncReply,
     ) -> Result<()> {
         tracing::debug!(
@@ -126,29 +135,30 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 "Spawning poll-based DAG fetchers for collection blocks"
             );
 
-            let host = self.host.clone();
+            let transport = self.transport.clone();
             let blockstore = self.manager.blockstore().clone();
             let event_tx = self.manager.event_sender();
             let semaphore = self.dag_fetch_semaphore.clone();
 
             for root_cid in cids_to_fetch {
-                let host = host.clone();
+                let transport = transport.clone();
                 let blockstore = blockstore.clone();
                 let event_tx = event_tx.clone();
                 let collection_id = reply.collection_id.clone();
                 let semaphore = semaphore.clone();
+                let source_peer = peer_id.clone();
 
                 tokio::spawn(async move {
                     let _permit = semaphore.acquire_owned().await;
                     super::super::dag_fetcher::poll_fetch_dag(
-                        host,
+                        transport,
                         blockstore,
                         event_tx,
                         root_cid,
                         String::new(),
                         collection_id,
                         String::new(),
-                        peer_id,
+                        source_peer,
                     )
                     .await;
                 });

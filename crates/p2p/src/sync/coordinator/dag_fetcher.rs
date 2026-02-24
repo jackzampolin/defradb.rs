@@ -8,20 +8,19 @@ use std::time::Duration;
 
 use blockstore::Blockstore;
 use cid::Cid;
-use libp2p::PeerId;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::host::P2PHostHandle;
 use crate::sync::manager::links::find_all_missing_links;
 use crate::sync::manager::SyncEvent;
+use crate::transport::{P2PTransport, PeerId};
 
 /// Fetch an entire DAG rooted at `root_cid`.
 ///
 /// Strategy: try CAR fetch first (one round-trip), then Bitswap for any missing blocks.
 #[allow(clippy::too_many_arguments)]
-pub async fn poll_fetch_dag<B: Blockstore + 'static>(
-    host: P2PHostHandle,
+pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
+    transport: T,
     blockstore: Arc<B>,
     event_tx: mpsc::Sender<SyncEvent>,
     root_cid: Cid,
@@ -37,9 +36,8 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static>(
         "Starting DAG fetch (CAR-first, Bitswap fallback)"
     );
 
-    // Try CAR fetch first — single round-trip for the entire DAG
-    if try_car_fetch(&host, &blockstore, &root_cid, source_peer).await {
-        // Verify completeness
+    // Try CAR fetch first
+    if try_car_fetch(&transport, &blockstore, &root_cid, &source_peer).await {
         if let Ok(Some(root_data)) = blockstore.get(&root_cid).await {
             let missing = find_all_missing_links(blockstore.as_ref(), &root_data)
                 .await
@@ -65,7 +63,7 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static>(
     }
 
     // Bitswap fallback: fetch root block
-    if !poll_fetch_block(&root_cid, &host, &blockstore, source_peer).await {
+    if !poll_fetch_block(&root_cid, &transport, &blockstore, &source_peer).await {
         warn!(root_cid = %root_cid, "Failed to fetch root block");
         return;
     }
@@ -101,7 +99,7 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static>(
 
         let fetches: Vec<_> = missing
             .iter()
-            .map(|cid| poll_fetch_block(cid, &host, &blockstore, source_peer))
+            .map(|cid| poll_fetch_block(cid, &transport, &blockstore, &source_peer))
             .collect();
         let results = futures::future::join_all(fetches).await;
         for (cid, success) in missing.iter().zip(results.iter()) {
@@ -141,22 +139,17 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static>(
 }
 
 /// Try to fetch an entire DAG via a single CAR request.
-///
-/// Sends a CAR request to the source peer, waits for the response
-/// (which arrives via the event pipeline and is stored by the coordinator),
-/// then checks if the root block appeared in the blockstore.
-async fn try_car_fetch<B: Blockstore>(
-    host: &P2PHostHandle,
+async fn try_car_fetch<B: Blockstore, T: P2PTransport>(
+    transport: &T,
     blockstore: &Arc<B>,
     root_cid: &Cid,
-    source_peer: PeerId,
+    source_peer: &PeerId,
 ) -> bool {
-    if let Err(e) = host.send_car_request(source_peer, *root_cid).await {
+    if let Err(e) = transport.send_car_request(source_peer, *root_cid).await {
         debug!(root_cid = %root_cid, error = %e, "CAR request failed, will use Bitswap");
         return false;
     }
 
-    // Poll blockstore for the root block (CAR response is stored by coordinator)
     let timeout = Duration::from_secs(10);
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
@@ -171,24 +164,24 @@ async fn try_car_fetch<B: Blockstore>(
 }
 
 /// Fetch a single block via Bitswap + blockstore polling.
-async fn poll_fetch_block<B: Blockstore>(
+async fn poll_fetch_block<B: Blockstore, T: P2PTransport>(
     cid: &Cid,
-    host: &P2PHostHandle,
+    transport: &T,
     blockstore: &Arc<B>,
-    source_peer: PeerId,
+    source_peer: &PeerId,
 ) -> bool {
-    // Already have it?
     if let Ok(true) = blockstore.has(cid).await {
         return true;
     }
 
-    // Start Bitswap fetch
-    if let Err(e) = host.bitswap_sync(*cid, vec![source_peer], vec![*cid]).await {
+    if let Err(e) = transport
+        .sync_blocks(*cid, vec![source_peer.clone()], vec![*cid])
+        .await
+    {
         warn!(cid = %cid, error = %e, "bitswap_sync failed");
         return false;
     }
 
-    // Poll blockstore for up to 30 seconds
     let timeout = Duration::from_secs(30);
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {

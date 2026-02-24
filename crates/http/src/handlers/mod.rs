@@ -16,6 +16,7 @@ pub mod block;
 pub mod collections;
 pub mod documents;
 pub mod encrypted_index;
+pub mod events;
 pub mod graphql;
 pub mod index;
 pub mod lens;

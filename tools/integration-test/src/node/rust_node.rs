@@ -21,14 +21,57 @@ impl RustNode {
 
     /// Build the Rust binary via cargo (debug mode for fast iteration).
     pub fn build() -> Result<()> {
+        Self::build_with_features(&[])
+    }
+
+    /// Build the Rust binary with additional cargo features.
+    pub fn build_with_features(features: &[&str]) -> Result<()> {
+        if Self::binary_is_current() {
+            return Ok(());
+        }
+
+        let mut args = vec!["build", "-p", "cli"];
+        let features_str = features.join(",");
+        if !features.is_empty() {
+            args.push("--features");
+            args.push(&features_str);
+        }
         let status = Command::new("cargo")
-            .args(["build", "-p", "cli"])
+            .args(&args)
             .current_dir(workspace_root())
             .status()
             .context("failed to run cargo build")?;
 
         anyhow::ensure!(status.success(), "cargo build failed with {}", status);
         Ok(())
+    }
+
+    /// Check if the existing binary is up-to-date with the source tree.
+    ///
+    /// Primary check: no source files are newer than the binary. This handles
+    /// worktrees where the embedded commit hash may differ from HEAD but the
+    /// source is unchanged (build.rs caches the commit hash).
+    fn binary_is_current() -> bool {
+        let binary = workspace_root().join("target/debug/defra");
+
+        // Binary must exist
+        let binary_mtime = match std::fs::metadata(&binary) {
+            Ok(m) => match m.modified() {
+                Ok(t) => t,
+                Err(_) => return false,
+            },
+            Err(_) => return false,
+        };
+
+        // Check no source files are newer than the binary
+        if let Ok(newest) = newest_source_mtime() {
+            if newest > binary_mtime {
+                eprintln!("source files newer than binary, rebuilding...");
+                return false;
+            }
+        }
+
+        true
     }
 
     /// Verify the Rust binary is built and returns parseable version info.
@@ -53,6 +96,42 @@ impl RustNode {
     }
 }
 
+/// Find the most recent mtime of any .rs file under crates/.
+fn newest_source_mtime() -> Result<std::time::SystemTime> {
+    let crates_dir = workspace_root().join("crates");
+    let mut newest = std::time::SystemTime::UNIX_EPOCH;
+
+    fn walk(dir: &Path, newest: &mut std::time::SystemTime) -> Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            if ft.is_dir() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name == "target" || name.starts_with('.') {
+                    continue;
+                }
+                walk(&entry.path(), newest)?;
+            } else if ft.is_file() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "rs" || e == "toml") {
+                    if let Ok(meta) = std::fs::metadata(&path) {
+                        if let Ok(mtime) = meta.modified() {
+                            if mtime > *newest {
+                                *newest = mtime;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    walk(&crates_dir, &mut newest)?;
+    Ok(newest)
+}
+
 impl DefraNode for RustNode {
     fn command(&self, config: &NodeConfig) -> Command {
         let mut cmd = Command::new(&self.binary_path);
@@ -61,7 +140,11 @@ impl DefraNode for RustNode {
         cmd.arg("--url").arg(&config.http_addr);
         cmd.arg("--no-log-color");
         cmd.arg("--log-output").arg("stdout");
-        cmd.arg("--no-keyring");
+        if config.keyring_enabled {
+            cmd.env("DEFRA_KEYRING_SECRET", "integration-test-secret");
+        } else {
+            cmd.arg("--no-keyring");
+        }
 
         cmd.arg("start");
         cmd.arg("--store")
@@ -115,6 +198,10 @@ impl DefraNode for RustNode {
 
         if let Some(timeout) = config.query_timeout {
             cmd.arg("--query-timeout").arg(timeout.to_string());
+        }
+
+        if let Some(ref transport) = config.p2p_transport {
+            cmd.arg("--p2p-transport").arg(transport);
         }
 
         cmd

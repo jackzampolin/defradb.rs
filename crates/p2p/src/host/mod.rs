@@ -7,12 +7,14 @@ mod command;
 mod command_handler;
 mod event;
 mod handle;
+pub mod libp2p_transport;
 mod p2p_host;
 
 // Re-export public types
 pub use command::HostCommand;
 pub use event::HostEvent;
 pub use handle::P2PHostHandle;
+pub use libp2p_transport::{convert_host_event, Libp2pTransport};
 pub use p2p_host::{P2PHost, P2PHostConfig};
 
 use libp2p::request_response;

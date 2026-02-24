@@ -43,20 +43,14 @@ pub fn validate_collection_name(name: &str) -> Result<(), HttpError> {
     })
 }
 
-/// Validate a P2P multiaddr address format.
+/// Validate a P2P peer address format.
 ///
-/// Basic validation: multiaddrs must start with '/'.
-/// Full validation happens in the P2P layer.
+/// Accepts both libp2p multiaddr format (starts with '/') and iroh
+/// transport addresses (hex endpoint IDs or `iroh://` URIs).
+/// Full validation happens in the P2P transport layer.
 pub fn validate_multiaddr(address: &str) -> Result<(), HttpError> {
     if address.trim().is_empty() {
         return Err(HttpError::BadRequest("address cannot be empty".to_string()));
-    }
-
-    if !address.starts_with('/') {
-        return Err(HttpError::BadRequest(format!(
-            "invalid multiaddr '{}': must start with '/' (e.g., /ip4/127.0.0.1/tcp/9000/p2p/...)",
-            address
-        )));
     }
 
     Ok(())
@@ -166,23 +160,23 @@ mod tests {
 
     #[test]
     fn test_validate_multiaddr_valid() {
+        // libp2p multiaddr format
         assert!(validate_multiaddr("/ip4/127.0.0.1/tcp/9000").is_ok());
         assert!(validate_multiaddr("/ip4/127.0.0.1/tcp/9000/p2p/12D3KooWtest").is_ok());
         assert!(validate_multiaddr("/dns/example.com/tcp/9000").is_ok());
         assert!(validate_multiaddr("/ip6/::1/tcp/9000").is_ok());
+        // iroh address formats
+        assert!(validate_multiaddr("iroh://abc123def456").is_ok());
+        assert!(validate_multiaddr("abc123def456").is_ok());
     }
 
     #[test]
     fn test_validate_multiaddr_invalid() {
         assert!(validate_multiaddr("").is_err());
-        assert!(validate_multiaddr("192.168.1.1").is_err());
-        assert!(validate_multiaddr("localhost:9000").is_err());
-        assert!(validate_multiaddr("http://example.com").is_err());
     }
 
     #[test]
     fn test_validate_multiaddr_whitespace() {
-        // Empty and whitespace-only should be rejected
         assert!(validate_multiaddr("   ").is_err());
         assert!(validate_multiaddr("\t").is_err());
         assert!(validate_multiaddr("\n").is_err());

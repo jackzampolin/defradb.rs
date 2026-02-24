@@ -55,6 +55,9 @@ pub enum Error {
     #[error("invalid datastore type: {0}")]
     InvalidDatastore(String),
 
+    #[error("invalid transport type: {0}")]
+    InvalidTransport(String),
+
     #[error("invalid config: {0}")]
     InvalidConfig(String),
 

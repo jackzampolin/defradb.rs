@@ -92,10 +92,20 @@ version = "0.9"
 features = ["vendored"]
 optional = true
 
+[dependencies.iroh-net]
+package = "iroh"
+version = "0.96"
+optional = true
+
+[dependencies.rand]
+version = "0.9"
+optional = true
+
 [features]
 fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]
 vendored-openssl = ["dep:openssl-sys"]
+iroh = ["p2p/iroh-transport", "dep:iroh-net", "dep:rand"]
 
 [dev-dependencies]
 tempfile = "3.17"

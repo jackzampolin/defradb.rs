@@ -42,6 +42,10 @@ path = "tests/backup.rs"
 name = "sourcehub"
 path = "tests/sourcehub.rs"
 
+[[test]]
+name = "p2p_iroh"
+path = "tests/p2p_iroh/main.rs"
+
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -63,3 +67,4 @@ identity = { path = "../../crates/identity" }
 crypto = { path = "../../crates/crypto" }
 base64 = "0.22"
 hex = "0.4"
+serial_test = "3"

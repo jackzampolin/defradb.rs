@@ -168,3 +168,33 @@ where
     sign_message(keypair, &mut signed)?;
     Ok(signed)
 }
+
+/// Sign a message using a `P2PTransport` for identity and signing.
+///
+/// This is the transport-agnostic equivalent of `sign_message`. It uses
+/// `transport.sign()`, `transport.local_public_key_proto()`, and
+/// `transport.local_peer_id()` instead of requiring a raw `Keypair`.
+///
+/// The serialization format is identical to `sign_message`, maintaining
+/// Go wire compatibility.
+pub fn sign_with_transport<M, T>(transport: &T, msg: &mut M) -> Result<()>
+where
+    M: Message + Serialize,
+    T: crate::transport::P2PTransport,
+{
+    if msg.message_id().is_empty() {
+        msg.set_message_id(Uuid::new_v4().to_string());
+    }
+
+    msg.set_version(MESSAGE_VERSION.to_string());
+    msg.set_sender_id(transport.local_peer_id().to_string());
+    msg.set_pubkey(transport.local_public_key_proto().to_vec());
+    msg.set_signature(None);
+
+    let bytes = serde_cbor::to_vec(&msg).map_err(|e| Error::CborSerialization(e.to_string()))?;
+
+    let signature = transport.sign(&bytes)?;
+    msg.set_signature(Some(signature));
+
+    Ok(())
+}

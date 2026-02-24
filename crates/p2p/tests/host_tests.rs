@@ -42,8 +42,9 @@ async fn test_replicator_management() {
     assert_eq!(info.collections.len(), 2);
 
     // Verify in registry
-    assert!(replicators.is_replicator("users", &peer_id));
-    assert!(replicators.is_replicator("posts", &peer_id));
+    let peer_str = peer_id.to_string();
+    assert!(replicators.is_replicator("users", &peer_str));
+    assert!(replicators.is_replicator("posts", &peer_str));
 
     // Get all replicators
     let all = handle.list_replicators().await.unwrap();
@@ -56,7 +57,7 @@ async fn test_replicator_management() {
     let info = handle.get_replicator(peer_id).await.unwrap();
     assert!(info.is_none());
 
-    assert!(!replicators.is_replicator("users", &peer_id));
+    assert!(!replicators.is_replicator("users", &peer_str));
 
     // Shutdown
     handle.shutdown().await.unwrap();

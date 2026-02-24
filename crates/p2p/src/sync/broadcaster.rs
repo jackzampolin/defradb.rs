@@ -11,9 +11,9 @@
 use cid::Cid;
 
 use crate::error::{Error, Result};
-use crate::host::P2PHostHandle;
 use crate::message::PushLogBroadcast;
 use crate::topics::DefraTopic;
+use crate::transport::P2PTransport;
 
 /// Result of a broadcast operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,79 +33,55 @@ pub enum BroadcastResult {
 }
 
 /// Broadcaster for sending block updates to the P2P network.
-///
-/// # Usage
-///
-/// ```ignore
-/// let broadcaster = Broadcaster::new(host_handle);
-///
-/// // Subscribe to topics for a collection
-/// broadcaster.subscribe_collection("users").await?;
-///
-/// // Broadcast an update
-/// broadcaster.broadcast_update(&broadcast).await?;
-/// ```
 #[derive(Clone)]
-pub struct Broadcaster {
-    host: P2PHostHandle,
+pub struct Broadcaster<T: P2PTransport> {
+    transport: T,
 }
 
-impl Broadcaster {
+impl<T: P2PTransport> Broadcaster<T> {
     /// Create a new broadcaster.
-    pub fn new(host: P2PHostHandle) -> Self {
-        Self { host }
+    pub fn new(transport: T) -> Self {
+        Self { transport }
     }
 
     /// Subscribe to a collection topic.
-    ///
-    /// This enables receiving updates for all documents in the collection.
     pub async fn subscribe_collection(&self, collection_id: &str) -> Result<bool> {
         let topic = DefraTopic::collection(collection_id);
-        self.host.subscribe(topic).await
+        self.transport.subscribe(topic).await
     }
 
     /// Subscribe to a specific document topic.
-    ///
-    /// This enables receiving updates for a specific document.
     pub async fn subscribe_document(&self, doc_id: &str) -> Result<bool> {
         let topic = DefraTopic::document(doc_id);
-        self.host.subscribe(topic).await
+        self.transport.subscribe(topic).await
     }
 
     /// Unsubscribe from a collection topic.
     pub async fn unsubscribe_collection(&self, collection_id: &str) -> Result<bool> {
         let topic = DefraTopic::collection(collection_id);
-        self.host.unsubscribe(topic).await
+        self.transport.unsubscribe(topic).await
     }
 
     /// Unsubscribe from a document topic.
     pub async fn unsubscribe_document(&self, doc_id: &str) -> Result<bool> {
         let topic = DefraTopic::document(doc_id);
-        self.host.unsubscribe(topic).await
+        self.transport.unsubscribe(topic).await
     }
 
     /// Broadcast an update to the network.
     ///
     /// This publishes to both the document-specific and collection-specific topics,
     /// matching Go's `SendUpdate()` behavior.
-    ///
-    /// # Arguments
-    ///
-    /// * `broadcast` - The PushLogBroadcast message to send
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(BroadcastResult)` indicating full or partial success.
-    /// Returns an error only if both publishes fail.
     pub async fn broadcast_update(&self, broadcast: &PushLogBroadcast) -> Result<BroadcastResult> {
         let doc_topic = DefraTopic::document(&broadcast.doc_id);
         let collection_topic = DefraTopic::collection(&broadcast.collection_id);
 
-        // Try to publish to both topics
-        let doc_result = self.host.publish(doc_topic, broadcast.clone()).await;
-        let collection_result = self.host.publish(collection_topic, broadcast.clone()).await;
+        let doc_result = self.transport.publish(doc_topic, broadcast.clone()).await;
+        let collection_result = self
+            .transport
+            .publish(collection_topic, broadcast.clone())
+            .await;
 
-        // Return appropriate result based on what succeeded
         match (&doc_result, &collection_result) {
             (Ok(doc_msg_id), Ok(col_msg_id)) => {
                 tracing::debug!(
@@ -158,14 +134,6 @@ impl Broadcaster {
     }
 
     /// Create a PushLogBroadcast from block data.
-    ///
-    /// # Arguments
-    ///
-    /// * `cid` - The CID of the block
-    /// * `block` - The raw block data
-    /// * `doc_id` - The document ID
-    /// * `collection_id` - The collection ID
-    /// * `creator` - The peer ID of the creator
     pub fn create_broadcast(
         cid: &Cid,
         block: &[u8],
@@ -182,18 +150,15 @@ impl Broadcaster {
         )
     }
 
-    /// Get the underlying host handle.
-    pub fn host(&self) -> &P2PHostHandle {
-        &self.host
+    /// Get the underlying transport reference.
+    pub fn transport(&self) -> &T {
+        &self.transport
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Note: Full integration tests require a running P2PHost
-    // See tests/integration.rs for end-to-end tests
 
     #[test]
     fn test_create_broadcast() {
@@ -205,7 +170,13 @@ mod tests {
         let collection_id = "users";
         let creator = "12D3KooWPeer";
 
-        let broadcast = Broadcaster::create_broadcast(&cid, block, doc_id, collection_id, creator);
+        let broadcast = Broadcaster::<crate::host::Libp2pTransport>::create_broadcast(
+            &cid,
+            block,
+            doc_id,
+            collection_id,
+            creator,
+        );
 
         assert_eq!(broadcast.doc_id, doc_id);
         assert_eq!(broadcast.collection_id, collection_id);

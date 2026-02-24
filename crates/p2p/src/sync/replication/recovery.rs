@@ -9,6 +9,7 @@ use super::handlers::handle_block_received;
 use super::result::ReplicationResult;
 use crate::sync::coordinator::SyncCoordinator;
 use crate::sync::merge::{BlockMetadata, MergeHandler};
+use crate::transport::P2PTransport;
 
 /// Process unmerged blocks from startup recovery.
 ///
@@ -34,12 +35,13 @@ use crate::sync::merge::{BlockMetadata, MergeHandler};
 /// Returns an error if:
 /// * The unmerged block list cannot be retrieved
 /// * One or more blocks failed to recover (returns `Error::RecoveryFailed`)
-pub async fn recover_unmerged<B, H>(
-    coordinator: Arc<SyncCoordinator<B>>,
+pub async fn recover_unmerged<B, T, H>(
+    coordinator: Arc<SyncCoordinator<B, T>>,
     handler: Arc<H>,
 ) -> Result<Vec<ReplicationResult>, crate::error::Error>
 where
     B: Blockstore + 'static,
+    T: P2PTransport,
     H: MergeHandler + 'static,
 {
     let config = ReplicationConfig {

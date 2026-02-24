@@ -1,0 +1,1196 @@
+//! Background event loop owning all iroh state.
+//!
+//! `IrohEndpoint` runs as a spawned tokio task and processes:
+//! - Incoming QUIC connections
+//! - Gossip events from iroh-gossip
+//! - Commands from the `IrohTransport` facade
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use bytes::Bytes;
+use iroh::endpoint::Connection;
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use iroh_gossip::net::Gossip;
+use iroh_gossip::proto::TopicId;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tracing::{debug, info, warn};
+
+use crate::replicator::ReplicatorInfo;
+use crate::transport::{MessageId, PeerAddr, PeerId, TransportEvent};
+use crate::QueryId;
+
+use super::command::IrohCommand;
+use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, PeerMap};
+use super::protocols;
+
+/// Handle to a gossip topic subscription.
+struct TopicSubscription {
+    sender: iroh_gossip::api::GossipSender,
+    reader_task: JoinHandle<()>,
+}
+
+/// Active block sync task.
+struct ActiveSync {
+    abort_handle: tokio::task::AbortHandle,
+}
+
+/// Configuration for creating an `IrohEndpoint`.
+pub struct IrohEndpointConfig {
+    pub secret_key: SecretKey,
+    /// Override the default N0 relay server with a custom URL (e.g. "https://relay.example.com").
+    pub relay_url: Option<String>,
+    /// Enable DNS-based peer discovery (default: true).
+    pub discovery: bool,
+}
+
+impl Default for IrohEndpointConfig {
+    fn default() -> Self {
+        Self {
+            secret_key: SecretKey::generate(&mut rand::rng()),
+            relay_url: None,
+            discovery: true,
+        }
+    }
+}
+
+/// Spawn the iroh endpoint background task.
+///
+/// Returns the command sender, event receiver, and background task handle.
+pub async fn spawn_endpoint(
+    config: IrohEndpointConfig,
+) -> crate::error::Result<(
+    mpsc::Sender<IrohCommand>,
+    mpsc::Receiver<TransportEvent>,
+    JoinHandle<()>,
+)> {
+    let mut alpns: Vec<Vec<u8>> = protocols::ALL_ALPNS.iter().map(|a| a.to_vec()).collect();
+    alpns.push(iroh_gossip::net::GOSSIP_ALPN.to_vec());
+
+    let mut builder = if let Some(ref relay_url) = config.relay_url {
+        let relay_map = iroh::RelayMap::try_from_iter([relay_url.as_str()])
+            .map_err(|e| crate::error::Error::Transport(format!("invalid relay URL: {}", e)))?;
+        Endpoint::builder()
+            .secret_key(config.secret_key.clone())
+            .alpns(alpns)
+            .relay_mode(iroh::RelayMode::Custom(relay_map))
+    } else {
+        // No relay URL configured: disable relay entirely so bind() returns immediately
+        // without attempting to connect to public relay servers. Peers connect directly
+        // via IP. Configure a relay URL to enable relay-assisted NAT traversal.
+        Endpoint::builder()
+            .secret_key(config.secret_key.clone())
+            .alpns(alpns)
+            .relay_mode(iroh::RelayMode::Disabled)
+    };
+
+    if !config.discovery {
+        builder = builder.clear_address_lookup();
+    }
+
+    let endpoint = builder.bind().await.map_err(|e| {
+        crate::error::Error::Transport(format!("failed to bind iroh endpoint: {}", e))
+    })?;
+
+    let gossip = Gossip::builder().spawn(endpoint.clone());
+
+    let (command_tx, command_rx) = mpsc::channel::<IrohCommand>(256);
+    let (event_tx, event_rx) = mpsc::channel::<TransportEvent>(256);
+
+    let task = tokio::spawn(run_event_loop(endpoint, gossip, command_rx, event_tx));
+
+    Ok((command_tx, event_rx, task))
+}
+
+/// Main event loop processing incoming connections, gossip, and commands.
+async fn run_event_loop(
+    endpoint: Endpoint,
+    gossip: Gossip,
+    mut command_rx: mpsc::Receiver<IrohCommand>,
+    event_tx: mpsc::Sender<TransportEvent>,
+) {
+    let peer_map = Arc::new(parking_lot::Mutex::new(PeerMap::new()));
+    let mut subscriptions: HashMap<String, TopicSubscription> = HashMap::new();
+    let mut replicators: HashMap<String, ReplicatorInfo> = HashMap::new();
+    let mut active_syncs: HashMap<u64, ActiveSync> = HashMap::new();
+    let mut next_query_id: u64 = 1;
+
+    // Emit Listening event with our endpoint address
+    let addr_str = format!("iroh://{}", endpoint.id());
+    if event_tx
+        .send(TransportEvent::Listening(PeerAddr::new(addr_str)))
+        .await
+        .is_err()
+    {
+        warn!("Event channel closed, cannot emit Listening event");
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            incoming = endpoint.accept() => {
+                match incoming {
+                    Some(incoming) => {
+                        handle_incoming(
+                            incoming,
+                            &gossip,
+                            &peer_map,
+                            &subscriptions,
+                            &event_tx,
+                        ).await;
+                    }
+                    None => break,
+                }
+            }
+            Some(cmd) = command_rx.recv() => {
+                let should_shutdown = handle_command(
+                    cmd,
+                    &endpoint,
+                    &gossip,
+                    &peer_map,
+                    &mut subscriptions,
+                    &mut replicators,
+                    &mut active_syncs,
+                    &mut next_query_id,
+                    &event_tx,
+                ).await;
+                if should_shutdown {
+                    break;
+                }
+            }
+            else => break,
+        }
+    }
+
+    // Clean up
+    for (_, sub) in subscriptions.drain() {
+        sub.reader_task.abort();
+    }
+    for (_, sync) in active_syncs.drain() {
+        sync.abort_handle.abort();
+    }
+    endpoint.close().await;
+    info!("Iroh endpoint shut down");
+}
+
+/// Handle an incoming QUIC connection.
+async fn handle_incoming(
+    incoming: iroh::endpoint::Incoming,
+    gossip: &Gossip,
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    subscriptions: &HashMap<String, TopicSubscription>,
+    event_tx: &mpsc::Sender<TransportEvent>,
+) {
+    // Accept the connection
+    let connection = match incoming.accept() {
+        Ok(accepting) => match accepting.await {
+            Ok(conn) => conn,
+            Err(e) => {
+                warn!("Failed to complete connection handshake: {}", e);
+                return;
+            }
+        },
+        Err(e) => {
+            warn!("Failed to accept connection: {}", e);
+            return;
+        }
+    };
+
+    let conn_alpn = connection.alpn().to_vec();
+
+    // If it's a gossip ALPN, hand off to the gossip layer
+    if conn_alpn == iroh_gossip::net::GOSSIP_ALPN {
+        if let Err(e) = gossip.handle_connection(connection).await {
+            debug!("Gossip handle_connection error: {}", e);
+        }
+        return;
+    }
+
+    let remote_id = connection.remote_id();
+
+    let is_new = peer_map.lock().increment_connections(remote_id, None);
+
+    if is_new
+        && event_tx
+            .send(TransportEvent::PeerConnected(endpoint_id_to_peer_id(
+                &remote_id,
+            )))
+            .await
+            .is_err()
+    {
+        warn!("Event channel closed, cannot emit PeerConnected");
+    }
+
+    if is_new {
+        join_peer_to_subscriptions(subscriptions, remote_id).await;
+    }
+
+    // Spawn handler for this connection's streams
+    let event_tx = event_tx.clone();
+    let peer_map = Arc::clone(peer_map);
+    tokio::spawn(async move {
+        handle_connection_streams(connection, remote_id, conn_alpn, event_tx, peer_map).await;
+    });
+}
+
+/// Process streams on an accepted connection, dispatching by ALPN.
+///
+/// Emits `PeerDisconnected` only when the last connection for this peer closes.
+async fn handle_connection_streams(
+    connection: Connection,
+    remote_id: EndpointId,
+    alpn: Vec<u8>,
+    event_tx: mpsc::Sender<TransportEvent>,
+    peer_map: Arc<parking_lot::Mutex<PeerMap>>,
+) {
+    let peer_id = endpoint_id_to_peer_id(&remote_id);
+
+    while let Ok((send, mut recv)) = connection.accept_bi().await {
+        let peer_id = peer_id.clone();
+        let event_tx = event_tx.clone();
+        let alpn = alpn.clone();
+        tokio::spawn(async move {
+            if let Err(e) = dispatch_stream(&alpn, &peer_id, send, &mut recv, &event_tx).await {
+                debug!("Stream error from {}: {}", peer_id, e);
+            }
+        });
+    }
+
+    let fully_disconnected = peer_map.lock().decrement_connections(&remote_id);
+    debug!(peer_id = %peer_id, fully_disconnected, "Connection closed");
+
+    if fully_disconnected {
+        if event_tx
+            .send(TransportEvent::PeerDisconnected(peer_id))
+            .await
+            .is_err()
+        {
+            debug!("Event channel closed, cannot emit PeerDisconnected");
+        }
+    }
+}
+
+/// Dispatch a stream based on the connection ALPN.
+async fn dispatch_stream(
+    alpn: &[u8],
+    peer_id: &PeerId,
+    send: iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    event_tx: &mpsc::Sender<TransportEvent>,
+) -> crate::error::Result<()> {
+    match alpn {
+        x if x == protocols::ALPN_PUSHLOG => {
+            let request: crate::message::PushLogRequest = protocols::read_message(recv).await?;
+            let token = crate::transport::ResponseToken::new(send);
+            if event_tx
+                .send(TransportEvent::PushLogRequest {
+                    peer_id: peer_id.clone(),
+                    request,
+                    token,
+                })
+                .await
+                .is_err()
+            {
+                warn!("Event channel closed, cannot emit PushLogRequest");
+            }
+        }
+        x if x == protocols::ALPN_TWOSTREAM => {
+            let request: crate::message::PushLogRequest = protocols::read_message(recv).await?;
+            let token = crate::transport::ResponseToken::new(send);
+            if event_tx
+                .send(TransportEvent::TwoStreamRequest {
+                    peer_id: peer_id.clone(),
+                    request,
+                    token: Some(token),
+                })
+                .await
+                .is_err()
+            {
+                warn!("Event channel closed, cannot emit TwoStreamRequest");
+            }
+        }
+        x if x == protocols::ALPN_DOCSYNC => {
+            let request: crate::message::DocSyncRequest = protocols::read_message(recv).await?;
+            let token = crate::transport::ResponseToken::new(send);
+            if event_tx
+                .send(TransportEvent::DocSyncRequest {
+                    peer_id: peer_id.clone(),
+                    request,
+                    token: Some(token),
+                })
+                .await
+                .is_err()
+            {
+                warn!("Event channel closed, cannot emit DocSyncRequest");
+            }
+        }
+        x if x == protocols::ALPN_BRANCHABLE => {
+            let request: crate::message::BranchableSyncRequest =
+                protocols::read_message(recv).await?;
+            let token = crate::transport::ResponseToken::new(send);
+            if event_tx
+                .send(TransportEvent::BranchableSyncRequest {
+                    peer_id: peer_id.clone(),
+                    request,
+                    token: Some(token),
+                })
+                .await
+                .is_err()
+            {
+                warn!("Event channel closed, cannot emit BranchableSyncRequest");
+            }
+        }
+        x if x == protocols::ALPN_CAR => {
+            debug!(peer_id = %peer_id, "CAR dispatch: reading request CID");
+            let root_cid: cid::Cid = protocols::read_message(recv).await?;
+            debug!(peer_id = %peer_id, root_cid = %root_cid, "CAR dispatch: emitting CarFetchRequest");
+            let token = crate::transport::ResponseToken::new(send);
+            if event_tx
+                .send(TransportEvent::CarFetchRequest {
+                    peer_id: peer_id.clone(),
+                    root_cid,
+                    token: Some(token),
+                })
+                .await
+                .is_err()
+            {
+                warn!("Event channel closed, cannot emit CarFetchRequest");
+            }
+        }
+        x if x == protocols::ALPN_CAR_RESP => {
+            let car_data: Vec<u8> = protocols::read_message(recv).await?;
+            // Extract the root CID from the CAR headers for event correlation.
+            let root_cid = match crate::sync::car::decode_car(&car_data) {
+                Ok((roots, _)) => roots.into_iter().next(),
+                Err(e) => {
+                    warn!("Failed to decode CAR response: {}", e);
+                    None
+                }
+            };
+            if let Some(root_cid) = root_cid {
+                if event_tx
+                    .send(TransportEvent::CarFetchResponse {
+                        peer_id: peer_id.clone(),
+                        root_cid,
+                        car_data,
+                    })
+                    .await
+                    .is_err()
+                {
+                    warn!("Event channel closed, cannot emit CarFetchResponse");
+                }
+            }
+        }
+        x if x == protocols::ALPN_SE => {
+            let request: crate::message::PushSEArtifactsRequest =
+                protocols::read_message(recv).await?;
+            debug!(
+                peer_id = %peer_id,
+                collection_id = %request.collection_id,
+                artifact_count = request.artifacts.len(),
+                "Received SE artifacts"
+            );
+            // SE artifact processing is handled at the database layer
+        }
+        _ => {
+            debug!("Unknown ALPN: {:?}", String::from_utf8_lossy(alpn));
+        }
+    }
+    Ok(())
+}
+
+/// Handle a command from `IrohTransport`.
+///
+/// Returns `true` if the event loop should shut down.
+#[allow(clippy::too_many_arguments)]
+async fn handle_command(
+    cmd: IrohCommand,
+    endpoint: &Endpoint,
+    gossip: &Gossip,
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    subscriptions: &mut HashMap<String, TopicSubscription>,
+    replicators: &mut HashMap<String, ReplicatorInfo>,
+    active_syncs: &mut HashMap<u64, ActiveSync>,
+    next_query_id: &mut u64,
+    event_tx: &mpsc::Sender<TransportEvent>,
+) -> bool {
+    match cmd {
+        IrohCommand::Dial {
+            peer_id,
+            addrs,
+            reply,
+        } => {
+            let result =
+                handle_dial(endpoint, peer_map, subscriptions, &peer_id, addrs, event_tx).await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::Listen { addr: _, reply } => {
+            // iroh endpoint is already listening after bind
+            let _ = reply.send(Ok(()));
+        }
+        IrohCommand::ConnectedPeers { reply } => {
+            let _ = reply.send(Ok(peer_map.lock().connected_peers()));
+        }
+        IrohCommand::ListenAddresses { reply } => {
+            let addr = endpoint.addr();
+            let mut addrs: Vec<PeerAddr> = addr
+                .ip_addrs()
+                .map(|a| PeerAddr::new(a.to_string()))
+                .collect();
+            if addrs.is_empty() {
+                // Before relay connection is established, fall back to endpoint ID.
+                // iroh can connect via relay using only the endpoint ID.
+                addrs.push(PeerAddr::new(format!("iroh://{}", endpoint.id())));
+            }
+            let _ = reply.send(Ok(addrs));
+        }
+        IrohCommand::PeerAddresses { reply } => {
+            let _ = reply.send(Ok(peer_map.lock().peer_addresses()));
+        }
+        IrohCommand::Subscribe { topic, reply } => {
+            let result = handle_subscribe(gossip, subscriptions, peer_map, topic, event_tx).await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::Unsubscribe { topic, reply } => {
+            let topic_str = topic.to_string();
+            if let Some(sub) = subscriptions.remove(&topic_str) {
+                sub.reader_task.abort();
+                let _ = reply.send(Ok(true));
+            } else {
+                let _ = reply.send(Ok(false));
+            }
+        }
+        IrohCommand::Publish { topic, msg, reply } => {
+            let result = handle_publish(subscriptions, &topic, &msg).await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::SendPushLogResponse {
+            mut send_stream,
+            reply_msg,
+            reply,
+        } => {
+            let result = async {
+                protocols::write_message(&mut send_stream, &reply_msg).await?;
+                send_stream.finish().map_err(|e| {
+                    crate::error::Error::Transport(format!("failed to finish stream: {}", e))
+                })?;
+                Ok(())
+            }
+            .await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::SendTwoStreamRequest {
+            peer_id,
+            request,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let result = handle_request_response(
+                endpoint,
+                &peer_id,
+                protocols::ALPN_TWOSTREAM,
+                &request,
+                direct_addr,
+            )
+            .await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::SendTwoStreamResponse {
+            peer_id,
+            reply_msg,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let result = handle_fire_and_forget(
+                endpoint,
+                &peer_id,
+                protocols::ALPN_TWOSTREAM,
+                &reply_msg,
+                direct_addr,
+            )
+            .await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::SendDocSyncRequest {
+            peer_id,
+            request,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let result: crate::error::Result<crate::message::DocSyncReply> =
+                handle_request_response(
+                    endpoint,
+                    &peer_id,
+                    protocols::ALPN_DOCSYNC,
+                    &request,
+                    direct_addr,
+                )
+                .await;
+            match result {
+                Ok(doc_reply) => {
+                    let _ = event_tx
+                        .send(TransportEvent::DocSyncReply {
+                            peer_id,
+                            reply: doc_reply,
+                        })
+                        .await;
+                    let _ = reply.send(Ok(()));
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
+            }
+        }
+        IrohCommand::SendBranchableSyncRequest {
+            peer_id,
+            request,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let result: crate::error::Result<crate::message::BranchableSyncReply> =
+                handle_request_response(
+                    endpoint,
+                    &peer_id,
+                    protocols::ALPN_BRANCHABLE,
+                    &request,
+                    direct_addr,
+                )
+                .await;
+            match result {
+                Ok(br_reply) => {
+                    let _ = event_tx
+                        .send(TransportEvent::BranchableSyncReply {
+                            peer_id,
+                            reply: br_reply,
+                        })
+                        .await;
+                    let _ = reply.send(Ok(()));
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
+            }
+        }
+        IrohCommand::SendDocSyncResponse {
+            peer_id,
+            reply_msg,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let result = handle_fire_and_forget(
+                endpoint,
+                &peer_id,
+                protocols::ALPN_DOCSYNC_RESP,
+                &reply_msg,
+                direct_addr,
+            )
+            .await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::SendBranchableSyncResponse {
+            peer_id,
+            reply_msg,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let result = handle_fire_and_forget(
+                endpoint,
+                &peer_id,
+                protocols::ALPN_BRANCHABLE_RESP,
+                &reply_msg,
+                direct_addr,
+            )
+            .await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::SendDocSyncResponseToken {
+            mut send_stream,
+            reply_msg,
+            reply,
+        } => {
+            let result = async {
+                protocols::write_message(&mut send_stream, &reply_msg).await?;
+                send_stream.finish().map_err(|e| {
+                    crate::error::Error::Transport(format!("failed to finish stream: {}", e))
+                })?;
+                Ok(())
+            }
+            .await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::SendBranchableSyncResponseToken {
+            mut send_stream,
+            reply_msg,
+            reply,
+        } => {
+            let result = async {
+                protocols::write_message(&mut send_stream, &reply_msg).await?;
+                send_stream.finish().map_err(|e| {
+                    crate::error::Error::Transport(format!("failed to finish stream: {}", e))
+                })?;
+                Ok(())
+            }
+            .await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::SendCarRequest {
+            peer_id,
+            root_cid,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let result = handle_fire_and_forget(
+                endpoint,
+                &peer_id,
+                protocols::ALPN_CAR,
+                &root_cid,
+                direct_addr,
+            )
+            .await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::SendCarResponse {
+            peer_id,
+            car_data,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let result = handle_fire_and_forget(
+                endpoint,
+                &peer_id,
+                protocols::ALPN_CAR_RESP,
+                &car_data,
+                direct_addr,
+            )
+            .await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::SendSEArtifacts {
+            peer_id,
+            request,
+            reply,
+        } => {
+            let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let result = handle_fire_and_forget(
+                endpoint,
+                &peer_id,
+                protocols::ALPN_SE,
+                &request,
+                direct_addr,
+            )
+            .await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::SyncBlocks {
+            root,
+            providers,
+            missing,
+            reply,
+        } => {
+            let query_id = QueryId(*next_query_id);
+            *next_query_id += 1;
+
+            let endpoint = endpoint.clone();
+            let event_tx = event_tx.clone();
+            let task = tokio::spawn(async move {
+                handle_block_sync(endpoint, query_id, root, providers, missing, event_tx).await;
+            });
+            active_syncs.insert(
+                query_id.0,
+                ActiveSync {
+                    abort_handle: task.abort_handle(),
+                },
+            );
+            let _ = reply.send(Ok(query_id));
+        }
+        IrohCommand::CancelSync { query_id, reply } => {
+            if let Some(sync) = active_syncs.remove(&query_id.0) {
+                sync.abort_handle.abort();
+                let _ = reply.send(Ok(true));
+            } else {
+                let _ = reply.send(Ok(false));
+            }
+        }
+        IrohCommand::CreateReplicator {
+            peer_id,
+            collections,
+            reply,
+        } => {
+            let info = ReplicatorInfo::from_raw(peer_id.to_string(), collections, Vec::new());
+            replicators.insert(peer_id.to_string(), info);
+            let _ = reply.send(Ok(()));
+        }
+        IrohCommand::DeleteReplicator { peer_id, reply } => {
+            replicators.remove(peer_id.as_str());
+            let _ = reply.send(Ok(()));
+        }
+        IrohCommand::ListReplicators { reply } => {
+            let list: Vec<ReplicatorInfo> = replicators.values().cloned().collect();
+            let _ = reply.send(Ok(list));
+        }
+        IrohCommand::GetReplicator { peer_id, reply } => {
+            let info = replicators.get(peer_id.as_str()).cloned();
+            let _ = reply.send(Ok(info));
+        }
+        IrohCommand::RemoveReplicatorCollections {
+            peer_id,
+            collections,
+            reply,
+        } => {
+            if let Some(info) = replicators.get_mut(peer_id.as_str()) {
+                info.collections.retain(|c| !collections.contains(c));
+                if info.collections.is_empty() {
+                    replicators.remove(peer_id.as_str());
+                    let _ = reply.send(Ok(true));
+                } else {
+                    let _ = reply.send(Ok(false));
+                }
+            } else {
+                let _ = reply.send(Ok(false));
+            }
+        }
+        IrohCommand::Shutdown { reply } => {
+            let _ = reply.send(Ok(()));
+            return true;
+        }
+    }
+    false
+}
+
+/// Dial a peer by EndpointId.
+///
+/// Keeps the connection alive by spawning a stream handler task.
+async fn handle_dial(
+    endpoint: &Endpoint,
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    subscriptions: &HashMap<String, TopicSubscription>,
+    peer_id: &PeerId,
+    addrs: Vec<PeerAddr>,
+    event_tx: &mpsc::Sender<TransportEvent>,
+) -> crate::error::Result<()> {
+    let endpoint_id = parse_endpoint_id(peer_id)?;
+
+    // Build EndpointAddr from ID plus optional socket addresses
+    let direct_addresses: Vec<std::net::SocketAddr> = addrs
+        .iter()
+        .filter_map(|a| a.as_str().parse().ok())
+        .collect();
+
+    let mut addr = EndpointAddr::new(endpoint_id);
+    for sa in &direct_addresses {
+        addr = addr.with_ip_addr(*sa);
+    }
+
+    let connection = endpoint
+        .connect(addr, protocols::ALPN_PUSHLOG)
+        .await
+        .map_err(|e| crate::error::Error::Dial(e.to_string()))?;
+
+    let conn_alpn = connection.alpn().to_vec();
+
+    let is_new = peer_map
+        .lock()
+        .increment_connections(endpoint_id, direct_addresses.first().copied());
+
+    if is_new
+        && event_tx
+            .send(TransportEvent::PeerConnected(peer_id.clone()))
+            .await
+            .is_err()
+    {
+        warn!("Event channel closed, cannot emit PeerConnected");
+    }
+
+    if is_new {
+        join_peer_to_subscriptions(subscriptions, endpoint_id).await;
+    }
+
+    // Keep connection alive by spawning a handler for incoming streams.
+    let event_tx = event_tx.clone();
+    let peer_map = Arc::clone(peer_map);
+    tokio::spawn(async move {
+        handle_connection_streams(connection, endpoint_id, conn_alpn, event_tx, peer_map).await;
+    });
+
+    Ok(())
+}
+
+/// Subscribe to a gossip topic.
+///
+/// Passes all currently connected peers as initial neighbors so gossip messages
+/// are immediately deliverable. iroh-gossip requires explicit neighbors unlike
+/// libp2p-gossipsub which discovers them automatically.
+async fn handle_subscribe(
+    gossip: &Gossip,
+    subscriptions: &mut HashMap<String, TopicSubscription>,
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    topic: crate::topics::DefraTopic,
+    event_tx: &mpsc::Sender<TransportEvent>,
+) -> crate::error::Result<bool> {
+    use futures::StreamExt;
+
+    let topic_str = topic.to_string();
+    if subscriptions.contains_key(&topic_str) {
+        return Ok(false);
+    }
+
+    let topic_id = topic_to_id(&topic_str);
+    let initial_peers: Vec<iroh::EndpointId> = peer_map.lock().endpoint_ids().collect();
+    let gossip_topic = gossip
+        .subscribe(topic_id, initial_peers)
+        .await
+        .map_err(|e| crate::error::Error::GossipSubSubscription(e.to_string()))?;
+
+    let (sender, mut receiver) = gossip_topic.split();
+
+    let event_tx = event_tx.clone();
+    let topic_str_clone = topic_str.clone();
+    let reader_task = tokio::spawn(async move {
+        while let Some(result) = receiver.next().await {
+            match result {
+                Ok(event) => match event {
+                    iroh_gossip::api::Event::Received(msg) => {
+                        match postcard::from_bytes::<crate::message::PushLogBroadcast>(&msg.content)
+                        {
+                            Ok(broadcast) => {
+                                let sender_peer_id = endpoint_id_to_peer_id(&msg.delivered_from);
+                                let msg_id = MessageId::new(uuid::Uuid::new_v4().to_string());
+                                if event_tx
+                                    .send(TransportEvent::GossipMessage {
+                                        propagation_source: sender_peer_id,
+                                        message_id: msg_id,
+                                        topic: topic_str_clone.clone(),
+                                        message: broadcast,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    debug!("Event channel closed, stopping gossip reader");
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to decode gossip message: {}", e);
+                            }
+                        }
+                    }
+                    iroh_gossip::api::Event::NeighborUp(id) => {
+                        if event_tx
+                            .send(TransportEvent::PeerSubscribed {
+                                peer_id: endpoint_id_to_peer_id(&id),
+                                topic: topic_str_clone.clone(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    iroh_gossip::api::Event::NeighborDown(id) => {
+                        if event_tx
+                            .send(TransportEvent::PeerUnsubscribed {
+                                peer_id: endpoint_id_to_peer_id(&id),
+                                topic: topic_str_clone.clone(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    iroh_gossip::api::Event::Lagged => {
+                        warn!(
+                            topic = %topic_str_clone,
+                            "Gossip lagged — some messages were missed"
+                        );
+                    }
+                },
+                Err(e) => {
+                    debug!("Gossip receiver error: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+
+    subscriptions.insert(
+        topic_str,
+        TopicSubscription {
+            sender,
+            reader_task,
+        },
+    );
+    Ok(true)
+}
+
+/// Join a newly connected peer into all active gossip topic subscriptions.
+///
+/// iroh-gossip subscriptions are created with an explicit neighbor list.
+/// When a new peer connects after subscription, we add them as a neighbor
+/// so they can receive (and send us) gossip messages on all subscribed topics.
+async fn join_peer_to_subscriptions(
+    subscriptions: &HashMap<String, TopicSubscription>,
+    endpoint_id: iroh::EndpointId,
+) {
+    for (topic, sub) in subscriptions.iter() {
+        if let Err(e) = sub.sender.join_peers(vec![endpoint_id]).await {
+            debug!(
+                topic = %topic,
+                peer = %endpoint_id,
+                "Failed to add new peer to gossip topic: {}",
+                e
+            );
+        }
+    }
+}
+
+/// Publish a message on a gossip topic.
+async fn handle_publish(
+    subscriptions: &mut HashMap<String, TopicSubscription>,
+    topic: &crate::topics::DefraTopic,
+    msg: &crate::message::PushLogBroadcast,
+) -> crate::error::Result<MessageId> {
+    let topic_str = topic.to_string();
+    let sub = subscriptions
+        .get_mut(&topic_str)
+        .ok_or_else(|| crate::error::Error::InvalidTopic(topic_str.clone()))?;
+
+    let payload =
+        postcard::to_allocvec(msg).map_err(|e| crate::error::Error::Codec(e.to_string()))?;
+
+    sub.sender
+        .broadcast(Bytes::from(payload))
+        .await
+        .map_err(|e| crate::error::Error::GossipSubPublish(e.to_string()))?;
+
+    Ok(MessageId::new(uuid::Uuid::new_v4().to_string()))
+}
+
+/// Send a request and wait for a response (bidirectional stream).
+///
+/// `direct_addr` is an optional cached socket address for the peer; when provided it is
+/// added to the `EndpointAddr` so iroh can connect directly without relay discovery.
+async fn handle_request_response<Req, Resp>(
+    endpoint: &Endpoint,
+    peer_id: &PeerId,
+    alpn: &[u8],
+    request: &Req,
+    direct_addr: Option<std::net::SocketAddr>,
+) -> crate::error::Result<Resp>
+where
+    Req: serde::Serialize,
+    Resp: serde::de::DeserializeOwned,
+{
+    let endpoint_id = parse_endpoint_id(peer_id)?;
+    let mut addr = EndpointAddr::from(endpoint_id);
+    if let Some(sa) = direct_addr {
+        addr = addr.with_ip_addr(sa);
+    }
+
+    let connection = endpoint
+        .connect(addr, alpn)
+        .await
+        .map_err(|e| crate::error::Error::Dial(e.to_string()))?;
+
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .map_err(|e| crate::error::Error::Transport(e.to_string()))?;
+
+    protocols::write_message(&mut send, request).await?;
+    send.finish()
+        .map_err(|e| crate::error::Error::Transport(e.to_string()))?;
+
+    let response: Resp = protocols::read_message(&mut recv).await?;
+    Ok(response)
+}
+
+/// Look up the cached direct socket address for a peer from the peer map.
+fn peer_direct_addr(
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    peer_id: &PeerId,
+) -> Option<std::net::SocketAddr> {
+    let id = parse_endpoint_id(peer_id).ok()?;
+    let map = peer_map.lock();
+    map.get(&id).and_then(|info| info.remote_addr)
+}
+
+/// Send a message without expecting a response.
+///
+/// Keeps the connection alive until the peer closes their stream, ensuring
+/// the message is received before CONNECTION_CLOSE is sent.
+async fn handle_fire_and_forget<T: serde::Serialize>(
+    endpoint: &Endpoint,
+    peer_id: &PeerId,
+    alpn: &[u8],
+    msg: &T,
+    direct_addr: Option<std::net::SocketAddr>,
+) -> crate::error::Result<()> {
+    let endpoint_id = parse_endpoint_id(peer_id)?;
+    let mut addr = EndpointAddr::from(endpoint_id);
+    if let Some(sa) = direct_addr {
+        addr = addr.with_ip_addr(sa);
+    }
+
+    let connection = endpoint
+        .connect(addr, alpn)
+        .await
+        .map_err(|e| crate::error::Error::Dial(e.to_string()))?;
+
+    let (mut send, mut recv) = connection
+        .open_bi()
+        .await
+        .map_err(|e| crate::error::Error::Transport(e.to_string()))?;
+
+    protocols::write_message(&mut send, msg).await?;
+    send.finish()
+        .map_err(|e| crate::error::Error::Transport(e.to_string()))?;
+
+    // Wait for peer to close their side of the stream (via RESET_STREAM or FIN).
+    // This ensures the connection stays open long enough for the peer's accept_bi()
+    // to run and read the message before CONNECTION_CLOSE is sent.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), recv.read_to_end(16)).await;
+
+    Ok(())
+}
+
+/// Try to fetch CAR blocks from a single provider.
+///
+/// Returns `Ok(())` if the fetch succeeded and a `CarFetchResponse` was emitted.
+async fn try_fetch_from_provider(
+    endpoint: &Endpoint,
+    provider: &PeerId,
+    root: cid::Cid,
+    event_tx: &mpsc::Sender<TransportEvent>,
+) -> bool {
+    let endpoint_id = match parse_endpoint_id(provider) {
+        Ok(id) => id,
+        Err(e) => {
+            warn!(provider = %provider, error = %e, "CAR fetch: invalid provider peer ID");
+            return false;
+        }
+    };
+
+    let addr = EndpointAddr::from(endpoint_id);
+    let connection = match endpoint.connect(addr, protocols::ALPN_CAR).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            warn!(provider = %provider, root = %root, error = %e, "CAR fetch: connection failed");
+            return false;
+        }
+    };
+
+    let (mut send, mut recv) = match connection.open_bi().await {
+        Ok(streams) => streams,
+        Err(e) => {
+            warn!(provider = %provider, root = %root, error = %e, "CAR fetch: open_bi failed");
+            return false;
+        }
+    };
+
+    if let Err(e) = protocols::write_message(&mut send, &root).await {
+        warn!(provider = %provider, root = %root, error = %e, "CAR fetch: write_message failed");
+        return false;
+    }
+    let _ = send.finish();
+
+    info!(provider = %provider, root = %root, "CAR fetch: request sent, waiting for response");
+
+    let car_data = match recv.read_to_end(64 * 1024 * 1024).await {
+        Ok(data) => data,
+        Err(e) => {
+            warn!(provider = %provider, root = %root, error = %e, "CAR fetch: read response failed");
+            return false;
+        }
+    };
+
+    if car_data.is_empty() {
+        warn!(provider = %provider, root = %root, "CAR fetch: empty response");
+        return false;
+    }
+
+    if event_tx
+        .send(TransportEvent::CarFetchResponse {
+            peer_id: provider.clone(),
+            root_cid: root,
+            car_data,
+        })
+        .await
+        .is_err()
+    {
+        warn!("Event channel closed, cannot emit CarFetchResponse");
+        return false;
+    }
+    true
+}
+
+/// CAR-based block sync: fetch blocks from providers concurrently.
+///
+/// Tries all providers in parallel, completes on first success and cancels the rest.
+/// The `missing` CIDs are logged for diagnostics but the CAR fetch retrieves the full DAG.
+async fn handle_block_sync(
+    endpoint: Endpoint,
+    query_id: QueryId,
+    root: cid::Cid,
+    providers: Vec<PeerId>,
+    missing: Vec<cid::Cid>,
+    event_tx: mpsc::Sender<TransportEvent>,
+) {
+    if !missing.is_empty() {
+        debug!(
+            root = %root,
+            missing_count = missing.len(),
+            "Block sync requested with {} missing CIDs",
+            missing.len()
+        );
+    }
+
+    let mut tasks: Vec<JoinHandle<bool>> = Vec::with_capacity(providers.len());
+
+    for provider in &providers {
+        let endpoint = endpoint.clone();
+        let event_tx = event_tx.clone();
+        let provider = provider.clone();
+        tasks.push(tokio::spawn(async move {
+            try_fetch_from_provider(&endpoint, &provider, root, &event_tx).await
+        }));
+    }
+
+    let mut any_success = false;
+
+    for task in tasks {
+        match task.await {
+            Ok(true) => {
+                any_success = true;
+                break;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                debug!("Block sync task panicked: {}", e);
+            }
+        }
+    }
+
+    if event_tx
+        .send(TransportEvent::BitswapComplete {
+            query_id,
+            success: any_success,
+            error: if any_success {
+                None
+            } else {
+                Some("all providers failed".to_string())
+            },
+        })
+        .await
+        .is_err()
+    {
+        warn!("Event channel closed, cannot emit BitswapComplete");
+    }
+}
+
+/// Hash a topic string to an iroh-gossip `TopicId`.
+fn topic_to_id(topic: &str) -> TopicId {
+    let hash = blake3::hash(topic.as_bytes());
+    TopicId::from(*hash.as_bytes())
+}

@@ -67,7 +67,11 @@ impl DefraNode for GoNode {
         cmd.arg("--url").arg(&config.http_addr);
         cmd.arg("--no-log-color");
         cmd.arg("--log-output").arg("stdout");
-        cmd.arg("--no-keyring");
+        if config.keyring_enabled {
+            cmd.env("DEFRA_KEYRING_SECRET", "integration-test-secret");
+        } else {
+            cmd.arg("--no-keyring");
+        }
 
         cmd.arg("start");
         cmd.arg("--store")

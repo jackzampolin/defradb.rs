@@ -2,23 +2,24 @@
 
 use blockstore::Blockstore;
 use cid::Cid;
-use libp2p::PeerId;
 
 use super::config::ReplicationConfig;
 use super::result::ReplicationResult;
 use crate::sync::coordinator::SyncCoordinator;
 use crate::sync::manager::SyncEvent;
 use crate::sync::merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
+use crate::transport::P2PTransport;
 
 /// Handle a DagNeedsFetch event by initiating a Bitswap sync.
-pub(super) async fn handle_dag_needs_fetch<B>(
-    coordinator: &SyncCoordinator<B>,
+pub(super) async fn handle_dag_needs_fetch<B, T>(
+    coordinator: &SyncCoordinator<B, T>,
     root_cid: Cid,
     missing: Vec<Cid>,
-    providers: Vec<PeerId>,
+    providers: Vec<String>,
 ) -> ReplicationResult
 where
     B: Blockstore + 'static,
+    T: P2PTransport,
 {
     tracing::debug!(
         cid = %root_cid,
@@ -27,10 +28,25 @@ where
         "Initiating Bitswap fetch for missing blocks"
     );
 
-    // Start Bitswap sync via host
+    // Convert string peer IDs to transport PeerIds.
+    // If the provider list is empty, fall back to all connected transport peers.
+    let transport_providers: Vec<crate::transport::PeerId> = if providers.is_empty() {
+        coordinator
+            .transport()
+            .connected_peers()
+            .await
+            .unwrap_or_default()
+    } else {
+        providers
+            .into_iter()
+            .map(crate::transport::PeerId::new)
+            .collect()
+    };
+
+    // Start Bitswap sync via transport
     match coordinator
-        .host()
-        .bitswap_sync(root_cid, providers, missing)
+        .transport()
+        .sync_blocks(root_cid, transport_providers, missing)
         .await
     {
         Ok(query_id) => {
@@ -53,8 +69,8 @@ where
 }
 
 /// Handle a BlockReceived event.
-pub(super) async fn handle_block_received<B, H>(
-    coordinator: &SyncCoordinator<B>,
+pub(super) async fn handle_block_received<B, T, H>(
+    coordinator: &SyncCoordinator<B, T>,
     handler: &H,
     config: &ReplicationConfig,
     cid: Cid,
@@ -62,6 +78,7 @@ pub(super) async fn handle_block_received<B, H>(
 ) -> ReplicationResult
 where
     B: Blockstore + 'static,
+    T: P2PTransport,
     H: MergeHandler + ?Sized + 'static,
 {
     // Load block from blockstore
@@ -211,14 +228,15 @@ fn event_to_merge_metadata(event: &SyncEvent) -> (Cid, String, String, String) {
 ///
 /// Loads block data from the blockstore, delegates batch merge to the handler,
 /// then batch-marks successful merges in a single transaction.
-pub(super) async fn process_merge_batch<B, H>(
-    coordinator: &SyncCoordinator<B>,
+pub(super) async fn process_merge_batch<B, T, H>(
+    coordinator: &SyncCoordinator<B, T>,
     events: Vec<SyncEvent>,
     handler: &H,
     _config: &ReplicationConfig,
 ) -> Vec<ReplicationResult>
 where
     B: Blockstore + 'static,
+    T: P2PTransport,
     H: MergeHandler + ?Sized + 'static,
 {
     let mut merge_blocks = Vec::with_capacity(events.len());
@@ -315,14 +333,15 @@ where
 }
 
 /// Process a sync event and return the result.
-pub(super) async fn process_event<B, H>(
-    coordinator: &SyncCoordinator<B>,
+pub(super) async fn process_event<B, T, H>(
+    coordinator: &SyncCoordinator<B, T>,
     event: SyncEvent,
     handler: &H,
     config: &ReplicationConfig,
 ) -> ReplicationResult
 where
     B: Blockstore + 'static,
+    T: P2PTransport,
     H: MergeHandler + ?Sized + 'static,
 {
     match event {

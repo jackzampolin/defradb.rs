@@ -175,6 +175,10 @@ pub struct StartArgs {
     /// Query execution timeout in seconds (0 = no timeout, default: 30)
     #[arg(long)]
     pub query_timeout: Option<u64>,
+
+    /// P2P transport backend: "libp2p" (default) or "iroh"
+    #[arg(long)]
+    pub p2p_transport: Option<String>,
 }
 
 impl StartArgs {
@@ -354,6 +358,9 @@ impl StartArgs {
         }
         if let Some(ref intervals) = self.replicator_retry_intervals {
             config.replicator_retry_intervals = intervals.clone();
+        }
+        if let Some(ref transport) = self.p2p_transport {
+            config.net.transport = transport.parse()?;
         }
         if let Some(ref durability) = self.durability {
             config.datastore.durability = match durability.as_str() {

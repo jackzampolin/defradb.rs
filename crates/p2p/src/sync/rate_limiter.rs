@@ -8,8 +8,9 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use libp2p::PeerId;
 use parking_lot::Mutex;
+
+use crate::transport::PeerId;
 
 /// Default bucket capacity (burst allowance).
 const DEFAULT_CAPACITY: u32 = 100;
@@ -61,8 +62,10 @@ impl Bucket {
 ///
 /// Thread-safe via an internal `Mutex`; designed to be held behind an `Arc`
 /// and shared across event-handler invocations.
+///
+/// Uses string-based peer IDs to support both libp2p and iroh transports.
 pub struct PeerRateLimiter {
-    buckets: Mutex<HashMap<PeerId, Bucket>>,
+    buckets: Mutex<HashMap<String, Bucket>>,
     capacity: u32,
     refill_rate: f64,
 }
@@ -90,15 +93,16 @@ impl PeerRateLimiter {
     ///
     /// Returns `true` if the event is allowed, `false` if the peer is rate-limited.
     pub fn check(&self, peer: &PeerId) -> bool {
+        let key = peer.as_str().to_string();
         let mut buckets = self.buckets.lock();
 
         // Lazy eviction when the map is too large.
-        if buckets.len() >= MAX_TRACKED_PEERS && !buckets.contains_key(peer) {
+        if buckets.len() >= MAX_TRACKED_PEERS && !buckets.contains_key(&key) {
             // Remove the entry with the oldest last_refill time.
             if let Some(oldest) = buckets
                 .iter()
                 .min_by_key(|(_, b)| b.last_refill)
-                .map(|(k, _)| *k)
+                .map(|(k, _)| k.clone())
             {
                 buckets.remove(&oldest);
             }
@@ -107,13 +111,13 @@ impl PeerRateLimiter {
         let capacity = self.capacity;
         let refill_rate = self.refill_rate;
         buckets
-            .entry(*peer)
+            .entry(key)
             .or_insert_with(|| Bucket::new(capacity))
             .try_consume(capacity, refill_rate)
     }
 
     /// Discard the bucket for `peer` (called on disconnect to free memory).
     pub fn remove_peer(&self, peer: &PeerId) {
-        self.buckets.lock().remove(peer);
+        self.buckets.lock().remove(peer.as_str());
     }
 }

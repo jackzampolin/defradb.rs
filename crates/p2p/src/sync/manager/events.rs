@@ -1,7 +1,6 @@
 //! Sync manager events.
 
 use cid::Cid;
-use libp2p::PeerId;
 
 /// Events emitted by the SyncManager for higher layers to process.
 #[derive(Debug, Clone)]
@@ -40,7 +39,7 @@ pub enum SyncEvent {
         /// CIDs of missing blocks to fetch
         missing: Vec<Cid>,
         /// Suggested providers (peers that may have the blocks)
-        providers: Vec<PeerId>,
+        providers: Vec<String>,
         /// Document ID for the root block
         doc_id: String,
         /// Collection ID for the root block

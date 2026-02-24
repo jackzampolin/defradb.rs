@@ -2,15 +2,13 @@
 
 use std::collections::HashMap;
 
-use libp2p::PeerId;
-
 use super::{PeerInfo, PeerStateTracker};
 
 impl PeerStateTracker {
     /// Enforce global limits by evicting oldest disconnected peers and their CIDs.
     ///
     /// Called internally when adding peers or CIDs.
-    pub(super) fn enforce_global_limits(&self, peers: &mut HashMap<PeerId, PeerInfo>) {
+    pub(super) fn enforce_global_limits(&self, peers: &mut HashMap<String, PeerInfo>) {
         // Check peer count limit - evict oldest disconnected peers first
         while peers.len() > self.max_peers {
             // Find the oldest disconnected peer
@@ -18,7 +16,7 @@ impl PeerStateTracker {
                 .iter()
                 .filter(|(_, info)| !info.connected)
                 .min_by_key(|(_, info)| info.last_seen)
-                .map(|(id, _)| *id);
+                .map(|(id, _)| id.clone());
 
             if let Some(peer_id) = oldest_disconnected {
                 tracing::debug!(
@@ -46,7 +44,7 @@ impl PeerStateTracker {
             // Evict from peers with the most CIDs (disconnected first)
             let mut peer_cid_counts: Vec<_> = peers
                 .iter()
-                .map(|(id, info)| (*id, info.known_cids.len(), info.connected))
+                .map(|(id, info)| (id.clone(), info.known_cids.len(), info.connected))
                 .collect();
 
             // Sort by: disconnected first, then by CID count descending

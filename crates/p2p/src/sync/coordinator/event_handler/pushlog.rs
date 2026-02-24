@@ -6,14 +6,15 @@ use cid::Cid;
 use super::super::SyncCoordinator;
 use crate::error::Result;
 use crate::message::{PushLogBroadcast, PushLogReply};
-use crate::signing::sign_message;
+use crate::signing::sign_with_transport;
+use crate::transport::{P2PTransport, PeerId, ResponseToken};
 
-impl<B: Blockstore + 'static> SyncCoordinator<B> {
+impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub(super) async fn handle_pushlog_request(
         &self,
-        peer_id: libp2p::PeerId,
+        peer_id: PeerId,
         request: crate::message::PushLogRequest,
-        channel: crate::host::ResponseChannel,
+        token: ResponseToken,
     ) -> Result<()> {
         tracing::debug!(
             peer_id = %peer_id,
@@ -23,7 +24,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         );
 
         // Access control check
-        if let Err(e) = self.check_access(&peer_id, &request.collection_id).await {
+        if let Err(e) = self
+            .check_access_str(peer_id.as_str(), &request.collection_id)
+            .await
+        {
             tracing::warn!(
                 peer_id = %peer_id,
                 collection_id = %request.collection_id,
@@ -37,7 +41,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     request.collection_id
                 ),
             );
-            if let Err(send_err) = self.host.send_pushlog_response(channel, reply).await {
+            if let Err(send_err) = self.transport.send_pushlog_response(token, reply).await {
                 tracing::warn!(
                     peer_id = %peer_id,
                     error = %send_err,
@@ -50,7 +54,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         // Parse CID - if invalid, send error response
         let cid = match Cid::try_from(request.cid.as_slice()) {
             Ok(cid) => {
-                self.peer_state.peer_has_cid(&peer_id, cid);
+                self.peer_state.peer_has_cid(peer_id.as_str(), cid);
                 cid
             }
             Err(e) => {
@@ -62,7 +66,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     "Failed to parse CID from PushLog request - sending error response"
                 );
                 let reply = PushLogReply::error(&request.metadata.message_id, &error_msg);
-                if let Err(send_err) = self.host.send_pushlog_response(channel, reply).await {
+                if let Err(send_err) = self.transport.send_pushlog_response(token, reply).await {
                     tracing::warn!(
                         peer_id = %peer_id,
                         error = %send_err,
@@ -75,17 +79,15 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
 
         tracing::trace!(?cid, "Parsed valid CID from PushLog request");
 
-        // Convert request to broadcast format and process
         let broadcast = PushLogBroadcast::from_request(&request);
         let process_result = self.manager.process_pushlog(&broadcast).await;
 
-        // Send response based on processing result
         let reply = match &process_result {
             Ok(()) => PushLogReply::success(&request.metadata.message_id),
             Err(e) => PushLogReply::error(&request.metadata.message_id, &e.to_string()),
         };
 
-        if let Err(e) = self.host.send_pushlog_response(channel, reply).await {
+        if let Err(e) = self.transport.send_pushlog_response(token, reply).await {
             tracing::warn!(
                 peer_id = %peer_id,
                 doc_id = %request.doc_id,
@@ -105,8 +107,9 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
 
     pub(super) async fn handle_two_stream_request(
         &self,
-        peer_id: libp2p::PeerId,
+        peer_id: PeerId,
         request: crate::message::PushLogRequest,
+        token: Option<ResponseToken>,
     ) -> Result<()> {
         tracing::debug!(
             peer_id = %peer_id,
@@ -117,7 +120,10 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         );
 
         // Access control check
-        if let Err(e) = self.check_access(&peer_id, &request.collection_id).await {
+        if let Err(e) = self
+            .check_access_str(peer_id.as_str(), &request.collection_id)
+            .await
+        {
             tracing::warn!(
                 peer_id = %peer_id,
                 collection_id = %request.collection_id,
@@ -131,23 +137,17 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     request.collection_id
                 ),
             );
-            if let Err(sign_err) = sign_message(self.host.keypair(), &mut reply) {
+            if let Err(sign_err) = sign_with_transport(&self.transport, &mut reply) {
                 tracing::error!(error = %sign_err, "Failed to sign access denied response");
             }
-            if let Err(send_err) = self.host.send_two_stream_response(peer_id, reply).await {
-                tracing::warn!(
-                    peer_id = %peer_id,
-                    error = %send_err,
-                    "Failed to send access denied response via two-stream"
-                );
-            }
+            self.send_two_stream_reply(&peer_id, reply, token).await;
             return Err(e);
         }
 
-        // Parse CID - if invalid, send error response
+        // Parse CID
         let cid = match Cid::try_from(request.cid.as_slice()) {
             Ok(cid) => {
-                self.peer_state.peer_has_cid(&peer_id, cid);
+                self.peer_state.peer_has_cid(peer_id.as_str(), cid);
                 cid
             }
             Err(e) => {
@@ -159,34 +159,25 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     "Failed to parse CID from two-stream request - sending error response"
                 );
                 let mut reply = PushLogReply::error(&request.metadata.message_id, &error_msg);
-                if let Err(sign_err) = sign_message(self.host.keypair(), &mut reply) {
+                if let Err(sign_err) = sign_with_transport(&self.transport, &mut reply) {
                     tracing::error!(error = %sign_err, "Failed to sign invalid CID response");
                 }
-                if let Err(send_err) = self.host.send_two_stream_response(peer_id, reply).await {
-                    tracing::warn!(
-                        peer_id = %peer_id,
-                        error = %send_err,
-                        "Failed to send error response for invalid CID via two-stream"
-                    );
-                }
+                self.send_two_stream_reply(&peer_id, reply, token).await;
                 return Err(crate::error::Error::InvalidCid(error_msg));
             }
         };
 
         tracing::trace!(?cid, "Parsed valid CID from two-stream request");
 
-        // Convert request to broadcast format and process
         let broadcast = PushLogBroadcast::from_request(&request);
         let process_result = self.manager.process_pushlog(&broadcast).await;
 
-        // Send response via two-stream protocol (on a NEW stream)
         let mut reply = match &process_result {
             Ok(()) => PushLogReply::success(&request.metadata.message_id),
             Err(e) => PushLogReply::error(&request.metadata.message_id, &e.to_string()),
         };
 
-        // Sign the response (required for Go compatibility)
-        if let Err(e) = sign_message(self.host.keypair(), &mut reply) {
+        if let Err(e) = sign_with_transport(&self.transport, &mut reply) {
             tracing::error!(
                 peer_id = %peer_id,
                 error = %e,
@@ -195,21 +186,37 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             return Err(e);
         }
 
-        if let Err(e) = self.host.send_two_stream_response(peer_id, reply).await {
+        self.send_two_stream_reply(&peer_id, reply, token).await;
+
+        process_result
+    }
+
+    /// Send a two-stream reply using the response token if available,
+    /// falling back to the transport's send_two_stream_response.
+    async fn send_two_stream_reply(
+        &self,
+        peer_id: &PeerId,
+        reply: PushLogReply,
+        token: Option<ResponseToken>,
+    ) {
+        if let Some(token) = token {
+            if let Err(e) = self.transport.send_pushlog_response(token, reply).await {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    error = %e,
+                    "Failed to send two-stream response via token"
+                );
+            }
+        } else if let Err(e) = self
+            .transport
+            .send_two_stream_response(peer_id, reply)
+            .await
+        {
             tracing::warn!(
                 peer_id = %peer_id,
-                doc_id = %request.doc_id,
                 error = %e,
                 "Failed to send two-stream response"
             );
-        } else {
-            tracing::trace!(
-                peer_id = %peer_id,
-                doc_id = %request.doc_id,
-                "Sent two-stream response"
-            );
         }
-
-        process_result
     }
 }

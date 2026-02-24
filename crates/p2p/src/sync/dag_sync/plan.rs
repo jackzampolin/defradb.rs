@@ -1,7 +1,6 @@
 //! Sync plan types for DAG synchronization.
 
 use cid::Cid;
-use libp2p::PeerId;
 
 /// Data for a NeedsFetch sync plan with enforced invariants.
 ///
@@ -14,14 +13,14 @@ pub struct NeedsFetchData {
     /// CIDs that need to be fetched (guaranteed non-empty).
     missing: Vec<Cid>,
     /// Potential providers for the blocks.
-    providers: Vec<PeerId>,
+    providers: Vec<String>,
 }
 
 impl NeedsFetchData {
     /// Create a new NeedsFetchData with validation.
     ///
     /// Returns `None` if `missing` is empty.
-    pub fn new(root: Cid, missing: Vec<Cid>, providers: Vec<PeerId>) -> Option<Self> {
+    pub fn new(root: Cid, missing: Vec<Cid>, providers: Vec<String>) -> Option<Self> {
         if missing.is_empty() {
             None
         } else {
@@ -44,7 +43,7 @@ impl NeedsFetchData {
     }
 
     /// Get the providers.
-    pub fn providers(&self) -> &[PeerId] {
+    pub fn providers(&self) -> &[String] {
         &self.providers
     }
 }
@@ -73,7 +72,7 @@ impl SyncPlan {
     /// Create a NeedsFetch plan with validation.
     ///
     /// Returns `None` if `missing` is empty (use `SyncPlan::Complete` instead).
-    pub fn needs_fetch_new(root: Cid, missing: Vec<Cid>, providers: Vec<PeerId>) -> Option<Self> {
+    pub fn needs_fetch_new(root: Cid, missing: Vec<Cid>, providers: Vec<String>) -> Option<Self> {
         NeedsFetchData::new(root, missing, providers).map(Self::NeedsFetch)
     }
 
@@ -99,7 +98,7 @@ impl SyncPlan {
     }
 
     /// Get the providers if a fetch is needed.
-    pub fn providers(&self) -> Option<&[PeerId]> {
+    pub fn providers(&self) -> Option<&[String]> {
         match self {
             SyncPlan::NeedsFetch(data) => Some(data.providers()),
             _ => None,

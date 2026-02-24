@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use storage::backends::DurabilityMode;
 
 use super::types::{
-    AcpDocumentType, DatastoreType, KeyringBackend, LogFormat, LogLevel, LogOutput,
+    AcpDocumentType, DatastoreType, KeyringBackend, LogFormat, LogLevel, LogOutput, TransportType,
 };
 use crate::error::{Error, Result};
 
@@ -192,6 +192,14 @@ pub struct NetConfig {
     /// Max established connections per peer. Default: 4.
     #[serde(default = "default_max_connections_per_peer")]
     pub max_connections_per_peer: u32,
+    #[serde(default)]
+    pub transport: TransportType,
+    /// Custom relay URL for iroh transport (overrides default N0 relay).
+    #[serde(default)]
+    pub iroh_relay_url: Option<String>,
+    /// Enable DNS-based peer discovery for iroh transport (default: true).
+    #[serde(default = "default_true")]
+    pub iroh_discovery: bool,
 }
 
 fn default_max_msg_size() -> u64 {
@@ -215,6 +223,9 @@ fn default_max_connections_out() -> u32 {
 fn default_max_connections_per_peer() -> u32 {
     4
 }
+fn default_true() -> bool {
+    true
+}
 
 impl Default for NetConfig {
     fn default() -> Self {
@@ -231,6 +242,9 @@ impl Default for NetConfig {
             max_connections_in: default_max_connections_in(),
             max_connections_out: default_max_connections_out(),
             max_connections_per_peer: default_max_connections_per_peer(),
+            transport: TransportType::default(),
+            iroh_relay_url: None,
+            iroh_discovery: true,
         }
     }
 }
@@ -242,10 +256,13 @@ impl NetConfig {
             return Ok(());
         }
 
-        for addr_str in &self.p2p_addresses {
-            addr_str
-                .parse::<p2p::Multiaddr>()
-                .map_err(|e| Error::InvalidMultiaddr(format!("{}: {}", addr_str, e)))?;
+        // Multiaddr validation only applies to libp2p transport
+        if self.transport == TransportType::Libp2p {
+            for addr_str in &self.p2p_addresses {
+                addr_str
+                    .parse::<p2p::Multiaddr>()
+                    .map_err(|e| Error::InvalidMultiaddr(format!("{}: {}", addr_str, e)))?;
+            }
         }
 
         Ok(())

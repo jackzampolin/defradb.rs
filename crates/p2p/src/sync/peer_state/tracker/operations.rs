@@ -3,23 +3,24 @@
 use std::time::Instant;
 
 use cid::Cid;
-use libp2p::PeerId;
 
 use super::{PeerInfo, PeerStateTracker};
 use crate::sync::peer_state::stats::PeerStats;
 
 impl PeerStateTracker {
     /// Record that a peer connected.
-    pub fn peer_connected(&self, peer_id: PeerId) {
+    pub fn peer_connected(&self, peer_id: &str) {
         let mut peers = self.peers.write();
-        let info = peers.entry(peer_id).or_insert_with(PeerInfo::new);
+        let info = peers
+            .entry(peer_id.to_string())
+            .or_insert_with(PeerInfo::new);
         info.connected = true;
         info.last_seen = Instant::now();
         self.enforce_global_limits(&mut peers);
     }
 
     /// Record that a peer disconnected.
-    pub fn peer_disconnected(&self, peer_id: &PeerId) {
+    pub fn peer_disconnected(&self, peer_id: &str) {
         let mut peers = self.peers.write();
         if let Some(info) = peers.get_mut(peer_id) {
             info.connected = false;
@@ -39,10 +40,12 @@ impl PeerStateTracker {
     /// Note: CID tracking is bounded by `max_cids_per_peer` (per-peer LRU)
     /// and `max_total_cids` (global limit). When limits are reached, oldest
     /// CIDs are evicted.
-    pub fn peer_has_cid(&self, peer_id: &PeerId, cid: Cid) {
+    pub fn peer_has_cid(&self, peer_id: &str, cid: Cid) {
         let mut peers = self.peers.write();
         let max_cids = self.max_cids_per_peer;
-        let info = peers.entry(*peer_id).or_insert_with(PeerInfo::new);
+        let info = peers
+            .entry(peer_id.to_string())
+            .or_insert_with(PeerInfo::new);
         info.add_cid(cid, max_cids);
         info.last_seen = Instant::now();
         self.enforce_global_limits(&mut peers);
@@ -55,10 +58,12 @@ impl PeerStateTracker {
     /// Note: CID tracking is bounded by `max_cids_per_peer` (per-peer LRU)
     /// and `max_total_cids` (global limit). When limits are reached, oldest
     /// CIDs are evicted.
-    pub fn peer_has_cids(&self, peer_id: &PeerId, cids: impl IntoIterator<Item = Cid>) {
+    pub fn peer_has_cids(&self, peer_id: &str, cids: impl IntoIterator<Item = Cid>) {
         let mut peers = self.peers.write();
         let max_cids = self.max_cids_per_peer;
-        let info = peers.entry(*peer_id).or_insert_with(PeerInfo::new);
+        let info = peers
+            .entry(peer_id.to_string())
+            .or_insert_with(PeerInfo::new);
         for cid in cids {
             info.add_cid(cid, max_cids);
         }
@@ -67,15 +72,17 @@ impl PeerStateTracker {
     }
 
     /// Record that a peer subscribed to a collection.
-    pub fn peer_subscribed(&self, peer_id: &PeerId, collection_id: String) {
+    pub fn peer_subscribed(&self, peer_id: &str, collection_id: String) {
         let mut peers = self.peers.write();
-        let info = peers.entry(*peer_id).or_insert_with(PeerInfo::new);
+        let info = peers
+            .entry(peer_id.to_string())
+            .or_insert_with(PeerInfo::new);
         info.subscribed_collections.insert(collection_id);
         info.last_seen = Instant::now();
     }
 
     /// Record that a peer unsubscribed from a collection.
-    pub fn peer_unsubscribed(&self, peer_id: &PeerId, collection_id: &str) {
+    pub fn peer_unsubscribed(&self, peer_id: &str, collection_id: &str) {
         let mut peers = self.peers.write();
         if let Some(info) = peers.get_mut(peer_id) {
             info.subscribed_collections.remove(collection_id);
@@ -84,7 +91,7 @@ impl PeerStateTracker {
     }
 
     /// Check if a peer likely has a CID.
-    pub fn peer_has(&self, peer_id: &PeerId, cid: &Cid) -> bool {
+    pub fn peer_has(&self, peer_id: &str, cid: &Cid) -> bool {
         let peers = self.peers.read();
         peers
             .get(peer_id)
@@ -97,51 +104,51 @@ impl PeerStateTracker {
     /// Returns peers that:
     /// - Are currently connected
     /// - Have announced this CID
-    pub fn peers_with_cid(&self, cid: &Cid) -> Vec<PeerId> {
+    pub fn peers_with_cid(&self, cid: &Cid) -> Vec<String> {
         let peers = self.peers.read();
         peers
             .iter()
             .filter(|(_, info)| info.connected && info.known_cids.contains(cid))
-            .map(|(peer_id, _)| *peer_id)
+            .map(|(peer_id, _)| peer_id.clone())
             .collect()
     }
 
     /// Get all connected peers subscribed to a collection.
-    pub fn peers_for_collection(&self, collection_id: &str) -> Vec<PeerId> {
+    pub fn peers_for_collection(&self, collection_id: &str) -> Vec<String> {
         let peers = self.peers.read();
         peers
             .iter()
             .filter(|(_, info)| {
                 info.connected && info.subscribed_collections.contains(collection_id)
             })
-            .map(|(peer_id, _)| *peer_id)
+            .map(|(peer_id, _)| peer_id.clone())
             .collect()
     }
 
     /// Get all connected peers.
-    pub fn connected_peers(&self) -> Vec<PeerId> {
+    pub fn connected_peers(&self) -> Vec<String> {
         let peers = self.peers.read();
         peers
             .iter()
             .filter(|(_, info)| info.connected)
-            .map(|(peer_id, _)| *peer_id)
+            .map(|(peer_id, _)| peer_id.clone())
             .collect()
     }
 
     /// Get peers that DON'T have a CID (potential recipients for broadcast).
     ///
     /// Returns connected peers that haven't announced having this CID.
-    pub fn peers_without_cid(&self, cid: &Cid) -> Vec<PeerId> {
+    pub fn peers_without_cid(&self, cid: &Cid) -> Vec<String> {
         let peers = self.peers.read();
         peers
             .iter()
             .filter(|(_, info)| info.connected && !info.known_cids.contains(cid))
-            .map(|(peer_id, _)| *peer_id)
+            .map(|(peer_id, _)| peer_id.clone())
             .collect()
     }
 
     /// Get number of CIDs known for a peer.
-    pub fn peer_cid_count(&self, peer_id: &PeerId) -> usize {
+    pub fn peer_cid_count(&self, peer_id: &str) -> usize {
         let peers = self.peers.read();
         peers
             .get(peer_id)
@@ -150,7 +157,7 @@ impl PeerStateTracker {
     }
 
     /// Check if a peer is connected.
-    pub fn is_connected(&self, peer_id: &PeerId) -> bool {
+    pub fn is_connected(&self, peer_id: &str) -> bool {
         let peers = self.peers.read();
         peers
             .get(peer_id)

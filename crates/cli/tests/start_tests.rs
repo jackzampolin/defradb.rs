@@ -42,6 +42,7 @@ fn default_start_args() -> StartArgs {
         max_connections_per_peer: None,
         max_merge_depth: None,
         query_timeout: None,
+        p2p_transport: None,
     }
 }
 
@@ -118,6 +119,7 @@ fn test_apply_to_config_all_flags() {
         max_connections_per_peer: Some(8),
         max_merge_depth: Some(2048),
         query_timeout: Some(45),
+        p2p_transport: None,
     };
 
     let result = args.apply_to_config(&mut config);

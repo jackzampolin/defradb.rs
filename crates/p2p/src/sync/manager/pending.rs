@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use cid::Cid;
-use libp2p::PeerId;
 
 /// Maximum number of entries in the pending DAGs map.
 ///
@@ -33,7 +32,7 @@ pub struct PendingDag {
     /// The peer that originally provided this DAG (e.g. DocSync reply sender).
     /// Always included in the Bitswap provider list during retries so the
     /// blocks can be fetched even if the peer isn't in connected_peers().
-    pub source_peer: Option<PeerId>,
+    pub source_peer: Option<String>,
     /// When this entry was inserted (for TTL eviction).
     pub inserted_at: Instant,
 }
