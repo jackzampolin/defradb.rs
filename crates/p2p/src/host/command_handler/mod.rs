@@ -153,7 +153,7 @@ impl<S: Store> P2PHost<S> {
                 }
             }
             HostCommand::GetReplicator { peer_id, response } => {
-                let info = self.replicators.get_replicator_info(&peer_id);
+                let info = self.replicators.get_replicator_info(&peer_id.to_string());
                 if response.send(info).is_err() {
                     debug!(peer_id = %peer_id, "GetReplicator command response dropped - caller cancelled");
                 }

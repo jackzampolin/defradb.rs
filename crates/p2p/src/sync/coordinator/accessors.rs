@@ -6,12 +6,12 @@ use blockstore::Blockstore;
 
 use super::SyncCoordinator;
 use crate::bitswap::ReplicatorRegistry;
-use crate::host::P2PHostHandle;
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::manager::SyncManager;
 use crate::sync::peer_state::PeerStateTracker;
+use crate::transport::P2PTransport;
 
-impl<B: Blockstore + 'static> SyncCoordinator<B> {
+impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Get the replicator registry.
     pub fn replicators(&self) -> &Arc<ReplicatorRegistry> {
         &self.replicators
@@ -23,7 +23,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
     }
 
     /// Get the broadcaster reference.
-    pub fn broadcaster(&self) -> &Broadcaster {
+    pub fn broadcaster(&self) -> &Broadcaster<T> {
         &self.broadcaster
     }
 
@@ -37,20 +37,13 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
         &self.peer_state
     }
 
-    /// Get the host handle for direct peer communication.
-    pub fn host(&self) -> &P2PHostHandle {
-        &self.host
+    /// Get the transport reference.
+    pub fn transport(&self) -> &T {
+        &self.transport
     }
 
     /// Get the sync manager reference.
     pub fn manager(&self) -> &SyncManager<B> {
         &self.manager
     }
-
-    // Note: The request_block and request_block_from_any_peer methods were removed.
-    // They didn't interoperate with Go DefraDB (which uses Bitswap).
-    //
-    // For block fetching, use the DagSync module with Bitswap:
-    //   - DagSync::prepare_sync() to identify missing blocks
-    //   - behaviour.bitswap_sync() to fetch via Bitswap protocol
 }

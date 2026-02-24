@@ -6,11 +6,12 @@ use cid::Cid;
 use super::super::SyncCoordinator;
 use crate::error::Result;
 use crate::message::PushLogBroadcast;
+use crate::transport::{P2PTransport, PeerId};
 
-impl<B: Blockstore + 'static> SyncCoordinator<B> {
+impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub(super) async fn handle_gossip_message(
         &self,
-        propagation_source: libp2p::PeerId,
+        propagation_source: PeerId,
         message: PushLogBroadcast,
         topic: String,
     ) -> Result<()> {
@@ -24,7 +25,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
 
         // Access control check
         if let Err(e) = self
-            .check_access(&propagation_source, &message.collection_id)
+            .check_access_str(propagation_source.as_str(), &message.collection_id)
             .await
         {
             tracing::warn!(
@@ -36,10 +37,12 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             return Err(e);
         }
 
-        // Parse CID - if invalid, return error early
+        // Parse CID
         match Cid::try_from(message.cid.as_slice()) {
             Ok(cid) => {
-                self.peer_state.peer_has_cid(&propagation_source, cid);
+                if let Ok(pid) = propagation_source.as_str().parse::<libp2p::PeerId>() {
+                    self.peer_state.peer_has_cid(&pid, cid);
+                }
             }
             Err(e) => {
                 tracing::warn!(

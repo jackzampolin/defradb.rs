@@ -83,6 +83,8 @@ pub mod patch;
 pub mod peer_identity;
 #[cfg(feature = "p2p")]
 pub mod push_docs;
+#[cfg(feature = "p2p")]
+pub mod push_docs_transport;
 pub mod schema_loader;
 pub mod se;
 pub mod txn;
@@ -130,6 +132,8 @@ pub use peer_identity::{
 };
 #[cfg(feature = "p2p")]
 pub use push_docs::{push_existing_docs, retry_doc};
+#[cfg(feature = "p2p")]
+pub use push_docs_transport::{push_existing_docs_via_transport, retry_doc_via_transport};
 pub use schema_loader::{
     get_collection_by_version_id, get_collection_version_ids, get_collections_by_collection_id,
     load_active_collections,

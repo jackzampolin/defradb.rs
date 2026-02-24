@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use blockstore::Blockstore;
 use document::{DocID, Document};
 use p2p::sync::{BroadcastResult, SyncCoordinator};
+use p2p::transport::P2PTransport;
 use query::mutator::{BroadcastStatus, CreateResult, DeleteResult, DocMutator, UpdateResult};
 use std::sync::Arc;
 use storage::corekv::Store;
@@ -40,15 +41,15 @@ use crate::database::DB;
 ///
 /// Callers should check `result.broadcast_status.is_failed()` and handle
 /// appropriately (e.g., queue for retry, alert user, etc.).
-pub struct BroadcastMutator<S: Store, B: Blockstore> {
+pub struct BroadcastMutator<S: Store, B: Blockstore, T: P2PTransport = p2p::Libp2pTransport> {
     inner: AutoCommitMutator<S>,
-    sync: Arc<SyncCoordinator<B>>,
+    sync: Arc<SyncCoordinator<B, T>>,
     db: Arc<DB<S>>,
 }
 
-impl<S: Store, B: Blockstore + 'static> BroadcastMutator<S, B> {
+impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, T> {
     /// Create a new broadcast-enabled mutator.
-    pub fn new(db: Arc<DB<S>>, sync: Arc<SyncCoordinator<B>>) -> Self {
+    pub fn new(db: Arc<DB<S>>, sync: Arc<SyncCoordinator<B, T>>) -> Self {
         Self {
             inner: AutoCommitMutator::new(db.clone()),
             sync,
@@ -59,7 +60,9 @@ impl<S: Store, B: Blockstore + 'static> BroadcastMutator<S, B> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutator<S, B> {
+impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
+    for BroadcastMutator<S, B, T>
+{
     async fn create(
         &self,
         collection_name: &str,
@@ -242,7 +245,7 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
             };
 
             self.sync
-                .push_to_replicators_with_creator(
+                .push_dag_to_replicators_with_creator(
                     &block_result.cid,
                     &block_result.block,
                     &block_result.doc_id,
@@ -501,8 +504,8 @@ impl<S: Store + 'static, B: Blockstore + 'static> DocMutator for BroadcastMutato
 use crate::block_builder::BlockResult;
 
 /// Broadcast via GossipSub with retry, optionally overriding the creator DID.
-async fn broadcast_with_retry_with_creator<B: Blockstore + 'static>(
-    sync: &SyncCoordinator<B>,
+async fn broadcast_with_retry_with_creator<B: Blockstore + 'static, T: P2PTransport>(
+    sync: &SyncCoordinator<B, T>,
     block_result: &BlockResult,
     collection_id: &str,
     collection_name: &str,

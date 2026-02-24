@@ -58,11 +58,10 @@ impl<S: Store + 'static> LensOperations for LensAdapter<S> {
             return Ok(transform_id.to_string());
         }
 
-        // Standalone module — add directly to the lens store
+        // Build IPLD blocks, store in blockstore, register with real CID
         let transform_id = self
             .database
-            .lens_store()
-            .add(lens_config)
+            .add_lens(lens_config)
             .await
             .map_err(|e| format!("failed to add lens: {}", e))?;
 

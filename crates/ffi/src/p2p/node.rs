@@ -214,8 +214,10 @@ pub unsafe extern "C" fn new_node_with_p2p(
         let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
             Arc::new(db::DbHeadProvider::new(database.clone()));
 
+        let libp2p_transport = p2p::Libp2pTransport::new(handle.clone());
+
         let (mut coordinator, sync_events_rx) = SyncCoordinator::with_head_provider(
-            handle.clone(),
+            libp2p_transport,
             blockstore.clone(),
             SyncConfig::default(),
             p2p::bitswap::AccessMode::Open,
@@ -265,7 +267,8 @@ pub unsafe extern "C" fn new_node_with_p2p(
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
                 let coord = coord_for_events.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = coord.handle_host_event(event).await {
+                    let transport_event = p2p::convert_host_event(event);
+                    if let Err(e) = coord.handle_transport_event(transport_event).await {
                         tracing::error!(error = %e, "Error handling host event");
                     }
                     drop(permit);

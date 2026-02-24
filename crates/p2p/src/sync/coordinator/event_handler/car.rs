@@ -2,28 +2,35 @@
 
 use blockstore::{verify_block_cid, Blockstore};
 use cid::Cid;
-use libp2p::PeerId;
 
 use crate::error::Result;
 use crate::sync::car::{collect_dag_blocks, decode_car, encode_car};
 use crate::sync::coordinator::SyncCoordinator;
+use crate::transport::{P2PTransport, PeerId, ResponseToken};
 
-impl<B: Blockstore + 'static> SyncCoordinator<B> {
+impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Handle an inbound CAR fetch request: collect the DAG and send CARv1 response.
     pub(crate) async fn handle_car_fetch_request(
         &self,
         peer_id: PeerId,
         root_cid: Cid,
+        token: Option<ResponseToken>,
     ) -> Result<()> {
         self.check_peer_is_replicator(&peer_id)?;
 
+        tracing::debug!(
+            root_cid = %root_cid,
+            peer_id = %peer_id,
+            has_token = token.is_some(),
+            "CAR handler: collecting DAG blocks"
+        );
         let blocks = collect_dag_blocks(self.manager.blockstore().as_ref(), &root_cid).await?;
 
         if blocks.is_empty() {
-            tracing::debug!(
+            tracing::warn!(
                 root_cid = %root_cid,
                 peer_id = %peer_id,
-                "CAR request for unknown DAG, ignoring"
+                "CAR handler: no blocks found for DAG"
             );
             return Ok(());
         }
@@ -40,7 +47,13 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             "Sending CAR response"
         );
 
-        self.host.send_car_response(peer_id, car_data).await?;
+        if let Some(token) = token {
+            self.transport
+                .send_car_response_token(token, car_data)
+                .await?;
+        } else {
+            self.transport.send_car_response(&peer_id, car_data).await?;
+        }
         Ok(())
     }
 

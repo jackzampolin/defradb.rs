@@ -58,9 +58,18 @@ parking_lot = { workspace = true }
 # Void type used by libp2p connection-limits behaviour (never emits events)
 void = "1.0.2"
 
+# Iroh transport (optional)
+iroh = { workspace = true, optional = true }
+iroh-gossip = { workspace = true, optional = true }
+iroh-blobs = { workspace = true, optional = true }
+postcard = { workspace = true, optional = true }
+rand = { version = "0.9", optional = true }
+blake3 = { version = "1", optional = true }
+
 [features]
 default = []
 test-utils = []
+iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-blobs", "dep:postcard", "dep:rand", "dep:blake3"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

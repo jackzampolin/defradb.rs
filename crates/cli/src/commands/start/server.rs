@@ -6,9 +6,11 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use super::node::{Node, P2PTasks};
-use crate::config::{AcpDocumentType, Config};
+use crate::config::{AcpDocumentType, Config, TransportType};
 use crate::error::{Error, Result};
 use identity::Identity;
+#[cfg(feature = "iroh")]
+use p2p::P2PTransport;
 
 /// Callback to wire DocumentACP into the merge handler after ACP initialization.
 type SetMergeAcp = Option<Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>>;
@@ -100,21 +102,28 @@ impl Node {
         // Set up P2P if enabled
         // Clone store before potential move for sync coordinator blockstore
         let store_for_sync = store.clone();
-        let (p2p, mut p2p_events, p2p_host_task) = if config.net.p2p_disabled {
-            (None, None, None)
-        } else {
-            info!("Initializing P2P network");
-            let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
-            let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
-            let (handle, events, host_task) = Self::start_p2p(
-                config,
-                bitswap_store,
-                peer_keypair,
-                config.net.pubsub_enabled,
-            )
-            .await?;
-            (Some(handle), Some(events), Some(host_task))
-        };
+        // Clone peer_keypair before potential move (iroh branch needs it later)
+        #[cfg(feature = "iroh")]
+        let peer_keypair_for_iroh = peer_keypair.clone();
+
+        // Only create libp2p P2PHost for libp2p transport; iroh creates its own transport
+        #[allow(unused_mut)]
+        let (p2p, mut p2p_events, mut p2p_host_task) =
+            if config.net.p2p_disabled || config.net.transport == TransportType::Iroh {
+                (None, None, None)
+            } else {
+                info!("Initializing P2P network (libp2p)");
+                let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
+                let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
+                let (handle, events, host_task) = Self::start_p2p(
+                    config,
+                    bitswap_store,
+                    peer_keypair,
+                    config.net.pubsub_enabled,
+                )
+                .await?;
+                (Some(handle), Some(events), Some(host_task))
+            };
 
         // Create HTTP server with database-backed query runner
         let (http_server, p2p_tasks) = {
@@ -142,8 +151,13 @@ impl Node {
 
             // Create sync coordinator if P2P is enabled (shared between mutator and P2P adapter)
             // Also captures task handles for graceful shutdown
+            #[allow(unused_mut)]
+            let mut iroh_p2p_adapter: Option<
+                Arc<dyn defra_http::router::P2POperations>,
+            > = None;
             let (
                 sync_coordinator,
+                mutator,
                 replication_task,
                 event_handler_task,
                 version_syncer,
@@ -152,7 +166,372 @@ impl Node {
                 retry_loop_task,
                 restored_doc_ids,
                 mut set_merge_handler_acp,
-            ) = if let Some(ref p2p_handle) = p2p {
+            ) = if config.net.p2p_disabled {
+                let mutator: Arc<dyn query::mutator::DocMutator> =
+                    Arc::new(db::AutoCommitMutator::new(database.clone()));
+                let no_acp: SetMergeAcp = None;
+                (
+                    None,
+                    mutator,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    std::collections::HashSet::new(),
+                    no_acp,
+                )
+            } else if config.net.transport == TransportType::Iroh {
+                #[cfg(feature = "iroh")]
+                {
+                    info!("Initializing P2P network (iroh)");
+                    let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(
+                        store_for_sync.clone(),
+                        false,
+                    ));
+                    let merge_blockstore = sync_blockstore.clone();
+                    let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
+                        Arc::new(p2p::sync::P2PCollectionStore::new(store_for_sync.clone()));
+
+                    // Create iroh secret key from peer keypair seed (first 32 bytes)
+                    let iroh_secret_key = if let Some(ref kp) = peer_keypair_for_iroh {
+                        let seed = kp.derive_secret(b"iroh-transport").ok_or_else(|| {
+                            Error::InvalidConfig("iroh transport requires Ed25519 key".into())
+                        })?;
+                        iroh_net::SecretKey::from_bytes(&seed)
+                    } else {
+                        iroh_net::SecretKey::generate(&mut rand::rng())
+                    };
+
+                    let iroh_config = p2p::iroh::IrohEndpointConfig {
+                        secret_key: iroh_secret_key.clone(),
+                        relay_url: config.net.iroh_relay_url.clone(),
+                        discovery: config.net.iroh_discovery,
+                    };
+                    let (command_tx, mut iroh_events, iroh_task) =
+                        p2p::iroh::spawn_endpoint(iroh_config)
+                            .await
+                            .map_err(Error::P2P)?;
+
+                    // Store iroh background task for graceful shutdown via P2PTasks
+                    p2p_host_task = Some(iroh_task);
+
+                    let iroh_transport = p2p::iroh::IrohTransport::new(command_tx, iroh_secret_key);
+                    let iroh_transport_for_adapter = iroh_transport.clone();
+
+                    info!(
+                        "Iroh transport initialized, peer ID: {}",
+                        iroh_transport.local_peer_id()
+                    );
+
+                    let access_mode = if config.acp.document_type != AcpDocumentType::None {
+                        p2p::bitswap::AccessMode::Controlled
+                    } else {
+                        p2p::bitswap::AccessMode::Open
+                    };
+
+                    let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
+                        Arc::new(db::DbHeadProvider::new(database.clone()));
+
+                    let (mut coordinator, sync_events) =
+                        p2p::sync::SyncCoordinator::with_head_provider(
+                            iroh_transport,
+                            sync_blockstore,
+                            p2p::sync::SyncConfig::default(),
+                            access_mode,
+                            Arc::new(p2p::ReplicatorRegistry::new()),
+                            collection_store,
+                            head_provider,
+                        )
+                        .await
+                        .map_err(Error::P2P)?;
+
+                    let (failure_tx, failure_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<p2p::sync::PushFailure>();
+                    coordinator.set_failure_channel(failure_tx);
+                    let coordinator = Arc::new(coordinator);
+
+                    match coordinator.load_p2p_collections().await {
+                        Ok(count) => {
+                            if count > 0 {
+                                info!("Loaded {} persisted P2P collection subscription(s)", count);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to load persisted P2P collections: {}", e);
+                        }
+                    }
+
+                    let merge_blockstore_for_syncer = merge_blockstore.clone();
+                    let merge_handler =
+                        Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
+                    let merge_handler_for_syncer = merge_handler.clone();
+                    let merge_handler_for_acp: Arc<db::DbMergeHandler<_, _>> = merge_handler.clone();
+
+                    // Spawn replication loop
+                    let coordinator_for_replication = coordinator.clone();
+                    let replication_config = p2p::sync::ReplicationConfig {
+                        continue_on_error: true,
+                        rebroadcast_on_merge: false,
+                        batch_size: 50,
+                        max_workers: 32,
+                    };
+                    let replication_task = tokio::spawn(async move {
+                        info!("Starting replication loop for P2P sync (iroh)");
+                        p2p::sync::ReplicationLoop::run(
+                            coordinator_for_replication,
+                            sync_events,
+                            merge_handler,
+                            replication_config,
+                        )
+                        .await;
+                        info!("Replication loop stopped (iroh)");
+                    });
+
+                    // Spawn iroh event handler (reads TransportEvents directly)
+                    let coordinator_for_events = coordinator.clone();
+                    let event_bus_for_handler = event_bus.clone();
+                    let event_handler_task = Some(tokio::spawn(async move {
+                        let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
+                        while let Some(event) = iroh_events.recv().await {
+                            match &event {
+                                p2p::TransportEvent::PeerConnected(peer) => {
+                                    info!("Peer connected (iroh): {}", peer);
+                                }
+                                p2p::TransportEvent::PeerDisconnected(peer) => {
+                                    info!("Peer disconnected (iroh): {}", peer);
+                                }
+                                p2p::TransportEvent::Listening(addr) => {
+                                    info!("Now listening (iroh): {}", addr);
+                                }
+                                p2p::TransportEvent::GossipMessage { topic, .. } => {
+                                    info!("Received gossip message (iroh) on {}", topic);
+                                }
+                                p2p::TransportEvent::PeerSubscribed { peer_id, topic } => {
+                                    info!("Peer subscribed (iroh): {} on {}", peer_id, topic);
+                                    event_bus_for_handler.publish(events::Message::topic_peer_event(
+                                        events::TopicPeerEventData {
+                                            peer_id: peer_id.to_string(),
+                                            topic: topic.clone(),
+                                            event_type: "JOINED".to_string(),
+                                        },
+                                    ));
+                                }
+                                p2p::TransportEvent::PeerUnsubscribed { peer_id, topic } => {
+                                    info!("Peer unsubscribed (iroh): {} on {}", peer_id, topic);
+                                    event_bus_for_handler.publish(events::Message::topic_peer_event(
+                                        events::TopicPeerEventData {
+                                            peer_id: peer_id.to_string(),
+                                            topic: topic.clone(),
+                                            event_type: "LEFT".to_string(),
+                                        },
+                                    ));
+                                }
+                                _ => {}
+                            }
+                            let permit = semaphore.clone().acquire_owned().await.unwrap();
+                            let coord = coordinator_for_events.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = coord.handle_transport_event(event).await {
+                                    error!("Failed to handle iroh event: {}", e);
+                                }
+                                drop(permit);
+                            });
+                        }
+                    }));
+
+                    // Create version syncer for schema sync
+                    let iroh_version_syncer: Option<
+                        Arc<dyn crate::transport_version_syncer::TransportVersionSyncer>,
+                    > = Some(
+                        crate::transport_version_syncer::DbTransportVersionSyncer::new_arc(
+                            merge_blockstore_for_syncer,
+                            merge_handler_for_syncer,
+                            database.clone(),
+                            iroh_transport_for_adapter.clone(),
+                        ),
+                    );
+
+                    // Create transport doc pusher
+                    let iroh_doc_pusher: Arc<dyn crate::transport_doc_pusher::TransportDocPusher> =
+                        crate::transport_doc_pusher::DbTransportDocPusher::new_arc(
+                            database.clone(),
+                            iroh_transport_for_adapter.clone(),
+                        );
+
+                    // Clone store for background tasks
+                    let store_for_iroh_bg = store_for_sync.clone();
+
+                    // Spawn failure recorder task
+                    let recorder_store = store_for_iroh_bg.clone();
+                    let failure_recorder_task = tokio::spawn(async move {
+                        let mut rx = failure_rx;
+                        while let Some(failure) = rx.recv().await {
+                            let peerstore = storage::stores::Peerstore::new(recorder_store.clone());
+                            let retry_info = storage::stores::RetryInfo::new_initial();
+                            let info_bytes = match retry_info.to_bytes() {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    warn!(error = %e, "Failed to serialize RetryInfo");
+                                    continue;
+                                }
+                            };
+                            if let Err(e) = peerstore
+                                .record_push_failure(
+                                    &failure.peer_id,
+                                    &failure.doc_id,
+                                    &failure.collection_id,
+                                    &info_bytes,
+                                )
+                                .await
+                            {
+                                warn!(error = %e, "Failed to record push failure");
+                            }
+                        }
+                    });
+
+                    // Spawn retry loop task
+                    let retry_store = store_for_iroh_bg.clone();
+                    let retry_pusher = iroh_doc_pusher.clone();
+                    let retry_transport = iroh_transport_for_adapter.clone();
+                    let retry_loop_task = tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            let peerstore = storage::stores::Peerstore::new(retry_store.clone());
+                            let peers = match peerstore.get_all_retry_peers().await {
+                                Ok(p) => p,
+                                Err(_) => continue,
+                            };
+                            for (peer_id_str, info_bytes) in peers {
+                                let mut retry_info =
+                                    match storage::stores::RetryInfo::from_bytes(&info_bytes) {
+                                        Ok(i) => i,
+                                        Err(_) => continue,
+                                    };
+                                if !retry_info.is_due() {
+                                    continue;
+                                }
+                                let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
+                                let connected =
+                                    retry_transport.connected_peers().await.unwrap_or_default();
+                                if !connected.iter().any(|p| p.as_str() == peer_id.as_str()) {
+                                    continue;
+                                }
+                                let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+                                    Ok(d) => d,
+                                    Err(_) => continue,
+                                };
+                                if docs.is_empty() {
+                                    let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                                    continue;
+                                }
+                                let mut all_succeeded = true;
+                                for (doc_id, collection_id) in &docs {
+                                    match retry_pusher
+                                        .retry_doc(&peer_id, doc_id, collection_id)
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            let _ = peerstore
+                                                .remove_retry_doc(&peer_id_str, doc_id)
+                                                .await;
+                                        }
+                                        Err(_) => {
+                                            all_succeeded = false;
+                                        }
+                                    }
+                                }
+                                if all_succeeded {
+                                    let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                                } else {
+                                    retry_info.bump();
+                                    if let Ok(bytes) = retry_info.to_bytes() {
+                                        let _ =
+                                            peerstore.update_retry_info(&peer_id_str, &bytes).await;
+                                    }
+                                }
+                            }
+                        }
+                    });
+
+                    // Restore replicators from peerstore
+                    let restore_peerstore =
+                        storage::stores::Peerstore::new(store_for_iroh_bg.clone());
+                    match restore_peerstore.list_replicators().await {
+                        Ok(entries) => {
+                            for (_peer_id_str, data) in entries {
+                                if let Ok(rep_info) = p2p::ReplicatorInfo::from_bytes(&data) {
+                                    let pid = p2p::transport::PeerId::new(
+                                        rep_info.peer_id_str().to_string(),
+                                    );
+                                    let _ = coordinator
+                                        .create_replicator(
+                                            &pid,
+                                            rep_info.collections.clone(),
+                                            false,
+                                        )
+                                        .await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "failed to load replicators from storage");
+                        }
+                    }
+
+                    // Restore document subscriptions from peerstore
+                    let mut restored_doc_ids = std::collections::HashSet::new();
+                    if let Ok(doc_ids) = restore_peerstore.load_documents().await {
+                        for doc_id in &doc_ids {
+                            let _ = iroh_transport_for_adapter
+                                .subscribe(p2p::topics::DefraTopic::document(doc_id))
+                                .await;
+                            restored_doc_ids.insert(doc_id.clone());
+                        }
+                    }
+
+                    // Create mutator with iroh coordinator
+                    let mutator: Arc<dyn query::mutator::DocMutator> = Arc::new(
+                        db::BroadcastMutator::new(database.clone(), coordinator.clone()),
+                    );
+
+                    // Create IrohP2PAdapter for HTTP endpoints
+                    let adapter = crate::iroh_p2p_adapter::IrohP2PAdapter::with_full_context(
+                        iroh_transport_for_adapter,
+                        coordinator.clone(),
+                        iroh_doc_pusher,
+                        event_bus.clone(),
+                        iroh_version_syncer,
+                    );
+                    adapter.set_initial_tracked_documents(restored_doc_ids.clone());
+                    iroh_p2p_adapter =
+                        Some(Arc::new(adapter) as Arc<dyn defra_http::router::P2POperations>);
+
+                    info!("P2P sync coordinator initialized (iroh)");
+                    let set_acp: SetMergeAcp = Some(Box::new(move |acp| {
+                        merge_handler_for_acp.set_document_acp(acp);
+                    }));
+                    (
+                        None,
+                        mutator,
+                        Some(replication_task),
+                        event_handler_task,
+                        None,
+                        None,
+                        Some(failure_recorder_task),
+                        Some(retry_loop_task),
+                        restored_doc_ids,
+                        set_acp,
+                    )
+                }
+                #[cfg(not(feature = "iroh"))]
+                {
+                    return Err(Error::InvalidTransport(
+                        "iroh transport not enabled. Rebuild with --features iroh".into(),
+                    ));
+                }
+            } else if let Some(ref p2p_handle) = p2p {
                 let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(
                     store_for_sync.clone(),
                     false,
@@ -174,9 +553,11 @@ impl Node {
                     p2p::bitswap::AccessMode::Open
                 };
 
+                let libp2p_transport = p2p::Libp2pTransport::new(p2p_handle.clone());
+
                 let (mut coordinator, sync_events) =
                     p2p::sync::SyncCoordinator::with_collection_store(
-                        p2p_handle.clone(),
+                        libp2p_transport,
                         sync_blockstore,
                         p2p::sync::SyncConfig::default(),
                         access_mode,
@@ -303,7 +684,9 @@ impl Node {
                             let permit = semaphore.clone().acquire_owned().await.unwrap();
                             let coord = coordinator_for_events.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = coord.handle_host_event(event).await {
+                                let transport_event = p2p::convert_host_event(event);
+                                if let Err(e) = coord.handle_transport_event(transport_event).await
+                                {
                                     error!("Failed to handle host event: {}", e);
                                 }
                                 drop(permit);
@@ -454,12 +837,18 @@ impl Node {
                     }
                 }
 
+                // Create mutator with libp2p coordinator
+                let mutator: Arc<dyn query::mutator::DocMutator> = Arc::new(
+                    db::BroadcastMutator::new(database.clone(), coordinator.clone()),
+                );
+
                 info!("P2P sync coordinator initialized");
                 let set_acp: SetMergeAcp = Some(Box::new(move |acp| {
                     merge_handler_for_acp.set_document_acp(acp);
                 }));
                 (
                     Some(coordinator),
+                    mutator,
                     Some(replication_task),
                     event_handler_task,
                     version_syncer,
@@ -470,9 +859,12 @@ impl Node {
                     set_acp,
                 )
             } else {
+                let mutator: Arc<dyn query::mutator::DocMutator> =
+                    Arc::new(db::AutoCommitMutator::new(database.clone()));
                 let no_acp: SetMergeAcp = None;
                 (
                     None,
+                    mutator,
                     None,
                     None,
                     None,
@@ -483,17 +875,6 @@ impl Node {
                     no_acp,
                 )
             };
-
-            // Create mutator - use BroadcastMutator if P2P is enabled for network propagation
-            let mutator: Arc<dyn query::mutator::DocMutator> =
-                if let Some(ref coordinator) = sync_coordinator {
-                    Arc::new(db::BroadcastMutator::new(
-                        database.clone(),
-                        coordinator.clone(),
-                    ))
-                } else {
-                    Arc::new(db::AutoCommitMutator::new(database.clone()))
-                };
 
             // Create transaction registry for explicit transaction support (Arc-shared)
             let registry = Arc::new(db::DbTransactionRegistry::new(database.clone()));
@@ -599,10 +980,10 @@ impl Node {
             // Wire default identity for ACP permission checks (from --identity CLI flag).
             // Skip for SourceHub ACP: identity must come from bearer tokens, not defaults.
             // Anonymous requests should be truly anonymous for on-chain policy evaluation.
-            if let Some(did) = user_did {
+            if let Some(ref did) = user_did {
                 if config.acp.document_type != AcpDocumentType::SourceHub {
                     info!("Query runner configured with default identity for ACP");
-                    query_runner = query_runner.with_default_identity(did);
+                    query_runner = query_runner.with_default_identity(did.clone());
                 }
             }
 
@@ -624,8 +1005,15 @@ impl Node {
                 .with_rest(rest_ops)
                 .with_dev_mode(config.development);
 
-            // Wire node identity DID for signing config fallback in HTTP handlers
-            if let Some(did) = node_identity_did {
+            // Wire signing identity DID for anonymous-request fallback in HTTP handlers.
+            // Prefer user_did (from --identity) because store_identity() stores the
+            // signing config under that DID. Fall back to node_identity_did (P2P peer
+            // key) which shares a DID only when no explicit --identity is given.
+            let signing_did = user_did
+                .as_ref()
+                .map(|d| d.to_string())
+                .or(node_identity_did);
+            if let Some(did) = signing_did {
                 server = server.with_node_identity_did(did);
             }
 
@@ -650,6 +1038,9 @@ impl Node {
                     };
                 server = server.with_p2p_arc(p2p_adapter);
                 info!("P2P HTTP endpoints enabled");
+            } else if let Some(adapter) = iroh_p2p_adapter {
+                server = server.with_p2p_arc(adapter);
+                info!("P2P HTTP endpoints enabled (iroh)");
             }
 
             // Wire schema operations to HTTP server

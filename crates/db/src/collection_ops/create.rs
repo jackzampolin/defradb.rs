@@ -211,15 +211,26 @@ impl<S: Store> crate::database::DB<S> {
             }
         }
 
-        // Store the collection definition block
-        // This includes the collection name, field CIDs, priority, and head CIDs.
-        // For views, also includes query_select and query_transform in the delta.
-        // For new collections (not patches), there are no heads, so we pass an empty slice.
-        match schema::generate_collection_block_full(
+        // Store the collection definition block.
+        // For views, include query_select and query_transform so the stored block's
+        // CID matches the version_id (which was computed with these fields).
+        let (qs_bytes_for_block, qt_cid_for_block) = if let Some(ref qs) = schema.query {
+            let select_cbor = serde_cbor::to_vec(&qs.query).unwrap_or_default();
+            let transform_cid = qs
+                .transform
+                .as_ref()
+                .and_then(|t| cid::Cid::try_from(t.as_str()).ok());
+            (Some(select_cbor), transform_cid)
+        } else {
+            (None, None)
+        };
+        match schema::generate_collection_block_full_with_query(
             Some(&schema.name),
             &field_cids,
             1,   // priority=1 for new collections
             &[], // no heads for new collections
+            qs_bytes_for_block.as_deref(),
+            qt_cid_for_block.as_ref(),
         ) {
             Ok(block_with_cid) => {
                 blockstore

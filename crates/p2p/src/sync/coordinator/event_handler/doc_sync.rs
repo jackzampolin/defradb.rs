@@ -7,11 +7,13 @@ use blockstore::Blockstore;
 use super::super::SyncCoordinator;
 use crate::error::{Error, Result};
 use crate::message::{DocSyncItem, DocSyncReply, MAX_DOC_IDS};
+use crate::signing::sign_with_transport;
+use crate::transport::{P2PTransport, PeerId};
 
-impl<B: Blockstore + 'static> SyncCoordinator<B> {
+impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub(super) async fn handle_doc_sync_request(
         &self,
-        peer_id: libp2p::PeerId,
+        peer_id: PeerId,
         request: crate::message::DocSyncRequest,
     ) -> Result<()> {
         self.check_peer_is_replicator(&peer_id)?;
@@ -72,7 +74,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
 
         let mut reply = DocSyncReply::success(&request.metadata.message_id, results);
 
-        if let Err(e) = crate::signing::sign_message(self.host.keypair(), &mut reply) {
+        if let Err(e) = sign_with_transport(&self.transport, &mut reply) {
             tracing::error!(
                 peer_id = %peer_id,
                 error = %e,
@@ -81,7 +83,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             return Err(e);
         }
 
-        if let Err(e) = self.host.send_doc_sync_response(peer_id, reply).await {
+        if let Err(e) = self.transport.send_doc_sync_response(&peer_id, reply).await {
             tracing::warn!(
                 peer_id = %peer_id,
                 error = %e,
@@ -98,7 +100,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
 
     pub(super) async fn handle_doc_sync_reply(
         &self,
-        peer_id: libp2p::PeerId,
+        peer_id: PeerId,
         reply: DocSyncReply,
     ) -> Result<()> {
         tracing::info!(
@@ -153,7 +155,7 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 "Spawning poll-based DAG fetchers for DocSync blocks"
             );
 
-            let host = self.host.clone();
+            let transport = self.transport.clone();
             let blockstore = self.manager.blockstore().clone();
             let event_tx = self.manager.event_sender();
             let semaphore = self.dag_fetch_semaphore.clone();
@@ -165,22 +167,23 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                     "Spawning poll-based DAG fetcher for DocSync"
                 );
 
-                let host = host.clone();
+                let transport = transport.clone();
                 let blockstore = blockstore.clone();
                 let event_tx = event_tx.clone();
                 let semaphore = semaphore.clone();
+                let source_peer = peer_id.clone();
 
                 tokio::spawn(async move {
                     let _permit = semaphore.acquire_owned().await;
                     super::super::dag_fetcher::poll_fetch_dag(
-                        host,
+                        transport,
                         blockstore,
                         event_tx,
                         root_cid,
                         doc_id,
                         String::new(),
                         String::new(),
-                        peer_id,
+                        source_peer,
                     )
                     .await;
                 });

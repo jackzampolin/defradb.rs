@@ -58,6 +58,12 @@ iroh-bitswap = { git = "https://github.com/sourcenetwork/beetle", branch = "main
 libp2p-stream = "0.1.0-alpha.1"
 multiaddr = "0.18"
 
+# Iroh P2P transport (alternative to libp2p)
+iroh = "0.96"
+iroh-gossip = "0.96"
+iroh-blobs = "0.98"
+postcard = { version = "1.0", features = ["alloc"] }
+
 # Storage
 redb = "2.4"
 fjall = "3"

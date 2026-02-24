@@ -6,8 +6,9 @@ use blockstore::Blockstore;
 
 use super::super::SyncCoordinator;
 use crate::error::Result;
+use crate::transport::{P2PTransport, PeerId};
 
-impl<B: Blockstore + 'static> SyncCoordinator<B> {
+impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub(super) async fn handle_bitswap_block_received(
         &self,
         query_id: crate::QueryId,
@@ -72,10 +73,6 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
             }
         }
 
-        // Retry ALL pending DAGs on both success AND failure.
-        // On success: newly fetched blocks may complete other DAGs.
-        // On failure: the timeout ensures we re-issue bitswap_sync with
-        //   a fresh session so the retry loop doesn't stall.
         let pending_dags: Vec<Cid> = self.manager.pending_dag_cids();
         for root_cid in pending_dags {
             match self.manager.retry_pending_dag(&root_cid).await {
@@ -89,17 +86,23 @@ impl<B: Blockstore + 'static> SyncCoordinator<B> {
                 Ok(false) => {
                     let missing = self.manager.pending_dag_missing(&root_cid);
                     if !missing.is_empty() {
-                        // Build provider list: connected peers + the original source peer.
-                        // The source peer is the one that sent the DocSync/Branchable reply
-                        // and definitely has the blocks.
-                        let mut providers: Vec<libp2p::PeerId> =
-                            self.peer_state.connected_peers().into_iter().collect();
+                        let mut providers: Vec<PeerId> = self
+                            .peer_state
+                            .connected_peers()
+                            .into_iter()
+                            .map(PeerId::from)
+                            .collect();
                         if let Some(source) = self.manager.pending_dag_source_peer(&root_cid) {
-                            if !providers.contains(&source) {
-                                providers.push(source);
+                            let source_transport_id = PeerId::from(source);
+                            if !providers.contains(&source_transport_id) {
+                                providers.push(source_transport_id);
                             }
                         }
-                        if let Err(e) = self.host.bitswap_sync(root_cid, providers, missing).await {
+                        if let Err(e) = self
+                            .transport
+                            .sync_blocks(root_cid, providers, missing)
+                            .await
+                        {
                             tracing::warn!(
                                 root_cid = %root_cid,
                                 error = %e,

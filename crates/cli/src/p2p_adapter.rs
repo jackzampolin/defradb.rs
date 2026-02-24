@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use blockstore::Blockstore;
 
 use defra_http::router::{P2POperations, ReplicatorInfo};
-use p2p::sync::SyncCoordinator;
+use p2p::sync::Libp2pSyncCoordinator;
 use p2p::topics::DefraTopic;
 use p2p::P2PHostHandle;
 
@@ -238,7 +238,7 @@ pub struct P2PAdapter<
     B: Blockstore + 'static = blockstore::DefraBlockstore<storage::backends::MemoryStore>,
 > {
     handle: P2PHostHandle,
-    sync_coordinator: Option<Arc<SyncCoordinator<B>>>,
+    sync_coordinator: Option<Arc<Libp2pSyncCoordinator<B>>>,
     doc_pusher: Option<Arc<dyn DocPusher>>,
     event_bus: Option<Arc<dyn events::Bus>>,
     version_syncer: Option<Arc<dyn VersionSyncer>>,
@@ -263,7 +263,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
     /// Create a new adapter with a sync coordinator for enhanced replicator support.
     pub fn with_sync_coordinator(
         handle: P2PHostHandle,
-        coordinator: Arc<SyncCoordinator<B>>,
+        coordinator: Arc<Libp2pSyncCoordinator<B>>,
     ) -> Self {
         Self {
             handle,
@@ -279,7 +279,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
     /// Create a new adapter with sync coordinator and collection lookup.
     pub fn with_sync_coordinator_and_lookup(
         handle: P2PHostHandle,
-        coordinator: Arc<SyncCoordinator<B>>,
+        coordinator: Arc<Libp2pSyncCoordinator<B>>,
         lookup: Arc<dyn CollectionLookup>,
     ) -> Self {
         let doc_pusher: Arc<dyn DocPusher> = Arc::new(LookupOnlyDocPusher(lookup));
@@ -304,7 +304,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
     /// Create a new adapter with full context for FFI-parity operations.
     pub fn with_full_context(
         handle: P2PHostHandle,
-        coordinator: Arc<SyncCoordinator<B>>,
+        coordinator: Arc<Libp2pSyncCoordinator<B>>,
         doc_pusher: Arc<dyn DocPusher>,
         event_bus: Arc<dyn events::Bus>,
         version_syncer: Option<Arc<dyn VersionSyncer>>,
@@ -332,7 +332,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
     /// Create an Arc-wrapped adapter with sync coordinator.
     pub fn with_sync_coordinator_arc(
         handle: P2PHostHandle,
-        coordinator: Arc<SyncCoordinator<B>>,
+        coordinator: Arc<Libp2pSyncCoordinator<B>>,
     ) -> Arc<dyn P2POperations> {
         Arc::new(Self::with_sync_coordinator(handle, coordinator))
     }
@@ -340,7 +340,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
     /// Create an Arc-wrapped adapter with sync coordinator and collection lookup.
     pub fn with_sync_coordinator_and_lookup_arc(
         handle: P2PHostHandle,
-        coordinator: Arc<SyncCoordinator<B>>,
+        coordinator: Arc<Libp2pSyncCoordinator<B>>,
         lookup: Arc<dyn CollectionLookup>,
     ) -> Arc<dyn P2POperations> {
         Arc::new(Self::with_sync_coordinator_and_lookup(
@@ -353,7 +353,7 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
     /// Create an Arc-wrapped adapter with full context.
     pub fn with_full_context_arc(
         handle: P2PHostHandle,
-        coordinator: Arc<SyncCoordinator<B>>,
+        coordinator: Arc<Libp2pSyncCoordinator<B>>,
         doc_pusher: Arc<dyn DocPusher>,
         event_bus: Arc<dyn events::Bus>,
         version_syncer: Option<Arc<dyn VersionSyncer>>,
@@ -563,8 +563,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
         // Register replicator (coordinator handles topic auto-subscribe)
         if let Some(ref coordinator) = self.sync_coordinator {
+            let transport_pid = p2p::transport::PeerId::from(peer_id);
             coordinator
-                .create_replicator(peer_id, collection_cids.clone(), true)
+                .create_replicator(&transport_pid, collection_cids.clone(), true)
                 .await
                 .map_err(|e| e.to_string())?;
         } else {
@@ -621,8 +622,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         let peer_id = parsed.peer_id;
 
         if let Some(ref coordinator) = self.sync_coordinator {
+            let transport_pid = p2p::transport::PeerId::from(peer_id);
             coordinator
-                .remove_replicator_collections(peer_id, collections)
+                .remove_replicator_collections(&transport_pid, collections)
                 .await
                 .map_err(|e| e.to_string())?;
         } else {

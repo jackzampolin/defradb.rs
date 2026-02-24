@@ -247,6 +247,8 @@ pub fn create_router_with_state(state: AppState) -> Router {
             "/encrypted-indexes",
             get(handlers::encrypted_index::go_list_all_encrypted_indexes),
         )
+        // Event bus SSE endpoint
+        .route("/events", get(handlers::events::events_sse))
         // Debug endpoints
         .route("/debug/dump", get(handlers::utility::dump))
         // Utility endpoints (Go-compatible)
