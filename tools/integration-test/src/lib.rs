@@ -19,6 +19,7 @@ pub use defra_harness::fixtures::*;
 pub use defra_harness::identity::*;
 pub use defra_harness::poll::poll_until;
 pub use defra_harness::DefraClient;
+pub use defra_harness::BinarySource;
 pub use defra_harness::NodeKind;
 pub use defra_harness::TestCluster;
 pub use defra_harness::TestClusterBuilder;
