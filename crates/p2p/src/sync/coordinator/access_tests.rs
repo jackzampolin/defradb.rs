@@ -37,8 +37,7 @@ fn create_test_coordinator(
     let broadcaster = Broadcaster::new(host.clone());
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
-    let (manager, events) =
-        SyncManager::new(blockstore, peer_state.clone(), SyncConfig::default());
+    let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), SyncConfig::default());
 
     let coordinator = SyncCoordinator {
         host,
@@ -48,9 +47,9 @@ fn create_test_coordinator(
         local_peer_id,
         access_mode,
         replicators,
-        subscribed_collections: Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashSet::new(),
-        )),
+        subscribed_collections: Arc::new(
+            tokio::sync::RwLock::new(std::collections::HashSet::new()),
+        ),
         collection_store: Arc::new(NoOpCollectionStorage),
         head_provider: Arc::new(NoOpHeadProvider),
         failure_tx: None,
@@ -154,8 +153,7 @@ async fn doc_sync_controlled_mode_allows_connected_peer() {
 async fn doc_sync_open_mode_allows_any_peer() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
-    let (coordinator, _events) =
-        create_test_coordinator(AccessMode::Open, replicators, peer_state);
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
 
     let random_peer = PeerId::random();
     let result = coordinator
@@ -270,8 +268,7 @@ async fn branchable_sync_controlled_mode_allows_subscribed_connected_peer() {
 async fn branchable_sync_open_mode_allows_any_peer() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
-    let (coordinator, _events) =
-        create_test_coordinator(AccessMode::Open, replicators, peer_state);
+    let (coordinator, _events) = create_test_coordinator(AccessMode::Open, replicators, peer_state);
 
     let random_peer = PeerId::random();
     let result = coordinator

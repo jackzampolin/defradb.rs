@@ -137,7 +137,12 @@ async fn query_timeout_under_load(cluster: TestCluster) {
             .query("query { Record { _docID label seq } }")
             .unwrap_or_else(|_| panic!("query iteration {}", i));
         let records = result["Record"].as_array().expect("Record array");
-        assert_eq!(records.len(), 100, "should see all 100 records on iteration {}", i);
+        assert_eq!(
+            records.len(),
+            100,
+            "should see all 100 records on iteration {}",
+            i
+        );
     }
 
     // Node remains healthy after sustained load
