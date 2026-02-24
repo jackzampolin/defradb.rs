@@ -83,16 +83,23 @@ async fn rust_sourcehub_p2p_acp() {
         )
         .expect("create user on node0");
 
-    // Wait for replication
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    // Jack can read on node 1 (same DID, same policy on Source Hub)
-    let jack_on_node1 = node1
-        .query_with_identity("query { User { _docID name } }", &jack.private_key_hex)
-        .expect("Jack query on node1");
-    let users = jack_on_node1["User"].as_array().expect("users array");
-    assert_eq!(users.len(), 1, "Jack should see replicated doc on node 1");
-    assert_eq!(users[0]["name"], "Jack");
+    // Poll until replication completes (up to 30s)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let jack_on_node1 = node1
+            .query_with_identity("query { User { _docID name } }", &jack.private_key_hex)
+            .expect("Jack query on node1");
+        let users = jack_on_node1["User"].as_array().expect("users array");
+        if users.len() == 1 {
+            assert_eq!(users[0]["name"], "Jack");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for replication to node 1"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 
     // Anonymous cannot read on node 1 (Source Hub ACP enforced)
     let anon_on_node1 = node1
