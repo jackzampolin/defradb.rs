@@ -207,17 +207,21 @@ where
                 .map_err(Into::into);
         }
 
-        // For normal operations, metadata must be present
-        let (creator, collection_id, doc_id) =
-            match (metadata.creator, metadata.collection_id, metadata.doc_id) {
-                (Some(c), Some(col), Some(d)) => (c, col, d),
-                _ => {
-                    return Err(AcpMergeError::MissingMetadata(
-                        "creator, collection_id, and doc_id required for non-recovery merge"
-                            .to_string(),
-                    ));
-                }
-            };
+        // For normal operations, metadata must be present.
+        // Use effective_creator() to prefer verified identity over self-reported.
+        let (creator, collection_id, doc_id) = match (
+            metadata.effective_creator(),
+            metadata.collection_id,
+            metadata.doc_id,
+        ) {
+            (Some(c), Some(col), Some(d)) => (c, col, d),
+            _ => {
+                return Err(AcpMergeError::MissingMetadata(
+                    "creator, collection_id, and doc_id required for non-recovery merge"
+                        .to_string(),
+                ));
+            }
+        };
 
         // Check ACP permission before merging
         let permitted = self

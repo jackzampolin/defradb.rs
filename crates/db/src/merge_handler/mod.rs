@@ -85,6 +85,10 @@ pub enum MergeError {
     #[error("storage error: {0}")]
     Storage(String),
 
+    /// Block signature verification failed — block MUST be rejected.
+    #[error("block signature verification failed for cid={cid}: {reason}")]
+    SignatureVerificationFailed { cid: Cid, reason: String },
+
     /// DAG recursion depth limit exceeded.
     ///
     /// A maliciously crafted deeply-nested DAG could otherwise cause a stack overflow.
@@ -363,135 +367,116 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 }
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
-    /// Verify block signature and creator identity for P2P blocks.
+    /// Verify block signature and return the verified creator identity.
     ///
-    /// Warns on unsigned blocks or creator/signer mismatches. This is a
-    /// non-blocking check: verification failures are logged but do not
-    /// reject the block, preserving CRDT convergence. Full enforcement
-    /// will gate merges once all peers reliably sign blocks.
-    async fn verify_block_signature(
+    /// Returns:
+    /// - `Ok(Some(identity))` — signature valid, identity is the verified signer
+    /// - `Ok(None)` — unsigned block or BLS (unsupported), proceed with warning
+    /// - `Err(SignatureVerificationFailed)` — invalid signature, block MUST be rejected
+    pub(crate) async fn verify_block_signature(
         &self,
         cid: &Cid,
         block: &Block,
         _block_data: &[u8],
-        metadata: &BlockMetadata<'_>,
-    ) {
+    ) -> Result<Option<String>, MergeError> {
         let sig_cid = match &block.signature {
             Some(sig_cid) => sig_cid,
             None => {
                 tracing::warn!(
                     cid = %cid,
-                    creator = ?metadata.creator,
                     "P2P block has no signature — cannot verify authenticity"
                 );
-                return;
+                return Ok(None);
             }
         };
 
         let sig_data = match self.blockstore.get(sig_cid).await {
             Ok(Some(data)) => data,
             Ok(None) => {
-                tracing::warn!(
-                    cid = %cid,
-                    sig_cid = %sig_cid,
-                    "Signature block not found in blockstore"
-                );
-                return;
+                return Err(MergeError::SignatureVerificationFailed {
+                    cid: *cid,
+                    reason: format!("signature block {} not found in blockstore", sig_cid),
+                });
             }
             Err(e) => {
-                tracing::warn!(
-                    cid = %cid,
-                    sig_cid = %sig_cid,
-                    error = %e,
-                    "Failed to load signature block"
-                );
-                return;
+                return Err(MergeError::SignatureVerificationFailed {
+                    cid: *cid,
+                    reason: format!("failed to load signature block {}: {}", sig_cid, e),
+                });
             }
         };
 
         let signature = match defra_core::block::Signature::from_dag_cbor(&sig_data) {
             Ok(sig) => sig,
             Err(e) => {
-                tracing::warn!(
-                    cid = %cid,
-                    sig_cid = %sig_cid,
-                    error = %e,
-                    "Failed to decode signature block"
-                );
-                return;
+                return Err(MergeError::SignatureVerificationFailed {
+                    cid: *cid,
+                    reason: format!("failed to decode signature block: {}", e),
+                });
             }
         };
 
-        let sig_identity = String::from_utf8_lossy(&signature.header.identity);
-
-        // Verify creator metadata matches signature identity
-        if let Some(creator) = metadata.creator {
-            if !creator.is_empty() && sig_identity.as_ref() != creator {
-                tracing::warn!(
-                    cid = %cid,
-                    metadata_creator = %creator,
-                    signature_identity = %sig_identity,
-                    "P2P block creator does not match signature identity"
-                );
-            }
-        }
+        let sig_identity = String::from_utf8_lossy(&signature.header.identity).to_string();
 
         // Verify the signature over the block data (block without signature field)
         let mut block_to_verify = block.clone();
         block_to_verify.signature = None;
-        match block_to_verify.to_dag_cbor() {
-            Ok(signed_bytes) => {
-                let sig_type = signature.header.sig_type;
-                let key_type = match sig_type {
-                    defra_core::block::SignatureType::ES256K => crypto::KeyType::Secp256k1,
-                    defra_core::block::SignatureType::ES256 => crypto::KeyType::Secp256r1,
-                    defra_core::block::SignatureType::EdDSA => crypto::KeyType::Ed25519,
-                    defra_core::block::SignatureType::BLS => {
-                        tracing::debug!(
-                            cid = %cid,
-                            "BLS signature verification not yet supported in merge path"
-                        );
-                        return;
-                    }
-                };
-                match crypto::public_key_from_string(key_type, &sig_identity) {
-                    Ok(pub_key) => match pub_key.verify(&signed_bytes, &signature.value) {
-                        Ok(true) => {
-                            tracing::debug!(
-                                cid = %cid,
-                                "Block signature verified successfully"
-                            );
-                        }
-                        Ok(false) => {
-                            tracing::warn!(
-                                cid = %cid,
-                                "Block signature verification FAILED — block may be tampered"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                cid = %cid,
-                                error = %e,
-                                "Block signature verification error"
-                            );
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(
-                            cid = %cid,
-                            error = %e,
-                            "Failed to parse public key from signature identity"
-                        );
-                    }
-                }
-            }
-            Err(e) => {
+        let signed_bytes =
+            block_to_verify
+                .to_dag_cbor()
+                .map_err(|e| MergeError::SignatureVerificationFailed {
+                    cid: *cid,
+                    reason: format!("failed to serialize block for verification: {}", e),
+                })?;
+
+        let sig_type = signature.header.sig_type;
+        let key_type = match sig_type {
+            defra_core::block::SignatureType::ES256K => crypto::KeyType::Secp256k1,
+            defra_core::block::SignatureType::ES256 => crypto::KeyType::Secp256r1,
+            defra_core::block::SignatureType::EdDSA => crypto::KeyType::Ed25519,
+            defra_core::block::SignatureType::BLS => {
                 tracing::warn!(
                     cid = %cid,
-                    error = %e,
-                    "Failed to serialize block for signature verification"
+                    "BLS signature verification not yet supported — allowing merge"
                 );
+                return Ok(None);
             }
+        };
+
+        let pub_key = crypto::public_key_from_string(key_type, &sig_identity).map_err(|e| {
+            MergeError::SignatureVerificationFailed {
+                cid: *cid,
+                reason: format!("failed to parse public key from identity: {}", e),
+            }
+        })?;
+
+        match pub_key.verify(&signed_bytes, &signature.value) {
+            Ok(true) => {
+                // Convert the hex public key to a did:key: DID so that
+                // effective_creator() returns a format compatible with ACP
+                // registration (which checks for "did:key:" prefix).
+                let verified_did =
+                    pub_key
+                        .did()
+                        .map_err(|e| MergeError::SignatureVerificationFailed {
+                            cid: *cid,
+                            reason: format!("failed to derive DID from verified key: {}", e),
+                        })?;
+                tracing::debug!(
+                    cid = %cid,
+                    identity = %verified_did,
+                    "Block signature verified successfully"
+                );
+                Ok(Some(verified_did))
+            }
+            Ok(false) => Err(MergeError::SignatureVerificationFailed {
+                cid: *cid,
+                reason: "signature value does not match block content".to_string(),
+            }),
+            Err(e) => Err(MergeError::SignatureVerificationFailed {
+                cid: *cid,
+                reason: format!("signature verification error: {}", e),
+            }),
         }
     }
 }
@@ -528,10 +513,13 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
             "Block decoded successfully"
         );
 
-        // Verify block signature for P2P blocks (skip during recovery)
+        // Verify block signature for P2P blocks (skip during recovery).
+        // On success, populate verified_creator with the cryptographically
+        // verified signer identity. Invalid signatures reject the block.
+        let mut metadata = metadata;
         if !metadata.is_recovery {
-            self.verify_block_signature(cid, &block, block_data, &metadata)
-                .await;
+            let verified = self.verify_block_signature(cid, &block, block_data).await?;
+            metadata.verified_creator = verified;
         }
 
         // Decrypt delta data if the block has encryption
@@ -631,8 +619,41 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockstore::DefraBlockstore;
+    use blockstore::{Blockstore as _, DefraBlockstore};
+    use crypto::PrivateKey as _;
+    use defra_core::block::{
+        Block, CrdtDelta, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
+    };
     use storage::backends::MemoryStore;
+
+    fn make_handler() -> (
+        DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
+        Arc<DefraBlockstore<MemoryStore>>,
+    ) {
+        let store = MemoryStore::new();
+        let store_arc = Arc::new(store);
+        let db = Arc::new(DB::from_arc(store_arc.clone()).unwrap());
+        let blockstore = Arc::new(DefraBlockstore::new(store_arc, false));
+        let handler = DbMergeHandler::new(db, blockstore.clone());
+        (handler, blockstore)
+    }
+
+    fn make_lww_block(signature_cid: Option<Cid>) -> Block {
+        let payload = LwwDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            field_name: "name".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            data: b"hello".to_vec(),
+        };
+        Block {
+            delta: CrdtDelta::Lww(payload),
+            heads: None,
+            links: None,
+            encryption: None,
+            signature: signature_cid,
+        }
+    }
 
     #[tokio::test]
     async fn test_merge_handler_creation() {
@@ -641,5 +662,210 @@ mod tests {
         let db = Arc::new(DB::from_arc(store_arc.clone()).unwrap());
         let blockstore = Arc::new(DefraBlockstore::new(store_arc, false));
         let _handler = DbMergeHandler::new(db, blockstore);
+    }
+
+    #[tokio::test]
+    async fn verify_unsigned_block_returns_none() {
+        let (handler, _bs) = make_handler();
+        let block = make_lww_block(None);
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+
+        let result = handler
+            .verify_block_signature(&cid, &block, &block_data)
+            .await;
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap().is_none(),
+            "unsigned block should return None"
+        );
+    }
+
+    /// Helper: sign a block with an Ed25519 key, store signature in blockstore.
+    /// Returns (private_key, hex_pubkey, did).
+    async fn sign_block_ed25519(
+        block: &mut Block,
+        blockstore: &DefraBlockstore<MemoryStore>,
+    ) -> (crypto::Ed25519PrivateKey, String, String) {
+        let private_key = crypto::generate_ed25519().unwrap();
+        let public_key = private_key.public_key();
+        let did = public_key.did().unwrap();
+        // Identity in signature header is hex-encoded public key (matches Go)
+        let pub_hex = hex::encode(public_key.raw());
+
+        let signed_bytes = block.to_dag_cbor().unwrap();
+        let sig_value = private_key.sign(&signed_bytes).unwrap();
+
+        let sig_block = Signature::new(
+            SignatureHeader::new(SignatureType::EdDSA, pub_hex.as_bytes().to_vec()),
+            sig_value,
+        );
+        let sig_data = sig_block.to_dag_cbor().unwrap();
+        let sig_cid = sig_block.generate_cid().unwrap();
+        blockstore.put(&sig_cid, &sig_data).await.unwrap();
+        block.signature = Some(sig_cid);
+
+        (private_key, pub_hex, did)
+    }
+
+    #[tokio::test]
+    async fn verify_valid_ed25519_signature_returns_did() {
+        let (handler, blockstore) = make_handler();
+
+        let mut block = make_lww_block(None);
+        let (_priv_key, _pub_hex, did) = sign_block_ed25519(&mut block, &blockstore).await;
+
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+
+        let result = handler
+            .verify_block_signature(&cid, &block, &block_data)
+            .await;
+        let verified_identity = result.expect("valid signature should succeed");
+        assert_eq!(
+            verified_identity.as_deref(),
+            Some(did.as_str()),
+            "should return the signer's DID"
+        );
+        assert!(
+            verified_identity.unwrap().starts_with("did:key:"),
+            "verified identity should be a DID"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_tampered_block_returns_error() {
+        let (handler, blockstore) = make_handler();
+
+        // Sign the original block
+        let mut original_block = make_lww_block(None);
+        sign_block_ed25519(&mut original_block, &blockstore).await;
+        let sig_cid = original_block.signature.unwrap();
+
+        // Create a DIFFERENT block (tampered) but attach the same signature
+        let tampered_payload = LwwDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            field_name: "name".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            data: b"TAMPERED".to_vec(),
+        };
+        let tampered_block = Block {
+            delta: CrdtDelta::Lww(tampered_payload),
+            heads: None,
+            links: None,
+            encryption: None,
+            signature: Some(sig_cid),
+        };
+        let cid = tampered_block.generate_cid().unwrap();
+        let block_data = tampered_block.to_dag_cbor().unwrap();
+
+        let result = handler
+            .verify_block_signature(&cid, &tampered_block, &block_data)
+            .await;
+        assert!(result.is_err(), "tampered block should be rejected");
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                MergeError::SignatureVerificationFailed { .. }
+            ),
+            "expected SignatureVerificationFailed"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_missing_signature_block_returns_error() {
+        let (handler, _bs) = make_handler();
+
+        // Create a block that references a signature CID that doesn't exist
+        let fake_sig_cid = defra_core::block::generate_cid_from_bytes(b"nonexistent").unwrap();
+        let block = make_lww_block(Some(fake_sig_cid));
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+
+        let result = handler
+            .verify_block_signature(&cid, &block, &block_data)
+            .await;
+        assert!(
+            result.is_err(),
+            "missing signature block should be rejected"
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            MergeError::SignatureVerificationFailed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn verify_corrupt_signature_block_returns_error() {
+        let (handler, blockstore) = make_handler();
+
+        // Store garbage data as a "signature block"
+        let garbage_cid = defra_core::block::generate_cid_from_bytes(b"garbage").unwrap();
+        blockstore
+            .put(&garbage_cid, b"not-valid-dag-cbor")
+            .await
+            .unwrap();
+
+        let block = make_lww_block(Some(garbage_cid));
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+
+        let result = handler
+            .verify_block_signature(&cid, &block, &block_data)
+            .await;
+        assert!(
+            result.is_err(),
+            "corrupt signature block should be rejected"
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            MergeError::SignatureVerificationFailed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn verify_attacker_identity_not_victim() {
+        let (handler, blockstore) = make_handler();
+
+        // The attack scenario:
+        // 1. Attacker signs a block with their own key
+        // 2. Sets PushLog metadata.creator = victim's DID
+        // 3. Without this fix, ACP would register doc under victim's DID
+        let mut block = make_lww_block(None);
+        let (_attacker_key, _pub_hex, attacker_did) =
+            sign_block_ed25519(&mut block, &blockstore).await;
+
+        let victim_did = "did:key:z6MkVICTIM_FAKE_DID";
+
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+
+        // Verification succeeds and returns ATTACKER's actual DID
+        let result = handler
+            .verify_block_signature(&cid, &block, &block_data)
+            .await;
+        let verified = result.expect("valid signature should succeed");
+        assert_eq!(
+            verified.as_deref(),
+            Some(attacker_did.as_str()),
+            "verified identity should be the actual signer, not the victim"
+        );
+
+        // effective_creator prefers verified over self-reported victim DID
+        let mut metadata = BlockMetadata::normal("doc1", "col1", victim_did);
+        metadata.verified_creator = verified;
+        assert_eq!(
+            metadata.effective_creator(),
+            Some(attacker_did.as_str()),
+            "effective_creator should return attacker's DID, not victim's"
+        );
+        assert!(
+            metadata
+                .effective_creator()
+                .unwrap()
+                .starts_with("did:key:"),
+            "DID format preserved for ACP registration"
+        );
     }
 }

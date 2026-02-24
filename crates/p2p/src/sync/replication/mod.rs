@@ -332,6 +332,7 @@ mod tests {
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),
+                    verified_creator: None,
                 }
             })
             .collect();
@@ -360,6 +361,7 @@ mod tests {
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),
+                    verified_creator: None,
                 }
             })
             .collect();
@@ -394,6 +396,7 @@ mod tests {
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),
+                    verified_creator: None,
                 }
             })
             .collect();
@@ -428,6 +431,7 @@ mod tests {
             doc_id: "doc0".to_string(),
             collection_id: "col1".to_string(),
             creator: "peer1".to_string(),
+            verified_creator: None,
         }];
 
         let results = handler.handle_block_batch(&blocks).await;
@@ -449,6 +453,7 @@ mod tests {
             doc_id: "my-doc".to_string(),
             collection_id: "my-collection".to_string(),
             creator: "my-peer".to_string(),
+            verified_creator: None,
         }];
 
         // The default impl passes metadata through to handle_block.
@@ -475,6 +480,7 @@ mod tests {
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),
+                    verified_creator: None,
                 }
             })
             .collect();
@@ -503,6 +509,7 @@ mod tests {
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),
+                    verified_creator: None,
                 }
             })
             .collect();

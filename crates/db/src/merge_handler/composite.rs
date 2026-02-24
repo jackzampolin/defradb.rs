@@ -708,13 +708,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 // collection has an ACP policy. This enables merge-denial:
                 // replicated docs are registered with the original owner DID
                 // so that access checks work on the receiving node.
-                if let Some(creator) = metadata.creator {
+                if let Some(creator) = metadata.effective_creator() {
                     if creator.starts_with("did:key:") {
                         if let Some(ref col) = collection_for_acp {
                             if let Some(ref policy) = col.schema().policy {
                                 if let Some(acp) = self.document_acp.get() {
-                                    let did = identity::Did::new(creator);
-                                    if let Ok(did) = did {
+                                    if let Ok(did) = identity::Did::new(creator) {
                                         match acp
                                             .register_doc_object(
                                                 &did,
@@ -762,7 +761,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     // For branchable collections, emit a collection-level merge_complete
                     // event. Uses composite CID to match the sender's Update event CID.
                     if is_branchable {
-                        let by_peer = metadata.creator.unwrap_or("").to_string();
+                        let by_peer = metadata.effective_creator().unwrap_or("").to_string();
                         let mc = MergeCompleteData {
                             doc_id: String::new(), // empty → keyed by collection_id
                             cid: *cid,
@@ -1270,7 +1269,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 }
 
                 // Register document in local ACP (batch path)
-                if let Some(creator) = metadata.creator {
+                if let Some(creator) = metadata.effective_creator() {
                     if creator.starts_with("did:key:") {
                         if let Some(ref col) = collection_for_acp {
                             if let Some(ref policy) = col.schema().policy {
@@ -1314,7 +1313,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     });
 
                     if is_branchable {
-                        let by_peer = metadata.creator.unwrap_or("").to_string();
+                        let by_peer = metadata.effective_creator().unwrap_or("").to_string();
                         let mc = MergeCompleteData {
                             doc_id: String::new(),
                             cid: *cid,
