@@ -166,7 +166,7 @@ impl DocumentDeleteArgs {
 impl DocIdsArgs {
     pub async fn execute(&self, ctx: &ClientContext, name: Option<&str>) -> Result<()> {
         let collection =
-            name.ok_or_else(|| Error::MissingInput("--name is required for doc-ids".to_string()))?;
+            name.ok_or_else(|| Error::MissingInput("--name is required for docIDs".to_string()))?;
         validate_identifier(collection)?;
 
         let client = HttpClient::new(&ctx.url)?
@@ -174,7 +174,14 @@ impl DocIdsArgs {
             .with_verbose(ctx.verbose);
 
         let result = client.collection_doc_ids(collection).await?;
-        println!("{}", serde_json::to_string_pretty(&result)?);
+
+        // Output line-separated {"docID": "..."} objects to match Go CLI format
+        if let Some(ids) = result.get("doc_ids").and_then(|v| v.as_array()) {
+            for id in ids {
+                let obj = serde_json::json!({ "docID": id });
+                println!("{}", serde_json::to_string_pretty(&obj)?);
+            }
+        }
         Ok(())
     }
 }

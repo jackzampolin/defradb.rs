@@ -48,13 +48,12 @@ impl QueryArgs {
         let response = client.graphql(&query, variables, txn_id).await?;
 
         if response.has_errors() {
-            // Just return the error - CLI framework will handle displaying it
             return Err(Error::Server(response.error_message()));
         }
 
-        // Always output data, even if null (for consistent piping/scripting)
         let data = response.data.unwrap_or(serde_json::Value::Null);
-        let output = serde_json::to_string_pretty(&data)?;
+        let wrapped = serde_json::json!({ "data": data });
+        let output = serde_json::to_string_pretty(&wrapped)?;
         println!("{output}");
 
         Ok(())

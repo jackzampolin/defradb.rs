@@ -259,7 +259,7 @@ impl TestClusterBuilder {
                 if is_iroh {
                     patterns::iroh_patterns()
                 } else {
-                    patterns::rust_patterns()
+                    patterns::node_patterns()
                 },
                 self.acp_document_type.clone(),
                 identity,
@@ -302,7 +302,7 @@ impl TestClusterBuilder {
                 self.p2p_enabled,
                 &run_dir,
                 self.health_timeout,
-                patterns::go_patterns(),
+                patterns::node_patterns(),
                 self.acp_document_type.clone(),
                 identity,
                 self.encryption_enabled,

@@ -14,7 +14,7 @@ impl<S: Store> P2PHost<S> {
     pub(super) async fn handle_swarm_event(&mut self, event: SwarmEvent<DefraEvent>) {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
-                info!("Listening on {}", address);
+                info!(address = %address, "Created LibP2P host");
                 if self
                     .event_tx
                     .send(HostEvent::Listening(address.clone()))
@@ -28,7 +28,7 @@ impl<S: Store> P2PHost<S> {
             SwarmEvent::ConnectionEstablished {
                 peer_id, endpoint, ..
             } => {
-                info!("Connected to peer: {}", peer_id);
+                info!(peer_id = %peer_id, "Peer connected");
                 // Store the remote peer's address from the connection endpoint.
                 // For dialer: the address we dialed (peer's listen addr).
                 // For listener: the send_back_addr. With TCP port reuse enabled,
@@ -89,7 +89,7 @@ impl<S: Store> P2PHost<S> {
                 num_established,
                 ..
             } => {
-                info!("Disconnected from peer: {}", peer_id);
+                info!(peer_id = %peer_id, "Peer disconnected");
                 if num_established == 0 {
                     self.peer_addrs.remove(&peer_id);
                 }

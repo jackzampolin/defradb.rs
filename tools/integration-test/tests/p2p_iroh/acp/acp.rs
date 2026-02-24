@@ -439,7 +439,9 @@ async fn iroh_acp_multi_identity() {
     );
 
     // Anonymous sees only public doc on node1
-    let node1_anon = node1.query("query { User { name } }").expect("anon query on node1");
+    let node1_anon = node1
+        .query("query { User { name } }")
+        .expect("anon query on node1");
     let node1_anon_names: Vec<&str> = node1_anon["User"]
         .as_array()
         .expect("anon node1 result not array")

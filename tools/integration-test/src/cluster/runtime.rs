@@ -158,10 +158,10 @@ impl TestCluster {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         let is_iroh = config.p2p_transport.as_deref() == Some("iroh");
-        let named_patterns: Vec<NamedPattern> = match kind {
-            NodeKind::Rust if is_iroh => patterns::iroh_patterns(),
-            NodeKind::Rust => patterns::rust_patterns(),
-            NodeKind::Go => patterns::go_patterns(),
+        let named_patterns: Vec<NamedPattern> = if is_iroh {
+            patterns::iroh_patterns()
+        } else {
+            patterns::node_patterns()
         };
 
         let node: Box<dyn DefraNode> = match kind {

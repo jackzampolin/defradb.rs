@@ -73,14 +73,13 @@ impl DefraClient {
 
     /// Execute a GraphQL query/mutation via `client query '<gql>'`.
     ///
-    /// Normalizes output across Go and Rust CLIs:
-    /// - Go wraps in `{"data": ...}` with a header; Rust returns data directly.
+    /// Both Go and Rust CLIs wrap output in `{"data": ...}`.
+    /// Go also prefixes with a header line that we skip.
     pub fn query(&self, gql: &str) -> Result<Value> {
         let out = self.exec(&["client", "query", gql])?;
         // Go CLI prefixes output with "------ Request Results ------\n"
         let json_str = out.find('{').map(|i| &out[i..]).unwrap_or(&out);
         let val: Value = serde_json::from_str(json_str).context("failed to parse query output")?;
-        // Go CLI wraps in {"data": ...}; Rust returns data directly
         if let Some(data) = val.get("data") {
             Ok(data.clone())
         } else {
@@ -226,26 +225,13 @@ impl DefraClient {
         serde_json::from_str(&out).context("failed to parse collection_describe output")
     }
 
-    /// List document IDs via `client collection doc-ids --name <n>`.
+    /// List document IDs via `client collection docIDs --name <n>`.
     ///
-    /// Normalizes across implementations:
-    /// - Rust returns `{"doc_ids": ["id1", ...]}`
-    /// - Go returns line-separated `{"DocID": "id1"}\n{"DocID": "id2"}\n...`
+    /// Both Go and Rust output line-separated `{"docID": "..."}\n` objects.
     pub fn collection_doc_ids(&self, name: &str) -> Result<Vec<String>> {
         let out = self.exec(&["client", "collection", "docIDs", "--name", name])?;
         let trimmed = out.trim();
 
-        // Try Rust format: {"doc_ids": [...]}
-        if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
-            if let Some(arr) = val.get("doc_ids").and_then(|v| v.as_array()) {
-                return Ok(arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect());
-            }
-        }
-
-        // Go format: line-separated JSON objects {"DocID": "..."}
         let mut ids = Vec::new();
         for line in trimmed.lines() {
             let line = line.trim();
@@ -253,7 +239,7 @@ impl DefraClient {
                 continue;
             }
             if let Ok(obj) = serde_json::from_str::<Value>(line) {
-                if let Some(id) = obj.get("DocID").and_then(|v| v.as_str()) {
+                if let Some(id) = obj.get("docID").and_then(|v| v.as_str()) {
                     ids.push(id.to_string());
                 }
             }
