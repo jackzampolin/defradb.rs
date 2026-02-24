@@ -154,6 +154,14 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         let block =
             Block::from_dag_cbor(block_data).map_err(|e| MergeError::BlockDecode(e.to_string()))?;
 
+        // Verify block signature (batch path). Clone metadata so we can
+        // set verified_creator from the cryptographic verification result.
+        let mut metadata = metadata.clone();
+        if !metadata.is_recovery {
+            let verified = self.verify_block_signature(cid, &block, block_data).await?;
+            metadata.verified_creator = verified;
+        }
+
         // Decrypt delta data if the block has encryption
         let decrypted_block;
         let effective_block = if block.encryption.is_some() {
@@ -213,7 +221,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     cid,
                     &block,
                     payload,
-                    metadata,
+                    &metadata,
                     false,
                     batch_merged,
                     pending_events,
@@ -228,7 +236,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     cid,
                     &block,
                     payload,
-                    metadata,
+                    &metadata,
                     batch_merged,
                     pending_events,
                     0,
@@ -260,7 +268,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
             )),
             CrdtDelta::CollectionDefinition(payload) => {
                 // CollectionDefinition uses its own txn (rare, not worth batching)
-                self.process_collection_definition_delta(cid, &block, payload, metadata)
+                self.process_collection_definition_delta(cid, &block, payload, &metadata)
                     .await
             }
             CrdtDelta::CollectionSet(_) => Ok(MergeOutcome::skipped("collection set delta")),

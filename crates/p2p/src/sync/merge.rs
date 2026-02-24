@@ -17,6 +17,9 @@ pub struct MergeBlock {
     pub doc_id: String,
     pub collection_id: String,
     pub creator: String,
+    /// Creator identity verified from the block's embedded signature.
+    /// When present, this MUST be preferred over self-reported `creator`.
+    pub verified_creator: Option<String>,
 }
 
 /// Outcome of a merge operation.
@@ -65,6 +68,10 @@ pub struct BlockMetadata<'a> {
     pub collection_id: Option<&'a str>,
     /// Peer that created this block (None during recovery)
     pub creator: Option<&'a str>,
+    /// Creator identity verified from the block's embedded signature.
+    /// Set by the merge handler after cryptographic verification.
+    /// When present, this MUST be preferred over self-reported `creator`.
+    pub verified_creator: Option<String>,
     /// Whether this is a recovery operation (block was stored but not merged before crash)
     pub is_recovery: bool,
     /// Whether this is a schema-level block (CollectionDefinition, FieldDefinition).
@@ -81,6 +88,7 @@ impl<'a> BlockMetadata<'a> {
             doc_id: Some(doc_id),
             collection_id: Some(collection_id),
             creator: Some(creator),
+            verified_creator: None,
             is_recovery: false,
             is_schema_block: false,
         }
@@ -96,6 +104,7 @@ impl<'a> BlockMetadata<'a> {
             doc_id: None,
             collection_id: None,
             creator: None,
+            verified_creator: None,
             is_recovery: false,
             is_schema_block: true,
         }
@@ -111,9 +120,16 @@ impl<'a> BlockMetadata<'a> {
             doc_id: None,
             collection_id: None,
             creator: None,
+            verified_creator: None,
             is_recovery: true,
             is_schema_block: false,
         }
+    }
+
+    /// Returns the most trustworthy creator identity available.
+    /// Prefers cryptographically verified identity over self-reported metadata.
+    pub fn effective_creator(&self) -> Option<&str> {
+        self.verified_creator.as_deref().or(self.creator)
     }
 
     /// Check if any metadata is missing.
@@ -206,5 +222,31 @@ mod tests {
         let skipped = MergeOutcome::skipped("already applied");
         assert!(!skipped.is_merged());
         assert!(skipped.is_skipped());
+    }
+
+    #[test]
+    fn effective_creator_prefers_verified() {
+        let mut meta = BlockMetadata::normal("doc1", "col1", "did:key:SELF_REPORTED");
+        meta.verified_creator = Some("did:key:VERIFIED_SIGNER".to_string());
+        assert_eq!(meta.effective_creator(), Some("did:key:VERIFIED_SIGNER"));
+    }
+
+    #[test]
+    fn effective_creator_falls_back_to_self_reported() {
+        let meta = BlockMetadata::normal("doc1", "col1", "did:key:SELF_REPORTED");
+        assert_eq!(meta.effective_creator(), Some("did:key:SELF_REPORTED"));
+    }
+
+    #[test]
+    fn effective_creator_none_when_both_absent() {
+        let meta = BlockMetadata::recovery();
+        assert_eq!(meta.effective_creator(), None);
+    }
+
+    #[test]
+    fn effective_creator_verified_only_no_self_reported() {
+        let mut meta = BlockMetadata::recovery();
+        meta.verified_creator = Some("did:key:VERIFIED".to_string());
+        assert_eq!(meta.effective_creator(), Some("did:key:VERIFIED"));
     }
 }

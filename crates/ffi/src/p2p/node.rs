@@ -220,7 +220,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
             libp2p_transport,
             blockstore.clone(),
             SyncConfig::default(),
-            p2p::bitswap::AccessMode::Open,
+            p2p::bitswap::AccessMode::Controlled,
             Arc::new(p2p::bitswap::ReplicatorRegistry::new()),
             Arc::new(p2p::sync::NoOpCollectionStorage),
             head_provider,

@@ -43,6 +43,7 @@ pub enum CollectionCommand {
     /// Describe a collection's schema
     Describe(CollectionDescribeArgs),
     /// Get document IDs
+    #[command(name = "docIDs")]
     DocIds(DocIdsArgs),
     /// Get a document by ID
     Get(DocumentGetArgs),

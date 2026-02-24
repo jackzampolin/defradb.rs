@@ -88,11 +88,15 @@ pub struct Cli {
     ///
     /// When enabled, node operations require authentication and authorization
     /// based on the node's identity from the keyring.
-    #[arg(long, global = true, env = "DEFRA_ACP_NODE_ENABLE", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    #[arg(long = "node-acp-enable", global = true, env = "DEFRA_ACP_NODE_ENABLE", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub acp_node_enable: Option<bool>,
 
     /// Document ACP type. Options are none, local, or source-hub
-    #[arg(long, global = true, env = "DEFRA_ACP_DOCUMENT_TYPE")]
+    #[arg(
+        long = "document-acp-type",
+        global = true,
+        env = "DEFRA_ACP_DOCUMENT_TYPE"
+    )]
     pub acp_document_type: Option<String>,
 
     #[command(subcommand)]

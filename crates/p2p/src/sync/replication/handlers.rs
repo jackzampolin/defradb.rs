@@ -254,6 +254,7 @@ where
                     doc_id,
                     collection_id,
                     creator,
+                    verified_creator: None,
                 });
             }
             Ok(None) => {

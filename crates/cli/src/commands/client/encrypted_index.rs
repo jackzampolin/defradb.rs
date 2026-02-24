@@ -28,11 +28,11 @@ pub enum EncryptedIndexCommand {
 #[derive(Args, Debug)]
 pub struct EncryptedIndexAddArgs {
     /// Collection name
-    #[arg(value_name = "COLLECTION")]
+    #[arg(long, short = 'c')]
     pub collection: String,
 
     /// Field name to add encrypted index on
-    #[arg(value_name = "FIELD")]
+    #[arg(long)]
     pub field: String,
 }
 
@@ -40,11 +40,11 @@ pub struct EncryptedIndexAddArgs {
 #[derive(Args, Debug)]
 pub struct EncryptedIndexDeleteArgs {
     /// Collection name
-    #[arg(value_name = "COLLECTION")]
+    #[arg(long, short = 'c')]
     pub collection: String,
 
     /// Field name to delete encrypted index from
-    #[arg(value_name = "FIELD")]
+    #[arg(long)]
     pub field: String,
 }
 
@@ -52,7 +52,7 @@ pub struct EncryptedIndexDeleteArgs {
 #[derive(Args, Debug)]
 pub struct EncryptedIndexListArgs {
     /// Collection name
-    #[arg(value_name = "COLLECTION")]
+    #[arg(long, short = 'c')]
     pub collection: String,
 }
 
