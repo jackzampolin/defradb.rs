@@ -11,17 +11,15 @@
 
 ## Failing Tests
 
-All 12 failures involve document replication under controlled-mode access control.
-Tests time out waiting for documents to replicate between iroh peers.
-
-Root cause: main's security audit added `check_access_str()` to the sync coordinator
-which calls `PeerState.is_connected()` using libp2p PeerId keys. Iroh peer IDs cannot
-be parsed as libp2p PeerIds, so connected iroh peers are not recognized in controlled
-mode. Only replicator-registered peers pass (via string-based replicator registry).
+All 12 failures involve ACP-protected document replication between iroh peers.
+Tests time out waiting for documents to replicate. The controlled-mode access
+checks and PeerState tracking are working (#501 fixed, #500 fixed), but the
+ACP-protected replication path has a remaining issue in the pushlog/DAG fetch
+flow for permissioned documents.
 
 ### acp.rs (2 tests)
-- `iroh_acp_replication` — ACP-protected doc fails to replicate
-- `iroh_acp_multi_identity` — multi-identity ACP replication fails
+- `iroh_acp_replication` — ACP-protected doc replication timeout
+- `iroh_acp_multi_identity` — multi-identity ACP replication timeout
 
 ### dac.rs (9 tests)
 - `replicator_permissioned_local` — permissioned replication with local ACP
@@ -36,5 +34,3 @@ mode. Only replicator-registered peers pass (via string-based replicator registr
 
 ### trust_boundary.rs (1 test)
 - `iroh_trust_boundary` — trust boundary enforcement between iroh peers
-
-Tracked in issue #501.

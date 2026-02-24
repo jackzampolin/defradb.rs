@@ -1,6 +1,6 @@
 # Schema Tests
 
-25 passing, 7 ignored.
+31 passing, 7 ignored.
 
 ## Files
 

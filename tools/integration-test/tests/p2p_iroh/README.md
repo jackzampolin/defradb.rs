@@ -16,21 +16,19 @@ The CLI binary must be built with `--features iroh` for P2P transport tests.
 | sync/ | 25 | 25 | 0 | 0 | Document sync, branchable sync, version sync with views |
 | replication/ | 40 | 40 | 0 | 0 | Replicator lifecycle, persistence, filtering |
 | peer/ | 43 | 42 | 0 | 1 | Peer events, subscriptions, create/update/delete |
-| schema/ | 32 | 25 | 0 | 7 | Encryption, schema migration with lens transforms |
+| schema/ | 38 | 31 | 0 | 7 | Encryption, schema migration with lens transforms |
 | acp/ | 65 | 53 | 12 | 0 | Access control: local ACP, NAC, DAC |
-| **Total** | **223** | **203** | **12** | **8** | |
+| **Total** | **229** | **209** | **12** | **8** | |
 
 ## Known Failures
 
 ### ACP replication tests (12 tests)
 
 All 12 failures are in `acp::acp`, `acp::dac`, and `acp::trust_boundary`. They time
-out waiting for documents to replicate. Root cause: main's security audit added
-controlled-mode access checks (`check_access_str`) that use `PeerState.is_connected()`
-with libp2p PeerId keys. Iroh peer IDs are not registered in the libp2p-keyed
-peer state tracker, so connected iroh peers fail the access check in controlled mode.
-
-Tracked in issue #501 (make PeerState string-based).
+out waiting for ACP-protected documents to replicate between iroh peers. The
+controlled-mode access checks and PeerState tracking are working (#501 fixed),
+but the ACP-protected replication path has a remaining issue in the pushlog/DAG
+fetch flow for permissioned documents.
 
 ## Running Individual Suites
 
