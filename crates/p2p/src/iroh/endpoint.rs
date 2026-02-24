@@ -312,10 +312,12 @@ async fn dispatch_stream(
         }
         x if x == protocols::ALPN_DOCSYNC => {
             let request: crate::message::DocSyncRequest = protocols::read_message(recv).await?;
+            let token = crate::transport::ResponseToken::new(send);
             if event_tx
                 .send(TransportEvent::DocSyncRequest {
                     peer_id: peer_id.clone(),
                     request,
+                    token: Some(token),
                 })
                 .await
                 .is_err()
@@ -323,44 +325,20 @@ async fn dispatch_stream(
                 warn!("Event channel closed, cannot emit DocSyncRequest");
             }
         }
-        x if x == protocols::ALPN_DOCSYNC_RESP => {
-            let reply: crate::message::DocSyncReply = protocols::read_message(recv).await?;
-            if event_tx
-                .send(TransportEvent::DocSyncReply {
-                    peer_id: peer_id.clone(),
-                    reply,
-                })
-                .await
-                .is_err()
-            {
-                warn!("Event channel closed, cannot emit DocSyncReply");
-            }
-        }
         x if x == protocols::ALPN_BRANCHABLE => {
             let request: crate::message::BranchableSyncRequest =
                 protocols::read_message(recv).await?;
+            let token = crate::transport::ResponseToken::new(send);
             if event_tx
                 .send(TransportEvent::BranchableSyncRequest {
                     peer_id: peer_id.clone(),
                     request,
+                    token: Some(token),
                 })
                 .await
                 .is_err()
             {
                 warn!("Event channel closed, cannot emit BranchableSyncRequest");
-            }
-        }
-        x if x == protocols::ALPN_BRANCHABLE_RESP => {
-            let reply: crate::message::BranchableSyncReply = protocols::read_message(recv).await?;
-            if event_tx
-                .send(TransportEvent::BranchableSyncReply {
-                    peer_id: peer_id.clone(),
-                    reply,
-                })
-                .await
-                .is_err()
-            {
-                warn!("Event channel closed, cannot emit BranchableSyncReply");
             }
         }
         x if x == protocols::ALPN_CAR => {
@@ -598,6 +576,36 @@ async fn handle_command(
                 &reply_msg,
                 direct_addr,
             )
+            .await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::SendDocSyncResponseToken {
+            mut send_stream,
+            reply_msg,
+            reply,
+        } => {
+            let result = async {
+                protocols::write_message(&mut send_stream, &reply_msg).await?;
+                send_stream.finish().map_err(|e| {
+                    crate::error::Error::Transport(format!("failed to finish stream: {}", e))
+                })?;
+                Ok(())
+            }
+            .await;
+            let _ = reply.send(result);
+        }
+        IrohCommand::SendBranchableSyncResponseToken {
+            mut send_stream,
+            reply_msg,
+            reply,
+        } => {
+            let result = async {
+                protocols::write_message(&mut send_stream, &reply_msg).await?;
+                send_stream.finish().map_err(|e| {
+                    crate::error::Error::Transport(format!("failed to finish stream: {}", e))
+                })?;
+                Ok(())
+            }
             .await;
             let _ = reply.send(result);
         }

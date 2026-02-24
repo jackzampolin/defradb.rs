@@ -194,6 +194,26 @@ impl P2PTransport for Libp2pTransport {
         ))
     }
 
+    async fn send_doc_sync_response_token(
+        &self,
+        _token: ResponseToken,
+        _reply: DocSyncReply,
+    ) -> Result<()> {
+        Err(Error::ResponseSend(
+            "libp2p does not use response tokens for DocSync".to_string(),
+        ))
+    }
+
+    async fn send_branchable_sync_response_token(
+        &self,
+        _token: ResponseToken,
+        _reply: BranchableSyncReply,
+    ) -> Result<()> {
+        Err(Error::ResponseSend(
+            "libp2p does not use response tokens for BranchableSync".to_string(),
+        ))
+    }
+
     async fn send_se_artifacts(&self, peer_id: &PeerId, req: PushSEArtifactsRequest) -> Result<()> {
         let pid = parse_libp2p_peer_id(peer_id)?;
         self.handle.send_se_artifacts(pid, req).await
@@ -322,6 +342,7 @@ pub fn convert_host_event(event: crate::host::HostEvent) -> TransportEvent {
         HostEvent::DocSyncRequest { peer_id, request } => TransportEvent::DocSyncRequest {
             peer_id: PeerId::from(peer_id),
             request,
+            token: None,
         },
         HostEvent::DocSyncReply { peer_id, reply } => TransportEvent::DocSyncReply {
             peer_id: PeerId::from(peer_id),
@@ -331,6 +352,7 @@ pub fn convert_host_event(event: crate::host::HostEvent) -> TransportEvent {
             TransportEvent::BranchableSyncRequest {
                 peer_id: PeerId::from(peer_id),
                 request,
+                token: None,
             }
         }
         HostEvent::BranchableSyncReply { peer_id, reply } => TransportEvent::BranchableSyncReply {

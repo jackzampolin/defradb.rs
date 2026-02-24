@@ -99,7 +99,9 @@ async fn replicator_create_new_field_older_version() {
     let node1 = cluster.client(1);
 
     // Patch only node 0: add Email field
-    node0.collection_patch(ADD_EMAIL_PATCH).expect("patch node0");
+    node0
+        .collection_patch(ADD_EMAIL_PATCH)
+        .expect("patch node0");
 
     // Set up replication
     node0.p2p_collection_add(&["Users"]).expect("col add n0");
@@ -146,7 +148,9 @@ async fn replicator_create_new_field_newer_version() {
     let node1 = cluster.client(1);
 
     // Patch only node 1: add Email field
-    node1.collection_patch(ADD_EMAIL_PATCH).expect("patch node1");
+    node1
+        .collection_patch(ADD_EMAIL_PATCH)
+        .expect("patch node1");
 
     // Set up replication
     node0.p2p_collection_add(&["Users"]).expect("col add n0");
@@ -190,8 +194,12 @@ async fn replicator_create_new_field_updated_version() {
     let node1 = cluster.client(1);
 
     // Patch BOTH nodes: add Email field
-    node0.collection_patch(ADD_EMAIL_PATCH).expect("patch node0");
-    node1.collection_patch(ADD_EMAIL_PATCH).expect("patch node1");
+    node0
+        .collection_patch(ADD_EMAIL_PATCH)
+        .expect("patch node0");
+    node1
+        .collection_patch(ADD_EMAIL_PATCH)
+        .expect("patch node1");
 
     // Set up replication
     node0.p2p_collection_add(&["Users"]).expect("col add n0");
@@ -263,7 +271,9 @@ async fn replicator_update_new_field_older_version() {
     wait_for_merge_events(&merges, 1, MERGE_TIMEOUT).await;
 
     // Patch only node 0: add Email field
-    node0.collection_patch(ADD_EMAIL_PATCH).expect("patch node0");
+    node0
+        .collection_patch(ADD_EMAIL_PATCH)
+        .expect("patch node0");
 
     // Update both fields on node 0
     node0
@@ -323,7 +333,9 @@ async fn replicator_update_new_field_older_version_multistep() {
     wait_for_merge_events(&merges, 1, MERGE_TIMEOUT).await;
 
     // Patch only node 0: add Email field
-    node0.collection_patch(ADD_EMAIL_PATCH).expect("patch node0");
+    node0
+        .collection_patch(ADD_EMAIL_PATCH)
+        .expect("patch node0");
 
     // Step 1: Update Email on node 0
     node0
@@ -402,7 +414,9 @@ async fn replicated_doc_older_schema_version() {
     let v1 = extract_version_id(&node0, "Users");
 
     // Patch node 1 only: add email field
-    node1.collection_patch(ADD_EMAIL_PATCH_LC).expect("patch node1");
+    node1
+        .collection_patch(ADD_EMAIL_PATCH_LC)
+        .expect("patch node1");
     let v2 = extract_version_id(&node1, "Users");
 
     // Configure migration on both nodes: v1 → v2
@@ -459,9 +473,13 @@ async fn replicated_doc_much_older_schema_version() {
     let v1 = extract_version_id(&node0, "Users");
 
     // Patch node 1 twice: add email, then address
-    node1.collection_patch(ADD_EMAIL_PATCH_LC).expect("patch1 node1");
+    node1
+        .collection_patch(ADD_EMAIL_PATCH_LC)
+        .expect("patch1 node1");
     let v2 = extract_version_id(&node1, "Users");
-    node1.collection_patch(ADD_ADDRESS_PATCH).expect("patch2 node1");
+    node1
+        .collection_patch(ADD_ADDRESS_PATCH)
+        .expect("patch2 node1");
     let v3 = extract_version_id(&node1, "Users");
 
     // Migration 1: v1→v2 sets verified=true
@@ -520,7 +538,9 @@ async fn replicated_doc_newer_schema_version() {
     let v1 = extract_version_id(&node0, "Users");
 
     // Patch node 0 only: add email field
-    node0.collection_patch(ADD_EMAIL_PATCH_LC).expect("patch node0");
+    node0
+        .collection_patch(ADD_EMAIL_PATCH_LC)
+        .expect("patch node0");
     let v2 = extract_version_id(&node0, "Users");
 
     // Configure migration on both nodes: v1 → v2
@@ -584,9 +604,13 @@ async fn replicated_doc_much_newer_with_history_gap() {
     let _v1 = extract_version_id(&node0, "Users");
 
     // Patch node 0 twice: add verified, then email
-    node0.collection_patch(ADD_VERIFIED_PATCH).expect("patch1 node0");
+    node0
+        .collection_patch(ADD_VERIFIED_PATCH)
+        .expect("patch1 node0");
     let v2 = extract_version_id(&node0, "Users");
-    node0.collection_patch(ADD_EMAIL_PATCH_LC).expect("patch2 node0");
+    node0
+        .collection_patch(ADD_EMAIL_PATCH_LC)
+        .expect("patch2 node0");
     let v3 = extract_version_id(&node0, "Users");
 
     // Only v2→v3 migration registered (gap: no v1→v2)
@@ -639,7 +663,9 @@ async fn replicated_doc_other_schema_branch() {
     let v1 = extract_version_id(&node0, "Users");
 
     // Patch node 0: add email
-    node0.collection_patch(ADD_EMAIL_PATCH_LC).expect("patch node0");
+    node0
+        .collection_patch(ADD_EMAIL_PATCH_LC)
+        .expect("patch node0");
     let v2 = extract_version_id(&node0, "Users");
 
     // Lens on both: v1→v2 sets name="Fred"
@@ -648,7 +674,9 @@ async fn replicated_doc_other_schema_branch() {
     node1.lens_set(&v1, &v2, &lens1).expect("lens_set node1");
 
     // Patch node 1: add phone (creates different branch v1→v3)
-    node1.collection_patch(ADD_PHONE_PATCH).expect("patch node1");
+    node1
+        .collection_patch(ADD_PHONE_PATCH)
+        .expect("patch node1");
     let v3 = extract_version_id(&node1, "Users");
 
     // Lens on both: v1→v3 sets phone="1234567890"

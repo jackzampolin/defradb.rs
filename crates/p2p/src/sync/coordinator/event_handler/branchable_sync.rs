@@ -8,13 +8,14 @@ use super::super::SyncCoordinator;
 use crate::error::Result;
 use crate::message::BranchableSyncReply;
 use crate::signing::sign_with_transport;
-use crate::transport::{P2PTransport, PeerId};
+use crate::transport::{P2PTransport, PeerId, ResponseToken};
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub(super) async fn handle_branchable_sync_request(
         &self,
         peer_id: PeerId,
         request: crate::message::BranchableSyncRequest,
+        token: Option<ResponseToken>,
     ) -> Result<()> {
         self.check_access_str(peer_id.as_str(), &request.collection_id)
             .await?;
@@ -63,11 +64,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return Err(e);
         }
 
-        if let Err(e) = self
-            .transport
-            .send_branchable_sync_response(&peer_id, reply)
-            .await
-        {
+        let send_result = if let Some(token) = token {
+            self.transport
+                .send_branchable_sync_response_token(token, reply)
+                .await
+        } else {
+            self.transport
+                .send_branchable_sync_response(&peer_id, reply)
+                .await
+        };
+        if let Err(e) = send_result {
             tracing::warn!(
                 peer_id = %peer_id,
                 error = %e,

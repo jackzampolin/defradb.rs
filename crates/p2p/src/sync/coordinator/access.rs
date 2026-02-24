@@ -41,7 +41,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         // Connected peers are already authenticated via transport-level crypto. The
         // replicator registry controls what WE push; it shouldn't gate what we ACCEPT
         // from authenticated peers on topics we've subscribed to.
-        if self.peer_state.is_connected_str(peer_id_str) {
+        if self.peer_state.is_connected(peer_id_str) {
             let subscribed = self.subscribed_collections.read().await;
             if subscribed.contains(collection_id) {
                 return Ok(());
@@ -73,7 +73,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return Ok(());
         }
 
-        if self.peer_state.is_connected_str(peer_id.as_str()) {
+        if self.peer_state.is_connected(peer_id.as_str()) {
             return Ok(());
         }
 

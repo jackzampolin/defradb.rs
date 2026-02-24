@@ -15,7 +15,7 @@ pub(super) async fn handle_dag_needs_fetch<B, T>(
     coordinator: &SyncCoordinator<B, T>,
     root_cid: Cid,
     missing: Vec<Cid>,
-    providers: Vec<libp2p::PeerId>,
+    providers: Vec<String>,
 ) -> ReplicationResult
 where
     B: Blockstore + 'static,
@@ -28,9 +28,8 @@ where
         "Initiating Bitswap fetch for missing blocks"
     );
 
-    // Convert libp2p PeerIds to transport PeerIds.
-    // If the provider list is empty (e.g., iroh transport uses non-libp2p IDs and
-    // PeerStateTracker is never populated), fall back to all connected transport peers.
+    // Convert string peer IDs to transport PeerIds.
+    // If the provider list is empty, fall back to all connected transport peers.
     let transport_providers: Vec<crate::transport::PeerId> = if providers.is_empty() {
         coordinator
             .transport()
@@ -38,7 +37,10 @@ where
             .await
             .unwrap_or_default()
     } else {
-        providers.into_iter().map(|p| p.into()).collect()
+        providers
+            .into_iter()
+            .map(crate::transport::PeerId::new)
+            .collect()
     };
 
     // Start Bitswap sync via transport

@@ -21,28 +21,20 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         match event {
             TransportEvent::PeerConnected(peer_id) => {
                 tracing::debug!(peer_id = %peer_id, "Peer connected");
-                if let Ok(pid) = peer_id.as_str().parse::<libp2p::PeerId>() {
-                    self.peer_state.peer_connected(pid);
-                }
+                self.peer_state.peer_connected(peer_id.as_str());
             }
             TransportEvent::PeerDisconnected(peer_id) => {
                 tracing::debug!(peer_id = %peer_id, "Peer disconnected");
-                if let Ok(pid) = peer_id.as_str().parse::<libp2p::PeerId>() {
-                    self.peer_state.peer_disconnected(&pid);
-                }
+                self.peer_state.peer_disconnected(peer_id.as_str());
                 self.rate_limiter.remove_peer(&peer_id);
             }
             TransportEvent::PeerSubscribed { peer_id, topic } => {
                 tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer subscribed to topic");
-                if let Ok(pid) = peer_id.as_str().parse::<libp2p::PeerId>() {
-                    self.peer_state.peer_subscribed(&pid, topic);
-                }
+                self.peer_state.peer_subscribed(peer_id.as_str(), topic);
             }
             TransportEvent::PeerUnsubscribed { peer_id, topic } => {
                 tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer unsubscribed from topic");
-                if let Ok(pid) = peer_id.as_str().parse::<libp2p::PeerId>() {
-                    self.peer_state.peer_unsubscribed(&pid, &topic);
-                }
+                self.peer_state.peer_unsubscribed(peer_id.as_str(), &topic);
             }
             TransportEvent::GossipMessage {
                 propagation_source,
@@ -114,7 +106,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 self.handle_bitswap_complete(query_id, success, error)
                     .await?;
             }
-            TransportEvent::DocSyncRequest { peer_id, request } => {
+            TransportEvent::DocSyncRequest {
+                peer_id,
+                request,
+                token,
+            } => {
                 if !self.rate_limiter.check(&peer_id) {
                     tracing::warn!(
                         peer_id = %peer_id,
@@ -125,12 +121,17 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         collection_id: "rate-limited".into(),
                     });
                 }
-                self.handle_doc_sync_request(peer_id, request).await?;
+                self.handle_doc_sync_request(peer_id, request, token)
+                    .await?;
             }
             TransportEvent::DocSyncReply { peer_id, reply } => {
                 self.handle_doc_sync_reply(peer_id, reply).await?;
             }
-            TransportEvent::BranchableSyncRequest { peer_id, request } => {
+            TransportEvent::BranchableSyncRequest {
+                peer_id,
+                request,
+                token,
+            } => {
                 if !self.rate_limiter.check(&peer_id) {
                     tracing::warn!(
                         peer_id = %peer_id,
@@ -141,7 +142,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         collection_id: "rate-limited".into(),
                     });
                 }
-                self.handle_branchable_sync_request(peer_id, request)
+                self.handle_branchable_sync_request(peer_id, request, token)
                     .await?;
             }
             TransportEvent::BranchableSyncReply { peer_id, reply } => {

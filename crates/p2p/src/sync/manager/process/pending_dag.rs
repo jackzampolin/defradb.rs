@@ -34,11 +34,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     }
 
     /// Get the source peer for a pending DAG (the peer that originally provided it).
-    pub fn pending_dag_source_peer(&self, root_cid: &Cid) -> Option<libp2p::PeerId> {
+    pub fn pending_dag_source_peer(&self, root_cid: &Cid) -> Option<String> {
         self.pending_dags
             .read()
             .get(root_cid)
-            .and_then(|dag| dag.source_peer)
+            .and_then(|dag| dag.source_peer.clone())
     }
 
     /// Insert a pending DAG entry, enforcing TTL eviction and capacity limits.
@@ -72,7 +72,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     ///
     /// * `root_cid` - The head CID to fetch
     /// * `doc_id` - Document ID from the DocSyncItem
-    pub fn register_docsync_dag(&self, root_cid: Cid, doc_id: String, source_peer: libp2p::PeerId) {
+    pub fn register_docsync_dag(&self, root_cid: Cid, doc_id: String, source_peer: String) {
         tracing::debug!(
             cid = %root_cid,
             doc_id = %doc_id,
@@ -110,7 +110,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         &self,
         root_cid: Cid,
         collection_id: String,
-        source_peer: libp2p::PeerId,
+        source_peer: String,
     ) {
         tracing::debug!(
             cid = %root_cid,

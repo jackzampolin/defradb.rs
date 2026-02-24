@@ -381,10 +381,11 @@ async fn sync_encrypted_dag() {
         r#"query {{ _commits(docID: "{}") {{ cid delta fieldName }} }}"#,
         doc_id
     );
-    let commits = cluster.client(1).query(&commits_query).expect("commits query");
-    let commit_arr = commits["_commits"]
-        .as_array()
-        .expect("_commits not array");
+    let commits = cluster
+        .client(1)
+        .query(&commits_query)
+        .expect("commits query");
+    let commit_arr = commits["_commits"].as_array().expect("_commits not array");
 
     // Should have at least 3 commits (composite, name field, age field)
     assert!(
@@ -407,10 +408,7 @@ async fn sync_encrypted_dag() {
         .iter()
         .filter(|c| c["fieldName"].as_str() != Some("_C"))
         .collect();
-    assert!(
-        !field_commits.is_empty(),
-        "expected field-level commits"
-    );
+    assert!(!field_commits.is_empty(), "expected field-level commits");
     for commit in &field_commits {
         assert!(
             !commit["delta"].is_null(),
@@ -460,7 +458,12 @@ async fn encrypted_doc_indexed_field() {
         .query(r#"query { Users(filter: {age: {_eq: 21}}) { name } }"#)
         .expect("filtered query");
     let users = result["Users"].as_array().expect("not array");
-    assert_eq!(users.len(), 2, "expected 2 users with age=21, got {:?}", users);
+    assert_eq!(
+        users.len(),
+        2,
+        "expected 2 users with age=21, got {:?}",
+        users
+    );
 
     let names: Vec<&str> = users.iter().filter_map(|u| u["name"].as_str()).collect();
     assert!(names.contains(&"Andy"), "missing Andy in {:?}", names);
@@ -503,7 +506,12 @@ async fn doc_encrypted_indexed_field() {
         .query(r#"query { Users(filter: {age: {_eq: 21}}) { name } }"#)
         .expect("filtered query");
     let users = result["Users"].as_array().expect("not array");
-    assert_eq!(users.len(), 2, "expected 2 users with age=21, got {:?}", users);
+    assert_eq!(
+        users.len(),
+        2,
+        "expected 2 users with age=21, got {:?}",
+        users
+    );
 
     let names: Vec<&str> = users.iter().filter_map(|u| u["name"].as_str()).collect();
     assert!(names.contains(&"Andy"), "missing Andy in {:?}", names);

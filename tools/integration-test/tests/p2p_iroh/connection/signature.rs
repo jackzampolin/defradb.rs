@@ -60,10 +60,9 @@ fn require_public_key(identity: &integration_test::TestIdentity) -> String {
 #[tokio::test]
 #[serial]
 async fn peers_secp256k1_sync() {
-    let identity = generate_identity(
-        &integration_test::workspace_root().join("target/debug/defra"),
-    )
-    .expect("generate secp256k1 identity");
+    let identity =
+        generate_identity(&integration_test::workspace_root().join("target/debug/defra"))
+            .expect("generate secp256k1 identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(2)
@@ -127,10 +126,9 @@ async fn peers_secp256k1_sync() {
 #[tokio::test]
 #[serial]
 async fn peers_ed25519_sync() {
-    let identity = generate_ed25519_identity(
-        &integration_test::workspace_root().join("target/debug/defra"),
-    )
-    .expect("generate ed25519 identity");
+    let identity =
+        generate_ed25519_identity(&integration_test::workspace_root().join("target/debug/defra"))
+            .expect("generate ed25519 identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(2)
@@ -424,10 +422,7 @@ async fn peers_different_key_types_same_doc_sync() {
     let has_eddsa = arr
         .iter()
         .any(|c| c["signature"]["type"].as_str() == Some("EdDSA"));
-    assert!(
-        has_es256k,
-        "should have ES256K-signed commits from node0"
-    );
+    assert!(has_es256k, "should have ES256K-signed commits from node0");
     assert!(has_eddsa, "should have EdDSA-signed commits from node1");
 }
 
@@ -436,10 +431,9 @@ async fn peers_different_key_types_same_doc_sync() {
 #[tokio::test]
 #[serial]
 async fn branchable_collection_signed() {
-    let identity = generate_identity(
-        &integration_test::workspace_root().join("target/debug/defra"),
-    )
-    .expect("generate identity");
+    let identity =
+        generate_identity(&integration_test::workspace_root().join("target/debug/defra"))
+            .expect("generate identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(1)
@@ -512,10 +506,9 @@ async fn branchable_collection_signed() {
 #[tokio::test]
 #[serial]
 async fn verify_valid_data() {
-    let identity = generate_identity(
-        &integration_test::workspace_root().join("target/debug/defra"),
-    )
-    .expect("generate identity");
+    let identity =
+        generate_identity(&integration_test::workspace_root().join("target/debug/defra"))
+            .expect("generate identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(1)
@@ -550,10 +543,9 @@ async fn verify_valid_data() {
 #[tokio::test]
 #[serial]
 async fn verify_different_key_type() {
-    let identity = generate_ed25519_identity(
-        &integration_test::workspace_root().join("target/debug/defra"),
-    )
-    .expect("generate ed25519 identity");
+    let identity =
+        generate_ed25519_identity(&integration_test::workspace_root().join("target/debug/defra"))
+            .expect("generate ed25519 identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(1)
@@ -588,10 +580,9 @@ async fn verify_different_key_type() {
 #[tokio::test]
 #[serial]
 async fn verify_wrong_identity_error() {
-    let identity = generate_identity(
-        &integration_test::workspace_root().join("target/debug/defra"),
-    )
-    .expect("generate identity");
+    let identity =
+        generate_identity(&integration_test::workspace_root().join("target/debug/defra"))
+            .expect("generate identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(1)
@@ -629,10 +620,9 @@ async fn verify_wrong_identity_error() {
 #[tokio::test]
 #[serial]
 async fn verify_wrong_cid_error() {
-    let identity = generate_identity(
-        &integration_test::workspace_root().join("target/debug/defra"),
-    )
-    .expect("generate identity");
+    let identity =
+        generate_identity(&integration_test::workspace_root().join("target/debug/defra"))
+            .expect("generate identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(1)

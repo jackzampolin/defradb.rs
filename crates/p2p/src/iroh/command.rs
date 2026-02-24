@@ -74,6 +74,11 @@ pub enum IrohCommand {
         reply_msg: DocSyncReply,
         reply: oneshot::Sender<crate::error::Result<()>>,
     },
+    SendDocSyncResponseToken {
+        send_stream: SendStream,
+        reply_msg: DocSyncReply,
+        reply: oneshot::Sender<crate::error::Result<()>>,
+    },
     SendBranchableSyncRequest {
         peer_id: PeerId,
         request: BranchableSyncRequest,
@@ -81,6 +86,11 @@ pub enum IrohCommand {
     },
     SendBranchableSyncResponse {
         peer_id: PeerId,
+        reply_msg: BranchableSyncReply,
+        reply: oneshot::Sender<crate::error::Result<()>>,
+    },
+    SendBranchableSyncResponseToken {
+        send_stream: SendStream,
         reply_msg: BranchableSyncReply,
         reply: oneshot::Sender<crate::error::Result<()>>,
     },

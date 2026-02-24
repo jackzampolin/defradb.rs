@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use cid::Cid;
-use libp2p::PeerId;
 use tracing::{debug, warn};
 
 use crate::error::Result;
@@ -129,7 +128,7 @@ impl DagSync {
     /// Get potential providers for a set of CIDs.
     ///
     /// Returns peers that might have the blocks, based on peer state tracking.
-    fn get_providers(&self, cids: &[Cid]) -> Vec<PeerId> {
+    fn get_providers(&self, cids: &[Cid]) -> Vec<String> {
         let mut providers = HashSet::new();
 
         // Add peers known to have any of the missing CIDs

@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 use parking_lot::RwLock;
 
 use cid::Cid;
-use libp2p::PeerId;
 
 /// Default maximum number of CIDs to track per peer.
 /// This prevents unbounded memory growth in long-running nodes.
@@ -89,7 +88,7 @@ impl PeerInfo {
 /// - `max_peers`: Maximum number of tracked peers (oldest disconnected peers evicted)
 pub struct PeerStateTracker {
     /// Per-peer state
-    pub(super) peers: RwLock<HashMap<PeerId, PeerInfo>>,
+    pub(super) peers: RwLock<HashMap<String, PeerInfo>>,
     /// How long to keep peer info after disconnect
     pub(super) peer_ttl: Duration,
     /// Maximum CIDs to track per peer (prevents memory exhaustion)

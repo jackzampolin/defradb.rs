@@ -292,9 +292,7 @@ async fn replicator_permissioned_local() {
     .await;
 
     // On node0: ACP enforced — anonymous cannot see, owner can
-    let anon_node0 = node0
-        .query("query { Users { name } }")
-        .unwrap_or_default();
+    let anon_node0 = node0.query("query { Users { name } }").unwrap_or_default();
     let anon_count = anon_node0["Users"]
         .as_array()
         .map(|arr| arr.len())
@@ -360,13 +358,8 @@ async fn subscribe_add_get_permissioned_sourcehub() {
     .await;
 
     // Anonymous cannot read on node1
-    let anon = node1
-        .query("query { User { name } }")
-        .unwrap_or_default();
-    let anon_count = anon["User"]
-        .as_array()
-        .map(|arr| arr.len())
-        .unwrap_or(0);
+    let anon = node1.query("query { User { name } }").unwrap_or_default();
+    let anon_count = anon["User"].as_array().map(|arr| arr.len()).unwrap_or(0);
     assert_eq!(
         anon_count, 0,
         "anonymous should NOT see docs on node1 (SourceHub ACP enforced)"
@@ -423,9 +416,7 @@ async fn create_private_docs_different_nodes() {
     assert!(n1_names.contains(&"Bob"), "node1 should have Bob");
 
     // Anonymous sees nothing
-    let anon0 = node0
-        .query("query { User { name } }")
-        .unwrap_or_default();
+    let anon0 = node0.query("query { User { name } }").unwrap_or_default();
     assert_eq!(
         anon0["User"].as_array().map(|a| a.len()).unwrap_or(0),
         0,
@@ -563,9 +554,7 @@ async fn update_private_docs_different_nodes() {
     .await;
 
     // Anonymous still cannot see
-    let anon = node1
-        .query("query { User { name } }")
-        .unwrap_or_default();
+    let anon = node1.query("query { User { name } }").unwrap_or_default();
     assert_eq!(
         anon["User"].as_array().map(|a| a.len()).unwrap_or(0),
         0,
@@ -603,10 +592,7 @@ async fn delete_private_docs_different_nodes() {
                 .unwrap_or_default();
             r["User"]
                 .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .any(|u| u["name"].as_str() == Some("ToDelete"))
-                })
+                .map(|arr| arr.iter().any(|u| u["name"].as_str() == Some("ToDelete")))
                 .unwrap_or(false)
         },
         Duration::from_secs(15),
@@ -636,8 +622,7 @@ async fn delete_private_docs_different_nodes() {
             match users {
                 Some(arr) => {
                     // Either: doc has _deleted=true, or doc is gone entirely
-                    arr.iter()
-                        .all(|u| u["name"].as_str() != Some("ToDelete"))
+                    arr.iter().all(|u| u["name"].as_str() != Some("ToDelete"))
                         || arr.iter().any(|u| {
                             u["name"].as_str() == Some("ToDelete")
                                 && u["_deleted"].as_bool() == Some(true)
@@ -693,9 +678,7 @@ async fn replicator_permissioned_sourcehub() {
     .await;
 
     // Anonymous cannot read
-    let anon = node1
-        .query("query { User { name } }")
-        .unwrap_or_default();
+    let anon = node1.query("query { User { name } }").unwrap_or_default();
     assert_eq!(
         anon["User"].as_array().map(|a| a.len()).unwrap_or(0),
         0,

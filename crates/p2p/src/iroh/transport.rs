@@ -235,6 +235,40 @@ impl P2PTransport for IrohTransport {
         .await
     }
 
+    async fn send_doc_sync_response_token(
+        &self,
+        token: ResponseToken,
+        reply: DocSyncReply,
+    ) -> Result<()> {
+        let send_stream: iroh::endpoint::SendStream = token
+            .downcast::<iroh::endpoint::SendStream>()
+            .ok_or_else(|| Error::ResponseSend("invalid response token type".to_string()))?;
+
+        self.send_command(|r| IrohCommand::SendDocSyncResponseToken {
+            send_stream,
+            reply_msg: reply,
+            reply: r,
+        })
+        .await
+    }
+
+    async fn send_branchable_sync_response_token(
+        &self,
+        token: ResponseToken,
+        reply: BranchableSyncReply,
+    ) -> Result<()> {
+        let send_stream: iroh::endpoint::SendStream = token
+            .downcast::<iroh::endpoint::SendStream>()
+            .ok_or_else(|| Error::ResponseSend("invalid response token type".to_string()))?;
+
+        self.send_command(|r| IrohCommand::SendBranchableSyncResponseToken {
+            send_stream,
+            reply_msg: reply,
+            reply: r,
+        })
+        .await
+    }
+
     async fn send_car_response_token(&self, token: ResponseToken, car_data: Vec<u8>) -> Result<()> {
         let mut send_stream: iroh::endpoint::SendStream = token
             .downcast::<iroh::endpoint::SendStream>()

@@ -90,10 +90,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                             .peer_state
                             .connected_peers()
                             .into_iter()
-                            .map(PeerId::from)
+                            .map(PeerId::new)
                             .collect();
                         if let Some(source) = self.manager.pending_dag_source_peer(&root_cid) {
-                            let source_transport_id = PeerId::from(source);
+                            let source_transport_id = PeerId::new(source);
                             if !providers.contains(&source_transport_id) {
                                 providers.push(source_transport_id);
                             }

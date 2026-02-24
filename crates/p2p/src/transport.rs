@@ -184,6 +184,7 @@ pub enum TransportEvent {
     DocSyncRequest {
         peer_id: PeerId,
         request: DocSyncRequest,
+        token: Option<ResponseToken>,
     },
     DocSyncReply {
         peer_id: PeerId,
@@ -192,6 +193,7 @@ pub enum TransportEvent {
     BranchableSyncRequest {
         peer_id: PeerId,
         request: BranchableSyncRequest,
+        token: Option<ResponseToken>,
     },
     BranchableSyncReply {
         peer_id: PeerId,
@@ -283,6 +285,18 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
     async fn send_car_response(&self, peer_id: &PeerId, car_data: Vec<u8>) -> Result<()>;
 
     async fn send_car_response_token(&self, token: ResponseToken, car_data: Vec<u8>) -> Result<()>;
+
+    async fn send_doc_sync_response_token(
+        &self,
+        token: ResponseToken,
+        reply: DocSyncReply,
+    ) -> Result<()>;
+
+    async fn send_branchable_sync_response_token(
+        &self,
+        token: ResponseToken,
+        reply: BranchableSyncReply,
+    ) -> Result<()>;
 
     async fn send_se_artifacts(&self, peer_id: &PeerId, req: PushSEArtifactsRequest) -> Result<()>;
 

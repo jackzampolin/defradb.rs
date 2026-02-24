@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use cid::Cid;
-use libp2p::PeerId;
 
 use blockstore::{verify_block_cid, Blockstore};
 
@@ -307,7 +306,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     }
 
     /// Get providers (peers that may have the blocks) for the given CIDs.
-    pub(super) fn get_providers_for_cids(&self, cids: &[Cid]) -> Vec<PeerId> {
+    pub(super) fn get_providers_for_cids(&self, cids: &[Cid]) -> Vec<String> {
         let mut providers = HashSet::new();
 
         // Add peers known to have any of the CIDs

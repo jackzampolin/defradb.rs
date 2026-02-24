@@ -6,9 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cid::Cid;
-use p2p::{
-    DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, PeerId, PeerStateTracker, SyncPlan,
-};
+use p2p::{DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, PeerStateTracker, SyncPlan};
 
 fn test_cid() -> Cid {
     Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap()
@@ -20,6 +18,10 @@ fn test_cid2() -> Cid {
 
 fn test_cid3() -> Cid {
     Cid::from_str("bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku").unwrap()
+}
+
+fn random_peer_str() -> String {
+    p2p::PeerId::random().to_string()
 }
 
 #[tokio::test]
@@ -87,8 +89,8 @@ async fn test_dag_sync_no_missing_links() {
 #[tokio::test]
 async fn test_dag_sync_with_missing_links() {
     let peer_state = Arc::new(PeerStateTracker::new());
-    let peer = PeerId::random();
-    peer_state.peer_connected(peer);
+    let peer = random_peer_str();
+    peer_state.peer_connected(&peer);
 
     let dag_sync = DagSync::new(peer_state);
 
@@ -187,7 +189,7 @@ async fn test_dag_sync_handle_complete() {
 
 #[tokio::test]
 async fn test_sync_plan_accessors() {
-    let plan = SyncPlan::needs_fetch_new(test_cid(), vec![test_cid2()], vec![PeerId::random()])
+    let plan = SyncPlan::needs_fetch_new(test_cid(), vec![test_cid2()], vec![random_peer_str()])
         .expect("missing is non-empty");
 
     assert!(plan.needs_fetch());
@@ -221,11 +223,11 @@ fn test_needs_fetch_data_non_empty_missing_returns_some() {
 #[tokio::test]
 async fn test_dag_sync_uses_peer_state_for_providers() {
     let peer_state = Arc::new(PeerStateTracker::new());
-    let peer1 = PeerId::random();
-    let peer2 = PeerId::random();
+    let peer1 = random_peer_str();
+    let peer2 = random_peer_str();
 
-    peer_state.peer_connected(peer1);
-    peer_state.peer_connected(peer2);
+    peer_state.peer_connected(&peer1);
+    peer_state.peer_connected(&peer2);
 
     // peer1 has cid2
     let cid2 = test_cid2();

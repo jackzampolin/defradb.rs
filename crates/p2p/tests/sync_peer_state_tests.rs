@@ -10,8 +10,8 @@ use cid::Cid;
 use p2p::sync::PeerStateTracker;
 use p2p::PeerId;
 
-fn test_peer_id() -> PeerId {
-    PeerId::random()
+fn test_peer_id() -> String {
+    PeerId::random().to_string()
 }
 
 fn test_cid() -> Cid {
@@ -25,7 +25,7 @@ fn test_peer_connect_disconnect() {
 
     assert!(!tracker.is_connected(&peer));
 
-    tracker.peer_connected(peer);
+    tracker.peer_connected(&peer);
     assert!(tracker.is_connected(&peer));
 
     tracker.peer_disconnected(&peer);
@@ -38,7 +38,7 @@ fn test_peer_has_cid() {
     let peer = test_peer_id();
     let cid = test_cid();
 
-    tracker.peer_connected(peer);
+    tracker.peer_connected(&peer);
     assert!(!tracker.peer_has(&peer, &cid));
 
     tracker.peer_has_cid(&peer, cid);
@@ -52,8 +52,8 @@ fn test_peers_with_cid() {
     let peer2 = test_peer_id();
     let cid = test_cid();
 
-    tracker.peer_connected(peer1);
-    tracker.peer_connected(peer2);
+    tracker.peer_connected(&peer1);
+    tracker.peer_connected(&peer2);
 
     // Only peer1 has the CID
     tracker.peer_has_cid(&peer1, cid);
@@ -71,8 +71,8 @@ fn test_peers_without_cid() {
     let peer2 = test_peer_id();
     let cid = test_cid();
 
-    tracker.peer_connected(peer1);
-    tracker.peer_connected(peer2);
+    tracker.peer_connected(&peer1);
+    tracker.peer_connected(&peer2);
 
     // Only peer1 has the CID
     tracker.peer_has_cid(&peer1, cid);
@@ -88,7 +88,7 @@ fn test_collection_subscription() {
     let tracker = PeerStateTracker::new();
     let peer = test_peer_id();
 
-    tracker.peer_connected(peer);
+    tracker.peer_connected(&peer);
     tracker.peer_subscribed(&peer, "users".to_string());
 
     let peers = tracker.peers_for_collection("users");
@@ -109,7 +109,7 @@ fn test_disconnected_peer_not_in_results() {
     let peer = test_peer_id();
     let cid = test_cid();
 
-    tracker.peer_connected(peer);
+    tracker.peer_connected(&peer);
     tracker.peer_has_cid(&peer, cid);
 
     // While connected, peer shows up
@@ -130,8 +130,8 @@ fn test_stats() {
     let peer2 = test_peer_id();
     let cid1 = test_cid();
 
-    tracker.peer_connected(peer1);
-    tracker.peer_connected(peer2);
+    tracker.peer_connected(&peer1);
+    tracker.peer_connected(&peer2);
     tracker.peer_has_cid(&peer1, cid1);
 
     let stats = tracker.stats();
@@ -149,7 +149,7 @@ fn test_cleanup_stale() {
     let tracker = PeerStateTracker::with_ttl(Duration::from_millis(10));
     let peer = test_peer_id();
 
-    tracker.peer_connected(peer);
+    tracker.peer_connected(&peer);
     tracker.peer_disconnected(&peer);
 
     // Peer still exists right after disconnect
@@ -171,8 +171,8 @@ fn test_connected_peers() {
     let peer1 = test_peer_id();
     let peer2 = test_peer_id();
 
-    tracker.peer_connected(peer1);
-    tracker.peer_connected(peer2);
+    tracker.peer_connected(&peer1);
+    tracker.peer_connected(&peer2);
 
     let connected = tracker.connected_peers();
     assert_eq!(connected.len(), 2);
@@ -207,7 +207,7 @@ fn test_peer_has_cid_creates_entry_for_unknown_peer() {
     assert!(tracker.peers_with_cid(&cid).is_empty());
 
     // Now connect the peer
-    tracker.peer_connected(peer);
+    tracker.peer_connected(&peer);
     assert!(tracker.is_connected(&peer));
 
     // Now they should appear in peers_with_cid
@@ -244,7 +244,7 @@ fn test_lru_eviction_when_max_cids_exceeded() {
     // Create tracker with a small limit for testing
     let tracker = PeerStateTracker::with_config(Duration::from_secs(3600), 3);
     let peer = test_peer_id();
-    tracker.peer_connected(peer);
+    tracker.peer_connected(&peer);
 
     // Create 5 different CIDs
     let cid1 =
@@ -292,7 +292,7 @@ fn test_lru_eviction_when_max_cids_exceeded() {
 fn test_adding_same_cid_twice_does_not_evict() {
     let tracker = PeerStateTracker::with_config(Duration::from_secs(3600), 3);
     let peer = test_peer_id();
-    tracker.peer_connected(peer);
+    tracker.peer_connected(&peer);
 
     let cid1 =
         Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap();
@@ -327,12 +327,12 @@ fn test_concurrent_peer_operations() {
     for i in 0..10 {
         let tracker_clone = Arc::clone(&tracker);
         let handle = thread::spawn(move || {
-            let peer = PeerId::random();
+            let peer = PeerId::random().to_string();
             let cid = Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
                 .unwrap();
 
             // Perform various operations
-            tracker_clone.peer_connected(peer);
+            tracker_clone.peer_connected(&peer);
             tracker_clone.peer_has_cid(&peer, cid);
             tracker_clone.peer_subscribed(&peer, format!("collection_{}", i));
 
@@ -362,14 +362,15 @@ fn test_concurrent_peer_operations() {
 #[test]
 fn test_concurrent_cid_tracking() {
     let tracker = Arc::new(PeerStateTracker::new());
-    let peer = PeerId::random();
-    tracker.peer_connected(peer);
+    let peer = PeerId::random().to_string();
+    tracker.peer_connected(&peer);
 
     let mut handles = vec![];
 
     // Spawn multiple threads that add CIDs concurrently
     for _ in 0..5 {
         let tracker_clone = Arc::clone(&tracker);
+        let peer_clone = peer.clone();
         let handle = thread::spawn(move || {
             // Each thread adds the same CID multiple times
             for _ in 0..10 {
@@ -377,7 +378,7 @@ fn test_concurrent_cid_tracking() {
                 let cid =
                     Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
                         .unwrap();
-                tracker_clone.peer_has_cid(&peer, cid);
+                tracker_clone.peer_has_cid(&peer_clone, cid);
             }
         });
         handles.push(handle);
@@ -408,8 +409,8 @@ fn test_global_peer_limits_enforced_on_connect() {
 
     // Add 6 peers - peer 6 should trigger eviction
     for _ in 0..6 {
-        let peer = PeerId::random();
-        tracker.peer_connected(peer);
+        let peer = PeerId::random().to_string();
+        tracker.peer_connected(&peer);
     }
 
     // Should have at most max_peers (5) tracked
@@ -430,19 +431,19 @@ fn test_global_limits_evicts_disconnected_first() {
     );
 
     // Add 2 peers
-    let peer1 = PeerId::random();
-    let peer2 = PeerId::random();
-    tracker.peer_connected(peer1);
-    tracker.peer_connected(peer2);
+    let peer1 = PeerId::random().to_string();
+    let peer2 = PeerId::random().to_string();
+    tracker.peer_connected(&peer1);
+    tracker.peer_connected(&peer2);
 
     // Disconnect peer2
     tracker.peer_disconnected(&peer2);
 
     // Add 2 more peers
-    let peer3 = PeerId::random();
-    let peer4 = PeerId::random();
-    tracker.peer_connected(peer3);
-    tracker.peer_connected(peer4);
+    let peer3 = PeerId::random().to_string();
+    let peer4 = PeerId::random().to_string();
+    tracker.peer_connected(&peer3);
+    tracker.peer_connected(&peer4);
 
     // After cleanup, peer2 (disconnected) should be evicted first
     tracker.cleanup_stale();

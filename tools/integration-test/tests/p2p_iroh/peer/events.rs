@@ -11,9 +11,7 @@
 
 use std::time::Duration;
 
-use integration_test::{
-    extract_p2p_addr, open_peer_events_sse, wait_for_peer_events, TestCluster,
-};
+use integration_test::{extract_p2p_addr, open_peer_events_sse, wait_for_peer_events, TestCluster};
 use serial_test::serial;
 
 const SCHEMA: &str = "type Users { name: String  age: Int }";
@@ -193,8 +191,14 @@ async fn on_connect_multiple_peers_all_join_events() {
     // Connect node0 to both node1 and node2
     let addr1 = extract_p2p_addr(&cluster, 1);
     let addr2 = extract_p2p_addr(&cluster, 2);
-    cluster.client(0).p2p_connect(&[&addr1]).expect("connect 0→1");
-    cluster.client(0).p2p_connect(&[&addr2]).expect("connect 0→2");
+    cluster
+        .client(0)
+        .p2p_connect(&[&addr1])
+        .expect("connect 0→1");
+    cluster
+        .client(0)
+        .p2p_connect(&[&addr2])
+        .expect("connect 0→2");
 
     // All nodes subscribe to collection to trigger gossip topic joins
     for i in 0..3 {
@@ -313,8 +317,14 @@ async fn multiple_nodes_subscribed_collection_join_events() {
     // Connect all to node0
     let addr1 = extract_p2p_addr(&cluster, 1);
     let addr2 = extract_p2p_addr(&cluster, 2);
-    cluster.client(0).p2p_connect(&[&addr1]).expect("connect 0→1");
-    cluster.client(0).p2p_connect(&[&addr2]).expect("connect 0→2");
+    cluster
+        .client(0)
+        .p2p_connect(&[&addr1])
+        .expect("connect 0→1");
+    cluster
+        .client(0)
+        .p2p_connect(&[&addr2])
+        .expect("connect 0→2");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let (handle, events) = open_peer_events_sse(cluster.api_url(0)).await;

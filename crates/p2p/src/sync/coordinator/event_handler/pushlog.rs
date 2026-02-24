@@ -54,9 +54,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         // Parse CID - if invalid, send error response
         let cid = match Cid::try_from(request.cid.as_slice()) {
             Ok(cid) => {
-                if let Ok(pid) = peer_id.as_str().parse::<libp2p::PeerId>() {
-                    self.peer_state.peer_has_cid(&pid, cid);
-                }
+                self.peer_state.peer_has_cid(peer_id.as_str(), cid);
                 cid
             }
             Err(e) => {
@@ -149,9 +147,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         // Parse CID
         let cid = match Cid::try_from(request.cid.as_slice()) {
             Ok(cid) => {
-                if let Ok(pid) = peer_id.as_str().parse::<libp2p::PeerId>() {
-                    self.peer_state.peer_has_cid(&pid, cid);
-                }
+                self.peer_state.peer_has_cid(peer_id.as_str(), cid);
                 cid
             }
             Err(e) => {

@@ -500,15 +500,11 @@ async fn update_and_delete_before_connect_show_deleted() {
         .expect("node1 showDeleted");
     let users1 = r1["Users"].as_array().expect("not array");
 
-    let andy1 = users1
-        .iter()
-        .find(|u| u["name"].as_str() == Some("Andy"));
+    let andy1 = users1.iter().find(|u| u["name"].as_str() == Some("Andy"));
     assert!(andy1.is_some(), "node1 should have Andy");
 
     // John may or may not appear on node1 depending on whether deleted docs replicate
-    let john1 = users1
-        .iter()
-        .find(|u| u["name"].as_str() == Some("John"));
+    let john1 = users1.iter().find(|u| u["name"].as_str() == Some("John"));
     if let Some(j) = john1 {
         assert_eq!(
             j["_deleted"], true,

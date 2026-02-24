@@ -39,8 +39,7 @@ fn create_test_coordinator(
     let broadcaster = Broadcaster::new(transport.clone());
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
-    let (manager, events) =
-        SyncManager::new(blockstore, peer_state.clone(), SyncConfig::default());
+    let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), SyncConfig::default());
 
     let coordinator = SyncCoordinator {
         transport,
@@ -71,6 +70,7 @@ fn doc_sync_event(peer_id: PeerId) -> TransportEvent {
             metadata: MetaData::new(),
             doc_ids: vec!["doc1".to_string()],
         },
+        token: None,
     }
 }
 
@@ -81,6 +81,7 @@ fn branchable_sync_event(peer_id: PeerId, collection_id: &str) -> TransportEvent
             metadata: MetaData::new(),
             collection_id: collection_id.to_string(),
         },
+        token: None,
     }
 }
 
@@ -141,8 +142,7 @@ async fn doc_sync_controlled_mode_allows_connected_peer() {
     let peer_state = Arc::new(PeerStateTracker::new());
 
     let connected_peer = random_peer_id();
-    let libp2p_peer: libp2p::PeerId = connected_peer.as_str().parse().unwrap();
-    peer_state.peer_connected(libp2p_peer);
+    peer_state.peer_connected(connected_peer.as_str());
 
     let (coordinator, _events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
@@ -250,8 +250,7 @@ async fn branchable_sync_controlled_mode_allows_subscribed_connected_peer() {
     let peer_state = Arc::new(PeerStateTracker::new());
 
     let connected_peer = random_peer_id();
-    let libp2p_peer: libp2p::PeerId = connected_peer.as_str().parse().unwrap();
-    peer_state.peer_connected(libp2p_peer);
+    peer_state.peer_connected(connected_peer.as_str());
 
     let (coordinator, _events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
