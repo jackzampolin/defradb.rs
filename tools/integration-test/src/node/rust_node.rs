@@ -92,11 +92,11 @@ impl DefraNode for RustNode {
         }
 
         if let Some(ref acp_type) = config.acp_document_type {
-            cmd.arg("--acp-document-type").arg(acp_type);
+            cmd.arg("--document-acp-type").arg(acp_type);
         }
 
         if config.nac_enabled {
-            cmd.arg("--acp-node-enable");
+            cmd.arg("--node-acp-enable");
         }
 
         if let Some(ref addr) = config.source_hub_address {

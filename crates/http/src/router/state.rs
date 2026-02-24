@@ -210,7 +210,7 @@ impl AppState {
     pub fn require_nac(&self) -> Result<&Arc<dyn NodeAcpOperations>, crate::error::HttpError> {
         self.nac.as_ref().ok_or_else(|| {
             crate::error::HttpError::ServiceUnavailable(
-                "NAC (Node Access Control) is not enabled. Start the server with --acp-node-enable to use this feature.".into()
+                "NAC (Node Access Control) is not enabled. Start the server with --node-acp-enable to use this feature.".into()
             )
         })
     }

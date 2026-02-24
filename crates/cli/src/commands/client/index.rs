@@ -28,7 +28,7 @@ pub enum IndexCommand {
 #[derive(Args, Debug)]
 pub struct IndexCreateArgs {
     /// The collection to create the index on
-    #[arg(value_name = "COLLECTION")]
+    #[arg(long, short = 'c')]
     pub collection: String,
 
     /// Field(s) to index (comma-separated or multiple --fields)
@@ -48,7 +48,7 @@ pub struct IndexCreateArgs {
 #[derive(Args, Debug)]
 pub struct IndexListArgs {
     /// Optional collection to filter indexes
-    #[arg(value_name = "COLLECTION")]
+    #[arg(long, short = 'c')]
     pub collection: Option<String>,
 }
 
@@ -56,11 +56,11 @@ pub struct IndexListArgs {
 #[derive(Args, Debug)]
 pub struct IndexDeleteArgs {
     /// The collection containing the index
-    #[arg(value_name = "COLLECTION")]
+    #[arg(long, short = 'c')]
     pub collection: String,
 
     /// The name of the index to delete
-    #[arg(value_name = "NAME")]
+    #[arg(long, short = 'n')]
     pub name: String,
 }
 

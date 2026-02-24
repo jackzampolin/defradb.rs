@@ -232,21 +232,8 @@ impl DefraClient {
     /// - Rust returns `{"doc_ids": ["id1", ...]}`
     /// - Go returns line-separated `{"DocID": "id1"}\n{"DocID": "id2"}\n...`
     pub fn collection_doc_ids(&self, name: &str) -> Result<Vec<String>> {
-        // Rust CLI uses "doc-ids", Go CLI uses "docIDs"
-        let out = self.exec(&["client", "collection", "doc-ids", "--name", name])?;
+        let out = self.exec(&["client", "collection", "docIDs", "--name", name])?;
         let trimmed = out.trim();
-
-        // If output doesn't look like JSON, try Go's "docIDs" subcommand
-        // Go CLI uses "docIDs"; also try --name before subcommand
-        let trimmed = if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
-            let out = self
-                .exec(&["client", "collection", "docIDs", "--name", name])
-                .or_else(|_| self.exec(&["client", "collection", "--name", name, "docIDs"]))?;
-            out.trim().to_string()
-        } else {
-            trimmed.to_string()
-        };
-        let trimmed = trimmed.as_str();
 
         // Try Rust format: {"doc_ids": [...]}
         if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
@@ -302,28 +289,15 @@ impl DefraClient {
         unique: bool,
     ) -> Result<Value> {
         let fields_csv = fields.join(",");
-        // Try Rust positional format first, fall back to Go --collection flag
-        let out = self
-            .try_index_create_args(collection, &fields_csv, name, unique, false)
-            .or_else(|_| self.try_index_create_args(collection, &fields_csv, name, unique, true))?;
-        serde_json::from_str(&out).context("failed to parse index_create output")
-    }
-
-    fn try_index_create_args(
-        &self,
-        collection: &str,
-        fields_csv: &str,
-        name: Option<&str>,
-        unique: bool,
-        use_flag: bool,
-    ) -> Result<String> {
-        let mut args = vec!["client", "index", "create"];
-        if use_flag {
-            args.push("--collection");
-        }
-        args.push(collection);
-        args.push("--fields");
-        args.push(fields_csv);
+        let mut args = vec![
+            "client",
+            "index",
+            "create",
+            "--collection",
+            collection,
+            "--fields",
+        ];
+        args.push(&fields_csv);
         if let Some(n) = name {
             args.push("--name");
             args.push(n);
@@ -331,35 +305,29 @@ impl DefraClient {
         if unique {
             args.push("--unique");
         }
-        self.exec(&args)
+        let out = self.exec(&args)?;
+        serde_json::from_str(&out).context("failed to parse index_create output")
     }
 
-    /// List indexes. Rust: positional collection. Go: `--collection` flag.
     pub fn index_list(&self, collection: Option<&str>) -> Result<Value> {
         let out = if let Some(c) = collection {
-            // Try Rust positional first, then Go --collection flag
-            self.exec(&["client", "index", "list", c])
-                .or_else(|_| self.exec(&["client", "index", "list", "--collection", c]))?
+            self.exec(&["client", "index", "list", "--collection", c])?
         } else {
             self.exec(&["client", "index", "list"])?
         };
         serde_json::from_str(&out).context("failed to parse index_list output")
     }
 
-    /// Delete an index. Rust: positional args. Go: `--collection` and `--name` flags.
     pub fn index_delete(&self, collection: &str, name: &str) -> Result<String> {
-        self.exec(&["client", "index", "delete", collection, name])
-            .or_else(|_| {
-                self.exec(&[
-                    "client",
-                    "index",
-                    "delete",
-                    "--collection",
-                    collection,
-                    "--name",
-                    name,
-                ])
-            })
+        self.exec(&[
+            "client",
+            "index",
+            "delete",
+            "--collection",
+            collection,
+            "--name",
+            name,
+        ])
     }
 
     // -- Transaction operations --
@@ -611,59 +579,39 @@ impl DefraClient {
 
     // -- Encrypted Index operations --
 
-    /// Add an encrypted index.
-    /// Rust: `client encrypted-index add <collection> <field>`
-    /// Go: `client encrypted-index add --collection <c> --field <f>`
     pub fn encrypted_index_add(&self, collection: &str, field: &str) -> Result<Value> {
-        let out = self
-            .exec(&["client", "encrypted-index", "add", collection, field])
-            .or_else(|_| {
-                self.exec(&[
-                    "client",
-                    "encrypted-index",
-                    "add",
-                    "--collection",
-                    collection,
-                    "--field",
-                    field,
-                ])
-            })?;
+        let out = self.exec(&[
+            "client",
+            "encrypted-index",
+            "add",
+            "--collection",
+            collection,
+            "--field",
+            field,
+        ])?;
         serde_json::from_str(&out).context("failed to parse encrypted_index_add output")
     }
 
-    /// Delete an encrypted index.
-    /// Rust: `client encrypted-index delete <collection> <field>`
-    /// Go: `client encrypted-index delete --collection <c> --field <f>`
     pub fn encrypted_index_delete(&self, collection: &str, field: &str) -> Result<String> {
-        self.exec(&["client", "encrypted-index", "delete", collection, field])
-            .or_else(|_| {
-                self.exec(&[
-                    "client",
-                    "encrypted-index",
-                    "delete",
-                    "--collection",
-                    collection,
-                    "--field",
-                    field,
-                ])
-            })
+        self.exec(&[
+            "client",
+            "encrypted-index",
+            "delete",
+            "--collection",
+            collection,
+            "--field",
+            field,
+        ])
     }
 
-    /// List encrypted indexes.
-    /// Rust: `client encrypted-index list <collection>`
-    /// Go: `client encrypted-index list --collection <c>`
     pub fn encrypted_index_list(&self, collection: &str) -> Result<Value> {
-        let out = self
-            .exec(&["client", "encrypted-index", "list", collection])
-            .or_else(|_| {
-                self.exec(&[
-                    "client",
-                    "encrypted-index",
-                    "list",
-                    "--collection",
-                    collection,
-                ])
-            })?;
+        let out = self.exec(&[
+            "client",
+            "encrypted-index",
+            "list",
+            "--collection",
+            collection,
+        ])?;
         serde_json::from_str(&out).context("failed to parse encrypted_index_list output")
     }
 
@@ -825,59 +773,45 @@ impl DefraClient {
         serde_json::from_str(&out).context("failed to parse p2p_active_peers output")
     }
 
-    /// Add an encrypted index with identity.
     pub fn encrypted_index_add_with_identity(
         &self,
         collection: &str,
         field: &str,
         hex_key: &str,
     ) -> Result<Value> {
-        let out = self
-            .exec_with_identity(
-                hex_key,
-                &["client", "encrypted-index", "add", collection, field],
-            )
-            .or_else(|_| {
-                self.exec_with_identity(
-                    hex_key,
-                    &[
-                        "client",
-                        "encrypted-index",
-                        "add",
-                        "--collection",
-                        collection,
-                        "--field",
-                        field,
-                    ],
-                )
-            })?;
+        let out = self.exec_with_identity(
+            hex_key,
+            &[
+                "client",
+                "encrypted-index",
+                "add",
+                "--collection",
+                collection,
+                "--field",
+                field,
+            ],
+        )?;
         serde_json::from_str(&out).context("failed to parse encrypted_index_add output")
     }
 
-    /// List encrypted indexes with identity.
     pub fn encrypted_index_list_with_identity(
         &self,
         collection: &str,
         hex_key: &str,
     ) -> Result<Value> {
-        let out = self
-            .exec_with_identity(hex_key, &["client", "encrypted-index", "list", collection])
-            .or_else(|_| {
-                self.exec_with_identity(
-                    hex_key,
-                    &[
-                        "client",
-                        "encrypted-index",
-                        "list",
-                        "--collection",
-                        collection,
-                    ],
-                )
-            })?;
+        let out = self.exec_with_identity(
+            hex_key,
+            &[
+                "client",
+                "encrypted-index",
+                "list",
+                "--collection",
+                collection,
+            ],
+        )?;
         serde_json::from_str(&out).context("failed to parse encrypted_index_list output")
     }
 
-    /// Delete an encrypted index with identity.
     pub fn encrypted_index_delete_with_identity(
         &self,
         collection: &str,
@@ -886,22 +820,16 @@ impl DefraClient {
     ) -> Result<String> {
         self.exec_with_identity(
             hex_key,
-            &["client", "encrypted-index", "delete", collection, field],
+            &[
+                "client",
+                "encrypted-index",
+                "delete",
+                "--collection",
+                collection,
+                "--field",
+                field,
+            ],
         )
-        .or_else(|_| {
-            self.exec_with_identity(
-                hex_key,
-                &[
-                    "client",
-                    "encrypted-index",
-                    "delete",
-                    "--collection",
-                    collection,
-                    "--field",
-                    field,
-                ],
-            )
-        })
     }
 
     /// Add a lens migration with identity.
@@ -1092,7 +1020,6 @@ impl DefraClient {
 
     // -- Identity-aware index operations --
 
-    /// Create an index with identity.
     pub fn index_create_with_identity(
         &self,
         collection: &str,
@@ -1102,44 +1029,15 @@ impl DefraClient {
         hex_key: &str,
     ) -> Result<Value> {
         let fields_csv = fields.join(",");
-        let out = self
-            .try_index_create_with_identity_args(
-                collection,
-                &fields_csv,
-                name,
-                unique,
-                false,
-                hex_key,
-            )
-            .or_else(|_| {
-                self.try_index_create_with_identity_args(
-                    collection,
-                    &fields_csv,
-                    name,
-                    unique,
-                    true,
-                    hex_key,
-                )
-            })?;
-        serde_json::from_str(&out).context("failed to parse index_create output")
-    }
-
-    fn try_index_create_with_identity_args(
-        &self,
-        collection: &str,
-        fields_csv: &str,
-        name: Option<&str>,
-        unique: bool,
-        use_flag: bool,
-        hex_key: &str,
-    ) -> Result<String> {
-        let mut args = vec!["client", "index", "create"];
-        if use_flag {
-            args.push("--collection");
-        }
-        args.push(collection);
-        args.push("--fields");
-        args.push(fields_csv);
+        let mut args = vec![
+            "client",
+            "index",
+            "create",
+            "--collection",
+            collection,
+            "--fields",
+        ];
+        args.push(&fields_csv);
         if let Some(n) = name {
             args.push("--name");
             args.push(n);
@@ -1147,51 +1045,41 @@ impl DefraClient {
         if unique {
             args.push("--unique");
         }
-        self.exec_with_identity(hex_key, &args)
+        let out = self.exec_with_identity(hex_key, &args)?;
+        serde_json::from_str(&out).context("failed to parse index_create output")
     }
 
-    /// List indexes with identity.
     pub fn index_list_with_identity(
         &self,
         collection: Option<&str>,
         hex_key: &str,
     ) -> Result<Value> {
         let out = if let Some(c) = collection {
-            self.exec_with_identity(hex_key, &["client", "index", "list", c])
-                .or_else(|_| {
-                    self.exec_with_identity(
-                        hex_key,
-                        &["client", "index", "list", "--collection", c],
-                    )
-                })?
+            self.exec_with_identity(hex_key, &["client", "index", "list", "--collection", c])?
         } else {
             self.exec_with_identity(hex_key, &["client", "index", "list"])?
         };
         serde_json::from_str(&out).context("failed to parse index_list output")
     }
 
-    /// Delete an index with identity.
     pub fn index_delete_with_identity(
         &self,
         collection: &str,
         name: &str,
         hex_key: &str,
     ) -> Result<String> {
-        self.exec_with_identity(hex_key, &["client", "index", "delete", collection, name])
-            .or_else(|_| {
-                self.exec_with_identity(
-                    hex_key,
-                    &[
-                        "client",
-                        "index",
-                        "delete",
-                        "--collection",
-                        collection,
-                        "--name",
-                        name,
-                    ],
-                )
-            })
+        self.exec_with_identity(
+            hex_key,
+            &[
+                "client",
+                "index",
+                "delete",
+                "--collection",
+                collection,
+                "--name",
+                name,
+            ],
+        )
     }
 
     // -- Identity-aware P2P operations --

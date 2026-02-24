@@ -670,7 +670,7 @@ impl Node {
                     );
                 info!("NAC HTTP endpoints enabled");
             } else {
-                info!("NAC disabled (use --acp-node-enable to enable)");
+                info!("NAC disabled (use --node-acp-enable to enable)");
             }
 
             // Wire ACP adapters only when document ACP is enabled
