@@ -6,28 +6,16 @@
 
 ---
 
-## NOT FIXED (1 item)
+## NOT FIXED (0 items)
 
-### 07-22: wasmtime 27.0.0 CVEs
-- **Severity**: HIGH
-- **Location**: `Cargo.lock` (wasmtime 27.0.0)
-- **Issue**: Three unpatched CVEs in wasmtime 27.0.0. Sandbox config is now enabled (05-31 fixed) but version still has known vulns.
-- **Fix**: Upgrade wasmtime to latest stable.
+_None — all 1.0 blockers resolved._
 
 ---
 
-## PARTIALLY FIXED (7 items)
+## PARTIALLY FIXED (3 items)
 
-### 01-XX: Crypto (2 items)
-- **01-05**: `generate_ed25519()` seed not zeroized after keypair derivation. The seed `Vec<u8>` lives on the heap until dropped but is not explicitly zeroed.
-- **01-09**: No binary identity SE test vector. Text-based test exists but no binary round-trip test for identity-tagged SE artifacts.
-
-### 02-XX: ACP (2 items)
-- **02-18**: P2P message-level signature verification is done. Block-level signature verification in merge path is not. (See 02-19/02-20.)
+### 02-XX: ACP (1 item)
 - **02-32/33/34**: Circuit breaker implemented for SourceHub fail-closed on partition. Cache TTL refresh and bearer token handling need further work.
-
-### 03-XX: P2P (1 item)
-- **03-20**: CLI path activates `AccessMode::Controlled` when ACP is configured. FFI path in `crates/ffi/src/p2p/node.rs:221` hardcodes `AccessMode::Open`.
 
 ### 04-XX: Identity (1 item)
 - **04-45**: No global deny-by-default auth middleware. Each handler must explicitly include `ExtractIdentity`. The dump endpoint was fixed individually but the structural gap remains.
@@ -43,6 +31,17 @@
 - ~~02-19~~: `verify_block_signature()` now returns verified signer identity as `did:key:` DID. `BlockMetadata.verified_creator` populated after verification. `effective_creator()` prefers verified over self-reported `creator`.
 - ~~02-20~~: `verify_block_signature()` is now blocking — invalid/tampered signatures reject the block with `SignatureVerificationFailed`. Both single-block and batch merge paths verify. 10 new unit tests (6 for verification, 4 for `effective_creator`).
 
+### wasmtime CVE fix
+- ~~07-22~~: Upgraded wasmtime from 27.0.0 to 41.0.3. All three CVEs (RUSTSEC-2025-0046, RUSTSEC-2025-0118, RUSTSEC-2026-0006) resolved. Zero API breakage; all lens unit + integration tests pass.
+
+### Block-level signature verification completes 02-18
+- ~~02-18~~: Block-level signature verification in merge path now implemented (see 02-19/02-20 above). P2P message-level + block-level both verified.
+
+### Audit hardening batch
+- ~~01-05~~: `generate_ed25519()` seed and key_bytes now zeroized after keypair derivation via `zeroize::Zeroize`.
+- ~~01-09~~: Binary identity SE artifact round-trip test added — creates tag with invalid-UTF-8 identity bytes, serializes to JSON, deserializes, verifies equality.
+- ~~03-20~~: FFI path `crates/ffi/src/p2p/node.rs:221` now uses `AccessMode::Controlled` (parity with CLI).
+
 ### Quick wins (commits a9454c38, 61879bb3)
 1. ~~06-29~~: `verify_block_cid()` added to PushLog handler + existing unit test
 2. ~~05-31~~: `WasmSandboxConfig::restrictive()` enabled by default + existing unit test
@@ -54,9 +53,7 @@
 
 ## 1.0 BLOCKERS
 
-| Item | Fix Complexity | Notes |
-|------|---------------|-------|
-| 07-22 (wasmtime CVEs) | Medium (dependency upgrade) | May have breaking API changes |
+_None — all 1.0 blockers resolved._
 
 ---
 
@@ -64,9 +61,6 @@
 
 | Item | Description |
 |------|-------------|
-| 03-20 | FFI AccessMode parity with CLI |
 | 04-45 | Global deny-by-default HTTP middleware |
-| 01-05 | Ed25519 seed zeroization |
-| 01-09 | Binary identity SE test vector |
 | 02-32/33/34 | SourceHub cache TTL refresh + bearer token |
 | 07-51 | FFI negative tests merge to main |

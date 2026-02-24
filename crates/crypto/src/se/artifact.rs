@@ -202,6 +202,32 @@ mod tests {
     }
 
     #[test]
+    fn test_artifact_binary_identity_round_trip() {
+        use crate::se::tag::generate_equality_tag;
+
+        let key = [0x33u8; 32];
+        // Binary identity with invalid UTF-8 (raw public key bytes)
+        let identity_bytes: &[u8] = &[0xFF, 0xFE, 0x00, 0x01, 0x80, 0x90];
+        let tag =
+            generate_equality_tag(&key, identity_bytes, "encrypted_col", "secret_field", b"42")
+                .unwrap();
+
+        let artifact = Artifact::new("encrypted_col", "bae-doc-123", "secret_field", tag.to_vec());
+
+        // JSON round-trip
+        let json = serde_json::to_string(&artifact).unwrap();
+        let deserialized: Artifact = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, artifact);
+        assert_eq!(deserialized.search_tag, tag.to_vec());
+
+        // Verify the tag is deterministic with the same binary identity
+        let tag2 =
+            generate_equality_tag(&key, identity_bytes, "encrypted_col", "secret_field", b"42")
+                .unwrap();
+        assert_eq!(tag, tag2);
+    }
+
+    #[test]
     fn test_artifact_type_serialization() {
         let art_type = ArtifactType::EqualityTag;
         let json = serde_json::to_string(&art_type).unwrap();

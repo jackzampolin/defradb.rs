@@ -84,8 +84,9 @@ pub fn generate_secp256r1() -> Result<Secp256r1PrivateKey> {
 /// let signature = private_key.sign(b"message")?;
 /// ```
 pub fn generate_ed25519() -> Result<Ed25519PrivateKey> {
-    // Generate random 32-byte seed
     use rand::RngCore;
+    use zeroize::Zeroize;
+
     let mut seed = [0u8; 32];
     OsRng
         .try_fill_bytes(&mut seed)
@@ -93,13 +94,15 @@ pub fn generate_ed25519() -> Result<Ed25519PrivateKey> {
 
     let signing_key = Ed25519SigningKey::from_bytes(&seed);
 
-    // Create 64-byte representation (32-byte seed + 32-byte public key)
     let public = signing_key.verifying_key().to_bytes();
     let mut key_bytes = Vec::with_capacity(64);
     key_bytes.extend_from_slice(&seed);
     key_bytes.extend_from_slice(&public);
 
-    Ed25519PrivateKey::from_bytes(&key_bytes)
+    seed.zeroize();
+    let result = Ed25519PrivateKey::from_bytes(&key_bytes);
+    key_bytes.zeroize();
+    result
 }
 
 /// Generate a new X25519 private key for ECIES
