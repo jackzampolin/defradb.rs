@@ -15,6 +15,7 @@ use pgwire::api::{ClientInfo, ClientPortalStore, PgWireServerHandlers, Type};
 use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use query::{CollectionProvider, QueryExecutor, QueryRequest, TransactionHandle};
+use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 use schema::FieldKind;
@@ -25,6 +26,7 @@ use crate::bridge::{
     SqlStatement,
 };
 use crate::encode;
+use crate::metadata::{DdlMetadata, IndexInfo, PrimaryKeyInfo};
 
 const TXN_ID_KEY: &str = "txn_id";
 
@@ -44,6 +46,7 @@ pub struct DefraQueryHandler {
     collections: Arc<dyn CollectionProvider>,
     parser: Arc<DefraQueryParser>,
     schema_manager: Option<Arc<dyn SchemaManager>>,
+    ddl_metadata: Arc<RwLock<DdlMetadata>>,
 }
 
 impl DefraQueryHandler {
@@ -58,6 +61,7 @@ impl DefraQueryHandler {
             collections,
             parser,
             schema_manager,
+            ddl_metadata: Arc::new(RwLock::new(DdlMetadata::default())),
         }
     }
 
@@ -267,6 +271,20 @@ impl DefraQueryHandler {
                 mutation_name,
                 kind,
             } => {
+                if kind == MutationKind::Delete {
+                    let has_cascade = !self
+                        .ddl_metadata
+                        .read()
+                        .await
+                        .cascade_children_of(&table_name)
+                        .is_empty();
+                    if has_cascade {
+                        return self
+                            .handle_delete_with_cascade(&graphql, &table_name, txn_id.as_deref())
+                            .await;
+                    }
+                }
+
                 self.handle_mutation_single(
                     &graphql,
                     &table_name,
@@ -299,10 +317,57 @@ impl DefraQueryHandler {
             SqlStatement::Begin => self.handle_begin_single(client).await,
             SqlStatement::Commit => self.handle_commit_single(client).await,
             SqlStatement::Rollback => self.handle_rollback_single(client).await,
-            SqlStatement::CreateTable(sdl) => self.handle_create_table(&sdl).await,
-            SqlStatement::DropTable | SqlStatement::CreateIndex | SqlStatement::AlterTable => {
-                debug!(sql, "DDL statement accepted as no-op");
-                Ok(encode::encode_empty_response("OK"))
+            SqlStatement::CreateTable {
+                sdl,
+                table_name,
+                primary_key_columns,
+                inline_foreign_keys,
+            } => {
+                {
+                    let mut meta = self.ddl_metadata.write().await;
+                    if !primary_key_columns.is_empty() {
+                        meta.add_primary_key(PrimaryKeyInfo {
+                            table_name: table_name.clone(),
+                            columns: primary_key_columns,
+                        });
+                    }
+                    for fk in &inline_foreign_keys {
+                        meta.add_foreign_key(&table_name, fk);
+                    }
+                }
+                self.handle_create_table(&sdl).await
+            }
+            SqlStatement::CreateIndex {
+                index_name,
+                table_name,
+                columns,
+            } => {
+                if let Some(name) = &index_name {
+                    self.ddl_metadata.write().await.add_index(IndexInfo {
+                        index_name: name.clone(),
+                        table_name: table_name.clone(),
+                        columns: columns.clone(),
+                    });
+                }
+                debug!(sql, "DDL CREATE INDEX accepted");
+                Ok(encode::encode_empty_response("CREATE INDEX"))
+            }
+            SqlStatement::AlterTable {
+                table_name,
+                foreign_keys,
+            } => {
+                {
+                    let mut meta = self.ddl_metadata.write().await;
+                    for fk in &foreign_keys {
+                        meta.add_foreign_key(&table_name, fk);
+                    }
+                }
+                debug!(sql, "DDL ALTER TABLE accepted");
+                Ok(encode::encode_empty_response("ALTER TABLE"))
+            }
+            SqlStatement::DropTable => {
+                debug!(sql, "DDL DROP TABLE accepted");
+                Ok(encode::encode_empty_response("DROP TABLE"))
             }
         }
     }
@@ -379,7 +444,7 @@ impl DefraQueryHandler {
         }
 
         // information_schema.tables → return actual collection names
-        if lower.contains("information_schema.tables") {
+        if lower.contains("information_schema.tables") && !lower.contains("table_constraints") {
             return self.handle_info_schema_tables().await;
         }
 
@@ -388,13 +453,27 @@ impl DefraQueryHandler {
             return self.handle_info_schema_columns().await;
         }
 
+        // pg_indexes → return stored index metadata
+        if lower.contains("pg_indexes") {
+            return self.handle_pg_indexes().await;
+        }
+
+        // FK constraints via table_constraints + constraint_column_usage
+        if lower.contains("table_constraints") && lower.contains("constraint_column_usage") {
+            return self.handle_fk_constraints().await;
+        }
+
+        // Primary key columns via pg_index + pg_attribute
+        if lower.contains("pg_index") && lower.contains("pg_attribute") {
+            return self.handle_pk_columns(sql).await;
+        }
+
         // pg_catalog.pg_type → return basic type stubs (but not for enum queries)
         if lower.contains("pg_type") && !lower.contains("pg_enum") {
             return Ok(encode::encode_pg_types());
         }
 
         // Other catalog queries (pg_class, pg_namespace, pg_roles, etc.)
-        // Return zero rows but with proper column headers so clients can parse the response.
         Ok(encode::encode_empty_select_with_columns(sql))
     }
 
@@ -449,6 +528,155 @@ impl DefraQueryHandler {
         }
 
         encode::encode_text_rows(&rows)
+    }
+
+    async fn handle_pg_indexes(&self) -> PgWireResult<Response> {
+        let meta = self.ddl_metadata.read().await;
+        let rows: Vec<Vec<(String, String)>> = meta
+            .indexes
+            .iter()
+            .map(|idx| {
+                vec![
+                    ("schemaname".to_string(), "public".to_string()),
+                    ("tablename".to_string(), idx.table_name.clone()),
+                    ("indexname".to_string(), idx.index_name.clone()),
+                ]
+            })
+            .collect();
+        encode::encode_text_rows(&rows)
+    }
+
+    async fn handle_fk_constraints(&self) -> PgWireResult<Response> {
+        let meta = self.ddl_metadata.read().await;
+        let rows: Vec<Vec<(String, String)>> = meta
+            .foreign_keys
+            .iter()
+            .map(|fk| {
+                vec![
+                    ("table_name".to_string(), fk.from_table.clone()),
+                    ("constraint_name".to_string(), fk.constraint_name.clone()),
+                    ("foreign_table_name".to_string(), fk.to_table.clone()),
+                ]
+            })
+            .collect();
+        encode::encode_text_rows(&rows)
+    }
+
+    async fn handle_pk_columns(&self, sql: &str) -> PgWireResult<Response> {
+        // Extract table name from 'table_name'::regclass pattern
+        let table_name = extract_regclass_table(sql).unwrap_or_default();
+        let meta = self.ddl_metadata.read().await;
+        let rows: Vec<Vec<(String, String)>> = meta
+            .primary_key_for(&table_name)
+            .map(|pk| {
+                pk.columns
+                    .iter()
+                    .map(|col| vec![("attname".to_string(), col.clone())])
+                    .collect()
+            })
+            .unwrap_or_default();
+        encode::encode_text_rows(&rows)
+    }
+
+    async fn handle_delete_with_cascade(
+        &self,
+        graphql: &str,
+        table_name: &str,
+        txn_id: Option<&str>,
+    ) -> PgWireResult<Response> {
+        // Extract the filter field and value from the GraphQL delete mutation.
+        // Pattern: `delete_Table(filter: {field: {_eq: "value"}}) { ... }`
+        let (filter_field, filter_value) = extract_filter_from_graphql(graphql);
+
+        // Recursively delete children first (depth-first)
+        Box::pin(self.cascade_delete_children(table_name, &filter_field, &filter_value, txn_id))
+            .await?;
+
+        // Delete from parent
+        let mutation_name = format!("delete_{}", table_name);
+        self.handle_mutation_single(
+            graphql,
+            table_name,
+            &mutation_name,
+            MutationKind::Delete,
+            txn_id,
+        )
+        .await
+    }
+
+    async fn cascade_delete_children(
+        &self,
+        parent_table: &str,
+        filter_field: &str,
+        filter_value: &str,
+        txn_id: Option<&str>,
+    ) -> PgWireResult<()> {
+        let children = {
+            let meta = self.ddl_metadata.read().await;
+            meta.cascade_children_of(parent_table)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        for fk in &children {
+            // If the FK points to the same column we're filtering on, we can
+            // use the parent's filter value directly. Otherwise we need to
+            // query the parent to get the linking column values.
+            let child_filter_value = if fk.to_column == filter_field {
+                filter_value.to_string()
+            } else {
+                // Query parent table for the FK target column values
+                let query_gql = format!(
+                    "query {{ {}(filter: {{{}: {{_eq: \"{}\"}}}}) {{ {} }} }}",
+                    parent_table, filter_field, filter_value, fk.to_column
+                );
+                let response = self.execute_graphql(&query_gql, txn_id).await;
+                let values = response
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get(parent_table))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|doc| {
+                                doc.get(&fk.to_column).map(|v| match v {
+                                    serde_json::Value::String(s) => s.clone(),
+                                    _ => v.to_string(),
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+
+                if values.is_empty() {
+                    continue;
+                }
+                values[0].clone()
+            };
+
+            // Recursively cascade into grandchildren
+            Box::pin(self.cascade_delete_children(
+                &fk.from_table,
+                &fk.from_column,
+                &child_filter_value,
+                txn_id,
+            ))
+            .await?;
+
+            // Delete from child table
+            let child_mutation_name = format!("delete_{}", fk.from_table);
+            let child_gql = format!(
+                "mutation {{ {}(filter: {{{}: {{_eq: \"{}\"}}}}) {{ _docID }} }}",
+                child_mutation_name, fk.from_column, child_filter_value
+            );
+            debug!(child_gql, "CASCADE delete child");
+            let response = self.execute_graphql(&child_gql, txn_id).await;
+            if response.has_errors() {
+                debug!(errors = ?response.errors, "CASCADE delete child errors (non-fatal)");
+            }
+        }
+        Ok(())
     }
 
     async fn handle_create_table(&self, sdl: &str) -> PgWireResult<Response> {
@@ -736,6 +964,32 @@ fn extract_fields_from_graphql(gql: &str) -> String {
         return fields.to_string();
     }
     String::new()
+}
+
+/// Extract 'table_name'::regclass from SQL (for PK queries).
+fn extract_regclass_table(sql: &str) -> Option<String> {
+    let lower = sql.to_lowercase();
+    let idx = lower.find("::regclass")?;
+    let before = &sql[..idx];
+    let quote_end = before.rfind('\'')?;
+    let before_quote = &before[..quote_end];
+    let quote_start = before_quote.rfind('\'')?;
+    Some(before[quote_start + 1..quote_end].to_string())
+}
+
+/// Extract (field, value) from a GraphQL filter pattern like `filter: {field: {_eq: "value"}}`.
+fn extract_filter_from_graphql(gql: &str) -> (String, String) {
+    // Match: filter: {field: {_eq: "value"}}
+    let re = regex::Regex::new(r#"filter:\s*\{(\w+):\s*\{_eq:\s*"([^"]*)"\}\}"#).unwrap();
+    if let Some(caps) = re.captures(gql) {
+        return (caps[1].to_string(), caps[2].to_string());
+    }
+    // Also match numeric: filter: {field: {_eq: 123}}
+    let re_num = regex::Regex::new(r#"filter:\s*\{(\w+):\s*\{_eq:\s*(\d+)\}\}"#).unwrap();
+    if let Some(caps) = re_num.captures(gql) {
+        return (caps[1].to_string(), caps[2].to_string());
+    }
+    (String::new(), String::new())
 }
 
 #[cfg(test)]

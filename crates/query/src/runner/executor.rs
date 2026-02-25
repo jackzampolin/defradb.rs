@@ -140,8 +140,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         // Use pre-parsed mutations to avoid redundant re-parsing
                         match self.mutator.as_ref() {
                             Some(mutator) => {
-                                self.execute_parsed_mutations(mutations, mutator.clone(), identity)
-                                    .await
+                                self.execute_parsed_mutations(
+                                    mutations,
+                                    mutator.clone(),
+                                    identity,
+                                    None,
+                                )
+                                .await
                             }
                             None => Err(crate::error::QueryError::execution(
                                 "mutations require a mutator; call with_mutator() first",
@@ -308,11 +313,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                             }
                         };
 
+                        let txn_fetcher = txn_ctx.doc_fetcher();
                         self.execute_mutation_internal_with_vars(
                             &request.query,
                             mutator,
                             identity,
                             variables.as_ref(),
+                            Some(txn_fetcher),
                         )
                         .await
                     }

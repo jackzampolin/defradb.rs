@@ -212,6 +212,26 @@ pub fn describe_system_catalog(sql: &str) -> Vec<FieldInfo> {
         ];
     }
 
+    if lower.contains("pg_indexes") {
+        return vec![
+            text_field("schemaname"),
+            text_field("tablename"),
+            text_field("indexname"),
+        ];
+    }
+
+    if lower.contains("table_constraints") && lower.contains("constraint_column_usage") {
+        return vec![
+            text_field("table_name"),
+            text_field("constraint_name"),
+            text_field("foreign_table_name"),
+        ];
+    }
+
+    if lower.contains("pg_index") && lower.contains("pg_attribute") {
+        return vec![text_field("attname")];
+    }
+
     if lower.contains("pg_type") {
         return vec![text_field("oid"), text_field("typname")];
     }

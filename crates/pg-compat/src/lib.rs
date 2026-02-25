@@ -2,6 +2,7 @@ mod bridge;
 mod encode;
 pub mod error;
 mod handler;
+mod metadata;
 mod types;
 
 use std::net::SocketAddr;
