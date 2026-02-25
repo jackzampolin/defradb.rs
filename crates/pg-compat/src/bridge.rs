@@ -1,14 +1,35 @@
 use sqlparser::ast::{
-    BinaryOperator, Expr, ObjectName, OrderByExpr, OrderByKind, SelectItem, SetExpr, Statement,
-    TableFactor, Value,
+    AssignmentTarget, BinaryOperator, Expr, FromTable, ObjectName, OrderByExpr, OrderByKind,
+    SelectItem, SetExpr, Statement, TableFactor, TableObject, Value,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
 use crate::error::PgCompatError;
 
-/// Parse a SQL string and translate it to a GraphQL query string.
-pub fn sql_to_graphql(sql: &str) -> Result<String, PgCompatError> {
+#[derive(Debug, PartialEq)]
+pub enum MutationKind {
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SqlStatement {
+    Query(String),
+    Mutation {
+        graphql: String,
+        table_name: String,
+        mutation_name: String,
+        kind: MutationKind,
+    },
+    Begin,
+    Commit,
+    Rollback,
+}
+
+/// Parse a SQL string and translate it to a structured statement.
+pub fn sql_to_graphql(sql: &str) -> Result<SqlStatement, PgCompatError> {
     let dialect = PostgreSqlDialect {};
     let statements =
         Parser::parse_sql(&dialect, sql).map_err(|e| PgCompatError::SqlParse(e.to_string()))?;
@@ -18,9 +39,21 @@ pub fn sql_to_graphql(sql: &str) -> Result<String, PgCompatError> {
     }
 
     match &statements[0] {
-        Statement::Query(query) => translate_query(query),
+        Statement::Query(query) => translate_query(query).map(SqlStatement::Query),
+        Statement::Insert(insert) => translate_insert(insert),
+        Statement::Update {
+            table,
+            assignments,
+            selection,
+            returning,
+            ..
+        } => translate_update(table, assignments, selection.as_ref(), returning.as_deref()),
+        Statement::Delete(delete) => translate_delete(delete),
+        Statement::StartTransaction { .. } => Ok(SqlStatement::Begin),
+        Statement::Commit { .. } => Ok(SqlStatement::Commit),
+        Statement::Rollback { .. } => Ok(SqlStatement::Rollback),
         other => Err(PgCompatError::UnsupportedSql(format!(
-            "only SELECT queries are supported, got: {}",
+            "unsupported statement: {}",
             statement_kind(other)
         ))),
     }
@@ -28,11 +61,9 @@ pub fn sql_to_graphql(sql: &str) -> Result<String, PgCompatError> {
 
 fn statement_kind(stmt: &Statement) -> &'static str {
     match stmt {
-        Statement::Insert { .. } => "INSERT",
-        Statement::Update { .. } => "UPDATE",
-        Statement::Delete(_) => "DELETE",
         Statement::CreateTable { .. } => "CREATE TABLE",
         Statement::Drop { .. } => "DROP",
+        Statement::AlterTable { .. } => "ALTER TABLE",
         _ => "unsupported statement",
     }
 }
@@ -47,7 +78,6 @@ fn translate_query(query: &sqlparser::ast::Query) -> Result<String, PgCompatErro
         }
     };
 
-    // Extract table name
     if select.from.len() != 1 {
         return Err(PgCompatError::UnsupportedSql(
             "exactly one FROM table is required".into(),
@@ -55,19 +85,15 @@ fn translate_query(query: &sqlparser::ast::Query) -> Result<String, PgCompatErro
     }
     let table_name = extract_table_name(&select.from[0].relation)?;
 
-    // Extract selected fields
     let fields = translate_projection(&select.projection)?;
 
-    // Build GraphQL arguments
     let mut args = Vec::new();
 
-    // WHERE → filter
     if let Some(ref selection) = select.selection {
         let filter = translate_where(selection)?;
         args.push(format!("filter: {{{}}}", filter));
     }
 
-    // ORDER BY
     if let Some(ref order_by) = query.order_by {
         match order_by {
             sqlparser::ast::OrderBy {
@@ -86,19 +112,16 @@ fn translate_query(query: &sqlparser::ast::Query) -> Result<String, PgCompatErro
         }
     }
 
-    // LIMIT
     if let Some(ref limit_expr) = query.limit {
         let limit = translate_limit_expr(limit_expr)?;
         args.push(format!("limit: {}", limit));
     }
 
-    // OFFSET
     if let Some(ref offset) = query.offset {
         let off = translate_limit_expr(&offset.value)?;
         args.push(format!("offset: {}", off));
     }
 
-    // Build the GraphQL query
     let args_str = if args.is_empty() {
         String::new()
     } else {
@@ -109,6 +132,251 @@ fn translate_query(query: &sqlparser::ast::Query) -> Result<String, PgCompatErro
         "query {{ {}{} {{ {} }} }}",
         table_name, args_str, fields
     ))
+}
+
+fn translate_insert(insert: &sqlparser::ast::Insert) -> Result<SqlStatement, PgCompatError> {
+    let table_name = match &insert.table {
+        TableObject::TableName(name) => object_name_to_string(name),
+        _ => {
+            return Err(PgCompatError::UnsupportedSql(
+                "only simple table names are supported for INSERT".into(),
+            ))
+        }
+    };
+
+    if insert.columns.is_empty() {
+        return Err(PgCompatError::UnsupportedSql(
+            "INSERT requires explicit column list".into(),
+        ));
+    }
+
+    let col_names: Vec<&str> = insert.columns.iter().map(|c| c.value.as_str()).collect();
+
+    let rows = extract_insert_values(insert)?;
+
+    let mut input_objects = Vec::with_capacity(rows.len());
+    for row in &rows {
+        if row.len() != col_names.len() {
+            return Err(PgCompatError::UnsupportedSql(format!(
+                "VALUES row has {} values but {} columns specified",
+                row.len(),
+                col_names.len()
+            )));
+        }
+        let fields: Result<Vec<String>, _> = col_names
+            .iter()
+            .zip(row.iter())
+            .map(|(col, val)| {
+                let v = expr_to_graphql_value(val)?;
+                Ok(format!("{}: {}", col, v))
+            })
+            .collect();
+        input_objects.push(format!("{{{}}}", fields?.join(", ")));
+    }
+
+    let input_str = if input_objects.len() == 1 {
+        input_objects.into_iter().next().unwrap()
+    } else {
+        format!("[{}]", input_objects.join(", "))
+    };
+
+    let return_fields = translate_returning(&insert.returning);
+    let mutation_name = format!("create_{}", table_name);
+
+    let graphql = format!(
+        "mutation {{ {}(input: {}) {{ {} }} }}",
+        mutation_name, input_str, return_fields
+    );
+
+    Ok(SqlStatement::Mutation {
+        graphql,
+        table_name,
+        mutation_name,
+        kind: MutationKind::Insert,
+    })
+}
+
+fn extract_insert_values(insert: &sqlparser::ast::Insert) -> Result<Vec<Vec<Expr>>, PgCompatError> {
+    let source = insert
+        .source
+        .as_ref()
+        .ok_or_else(|| PgCompatError::UnsupportedSql("INSERT requires VALUES clause".into()))?;
+
+    match source.body.as_ref() {
+        SetExpr::Values(values) => Ok(values.rows.clone()),
+        _ => Err(PgCompatError::UnsupportedSql(
+            "only INSERT ... VALUES is supported".into(),
+        )),
+    }
+}
+
+fn translate_update(
+    table: &sqlparser::ast::TableWithJoins,
+    assignments: &[sqlparser::ast::Assignment],
+    selection: Option<&Expr>,
+    returning: Option<&[SelectItem]>,
+) -> Result<SqlStatement, PgCompatError> {
+    let table_name = extract_table_name(&table.relation)?;
+
+    if assignments.is_empty() {
+        return Err(PgCompatError::UnsupportedSql(
+            "UPDATE requires at least one SET assignment".into(),
+        ));
+    }
+
+    let mut input_fields = Vec::with_capacity(assignments.len());
+    for assign in assignments {
+        let col = assignment_target_name(&assign.target)?;
+        validate_assignment_value(&col, &assign.value)?;
+        let val = expr_to_graphql_value(&assign.value)?;
+        input_fields.push(format!("{}: {}", col, val));
+    }
+    let input_str = format!("{{{}}}", input_fields.join(", "));
+
+    let mut args = Vec::new();
+
+    if let Some(sel) = selection {
+        if let Some(doc_id) = try_extract_docid(sel) {
+            args.push(format!("docID: \"{}\"", doc_id));
+        } else {
+            let filter = translate_where(sel)?;
+            args.push(format!("filter: {{{}}}", filter));
+        }
+    }
+
+    args.push(format!("input: {}", input_str));
+
+    let return_fields = translate_returning(&returning.map(|s| s.to_vec()));
+    let mutation_name = format!("update_{}", table_name);
+
+    let graphql = format!(
+        "mutation {{ {}({}) {{ {} }} }}",
+        mutation_name,
+        args.join(", "),
+        return_fields
+    );
+
+    Ok(SqlStatement::Mutation {
+        graphql,
+        table_name,
+        mutation_name,
+        kind: MutationKind::Update,
+    })
+}
+
+fn translate_delete(delete: &sqlparser::ast::Delete) -> Result<SqlStatement, PgCompatError> {
+    let tables = match &delete.from {
+        FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => tables,
+    };
+
+    if tables.is_empty() {
+        return Err(PgCompatError::UnsupportedSql(
+            "DELETE requires a FROM table".into(),
+        ));
+    }
+
+    let table_name = extract_table_name(&tables[0].relation)?;
+
+    let mut args = Vec::new();
+
+    if let Some(sel) = &delete.selection {
+        if let Some(doc_id) = try_extract_docid(sel) {
+            args.push(format!("docID: \"{}\"", doc_id));
+        } else {
+            let filter = translate_where(sel)?;
+            args.push(format!("filter: {{{}}}", filter));
+        }
+    }
+
+    let return_fields = translate_returning(&delete.returning);
+    let mutation_name = format!("delete_{}", table_name);
+
+    let args_str = if args.is_empty() {
+        String::new()
+    } else {
+        format!("({})", args.join(", "))
+    };
+
+    let graphql = format!(
+        "mutation {{ {}{} {{ {} }} }}",
+        mutation_name, args_str, return_fields
+    );
+
+    Ok(SqlStatement::Mutation {
+        graphql,
+        table_name,
+        mutation_name,
+        kind: MutationKind::Delete,
+    })
+}
+
+/// Check if a WHERE clause is `_docID = 'value'` and extract the value.
+fn try_extract_docid(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::BinaryOp { left, op, right } if *op == BinaryOperator::Eq => {
+            let field = expr_to_field_name(left).ok()?;
+            if field == "_docID" {
+                if let Ok(val) = extract_string_value(right) {
+                    return Some(val);
+                }
+            }
+            None
+        }
+        Expr::Nested(inner) => try_extract_docid(inner),
+        _ => None,
+    }
+}
+
+fn extract_string_value(expr: &Expr) -> Result<String, PgCompatError> {
+    match expr {
+        Expr::Value(vws) => match &vws.value {
+            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => Ok(s.clone()),
+            _ => Err(PgCompatError::UnsupportedSql(
+                "expected string value".into(),
+            )),
+        },
+        _ => Err(PgCompatError::UnsupportedSql(
+            "expected string value".into(),
+        )),
+    }
+}
+
+fn assignment_target_name(target: &AssignmentTarget) -> Result<String, PgCompatError> {
+    match target {
+        AssignmentTarget::ColumnName(name) => Ok(object_name_to_string(name)),
+        _ => Err(PgCompatError::UnsupportedSql(
+            "only simple column assignments are supported".into(),
+        )),
+    }
+}
+
+/// Reject arithmetic expressions like `counter = counter + 1`.
+fn validate_assignment_value(col: &str, value: &Expr) -> Result<(), PgCompatError> {
+    match value {
+        Expr::BinaryOp { .. } => Err(PgCompatError::UnsupportedSql(format!(
+            "arithmetic expressions in SET clause for '{}' are not supported; \
+             use GraphQL _increment/_decrement mutations instead",
+            col
+        ))),
+        _ => Ok(()),
+    }
+}
+
+fn translate_returning(returning: &Option<Vec<SelectItem>>) -> String {
+    match returning {
+        Some(items) if !items.is_empty() => {
+            let fields: Vec<String> = items
+                .iter()
+                .map(|item| match item {
+                    SelectItem::UnnamedExpr(Expr::Identifier(ident)) => ident.value.clone(),
+                    SelectItem::Wildcard(_) => "*".to_string(),
+                    other => format!("{}", other),
+                })
+                .collect();
+            fields.join(" ")
+        }
+        _ => "_docID".to_string(),
+    }
 }
 
 fn extract_table_name(table: &TableFactor) -> Result<String, PgCompatError> {
@@ -282,51 +550,243 @@ fn translate_limit_expr(expr: &Expr) -> Result<String, PgCompatError> {
 mod tests {
     use super::*;
 
+    // ── SELECT tests (unchanged from Phase 1) ──
+
     #[test]
     fn simple_select_all() {
-        let gql = sql_to_graphql("SELECT name, age FROM User").unwrap();
-        assert_eq!(gql, "query { User { name age } }");
+        let stmt = sql_to_graphql("SELECT name, age FROM User").unwrap();
+        assert_eq!(
+            stmt,
+            SqlStatement::Query("query { User { name age } }".into())
+        );
     }
 
     #[test]
     fn select_with_where() {
-        let gql = sql_to_graphql("SELECT name FROM User WHERE age > 25").unwrap();
-        assert_eq!(gql, "query { User(filter: {age: {_gt: 25}}) { name } }");
+        let stmt = sql_to_graphql("SELECT name FROM User WHERE age > 25").unwrap();
+        assert_eq!(
+            stmt,
+            SqlStatement::Query("query { User(filter: {age: {_gt: 25}}) { name } }".into())
+        );
     }
 
     #[test]
     fn select_with_order() {
-        let gql = sql_to_graphql("SELECT name FROM User ORDER BY name").unwrap();
-        assert_eq!(gql, "query { User(order: {name: ASC}) { name } }");
+        let stmt = sql_to_graphql("SELECT name FROM User ORDER BY name").unwrap();
+        assert_eq!(
+            stmt,
+            SqlStatement::Query("query { User(order: {name: ASC}) { name } }".into())
+        );
     }
 
     #[test]
     fn select_with_limit_offset() {
-        let gql = sql_to_graphql("SELECT name FROM User LIMIT 10 OFFSET 5").unwrap();
-        assert_eq!(gql, "query { User(limit: 10, offset: 5) { name } }");
+        let stmt = sql_to_graphql("SELECT name FROM User LIMIT 10 OFFSET 5").unwrap();
+        assert_eq!(
+            stmt,
+            SqlStatement::Query("query { User(limit: 10, offset: 5) { name } }".into())
+        );
     }
 
     #[test]
     fn select_with_string_where() {
-        let gql = sql_to_graphql("SELECT name FROM User WHERE name = 'Alice'").unwrap();
+        let stmt = sql_to_graphql("SELECT name FROM User WHERE name = 'Alice'").unwrap();
         assert_eq!(
-            gql,
-            "query { User(filter: {name: {_eq: \"Alice\"}}) { name } }"
+            stmt,
+            SqlStatement::Query("query { User(filter: {name: {_eq: \"Alice\"}}) { name } }".into())
         );
     }
 
     #[test]
     fn select_with_and() {
-        let gql =
+        let stmt =
             sql_to_graphql("SELECT name FROM User WHERE age > 25 AND name = 'Alice'").unwrap();
-        assert!(gql.contains("_and"));
-        assert!(gql.contains("_gt: 25"));
-        assert!(gql.contains("_eq: \"Alice\""));
+        match stmt {
+            SqlStatement::Query(gql) => {
+                assert!(gql.contains("_and"));
+                assert!(gql.contains("_gt: 25"));
+                assert!(gql.contains("_eq: \"Alice\""));
+            }
+            _ => panic!("expected Query"),
+        }
+    }
+
+    // ── INSERT tests ──
+
+    #[test]
+    fn insert_single_row() {
+        let stmt = sql_to_graphql("INSERT INTO User (name, age) VALUES ('Alice', 30)").unwrap();
+        match stmt {
+            SqlStatement::Mutation {
+                graphql,
+                table_name,
+                mutation_name,
+                kind,
+            } => {
+                assert_eq!(kind, MutationKind::Insert);
+                assert_eq!(table_name, "User");
+                assert_eq!(mutation_name, "create_User");
+                assert_eq!(
+                    graphql,
+                    "mutation { create_User(input: {name: \"Alice\", age: 30}) { _docID } }"
+                );
+            }
+            _ => panic!("expected Mutation"),
+        }
     }
 
     #[test]
-    fn rejects_insert() {
-        let result = sql_to_graphql("INSERT INTO User (name) VALUES ('Alice')");
+    fn insert_multi_row() {
+        let stmt = sql_to_graphql("INSERT INTO User (name, age) VALUES ('Alice', 30), ('Bob', 25)")
+            .unwrap();
+        match stmt {
+            SqlStatement::Mutation { graphql, kind, .. } => {
+                assert_eq!(kind, MutationKind::Insert);
+                assert!(graphql.contains("[{name: \"Alice\", age: 30}, {name: \"Bob\", age: 25}]"));
+            }
+            _ => panic!("expected Mutation"),
+        }
+    }
+
+    #[test]
+    fn insert_with_returning() {
+        let stmt = sql_to_graphql(
+            "INSERT INTO User (name, age) VALUES ('Alice', 30) RETURNING _docID, name",
+        )
+        .unwrap();
+        match stmt {
+            SqlStatement::Mutation { graphql, .. } => {
+                assert!(graphql.contains("{ _docID name }"));
+            }
+            _ => panic!("expected Mutation"),
+        }
+    }
+
+    #[test]
+    fn insert_without_columns_fails() {
+        let result = sql_to_graphql("INSERT INTO User VALUES ('Alice', 30)");
         assert!(result.is_err());
+    }
+
+    // ── UPDATE tests ──
+
+    #[test]
+    fn update_with_where() {
+        let stmt =
+            sql_to_graphql("UPDATE User SET age = 31, name = 'Bob' WHERE name = 'Alice'").unwrap();
+        match stmt {
+            SqlStatement::Mutation {
+                graphql,
+                table_name,
+                mutation_name,
+                kind,
+            } => {
+                assert_eq!(kind, MutationKind::Update);
+                assert_eq!(table_name, "User");
+                assert_eq!(mutation_name, "update_User");
+                assert_eq!(
+                    graphql,
+                    "mutation { update_User(filter: {name: {_eq: \"Alice\"}}, input: {age: 31, name: \"Bob\"}) { _docID } }"
+                );
+            }
+            _ => panic!("expected Mutation"),
+        }
+    }
+
+    #[test]
+    fn update_with_docid() {
+        let stmt = sql_to_graphql("UPDATE User SET age = 31 WHERE _docID = 'bae-abc123'").unwrap();
+        match stmt {
+            SqlStatement::Mutation { graphql, kind, .. } => {
+                assert_eq!(kind, MutationKind::Update);
+                assert!(graphql.contains("docID: \"bae-abc123\""));
+                assert!(graphql.contains("input: {age: 31}"));
+            }
+            _ => panic!("expected Mutation"),
+        }
+    }
+
+    #[test]
+    fn update_without_where() {
+        let stmt = sql_to_graphql("UPDATE User SET age = 0").unwrap();
+        match stmt {
+            SqlStatement::Mutation { graphql, kind, .. } => {
+                assert_eq!(kind, MutationKind::Update);
+                assert_eq!(
+                    graphql,
+                    "mutation { update_User(input: {age: 0}) { _docID } }"
+                );
+            }
+            _ => panic!("expected Mutation"),
+        }
+    }
+
+    #[test]
+    fn update_arithmetic_rejected() {
+        let result = sql_to_graphql("UPDATE User SET age = age + 1 WHERE name = 'Alice'");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("arithmetic"));
+    }
+
+    // ── DELETE tests ──
+
+    #[test]
+    fn delete_with_where() {
+        let stmt = sql_to_graphql("DELETE FROM User WHERE name = 'Alice'").unwrap();
+        match stmt {
+            SqlStatement::Mutation {
+                graphql,
+                table_name,
+                mutation_name,
+                kind,
+            } => {
+                assert_eq!(kind, MutationKind::Delete);
+                assert_eq!(table_name, "User");
+                assert_eq!(mutation_name, "delete_User");
+                assert_eq!(
+                    graphql,
+                    "mutation { delete_User(filter: {name: {_eq: \"Alice\"}}) { _docID } }"
+                );
+            }
+            _ => panic!("expected Mutation"),
+        }
+    }
+
+    #[test]
+    fn delete_with_docid() {
+        let stmt = sql_to_graphql("DELETE FROM User WHERE _docID = 'bae-abc123'").unwrap();
+        match stmt {
+            SqlStatement::Mutation { graphql, kind, .. } => {
+                assert_eq!(kind, MutationKind::Delete);
+                assert!(graphql.contains("docID: \"bae-abc123\""));
+            }
+            _ => panic!("expected Mutation"),
+        }
+    }
+
+    #[test]
+    fn delete_without_where() {
+        let stmt = sql_to_graphql("DELETE FROM User").unwrap();
+        match stmt {
+            SqlStatement::Mutation { graphql, kind, .. } => {
+                assert_eq!(kind, MutationKind::Delete);
+                assert_eq!(graphql, "mutation { delete_User { _docID } }");
+            }
+            _ => panic!("expected Mutation"),
+        }
+    }
+
+    // ── Transaction tests ──
+
+    #[test]
+    fn begin_commit_rollback() {
+        assert_eq!(sql_to_graphql("BEGIN").unwrap(), SqlStatement::Begin);
+        assert_eq!(
+            sql_to_graphql("START TRANSACTION").unwrap(),
+            SqlStatement::Begin
+        );
+        assert_eq!(sql_to_graphql("COMMIT").unwrap(), SqlStatement::Commit);
+        assert_eq!(sql_to_graphql("ROLLBACK").unwrap(), SqlStatement::Rollback);
     }
 }

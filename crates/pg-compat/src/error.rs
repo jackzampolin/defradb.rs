@@ -6,6 +6,7 @@ pub enum PgCompatError {
     UnsupportedSql(String),
     QueryExecution(String),
     CollectionNotFound(String),
+    Transaction(String),
 }
 
 impl fmt::Display for PgCompatError {
@@ -15,6 +16,7 @@ impl fmt::Display for PgCompatError {
             Self::UnsupportedSql(msg) => write!(f, "unsupported SQL: {}", msg),
             Self::QueryExecution(msg) => write!(f, "query execution error: {}", msg),
             Self::CollectionNotFound(name) => write!(f, "table not found: {}", name),
+            Self::Transaction(msg) => write!(f, "transaction error: {}", msg),
         }
     }
 }
