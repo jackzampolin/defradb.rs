@@ -1,12 +1,19 @@
+use std::collections::HashMap;
+
 use regex::Regex;
+use schema::ScalarKind;
 use sqlparser::ast::{
-    AssignmentTarget, BinaryOperator, Expr, FromTable, ObjectName, OrderByExpr, OrderByKind,
-    SelectItem, SetExpr, Statement, TableFactor, TableObject, Value,
+    AssignmentTarget, BinaryOperator, ColumnDef, DataType, Expr, FromTable, ObjectName,
+    OnConflictAction, OnInsert, OrderByExpr, OrderByKind, SelectItem, SetExpr, Statement,
+    TableFactor, TableObject, Value,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
 use crate::error::PgCompatError;
+
+/// Map of field name → scalar kind, used for schema-aware type coercion.
+pub type FieldTypeMap = HashMap<String, ScalarKind>;
 
 #[derive(Debug, PartialEq)]
 pub enum MutationKind {
@@ -27,10 +34,45 @@ pub enum SqlStatement {
     Begin,
     Commit,
     Rollback,
+    /// CREATE TABLE translated to DefraDB SDL.
+    CreateTable(String),
+    /// DROP TABLE — treated as a no-op.
+    DropTable,
+    /// CREATE INDEX — treated as a no-op.
+    CreateIndex,
+    /// ALTER TABLE — treated as a no-op (FK constraints, etc.).
+    AlterTable,
+    /// SELECT without FROM — synthetic result from expression evaluation.
+    SyntheticQuery {
+        columns: Vec<(String, String)>,
+    },
+    /// INSERT ... ON CONFLICT DO UPDATE — check-then-insert-or-update.
+    Upsert {
+        insert_graphql: String,
+        update_graphql: String,
+        check_graphql: String,
+        table_name: String,
+        insert_mutation_name: String,
+        update_mutation_name: String,
+    },
 }
 
-/// Parse a SQL string and translate it to a structured statement.
+/// Parse a SQL string and translate it to a structured statement (no type coercion).
+#[cfg(test)]
 pub fn sql_to_graphql(sql: &str) -> Result<SqlStatement, PgCompatError> {
+    sql_to_graphql_typed(sql, None)
+}
+
+/// Parse a SQL string with schema-aware type coercion for mutations.
+///
+/// When `field_types` is provided, numeric values targeting String fields
+/// are quoted as GraphQL strings instead of bare numbers. This fixes the
+/// extended query protocol case where postgres.js sends all params as text
+/// and `substitute_params` treats numeric-looking values as bare numbers.
+pub fn sql_to_graphql_typed(
+    sql: &str,
+    field_types: Option<&FieldTypeMap>,
+) -> Result<SqlStatement, PgCompatError> {
     let dialect = PostgreSqlDialect {};
     let statements =
         Parser::parse_sql(&dialect, sql).map_err(|e| PgCompatError::SqlParse(e.to_string()))?;
@@ -40,19 +82,29 @@ pub fn sql_to_graphql(sql: &str) -> Result<SqlStatement, PgCompatError> {
     }
 
     match &statements[0] {
-        Statement::Query(query) => translate_query(query).map(SqlStatement::Query),
-        Statement::Insert(insert) => translate_insert(insert),
+        Statement::Query(query) => translate_query(query),
+        Statement::Insert(insert) => translate_insert(insert, field_types),
         Statement::Update {
             table,
             assignments,
             selection,
             returning,
             ..
-        } => translate_update(table, assignments, selection.as_ref(), returning.as_deref()),
+        } => translate_update(
+            table,
+            assignments,
+            selection.as_ref(),
+            returning.as_deref(),
+            field_types,
+        ),
         Statement::Delete(delete) => translate_delete(delete),
         Statement::StartTransaction { .. } => Ok(SqlStatement::Begin),
         Statement::Commit { .. } => Ok(SqlStatement::Commit),
         Statement::Rollback { .. } => Ok(SqlStatement::Rollback),
+        Statement::CreateTable(ct) => translate_create_table(ct),
+        Statement::Drop { .. } => Ok(SqlStatement::DropTable),
+        Statement::CreateIndex(_) => Ok(SqlStatement::CreateIndex),
+        Statement::AlterTable { .. } => Ok(SqlStatement::AlterTable),
         other => Err(PgCompatError::UnsupportedSql(format!(
             "unsupported statement: {}",
             statement_kind(other)
@@ -150,12 +202,24 @@ pub fn is_system_catalog_query(sql: &str) -> bool {
     let lower = sql.to_lowercase();
     lower.contains("pg_catalog")
         || lower.contains("information_schema")
-        || lower.contains("pg_type")
-        || lower.contains("pg_namespace")
-        || lower.contains("pg_class")
-        || lower.contains("pg_attribute")
         || lower.contains("current_schema")
-        || lower.contains("pg_statio_user_tables")
+        || has_pg_system_table(&lower)
+}
+
+/// Check if the query references a Postgres system table (pg_*).
+///
+/// Matches tables in FROM/JOIN clauses that start with `pg_`.
+fn has_pg_system_table(lower: &str) -> bool {
+    for keyword in ["from ", "join "] {
+        for segment in lower.split(keyword).skip(1) {
+            let table = segment.split_whitespace().next().unwrap_or("");
+            let table = table.trim_matches('"');
+            if table.starts_with("pg_") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Check if a SQL string is a transaction control statement.
@@ -172,11 +236,71 @@ fn statement_kind(stmt: &Statement) -> &'static str {
         Statement::CreateTable { .. } => "CREATE TABLE",
         Statement::Drop { .. } => "DROP",
         Statement::AlterTable { .. } => "ALTER TABLE",
+        Statement::CreateIndex { .. } => "CREATE INDEX",
         _ => "unsupported statement",
     }
 }
 
-fn translate_query(query: &sqlparser::ast::Query) -> Result<String, PgCompatError> {
+/// Translate a CREATE TABLE statement to a DefraDB GraphQL SDL type definition.
+fn translate_create_table(ct: &sqlparser::ast::CreateTable) -> Result<SqlStatement, PgCompatError> {
+    let table_name = object_name_to_string(&ct.name);
+
+    let mut fields = Vec::new();
+    for col in &ct.columns {
+        if let Some(sdl_field) = column_to_sdl_field(col) {
+            fields.push(sdl_field);
+        }
+    }
+
+    if fields.is_empty() {
+        return Err(PgCompatError::UnsupportedSql(
+            "CREATE TABLE requires at least one column".into(),
+        ));
+    }
+
+    let sdl = format!("type {} {{\n  {}\n}}", table_name, fields.join("\n  "));
+    Ok(SqlStatement::CreateTable(sdl))
+}
+
+/// Convert a SQL column definition to a DefraDB SDL field string.
+fn column_to_sdl_field(col: &ColumnDef) -> Option<String> {
+    let name = &col.name.value;
+    let defra_type = sql_type_to_defra(&col.data_type)?;
+    Some(format!("{}: {}", name, defra_type))
+}
+
+/// Map SQL data types to DefraDB scalar type names.
+fn sql_type_to_defra(dt: &DataType) -> Option<&'static str> {
+    match dt {
+        DataType::Text
+        | DataType::Varchar(_)
+        | DataType::CharVarying(_)
+        | DataType::Character(_)
+        | DataType::Char(_) => Some("String"),
+
+        DataType::Integer(_) | DataType::Int(_) | DataType::SmallInt(_) | DataType::Int4(_) => {
+            Some("Int")
+        }
+
+        DataType::BigInt(_) | DataType::Int8(_) => Some("Int"),
+
+        DataType::Real | DataType::Float4 | DataType::Float(_) => Some("Float"),
+
+        DataType::Double(_) | DataType::DoublePrecision | DataType::Float8 => Some("Float"),
+
+        DataType::Boolean => Some("Boolean"),
+
+        DataType::Timestamp(_, _) | DataType::Date => Some("DateTime"),
+
+        DataType::JSON | DataType::JSONB => Some("JSON"),
+
+        DataType::Bytea => Some("Blob"),
+
+        _ => Some("String"),
+    }
+}
+
+fn translate_query(query: &sqlparser::ast::Query) -> Result<SqlStatement, PgCompatError> {
     let select = match query.body.as_ref() {
         SetExpr::Select(s) => s,
         _ => {
@@ -185,6 +309,11 @@ fn translate_query(query: &sqlparser::ast::Query) -> Result<String, PgCompatErro
             ))
         }
     };
+
+    // Handle SELECT without FROM (synthetic expressions like SELECT $1::text AS greeting)
+    if select.from.is_empty() {
+        return translate_synthetic_query(&select.projection);
+    }
 
     if select.from.len() != 1 {
         return Err(PgCompatError::UnsupportedSql(
@@ -214,7 +343,7 @@ fn translate_query(query: &sqlparser::ast::Query) -> Result<String, PgCompatErro
             } => {
                 if !exprs.is_empty() {
                     let order = translate_order(exprs)?;
-                    args.push(format!("order: {{{}}}", order));
+                    args.push(format!("order: {}", order));
                 }
             }
         }
@@ -236,13 +365,16 @@ fn translate_query(query: &sqlparser::ast::Query) -> Result<String, PgCompatErro
         format!("({})", args.join(", "))
     };
 
-    Ok(format!(
+    Ok(SqlStatement::Query(format!(
         "query {{ {}{} {{ {} }} }}",
         table_name, args_str, fields
-    ))
+    )))
 }
 
-fn translate_insert(insert: &sqlparser::ast::Insert) -> Result<SqlStatement, PgCompatError> {
+fn translate_insert(
+    insert: &sqlparser::ast::Insert,
+    field_types: Option<&FieldTypeMap>,
+) -> Result<SqlStatement, PgCompatError> {
     let table_name = match &insert.table {
         TableObject::TableName(name) => object_name_to_string(name),
         _ => {
@@ -256,6 +388,11 @@ fn translate_insert(insert: &sqlparser::ast::Insert) -> Result<SqlStatement, PgC
         return Err(PgCompatError::UnsupportedSql(
             "INSERT requires explicit column list".into(),
         ));
+    }
+
+    // Check for ON CONFLICT DO UPDATE (upsert) — translate as INSERT + UPDATE
+    if let Some(OnInsert::OnConflict(conflict)) = &insert.on {
+        return translate_upsert(insert, &table_name, conflict, field_types);
     }
 
     let col_names: Vec<&str> = insert.columns.iter().map(|c| c.value.as_str()).collect();
@@ -275,7 +412,8 @@ fn translate_insert(insert: &sqlparser::ast::Insert) -> Result<SqlStatement, PgC
             .iter()
             .zip(row.iter())
             .map(|(col, val)| {
-                let v = expr_to_graphql_value(val)?;
+                let type_hint = field_types.and_then(|ft| ft.get(*col));
+                let v = typed_graphql_value(val, type_hint)?;
                 Ok(format!("{}: {}", col, v))
             })
             .collect();
@@ -304,6 +442,123 @@ fn translate_insert(insert: &sqlparser::ast::Insert) -> Result<SqlStatement, PgC
     })
 }
 
+/// Translate INSERT ... ON CONFLICT DO UPDATE into an Upsert statement.
+///
+/// Since DefraDB doesn't have native upsert, we translate this to two operations:
+/// first try an INSERT, then if it fails (conflict) do an UPDATE.
+/// We represent this as a special Upsert variant.
+fn translate_upsert(
+    insert: &sqlparser::ast::Insert,
+    table_name: &str,
+    conflict: &sqlparser::ast::OnConflict,
+    field_types: Option<&FieldTypeMap>,
+) -> Result<SqlStatement, PgCompatError> {
+    let col_names: Vec<&str> = insert.columns.iter().map(|c| c.value.as_str()).collect();
+    let rows = extract_insert_values(insert)?;
+
+    if rows.is_empty() {
+        return Err(PgCompatError::UnsupportedSql(
+            "INSERT ON CONFLICT requires at least one VALUES row".into(),
+        ));
+    }
+
+    let row = &rows[0];
+    let fields: Result<Vec<String>, _> = col_names
+        .iter()
+        .zip(row.iter())
+        .map(|(col, val)| {
+            let type_hint = field_types.and_then(|ft| ft.get(*col));
+            let v = typed_graphql_value(val, type_hint)?;
+            Ok(format!("{}: {}", col, v))
+        })
+        .collect();
+    let input_str = format!("{{{}}}", fields?.join(", "));
+
+    let return_fields = translate_returning(&insert.returning);
+    let mutation_name = format!("create_{}", table_name);
+
+    let insert_graphql = format!(
+        "mutation {{ {}(input: {}) {{ {} }} }}",
+        mutation_name, input_str, return_fields
+    );
+
+    // Extract update fields from ON CONFLICT DO UPDATE SET ...
+    let update_fields = match &conflict.action {
+        OnConflictAction::DoUpdate(do_update) => {
+            let mut fields = Vec::new();
+            for assign in &do_update.assignments {
+                let col = assignment_target_name(&assign.target)?;
+                let type_hint = field_types.and_then(|ft| ft.get(col.as_str()));
+                let val = typed_graphql_value(&assign.value, type_hint)?;
+                fields.push(format!("{}: {}", col, val));
+            }
+            format!("{{{}}}", fields.join(", "))
+        }
+        OnConflictAction::DoNothing => {
+            // ON CONFLICT DO NOTHING — just treat as regular insert
+            return Ok(SqlStatement::Mutation {
+                graphql: insert_graphql,
+                table_name: table_name.to_string(),
+                mutation_name,
+                kind: MutationKind::Insert,
+            });
+        }
+    };
+
+    // Extract conflict target column(s) for building the WHERE filter
+    let conflict_cols: Vec<String> = match &conflict.conflict_target {
+        Some(sqlparser::ast::ConflictTarget::Columns(cols)) => {
+            cols.iter().map(|c| c.value.clone()).collect()
+        }
+        _ => vec![],
+    };
+
+    // Build update filter from conflict columns + inserted values
+    let mut filter_parts = Vec::new();
+    for col in &conflict_cols {
+        if let Some(idx) = col_names.iter().position(|c| *c == col.as_str()) {
+            let val = expr_to_graphql_value(&row[idx])?;
+            filter_parts.push(format!("{}: {{_eq: {}}}", col, val));
+        }
+    }
+
+    let update_mutation_name = format!("update_{}", table_name);
+    let update_args = if filter_parts.is_empty() {
+        format!("input: {}", update_fields)
+    } else {
+        format!(
+            "filter: {{{}}}, input: {}",
+            filter_parts.join(", "),
+            update_fields
+        )
+    };
+
+    let update_graphql = format!(
+        "mutation {{ {}({}) {{ {} }} }}",
+        update_mutation_name, update_args, return_fields
+    );
+
+    // Check query: does a row with the conflict key already exist?
+    let check_graphql = if filter_parts.is_empty() {
+        format!("query {{ {} {{ _docID }} }}", table_name)
+    } else {
+        format!(
+            "query {{ {}(filter: {{{}}}) {{ _docID }} }}",
+            table_name,
+            filter_parts.join(", ")
+        )
+    };
+
+    Ok(SqlStatement::Upsert {
+        insert_graphql,
+        update_graphql,
+        check_graphql,
+        table_name: table_name.to_string(),
+        insert_mutation_name: mutation_name,
+        update_mutation_name,
+    })
+}
+
 fn extract_insert_values(insert: &sqlparser::ast::Insert) -> Result<Vec<Vec<Expr>>, PgCompatError> {
     let source = insert
         .source
@@ -323,6 +578,7 @@ fn translate_update(
     assignments: &[sqlparser::ast::Assignment],
     selection: Option<&Expr>,
     returning: Option<&[SelectItem]>,
+    field_types: Option<&FieldTypeMap>,
 ) -> Result<SqlStatement, PgCompatError> {
     let table_name = extract_table_name(&table.relation)?;
 
@@ -336,7 +592,8 @@ fn translate_update(
     for assign in assignments {
         let col = assignment_target_name(&assign.target)?;
         validate_assignment_value(&col, &assign.value)?;
-        let val = expr_to_graphql_value(&assign.value)?;
+        let type_hint = field_types.and_then(|ft| ft.get(col.as_str()));
+        let val = typed_graphql_value(&assign.value, type_hint)?;
         input_fields.push(format!("{}: {}", col, val));
     }
     let input_str = format!("{{{}}}", input_fields.join(", "));
@@ -508,8 +765,13 @@ fn translate_projection(items: &[SelectItem]) -> Result<String, PgCompatError> {
     let mut fields = Vec::new();
     for item in items {
         match item {
-            SelectItem::UnnamedExpr(Expr::Identifier(ident)) => {
-                fields.push(ident.value.clone());
+            SelectItem::UnnamedExpr(expr) => {
+                let name = projection_expr_to_field(expr)?;
+                fields.push(name);
+            }
+            SelectItem::ExprWithAlias { expr, alias } => {
+                let _name = projection_expr_to_field(expr)?;
+                fields.push(alias.value.clone());
             }
             SelectItem::Wildcard(_) => {
                 fields.push("*".to_string());
@@ -525,6 +787,22 @@ fn translate_projection(items: &[SelectItem]) -> Result<String, PgCompatError> {
     Ok(fields.join(" "))
 }
 
+/// Extract a field name from a projection expression, handling casts and qualifiers.
+fn projection_expr_to_field(expr: &Expr) -> Result<String, PgCompatError> {
+    match expr {
+        Expr::Identifier(ident) => Ok(ident.value.clone()),
+        Expr::CompoundIdentifier(parts) => parts
+            .last()
+            .map(|p| p.value.clone())
+            .ok_or_else(|| PgCompatError::UnsupportedSql("empty compound identifier".into())),
+        Expr::Cast { expr, .. } => projection_expr_to_field(expr),
+        _ => Err(PgCompatError::UnsupportedSql(format!(
+            "unsupported SELECT expression: {}",
+            expr
+        ))),
+    }
+}
+
 fn translate_where(expr: &Expr) -> Result<String, PgCompatError> {
     match expr {
         Expr::BinaryOp { left, op, right } => translate_binary_op(left, op, right),
@@ -537,8 +815,75 @@ fn translate_where(expr: &Expr) -> Result<String, PgCompatError> {
             let field = expr_to_field_name(inner)?;
             Ok(format!("{}: {{_ne: null}}", field))
         }
+        Expr::InList {
+            expr: inner,
+            list,
+            negated,
+        } => {
+            let field = expr_to_field_name(inner)?;
+            let values: Result<Vec<String>, _> = list.iter().map(expr_to_graphql_value).collect();
+            let op = if *negated { "_nin" } else { "_in" };
+            Ok(format!("{}: {{{}: [{}]}}", field, op, values?.join(", ")))
+        }
+        Expr::Like {
+            expr: inner,
+            pattern,
+            negated,
+            ..
+        } => {
+            let field = expr_to_field_name(inner)?;
+            let pat = expr_to_graphql_value(pattern)?;
+            let op = if *negated { "_nlike" } else { "_like" };
+            Ok(format!("{}: {{{}: {}}}", field, op, pat))
+        }
         _ => Err(PgCompatError::UnsupportedSql(format!(
             "unsupported WHERE expression: {}",
+            expr
+        ))),
+    }
+}
+
+/// Translate a SELECT without FROM into a SyntheticQuery.
+fn translate_synthetic_query(items: &[SelectItem]) -> Result<SqlStatement, PgCompatError> {
+    let mut columns = Vec::new();
+    for item in items {
+        match item {
+            SelectItem::ExprWithAlias { expr, alias } => {
+                let value = eval_const_expr(expr)?;
+                columns.push((alias.value.clone(), value));
+            }
+            SelectItem::UnnamedExpr(expr) => {
+                let value = eval_const_expr(expr)?;
+                let name = format!("{}", expr);
+                columns.push((name, value));
+            }
+            _ => {
+                return Err(PgCompatError::UnsupportedSql(
+                    "unsupported synthetic SELECT item".into(),
+                ))
+            }
+        }
+    }
+    Ok(SqlStatement::SyntheticQuery { columns })
+}
+
+/// Evaluate a constant expression to a string value.
+fn eval_const_expr(expr: &Expr) -> Result<String, PgCompatError> {
+    match expr {
+        Expr::Value(vws) => match &vws.value {
+            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => Ok(s.clone()),
+            Value::Number(n, _) => Ok(n.clone()),
+            Value::Boolean(b) => Ok(b.to_string()),
+            Value::Null => Ok("".to_string()),
+            _ => Err(PgCompatError::UnsupportedSql(format!(
+                "unsupported constant: {}",
+                vws.value
+            ))),
+        },
+        Expr::Cast { expr, .. } => eval_const_expr(expr),
+        Expr::Identifier(ident) => Ok(ident.value.clone()),
+        _ => Err(PgCompatError::UnsupportedSql(format!(
+            "unsupported synthetic expression: {}",
             expr
         ))),
     }
@@ -587,6 +932,13 @@ fn sql_op_to_graphql(op: &BinaryOperator) -> Result<&'static str, PgCompatError>
 fn expr_to_field_name(expr: &Expr) -> Result<String, PgCompatError> {
     match expr {
         Expr::Identifier(ident) => Ok(ident.value.clone()),
+        Expr::CompoundIdentifier(parts) => {
+            // "table"."column" → just use the column name (last part)
+            parts
+                .last()
+                .map(|p| p.value.clone())
+                .ok_or_else(|| PgCompatError::UnsupportedSql("empty compound identifier".into()))
+        }
         _ => Err(PgCompatError::UnsupportedSql(format!(
             "expected column name, got: {}",
             expr
@@ -604,6 +956,7 @@ fn expr_to_graphql_value(expr: &Expr) -> Result<String, PgCompatError> {
             let val = expr_to_graphql_value(expr)?;
             Ok(format!("-{}", val))
         }
+        Expr::Cast { expr, .. } => expr_to_graphql_value(expr),
         _ => Err(PgCompatError::UnsupportedSql(format!(
             "unsupported value expression: {}",
             expr
@@ -614,13 +967,58 @@ fn expr_to_graphql_value(expr: &Expr) -> Result<String, PgCompatError> {
 fn value_to_graphql(value: &Value) -> Result<String, PgCompatError> {
     match value {
         Value::Number(n, _) => Ok(n.clone()),
-        Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => Ok(format!("\"{}\"", s)),
+        Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
+            let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+            Ok(format!("\"{}\"", escaped))
+        }
         Value::Boolean(b) => Ok(b.to_string()),
         Value::Null => Ok("null".to_string()),
         _ => Err(PgCompatError::UnsupportedSql(format!(
             "unsupported value: {}",
             value
         ))),
+    }
+}
+
+/// Convert a SQL expression to a GraphQL value with optional schema type hint.
+///
+/// When `type_hint` indicates a String field, numeric values are quoted as
+/// GraphQL strings. This handles the extended query protocol case where
+/// postgres.js sends `"2"` as a text param that `substitute_params` treats
+/// as a bare number, but DefraDB expects a string for the target field.
+fn typed_graphql_value(
+    expr: &Expr,
+    type_hint: Option<&ScalarKind>,
+) -> Result<String, PgCompatError> {
+    match expr {
+        Expr::Value(vws) => typed_value_to_graphql(&vws.value, type_hint),
+        Expr::UnaryOp {
+            op: sqlparser::ast::UnaryOperator::Minus,
+            expr,
+        } => {
+            let val = typed_graphql_value(expr, type_hint)?;
+            Ok(format!("-{}", val))
+        }
+        Expr::Cast { expr, .. } => typed_graphql_value(expr, type_hint),
+        _ => expr_to_graphql_value(expr),
+    }
+}
+
+fn typed_value_to_graphql(
+    value: &Value,
+    type_hint: Option<&ScalarKind>,
+) -> Result<String, PgCompatError> {
+    let is_string_field = matches!(
+        type_hint,
+        Some(ScalarKind::String | ScalarKind::DocID | ScalarKind::None | ScalarKind::DateTime)
+    );
+
+    match value {
+        Value::Number(n, _) if is_string_field => {
+            // Field expects a string but SQL has a bare number (from param substitution).
+            Ok(format!("\"{}\"", n))
+        }
+        _ => value_to_graphql(value),
     }
 }
 
@@ -633,9 +1031,13 @@ fn translate_order(exprs: &[OrderByExpr]) -> Result<String, PgCompatError> {
         } else {
             "ASC"
         };
-        parts.push(format!("{}: {}", field, dir));
+        parts.push(format!("{{{}: {}}}", field, dir));
     }
-    Ok(parts.join(", "))
+    if parts.len() == 1 {
+        Ok(parts.into_iter().next().unwrap())
+    } else {
+        Ok(format!("[{}]", parts.join(", ")))
+    }
 }
 
 fn translate_limit_expr(expr: &Expr) -> Result<String, PgCompatError> {
@@ -981,5 +1383,76 @@ mod tests {
     #[test]
     fn extract_table_from_begin() {
         assert_eq!(extract_table_from_sql("BEGIN"), None);
+    }
+
+    // ── Schema-aware type coercion tests ──
+
+    #[test]
+    fn insert_coerces_number_to_string_for_string_field() {
+        let mut types = FieldTypeMap::new();
+        types.insert("version".to_string(), ScalarKind::String);
+        types.insert("count".to_string(), ScalarKind::Int);
+
+        let stmt = sql_to_graphql_typed(
+            "INSERT INTO session (version, count) VALUES (2, 42)",
+            Some(&types),
+        )
+        .unwrap();
+
+        match stmt {
+            SqlStatement::Mutation { graphql, .. } => {
+                // version should be quoted (String field), count should be bare (Int field)
+                assert!(
+                    graphql.contains("version: \"2\""),
+                    "expected version: \"2\", got: {}",
+                    graphql
+                );
+                assert!(
+                    graphql.contains("count: 42"),
+                    "expected count: 42, got: {}",
+                    graphql
+                );
+            }
+            _ => panic!("expected Mutation"),
+        }
+    }
+
+    #[test]
+    fn insert_without_types_preserves_numbers() {
+        let stmt = sql_to_graphql_typed("INSERT INTO session (version) VALUES (2)", None).unwrap();
+
+        match stmt {
+            SqlStatement::Mutation { graphql, .. } => {
+                assert!(
+                    graphql.contains("version: 2"),
+                    "expected bare version: 2, got: {}",
+                    graphql
+                );
+            }
+            _ => panic!("expected Mutation"),
+        }
+    }
+
+    #[test]
+    fn update_coerces_number_to_string_for_string_field() {
+        let mut types = FieldTypeMap::new();
+        types.insert("version".to_string(), ScalarKind::String);
+
+        let stmt = sql_to_graphql_typed(
+            "UPDATE session SET version = 3 WHERE id = 'abc'",
+            Some(&types),
+        )
+        .unwrap();
+
+        match stmt {
+            SqlStatement::Mutation { graphql, .. } => {
+                assert!(
+                    graphql.contains("version: \"3\""),
+                    "expected version: \"3\", got: {}",
+                    graphql
+                );
+            }
+            _ => panic!("expected Mutation"),
+        }
     }
 }

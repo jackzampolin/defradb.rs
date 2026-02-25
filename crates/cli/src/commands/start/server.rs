@@ -1196,10 +1196,13 @@ impl Node {
                     runner_for_pg.clone();
                 let pg_collections: std::sync::Arc<dyn query::CollectionProvider> =
                     collection_provider_for_pg.clone();
+                let pg_schema_manager =
+                    crate::schema_adapter::SchemaAdapter::new_pg_arc(database.clone());
                 Some(pg_compat::PgServer::new(
                     pg_addr,
                     pg_executor,
                     pg_collections,
+                    Some(pg_schema_manager),
                 ))
             } else {
                 None

@@ -17,13 +17,23 @@ use pgwire::messages::PgWireBackendMessage;
 use query::{CollectionProvider, QueryExecutor, QueryRequest, TransactionHandle};
 use tracing::{debug, warn};
 
+use schema::FieldKind;
+
 use crate::bridge::{
     count_params, extract_table_from_sql, is_select_or_returning, is_system_catalog_query,
-    is_transaction_control, sql_to_graphql, substitute_params, MutationKind, SqlStatement,
+    is_transaction_control, sql_to_graphql_typed, substitute_params, FieldTypeMap, MutationKind,
+    SqlStatement,
 };
 use crate::encode;
 
 const TXN_ID_KEY: &str = "txn_id";
+
+/// Trait for creating DefraDB schemas from SQL DDL.
+#[async_trait]
+pub trait SchemaManager: Send + Sync {
+    /// Add a schema from a GraphQL SDL string.
+    async fn add_schema(&self, sdl: &str) -> Result<(), String>;
+}
 
 /// Handler for Postgres wire protocol queries.
 ///
@@ -33,15 +43,21 @@ pub struct DefraQueryHandler {
     executor: Arc<dyn QueryExecutor>,
     collections: Arc<dyn CollectionProvider>,
     parser: Arc<DefraQueryParser>,
+    schema_manager: Option<Arc<dyn SchemaManager>>,
 }
 
 impl DefraQueryHandler {
-    pub fn new(executor: Arc<dyn QueryExecutor>, collections: Arc<dyn CollectionProvider>) -> Self {
+    pub fn new(
+        executor: Arc<dyn QueryExecutor>,
+        collections: Arc<dyn CollectionProvider>,
+        schema_manager: Option<Arc<dyn SchemaManager>>,
+    ) -> Self {
         let parser = Arc::new(DefraQueryParser);
         Self {
             executor,
             collections,
             parser,
+            schema_manager,
         }
     }
 
@@ -226,14 +242,15 @@ impl DefraQueryHandler {
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
     {
         if is_system_catalog_query(sql) {
-            debug!(sql, "Returning empty result for system catalog query");
-            return Ok(encode::encode_empty_query_response());
+            debug!(sql, "Handling system catalog query");
+            return self.handle_system_catalog(sql).await;
         }
 
-        let statement = match sql_to_graphql(sql) {
+        let field_types = self.build_field_type_map(sql).await;
+        let statement = match sql_to_graphql_typed(sql, field_types.as_ref()) {
             Ok(stmt) => stmt,
             Err(e) => {
-                warn!(error = %e, "SQL translation failed");
+                warn!(error = %e, sql, "SQL translation failed");
                 return Err(pg_error("42601", e.to_string()));
             }
         };
@@ -259,10 +276,195 @@ impl DefraQueryHandler {
                 )
                 .await
             }
+            SqlStatement::Upsert {
+                insert_graphql,
+                update_graphql,
+                check_graphql,
+                table_name,
+                insert_mutation_name,
+                update_mutation_name,
+            } => {
+                self.handle_upsert(
+                    &insert_graphql,
+                    &update_graphql,
+                    &check_graphql,
+                    &table_name,
+                    &insert_mutation_name,
+                    &update_mutation_name,
+                    txn_id.as_deref(),
+                )
+                .await
+            }
+            SqlStatement::SyntheticQuery { columns } => encode::encode_synthetic_response(&columns),
             SqlStatement::Begin => self.handle_begin_single(client).await,
             SqlStatement::Commit => self.handle_commit_single(client).await,
             SqlStatement::Rollback => self.handle_rollback_single(client).await,
+            SqlStatement::CreateTable(sdl) => self.handle_create_table(&sdl).await,
+            SqlStatement::DropTable | SqlStatement::CreateIndex | SqlStatement::AlterTable => {
+                debug!(sql, "DDL statement accepted as no-op");
+                Ok(encode::encode_empty_response("OK"))
+            }
         }
+    }
+
+    /// Build a field type map for the target table in a SQL statement.
+    ///
+    /// Returns `None` for queries where schema lookup isn't needed or fails.
+    async fn build_field_type_map(&self, sql: &str) -> Option<FieldTypeMap> {
+        let table_name = extract_table_from_sql(sql)?;
+        let collection = self.collections.get_collection(&table_name).await.ok()??;
+        let mut types = FieldTypeMap::new();
+        for field in &collection.fields {
+            if let FieldKind::Scalar(scalar) = &field.kind {
+                types.insert(field.name.clone(), *scalar);
+            }
+        }
+        Some(types)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_upsert(
+        &self,
+        insert_graphql: &str,
+        update_graphql: &str,
+        check_graphql: &str,
+        table_name: &str,
+        insert_mutation_name: &str,
+        update_mutation_name: &str,
+        txn_id: Option<&str>,
+    ) -> PgWireResult<Response> {
+        debug!(check_graphql, "Upsert: checking for existing row");
+
+        // Check if a row with the conflict key already exists
+        let check_response = self.execute_graphql(check_graphql, txn_id).await;
+        let exists = check_response
+            .data
+            .as_ref()
+            .and_then(|d| {
+                let table = extract_table_name_from_graphql(check_graphql);
+                d.get(&table)
+            })
+            .and_then(|v| v.as_array())
+            .is_some_and(|arr| !arr.is_empty());
+
+        if exists {
+            debug!(update_graphql, "Upsert: row exists, updating");
+            self.handle_mutation_single(
+                update_graphql,
+                table_name,
+                update_mutation_name,
+                MutationKind::Update,
+                txn_id,
+            )
+            .await
+        } else {
+            debug!(insert_graphql, "Upsert: no existing row, inserting");
+            self.handle_mutation_single(
+                insert_graphql,
+                table_name,
+                insert_mutation_name,
+                MutationKind::Insert,
+                txn_id,
+            )
+            .await
+        }
+    }
+
+    async fn handle_system_catalog(&self, sql: &str) -> PgWireResult<Response> {
+        let lower = sql.to_lowercase();
+
+        // SELECT current_schema()
+        if lower.contains("current_schema") && !lower.contains("information_schema") {
+            return encode::encode_single_value_response("current_schema", "public");
+        }
+
+        // information_schema.tables → return actual collection names
+        if lower.contains("information_schema.tables") {
+            return self.handle_info_schema_tables().await;
+        }
+
+        // information_schema.columns → return actual field metadata
+        if lower.contains("information_schema.columns") {
+            return self.handle_info_schema_columns().await;
+        }
+
+        // pg_catalog.pg_type → return basic type stubs (but not for enum queries)
+        if lower.contains("pg_type") && !lower.contains("pg_enum") {
+            return Ok(encode::encode_pg_types());
+        }
+
+        // Other catalog queries (pg_class, pg_namespace, pg_roles, etc.)
+        // Return zero rows but with proper column headers so clients can parse the response.
+        Ok(encode::encode_empty_select_with_columns(sql))
+    }
+
+    async fn handle_info_schema_tables(&self) -> PgWireResult<Response> {
+        let names = self
+            .collections
+            .list_collections()
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
+        let rows: Vec<Vec<(String, String)>> = names
+            .into_iter()
+            .map(|name| {
+                vec![
+                    ("table_schema".to_string(), "public".to_string()),
+                    ("table_name".to_string(), name),
+                    ("table_type".to_string(), "BASE TABLE".to_string()),
+                ]
+            })
+            .collect();
+
+        encode::encode_text_rows(&rows)
+    }
+
+    async fn handle_info_schema_columns(&self) -> PgWireResult<Response> {
+        let names = self
+            .collections
+            .list_collections()
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
+        let mut rows = Vec::new();
+        for name in &names {
+            if let Ok(Some(col)) = self.collections.get_collection(name).await {
+                for (pos, field) in col.fields.iter().enumerate() {
+                    if !field.kind.is_scalar() {
+                        continue;
+                    }
+                    rows.push(vec![
+                        ("table_schema".to_string(), "public".to_string()),
+                        ("table_name".to_string(), name.clone()),
+                        ("column_name".to_string(), field.name.clone()),
+                        ("ordinal_position".to_string(), (pos + 1).to_string()),
+                        (
+                            "data_type".to_string(),
+                            encode::field_kind_to_pg_type_name(&field.kind),
+                        ),
+                        ("is_nullable".to_string(), "YES".to_string()),
+                    ]);
+                }
+            }
+        }
+
+        encode::encode_text_rows(&rows)
+    }
+
+    async fn handle_create_table(&self, sdl: &str) -> PgWireResult<Response> {
+        let mgr = self.schema_manager.as_ref().ok_or_else(|| {
+            pg_error(
+                "0A000",
+                "CREATE TABLE not supported: no schema manager configured".to_string(),
+            )
+        })?;
+
+        debug!(sdl, "Creating collection from DDL");
+        mgr.add_schema(sdl)
+            .await
+            .map_err(|e| pg_error("42000", e))?;
+
+        Ok(encode::encode_empty_response("CREATE TABLE"))
     }
 }
 
@@ -365,11 +567,16 @@ impl ExtendedQueryHandler for DefraQueryHandler {
         let sql = &target.statement;
         let param_types = self.parser.get_parameter_types(sql)?;
 
-        if is_transaction_control(sql) || !is_select_or_returning(sql) {
+        if is_transaction_control(sql) {
             return Ok(DescribeStatementResponse::new(param_types, vec![]));
         }
 
-        let fields = self.build_field_infos_from_sql(sql).await;
+        // For non-SELECT DML without RETURNING, return no columns
+        if !is_select_or_returning(sql) && !is_system_catalog_query(sql) {
+            return Ok(DescribeStatementResponse::new(param_types, vec![]));
+        }
+
+        let fields = self.build_field_infos_for_describe(sql).await;
         Ok(DescribeStatementResponse::new(param_types, fields))
     }
 
@@ -386,20 +593,33 @@ impl ExtendedQueryHandler for DefraQueryHandler {
     {
         let sql = &target.statement.statement;
 
-        if is_transaction_control(sql) || !is_select_or_returning(sql) {
+        if is_transaction_control(sql) {
             return Ok(DescribePortalResponse::new(vec![]));
         }
 
-        let fields = self.build_field_infos_from_sql(sql).await;
+        if !is_select_or_returning(sql) && !is_system_catalog_query(sql) {
+            return Ok(DescribePortalResponse::new(vec![]));
+        }
+
+        let fields = self.build_field_infos_for_describe(sql).await;
         Ok(DescribePortalResponse::new(fields))
     }
 }
 
 impl DefraQueryHandler {
-    async fn build_field_infos_from_sql(&self, sql: &str) -> Vec<FieldInfo> {
+    async fn build_field_infos_for_describe(&self, sql: &str) -> Vec<FieldInfo> {
+        // System catalog queries
+        if is_system_catalog_query(sql) {
+            return encode::describe_system_catalog(sql);
+        }
+
+        // Try to resolve from table
         let table_name = match extract_table_from_sql(sql) {
             Some(name) => name,
-            None => return vec![],
+            None => {
+                // SELECT without FROM — try to extract synthetic column names
+                return encode::describe_synthetic_query(sql);
+            }
         };
 
         let collection = match self.collections.get_collection(&table_name).await {
@@ -407,7 +627,22 @@ impl DefraQueryHandler {
             _ => return vec![],
         };
 
-        encode::build_field_infos_from_collection(&collection)
+        // Extract requested columns from the SQL to match what execute returns.
+        // For SELECT, parse the column list; for DML with RETURNING, parse the RETURNING clause.
+        let columns = {
+            let select_cols = encode::extract_select_columns(sql);
+            if select_cols.is_empty() {
+                encode::extract_returning_columns(sql)
+            } else {
+                select_cols
+            }
+        };
+
+        if columns.is_empty() || columns.iter().any(|c| c == "*") {
+            return encode::build_field_infos_from_collection(&collection);
+        }
+
+        encode::build_field_infos_for_columns(&collection, &columns)
     }
 }
 

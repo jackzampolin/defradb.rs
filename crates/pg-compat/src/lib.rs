@@ -13,9 +13,11 @@ use tracing::{error, info};
 
 use handler::{DefraHandlerFactory, DefraQueryHandler};
 
+pub use handler::SchemaManager;
+
 /// Postgres wire protocol compatibility server for DefraDB.
 ///
-/// Accepts psql connections and translates SQL SELECT queries to GraphQL,
+/// Accepts psql connections and translates SQL queries to GraphQL,
 /// executing them through the existing query engine.
 pub struct PgServer {
     address: SocketAddr,
@@ -27,8 +29,13 @@ impl PgServer {
         address: SocketAddr,
         executor: Arc<dyn QueryExecutor>,
         collections: Arc<dyn CollectionProvider>,
+        schema_manager: Option<Arc<dyn SchemaManager>>,
     ) -> Self {
-        let handler = Arc::new(DefraQueryHandler::new(executor, collections));
+        let handler = Arc::new(DefraQueryHandler::new(
+            executor,
+            collections,
+            schema_manager,
+        ));
         let factory = Arc::new(DefraHandlerFactory::new(handler));
         Self { address, factory }
     }
