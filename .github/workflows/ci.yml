@@ -47,6 +47,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Exclude tools with private deps from workspace
+        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   cbindgen:
