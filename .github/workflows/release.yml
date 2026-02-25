@@ -246,7 +246,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config protobuf-compiler
+          sudo apt-get install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
           if [ "${{ matrix.variant }}" = "rocksdb" ]; then
             sudo apt-get install -y libclang-dev
           fi
@@ -330,7 +330,35 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: defra-redb-*
           merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: defra-fjall-*
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: defra-rocksdb-*
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: defra-ffi-*
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: defra-wasm
+          merge-multiple: true
+
+      - name: List release artifacts
+        run: find artifacts -type f | sort
 
       - uses: softprops/action-gh-release@v2
         with:
