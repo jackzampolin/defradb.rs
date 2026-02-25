@@ -21,9 +21,9 @@ use tracing::{debug, warn};
 use schema::FieldKind;
 
 use crate::bridge::{
-    count_params, extract_table_from_sql, is_select_or_returning, is_system_catalog_query,
-    is_transaction_control, sql_to_graphql_typed, substitute_params, FieldTypeMap, MutationKind,
-    SqlStatement,
+    count_params, escape_graphql_string, extract_table_from_sql, is_select_or_returning,
+    is_system_catalog_query, is_transaction_control, sql_to_graphql_typed, substitute_params,
+    FieldTypeMap, MutationKind, SqlStatement,
 };
 use crate::encode;
 use crate::metadata::{DdlMetadata, IndexInfo, PrimaryKeyInfo};
@@ -65,14 +65,20 @@ impl DefraQueryHandler {
         }
     }
 
-    async fn execute_graphql(&self, graphql: &str, txn_id: Option<&str>) -> query::QueryResponse {
+    async fn execute_graphql(
+        &self,
+        graphql: &str,
+        txn_id: Option<&str>,
+    ) -> PgWireResult<query::QueryResponse> {
         let request = QueryRequest::new(graphql);
         match txn_id {
             Some(id) => {
-                let handle: TransactionHandle = id.parse().expect("valid txn handle");
-                self.executor.execute_in_txn(request, &handle).await
+                let handle: TransactionHandle = id
+                    .parse()
+                    .map_err(|e: query::TransactionError| pg_error("XX000", e.to_string()))?;
+                Ok(self.executor.execute_in_txn(request, &handle).await)
             }
-            None => self.executor.execute(request).await,
+            None => Ok(self.executor.execute(request).await),
         }
     }
 }
@@ -88,7 +94,7 @@ impl DefraQueryHandler {
         debug!(graphql, "Translated to GraphQL query");
 
         let table_name = extract_table_name_from_graphql(graphql);
-        let response = self.execute_graphql(graphql, txn_id).await;
+        let response = self.execute_graphql(graphql, txn_id).await?;
 
         if response.has_errors() {
             return Err(pg_error("XX000", format_errors(&response.errors)));
@@ -133,7 +139,7 @@ impl DefraQueryHandler {
     ) -> PgWireResult<Response> {
         debug!(graphql, "Translated to GraphQL mutation");
 
-        let response = self.execute_graphql(graphql, txn_id).await;
+        let response = self.execute_graphql(graphql, txn_id).await?;
 
         if response.has_errors() {
             return Err(pg_error("XX000", format_errors(&response.errors)));
@@ -401,7 +407,7 @@ impl DefraQueryHandler {
         debug!(check_graphql, "Upsert: checking for existing row");
 
         // Check if a row with the conflict key already exists
-        let check_response = self.execute_graphql(check_graphql, txn_id).await;
+        let check_response = self.execute_graphql(check_graphql, txn_id).await?;
         let exists = check_response
             .data
             .as_ref()
@@ -627,11 +633,12 @@ impl DefraQueryHandler {
                 filter_value.to_string()
             } else {
                 // Query parent table for the FK target column values
+                let escaped = escape_graphql_string(filter_value);
                 let query_gql = format!(
                     "query {{ {}(filter: {{{}: {{_eq: \"{}\"}}}}) {{ {} }} }}",
-                    parent_table, filter_field, filter_value, fk.to_column
+                    parent_table, filter_field, escaped, fk.to_column
                 );
-                let response = self.execute_graphql(&query_gql, txn_id).await;
+                let response = self.execute_graphql(&query_gql, txn_id).await?;
                 let values = response
                     .data
                     .as_ref()
@@ -666,12 +673,13 @@ impl DefraQueryHandler {
 
             // Delete from child table
             let child_mutation_name = format!("delete_{}", fk.from_table);
+            let escaped_child = escape_graphql_string(&child_filter_value);
             let child_gql = format!(
                 "mutation {{ {}(filter: {{{}: {{_eq: \"{}\"}}}}) {{ _docID }} }}",
-                child_mutation_name, fk.from_column, child_filter_value
+                child_mutation_name, fk.from_column, escaped_child
             );
             debug!(child_gql, "CASCADE delete child");
-            let response = self.execute_graphql(&child_gql, txn_id).await;
+            let response = self.execute_graphql(&child_gql, txn_id).await?;
             if response.has_errors() {
                 debug!(errors = ?response.errors, "CASCADE delete child errors (non-fatal)");
             }

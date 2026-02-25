@@ -154,6 +154,11 @@ pub fn substitute_params(sql: &str, params: &[Option<String>]) -> String {
     .into_owned()
 }
 
+/// Escape a string for safe interpolation into a GraphQL string literal.
+pub fn escape_graphql_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Count the number of `$N` parameter placeholders in a SQL string.
 pub fn count_params(sql: &str) -> usize {
     let re = Regex::new(r"\$(\d+)").expect("valid regex");
