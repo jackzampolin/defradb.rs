@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::future::Future;
 use tracing::instrument;
 
 use acp::nac::NodePermission;
@@ -15,6 +15,34 @@ use crate::query_parse::{parse_request_with_variables, ParsedOperation};
 use crate::txn::{GetTransactionResult, TransactionHandle, TransactionRegistry};
 
 use super::{DocFetcher, QueryRunner};
+
+/// Await a future with an optional timeout (native only, WASM always awaits directly).
+#[cfg(not(target_arch = "wasm32"))]
+async fn await_with_timeout<F: Future<Output = Result<JsonValue>>>(
+    future: F,
+    timeout_secs: u64,
+) -> Result<JsonValue> {
+    if timeout_secs > 0 {
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        match tokio::time::timeout(timeout, future).await {
+            Ok(r) => r,
+            Err(_) => Err(crate::error::QueryError::execution(format!(
+                "query execution timed out after {} seconds",
+                timeout_secs
+            ))),
+        }
+    } else {
+        future.await
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn await_with_timeout<F: Future<Output = Result<JsonValue>>>(
+    future: F,
+    _timeout_secs: u64,
+) -> Result<JsonValue> {
+    future.await
+}
 
 /// Map a parsed operation to the required NAC permission.
 fn permission_for_operation(parsed: &ParsedOperation) -> NodePermission {
@@ -163,27 +191,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
-        let result = if self.query_timeout > 0 {
-            let timeout = Duration::from_secs(self.query_timeout);
-            match tokio::time::timeout(timeout, execution).await {
-                Ok(r) => r,
-                Err(_) => {
-                    return QueryResponse {
-                        data: None,
-                        errors: vec![QueryResponseError {
-                            message: format!(
-                                "query execution timed out after {} seconds",
-                                self.query_timeout
-                            ),
-                            path: None,
-                            locations: None,
-                        }],
-                    };
-                }
-            }
-        } else {
-            execution.await
-        };
+        let result = await_with_timeout(execution, self.query_timeout).await;
 
         match result {
             Ok(data) => QueryResponse {
@@ -331,27 +339,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
-        let result = if self.query_timeout > 0 {
-            let timeout = Duration::from_secs(self.query_timeout);
-            match tokio::time::timeout(timeout, execution).await {
-                Ok(r) => r,
-                Err(_) => {
-                    return QueryResponse {
-                        data: None,
-                        errors: vec![QueryResponseError {
-                            message: format!(
-                                "query execution timed out after {} seconds",
-                                self.query_timeout
-                            ),
-                            path: None,
-                            locations: None,
-                        }],
-                    };
-                }
-            }
-        } else {
-            execution.await
-        };
+        let result = await_with_timeout(execution, self.query_timeout).await;
 
         match result {
             Ok(data) => QueryResponse {

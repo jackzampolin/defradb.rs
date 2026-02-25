@@ -22,7 +22,6 @@ lens = { path = "../lens", default-features = false }
 # Async runtime
 async-trait.workspace = true
 futures.workspace = true
-tokio = { workspace = true, features = ["time"] }
 
 # Serialization
 serde.workspace = true
@@ -51,6 +50,10 @@ regex = "1"
 
 # Time handling (for DateTime parsing in mutations)
 chrono = { version = "0.4", features = ["serde"] }
+
+# Tokio is only needed on non-WASM targets (for query timeouts)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 proptest.workspace = true

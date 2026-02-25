@@ -30,8 +30,9 @@ pub use defra_core::{Error, Result};
 pub use types::KeyType;
 
 // Re-export key types
+#[cfg(not(target_arch = "wasm32"))]
+pub use keys::bls::BlsPublicKey;
 pub use keys::{
-    bls::BlsPublicKey,
     ed25519::{ed25519_key_from_seed, Ed25519PrivateKey, Ed25519PublicKey},
     generation::{
         generate_aes256, generate_ed25519, generate_key, generate_secp256k1, generate_secp256r1,

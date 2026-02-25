@@ -12,8 +12,9 @@ use x25519_dalek::StaticSecret;
 use defra_core::Result;
 
 use crate::error::{crypto_error, unsupported_key_type};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::keys::bls::BlsPublicKey;
 use crate::keys::{
-    bls::BlsPublicKey,
     ed25519::{Ed25519PrivateKey, Ed25519PublicKey},
     secp256k1::{Secp256k1PrivateKey, Secp256k1PublicKey},
     secp256r1::{Secp256r1PrivateKey, Secp256r1PublicKey},
@@ -227,10 +228,13 @@ pub fn public_key_from_bytes(
             let key = Secp256r1PublicKey::from_bytes(bytes)?;
             Ok(Box::new(key))
         }
+        #[cfg(not(target_arch = "wasm32"))]
         KeyType::Bls12381 => {
             let key = BlsPublicKey::from_bytes(bytes)?;
             Ok(Box::new(key))
         }
+        #[cfg(target_arch = "wasm32")]
+        KeyType::Bls12381 => Err(unsupported_key_type(key_type)),
     }
 }
 
