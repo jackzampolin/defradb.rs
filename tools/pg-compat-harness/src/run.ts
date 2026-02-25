@@ -25,6 +25,9 @@ import * as t07 from "./tests/07-transactions";
 import * as t08 from "./tests/08-pagination";
 import * as t09 from "./tests/09-json";
 import * as t10 from "./tests/10-session-lifecycle";
+import * as t11 from "./tests/11-txn-read-your-writes";
+import * as t12 from "./tests/12-advanced-filters";
+import * as t13 from "./tests/13-edge-cases";
 
 const categories: { name: string; run: () => Promise<TestResult[]> }[] = [
   { name: "01-connection", run: t01.run },
@@ -37,6 +40,9 @@ const categories: { name: string; run: () => Promise<TestResult[]> }[] = [
   { name: "08-pagination", run: t08.run },
   { name: "09-json", run: t09.run },
   { name: "10-session-lifecycle", run: t10.run },
+  { name: "11-txn-read-your-writes", run: t11.run },
+  { name: "12-advanced-filters", run: t12.run },
+  { name: "13-edge-cases", run: t13.run },
 ];
 
 async function main() {
