@@ -380,8 +380,9 @@ async fn replicator_update_new_field_older_version_multistep() {
 
 /// Build the set_default WASM lens module and return its file:// path.
 fn wasm_lens_path() -> String {
-    integration_test::wasm_lens::WasmLens::build().expect("build set_default WASM lens");
-    integration_test::wasm_lens::WasmLens::module_path()
+    let lens = integration_test::wasm_lens::wasm_lens_defra();
+    lens.build().expect("build set_default WASM lens");
+    lens.module_path()
 }
 
 /// Build a lens config JSON for the set_default module.
