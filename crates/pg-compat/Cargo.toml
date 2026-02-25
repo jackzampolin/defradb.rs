@@ -29,6 +29,9 @@ serde_json = { workspace = true }
 # Logging
 tracing = { workspace = true }
 
+# Regex for parameter substitution
+regex = "1"
+
 # Error handling
 thiserror = { workspace = true }
 

@@ -120,6 +120,14 @@ fn encode_number(
     }
 }
 
+/// Build FieldInfo metadata for all scalar fields in a collection.
+///
+/// Used by describe responses so clients know column types before execution.
+pub fn build_field_infos_from_collection(collection: &CollectionVersion) -> Vec<FieldInfo> {
+    let fields = resolve_fields(collection, &[]);
+    build_field_infos(&fields)
+}
+
 /// Extract field names from a SELECT * or explicit column list.
 pub fn extract_requested_fields(fields_str: &str) -> Vec<String> {
     fields_str

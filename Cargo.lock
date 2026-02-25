@@ -7306,6 +7306,7 @@ dependencies = [
  "identity",
  "pgwire",
  "query",
+ "regex",
  "schema",
  "serde_json",
  "sqlparser",

@@ -1,3 +1,4 @@
+use regex::Regex;
 use sqlparser::ast::{
     AssignmentTarget, BinaryOperator, Expr, FromTable, ObjectName, OrderByExpr, OrderByKind,
     SelectItem, SetExpr, Statement, TableFactor, TableObject, Value,
@@ -57,6 +58,97 @@ pub fn sql_to_graphql(sql: &str) -> Result<SqlStatement, PgCompatError> {
             statement_kind(other)
         ))),
     }
+}
+
+/// Replace `$1`, `$2`, ... placeholders with literal values for `sql_to_graphql()`.
+///
+/// String values are single-quoted, NULLs become `NULL`, numeric values stay as-is.
+pub fn substitute_params(sql: &str, params: &[Option<String>]) -> String {
+    if params.is_empty() {
+        return sql.to_string();
+    }
+
+    let re = Regex::new(r"\$(\d+)").expect("valid regex");
+    re.replace_all(sql, |caps: &regex::Captures| {
+        let idx: usize = caps[1].parse().unwrap_or(0);
+        if idx == 0 || idx > params.len() {
+            return caps[0].to_string();
+        }
+        match &params[idx - 1] {
+            None => "NULL".to_string(),
+            Some(val) => {
+                let is_literal = val.parse::<f64>().is_ok()
+                    || val.eq_ignore_ascii_case("true")
+                    || val.eq_ignore_ascii_case("false");
+                if is_literal {
+                    val.clone()
+                } else {
+                    format!("'{}'", val.replace('\'', "''"))
+                }
+            }
+        }
+    })
+    .into_owned()
+}
+
+/// Count the number of `$N` parameter placeholders in a SQL string.
+pub fn count_params(sql: &str) -> usize {
+    let re = Regex::new(r"\$(\d+)").expect("valid regex");
+    let mut max = 0usize;
+    for caps in re.captures_iter(sql) {
+        if let Ok(n) = caps[1].parse::<usize>() {
+            max = max.max(n);
+        }
+    }
+    max
+}
+
+/// Extract the table name from a SQL string (for describe responses).
+///
+/// Returns the first table referenced in FROM or INTO clauses.
+pub fn extract_table_from_sql(sql: &str) -> Option<String> {
+    let dialect = PostgreSqlDialect {};
+    let statements = Parser::parse_sql(&dialect, sql).ok()?;
+    let stmt = statements.first()?;
+    match stmt {
+        Statement::Query(query) => {
+            if let SetExpr::Select(select) = query.body.as_ref() {
+                if let Some(from) = select.from.first() {
+                    return extract_table_name(&from.relation).ok();
+                }
+            }
+            None
+        }
+        Statement::Insert(insert) => match &insert.table {
+            TableObject::TableName(name) => Some(object_name_to_string(name)),
+            _ => None,
+        },
+        Statement::Update { table, .. } => extract_table_name(&table.relation).ok(),
+        Statement::Delete(delete) => {
+            let tables = match &delete.from {
+                FromTable::WithFromKeyword(t) | FromTable::WithoutKeyword(t) => t,
+            };
+            tables
+                .first()
+                .and_then(|t| extract_table_name(&t.relation).ok())
+        }
+        _ => None,
+    }
+}
+
+/// Check if a SQL string is a SELECT query (or has RETURNING clause).
+pub fn is_select_or_returning(sql: &str) -> bool {
+    let upper = sql.trim().to_uppercase();
+    upper.starts_with("SELECT") || upper.contains("RETURNING")
+}
+
+/// Check if a SQL string is a transaction control statement.
+pub fn is_transaction_control(sql: &str) -> bool {
+    let upper = sql.trim().to_uppercase();
+    upper.starts_with("BEGIN")
+        || upper.starts_with("START TRANSACTION")
+        || upper.starts_with("COMMIT")
+        || upper.starts_with("ROLLBACK")
 }
 
 fn statement_kind(stmt: &Statement) -> &'static str {
@@ -788,5 +880,90 @@ mod tests {
         );
         assert_eq!(sql_to_graphql("COMMIT").unwrap(), SqlStatement::Commit);
         assert_eq!(sql_to_graphql("ROLLBACK").unwrap(), SqlStatement::Rollback);
+    }
+
+    // ── Parameter substitution tests ──
+
+    #[test]
+    fn substitute_string_param() {
+        let sql = "SELECT * FROM users WHERE name = $1";
+        let result = substitute_params(sql, &[Some("Alice".into())]);
+        assert_eq!(result, "SELECT * FROM users WHERE name = 'Alice'");
+    }
+
+    #[test]
+    fn substitute_numeric_param() {
+        let sql = "SELECT * FROM users WHERE age > $1";
+        let result = substitute_params(sql, &[Some("25".into())]);
+        assert_eq!(result, "SELECT * FROM users WHERE age > 25");
+    }
+
+    #[test]
+    fn substitute_null_param() {
+        let sql = "INSERT INTO users (name) VALUES ($1)";
+        let result = substitute_params(sql, &[None]);
+        assert_eq!(result, "INSERT INTO users (name) VALUES (NULL)");
+    }
+
+    #[test]
+    fn substitute_multiple_params() {
+        let sql = "INSERT INTO users (name, age) VALUES ($1, $2)";
+        let result = substitute_params(sql, &[Some("Bob".into()), Some("30".into())]);
+        assert_eq!(result, "INSERT INTO users (name, age) VALUES ('Bob', 30)");
+    }
+
+    #[test]
+    fn substitute_escapes_quotes() {
+        let sql = "SELECT * FROM users WHERE name = $1";
+        let result = substitute_params(sql, &[Some("O'Brien".into())]);
+        assert_eq!(result, "SELECT * FROM users WHERE name = 'O''Brien'");
+    }
+
+    #[test]
+    fn substitute_no_params() {
+        let sql = "SELECT * FROM users";
+        let result = substitute_params(sql, &[]);
+        assert_eq!(result, "SELECT * FROM users");
+    }
+
+    #[test]
+    fn substitute_boolean_param() {
+        let sql = "SELECT * FROM users WHERE active = $1";
+        let result = substitute_params(sql, &[Some("true".into())]);
+        assert_eq!(result, "SELECT * FROM users WHERE active = true");
+    }
+
+    #[test]
+    fn count_params_basic() {
+        assert_eq!(
+            count_params("SELECT * FROM users WHERE name = $1 AND age > $2"),
+            2
+        );
+        assert_eq!(count_params("SELECT * FROM users"), 0);
+        assert_eq!(
+            count_params("INSERT INTO t (a, b, c) VALUES ($1, $2, $3)"),
+            3
+        );
+    }
+
+    #[test]
+    fn extract_table_from_select() {
+        assert_eq!(
+            extract_table_from_sql("SELECT name FROM users WHERE id = 1"),
+            Some("users".into())
+        );
+    }
+
+    #[test]
+    fn extract_table_from_insert() {
+        assert_eq!(
+            extract_table_from_sql("INSERT INTO users (name) VALUES ('a')"),
+            Some("users".into())
+        );
+    }
+
+    #[test]
+    fn extract_table_from_begin() {
+        assert_eq!(extract_table_from_sql("BEGIN"), None);
     }
 }
