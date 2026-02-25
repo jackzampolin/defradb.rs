@@ -1,4 +1,6 @@
 [advisories]
+# Some ignored crates live in tools/ (excluded from CI workspace) so may not match
+unused-ignored-advisory = "warn"
 ignore = [
     # Unmaintained transitive dependencies - acceptable for now
     "RUSTSEC-2024-0388",  # derivative
