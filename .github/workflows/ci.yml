@@ -30,6 +30,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
+      - name: Exclude tools with private deps from workspace
+        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
       - run: cargo clippy --all -- -D warnings
 
   test:
@@ -40,6 +42,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
+      - name: Exclude tools with private deps from workspace
+        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
       - run: cargo test --workspace
 
   deny:
@@ -59,6 +63,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
+      - name: Exclude tools with private deps from workspace
+        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
       - name: Install cbindgen
         run: cargo install cbindgen
       - name: Generate header
