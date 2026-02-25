@@ -45,6 +45,15 @@ pub fn encode_empty_response(message: &str) -> Response {
     Response::Execution(Tag::new(message))
 }
 
+/// Build a SELECT response with zero rows and no columns.
+///
+/// Used for system catalog queries (pg_catalog, information_schema) that
+/// we can't translate but need to return successfully.
+pub fn encode_empty_query_response() -> Response {
+    let schema = Arc::new(vec![]);
+    Response::Query(QueryResponse::new(schema, stream::iter(vec![])))
+}
+
 /// Resolve which fields to include, returning (name, pg_type) pairs.
 fn resolve_fields(collection: &CollectionVersion, requested: &[String]) -> Vec<(String, Type)> {
     let use_all = requested.is_empty() || requested.iter().any(|f| f == "*");

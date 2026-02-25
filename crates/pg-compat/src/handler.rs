@@ -18,8 +18,8 @@ use query::{CollectionProvider, QueryExecutor, QueryRequest, TransactionHandle};
 use tracing::{debug, warn};
 
 use crate::bridge::{
-    count_params, extract_table_from_sql, is_select_or_returning, is_transaction_control,
-    sql_to_graphql, substitute_params, MutationKind, SqlStatement,
+    count_params, extract_table_from_sql, is_select_or_returning, is_system_catalog_query,
+    is_transaction_control, sql_to_graphql, substitute_params, MutationKind, SqlStatement,
 };
 use crate::encode;
 
@@ -225,6 +225,11 @@ impl DefraQueryHandler {
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
     {
+        if is_system_catalog_query(sql) {
+            debug!(sql, "Returning empty result for system catalog query");
+            return Ok(encode::encode_empty_query_response());
+        }
+
         let statement = match sql_to_graphql(sql) {
             Ok(stmt) => stmt,
             Err(e) => {

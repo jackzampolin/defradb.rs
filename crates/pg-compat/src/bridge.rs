@@ -142,6 +142,22 @@ pub fn is_select_or_returning(sql: &str) -> bool {
     upper.starts_with("SELECT") || upper.contains("RETURNING")
 }
 
+/// Check if a SQL string references system catalog tables.
+///
+/// postgres.js sends type discovery queries against pg_catalog on connect.
+/// We return empty results for these rather than failing translation.
+pub fn is_system_catalog_query(sql: &str) -> bool {
+    let lower = sql.to_lowercase();
+    lower.contains("pg_catalog")
+        || lower.contains("information_schema")
+        || lower.contains("pg_type")
+        || lower.contains("pg_namespace")
+        || lower.contains("pg_class")
+        || lower.contains("pg_attribute")
+        || lower.contains("current_schema")
+        || lower.contains("pg_statio_user_tables")
+}
+
 /// Check if a SQL string is a transaction control statement.
 pub fn is_transaction_control(sql: &str) -> bool {
     let upper = sql.trim().to_uppercase();
