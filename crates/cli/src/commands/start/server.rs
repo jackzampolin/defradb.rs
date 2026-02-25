@@ -35,6 +35,7 @@ impl Node {
         Option<p2p::P2PHostHandle>,
         Option<P2PTasks>,
         defra_http::Server,
+        Option<pg_compat::PgServer>,
     )>
     where
         S: storage::corekv::Store + 'static,
@@ -126,7 +127,7 @@ impl Node {
             };
 
         // Create HTTP server with database-backed query runner
-        let (http_server, p2p_tasks) = {
+        let (http_server, p2p_tasks, pg_server) = {
             let api_address: SocketAddr =
                 config
                     .api
@@ -943,6 +944,9 @@ impl Node {
                 set_acp(document_acp.clone());
             }
 
+            // Clone collection provider for PG server before it's moved into QueryRunner
+            let collection_provider_for_pg = collection_provider.clone();
+
             // Create query runner with transaction, mutation, and ACP support
             // Use Arc-shared registry so it can also be used by TxnRegistryAdapter
             let document_acp_for_http = document_acp.clone();
@@ -999,6 +1003,7 @@ impl Node {
 
             let runner = Arc::new(query_runner);
             let runner_for_backup: Arc<dyn query::executor::QueryExecutor> = runner.clone();
+            let runner_for_pg: Arc<dyn query::executor::QueryExecutor> = runner.clone();
 
             // Create REST operations that wrap the query runner
             let rest_ops = query::rest::RestOperationsImpl::new(Arc::clone(&runner));
@@ -1177,9 +1182,32 @@ impl Node {
                 _ => None,
             };
 
-            (server, p2p_tasks)
+            // Create PG wire protocol server if configured
+            let pg_server = if !config.api.pg_address.is_empty() {
+                let pg_addr: SocketAddr =
+                    config
+                        .api
+                        .pg_address
+                        .parse()
+                        .map_err(|e: std::net::AddrParseError| {
+                            Error::InvalidApiAddress(config.api.pg_address.clone(), e.to_string())
+                        })?;
+                let pg_executor: std::sync::Arc<dyn query::executor::QueryExecutor> =
+                    runner_for_pg.clone();
+                let pg_collections: std::sync::Arc<dyn query::CollectionProvider> =
+                    collection_provider_for_pg.clone();
+                Some(pg_compat::PgServer::new(
+                    pg_addr,
+                    pg_executor,
+                    pg_collections,
+                ))
+            } else {
+                None
+            };
+
+            (server, p2p_tasks, pg_server)
         };
 
-        Ok((p2p, p2p_tasks, http_server))
+        Ok((p2p, p2p_tasks, http_server, pg_server))
     }
 }

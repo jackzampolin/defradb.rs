@@ -66,6 +66,9 @@ pub struct ApiConfig {
     /// Query execution timeout in seconds (0 = no timeout). Default: 30.
     #[serde(default = "default_query_timeout")]
     pub query_timeout: u64,
+    /// Postgres wire protocol address (empty = disabled). Default: "" (disabled).
+    #[serde(default)]
+    pub pg_address: String,
 }
 
 fn default_request_timeout() -> u64 {
@@ -93,6 +96,7 @@ impl Default for ApiConfig {
             request_timeout: default_request_timeout(),
             max_concurrent_requests: default_max_concurrent(),
             query_timeout: default_query_timeout(),
+            pg_address: String::new(),
         }
     }
 }
