@@ -14,6 +14,10 @@ ignore = [
     "RUSTSEC-2025-0046",  # wasmtime fd_renumber
     "RUSTSEC-2025-0118",  # wasmtime linear memory
     "RUSTSEC-2024-0320",  # wasmtime related
+    "RUSTSEC-2026-0020",  # wasmtime WASI resource exhaustion
+    "RUSTSEC-2026-0021",  # wasmtime wasi:http/types.fields panic
+    "RUSTSEC-2026-0022",  # wasmtime Func::call_async drop panic
+    "RUSTSEC-2023-0089",  # atomic-polyfill unmaintained
 ]
 
 [licenses]
