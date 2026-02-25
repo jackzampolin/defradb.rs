@@ -934,16 +934,16 @@ struct FfiResult parse_duration(const char *duration_str);
 struct FfiResult parse_string_array(const char *input);
 
 /*
- Create a new encrypted index on a collection field.
+ Add a new encrypted index on a collection field.
 
  # Safety
 
  All string pointers must be valid null-terminated UTF-8 strings.
  */
-struct FfiResult create_encrypted_index(uintptr_t node_ptr,
-                                        const char *identity_did,
-                                        const char *collection_name,
-                                        const char *field_name);
+struct FfiResult add_encrypted_index(uintptr_t node_ptr,
+                                     const char *identity_did,
+                                     const char *collection_name,
+                                     const char *field_name);
 
 /*
  Delete an encrypted index from a collection.
@@ -1013,13 +1013,13 @@ struct FfiResult create_index(uintptr_t node_ptr,
                               const char *index_json);
 
 /*
- Drop an index from a collection.
+ Delete an index from a collection.
 
  # Arguments
 
  * `node_ptr` - Handle to the node
  * `collection_name` - Name of the collection
- * `index_name` - Name of the index to drop
+ * `index_name` - Name of the index to delete
 
  # Returns
 
@@ -1029,10 +1029,10 @@ struct FfiResult create_index(uintptr_t node_ptr,
 
  All string pointers must be valid null-terminated UTF-8 strings.
  */
-struct FfiResult drop_index(uintptr_t node_ptr,
-                            const char *identity_did,
-                            const char *collection_name,
-                            const char *index_name);
+struct FfiResult delete_index(uintptr_t node_ptr,
+                              const char *identity_did,
+                              const char *collection_name,
+                              const char *index_name);
 
 /*
  Get all indexes for a collection.
@@ -1069,7 +1069,7 @@ struct FfiResult get_indexes(uintptr_t node_ptr,
 
  Caller must ensure all pointer arguments are valid, non-null, and point to valid C strings.
  */
-struct FfiResult get_all_indexes(uintptr_t node_ptr, const char *identity_did);
+struct FfiResult list_all_indexes(uintptr_t node_ptr, const char *identity_did);
 
 /*
  Add a lens transform to the database.
@@ -1140,9 +1140,9 @@ struct FfiResult node_close(uintptr_t node_ptr);
 
  `collections_json` must be a valid null-terminated UTF-8 string.
  */
-struct FfiResult p2p_create_collections(uintptr_t node_ptr,
-                                        const char *identity_did,
-                                        const char *collections_json);
+struct FfiResult p2p_add_collections(uintptr_t node_ptr,
+                                     const char *identity_did,
+                                     const char *collections_json);
 
 /*
  Remove collections from P2P replication.
@@ -1183,9 +1183,9 @@ struct FfiResult p2p_list_collections(uintptr_t node_ptr, const char *identity_d
 
  `doc_ids_json` must be a valid null-terminated UTF-8 string.
  */
-struct FfiResult p2p_create_documents(uintptr_t node_ptr,
-                                      const char *identity_did,
-                                      const char *doc_ids_json);
+struct FfiResult p2p_add_documents(uintptr_t node_ptr,
+                                   const char *identity_did,
+                                   const char *doc_ids_json);
 
 /*
  Remove documents from P2P replication by unsubscribing from their GossipSub topics.
@@ -1295,10 +1295,10 @@ struct FfiResult p2p_retry_replicators(uintptr_t node_ptr);
 
  All string pointers must be valid null-terminated UTF-8 strings.
  */
-struct FfiResult p2p_create_replicator(uintptr_t node_ptr,
-                                       const char *identity_did,
-                                       const char *peer_addr,
-                                       const char *collections_json);
+struct FfiResult p2p_add_replicator(uintptr_t node_ptr,
+                                    const char *identity_did,
+                                    const char *peer_addr,
+                                    const char *collections_json);
 
 /*
  Delete a replicator.

@@ -418,7 +418,15 @@ impl Server {
         }
         builder = builder.with_dev_mode(self.dev_mode);
         let state = builder.build();
+        let state_for_middleware = state.clone();
         let mut router = create_router_with_state(state);
+
+        // Global auth middleware: enforces route-level permissions before handlers run.
+        // Applied via route_layer so MatchedPath is available (routing has completed).
+        router = router.route_layer(axum::middleware::from_fn_with_state(
+            state_for_middleware,
+            crate::auth_middleware::auth_middleware,
+        ));
 
         // Apply global body limit (0 = unlimited)
         if self.config.max_body_size > 0 {

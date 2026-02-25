@@ -39,6 +39,12 @@ impl ExtractIdentity {
         Self(None)
     }
 
+    /// Create an ExtractIdentity from an already-parsed DID.
+    /// Used by the auth middleware to construct an ExtractIdentity for permission checks.
+    pub(crate) fn from_did(did: Option<Did>) -> Self {
+        Self(did)
+    }
+
     /// Returns a reference to the extracted DID if present.
     pub fn did(&self) -> Option<&Did> {
         self.0.as_ref()
@@ -80,9 +86,9 @@ enum HostHeaderResult {
     Invalid,
 }
 
-/// Extract and validate the Host header from request parts.
-fn extract_host_header(parts: &Parts) -> HostHeaderResult {
-    match parts.headers.get(HOST) {
+/// Extract and validate the Host header from HTTP headers.
+fn extract_host_header(headers: &axum::http::HeaderMap) -> HostHeaderResult {
+    match headers.get(HOST) {
         Some(value) => match value.to_str() {
             Ok(s) if !s.is_empty() => HostHeaderResult::Valid(s.to_lowercase()),
             Ok(_) => {
@@ -99,6 +105,62 @@ fn extract_host_header(parts: &Parts) -> HostHeaderResult {
             HostHeaderResult::Missing
         }
     }
+}
+
+/// Identity pre-populated by the auth middleware.
+///
+/// When present in request extensions, `ExtractIdentity` reuses this
+/// instead of re-parsing the Authorization header.
+#[derive(Clone, Debug)]
+pub(crate) struct MiddlewareIdentity(pub Option<Did>);
+
+/// Parse identity from HTTP headers (shared between middleware and extractors).
+///
+/// Extracts the Authorization header, validates the Host header for
+/// authenticated requests, and returns the parsed DID.
+pub(crate) fn parse_identity_from_headers(
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<Did>, IdentityExtractionError> {
+    let auth_value = match headers.get(AUTHORIZATION) {
+        Some(value) => match value.to_str() {
+            Ok(s) => Some(s.to_string()),
+            Err(_) => {
+                return Err(IdentityExtractionError::InvalidToken(
+                    "Authorization header contains invalid characters".to_string(),
+                ))
+            }
+        },
+        None => None,
+    };
+
+    let has_auth_token = match &auth_value {
+        Some(auth) => {
+            let trimmed = auth
+                .strip_prefix("Bearer ")
+                .or_else(|| auth.strip_prefix("bearer "));
+            trimmed.map(|t| !t.trim().is_empty()).unwrap_or(false)
+        }
+        _ => false,
+    };
+
+    let host_result = extract_host_header(headers);
+
+    let host = match host_result {
+        HostHeaderResult::Valid(h) => h,
+        HostHeaderResult::Missing if has_auth_token => {
+            return Err(IdentityExtractionError::MissingHost(
+                "Host header required for authenticated requests".to_string(),
+            ));
+        }
+        HostHeaderResult::Invalid if has_auth_token => {
+            return Err(IdentityExtractionError::MissingHost(
+                "valid Host header required for authenticated requests".to_string(),
+            ));
+        }
+        _ => String::new(),
+    };
+
+    extract_identity_from_auth_header(auth_value.as_deref(), &host)
 }
 
 impl IntoResponse for IdentityExtractionError {
@@ -195,56 +257,18 @@ where
         'life1: 'async_trait,
         Self: 'async_trait,
     {
-        // Get the auth header value, returning error for malformed headers
-        let auth_result: Result<Option<String>, IdentityExtractionError> =
-            match parts.headers.get(AUTHORIZATION) {
-                Some(value) => match value.to_str() {
-                    Ok(s) => Ok(Some(s.to_string())),
-                    Err(_) => Err(IdentityExtractionError::InvalidToken(
-                        "Authorization header contains invalid characters".to_string(),
-                    )),
-                },
-                None => Ok(None),
-            };
+        // If the auth middleware already parsed identity, reuse it.
+        if let Some(mid) = parts.extensions.get::<MiddlewareIdentity>() {
+            let did = mid.0.clone();
+            return Box::pin(async move { Ok(ExtractIdentity(did)) });
+        }
 
-        // Check if request has an Authorization header with a token
-        let has_auth_token = match &auth_result {
-            Ok(Some(auth)) => {
-                let trimmed = auth
-                    .strip_prefix("Bearer ")
-                    .or_else(|| auth.strip_prefix("bearer "));
-                trimmed.map(|t| !t.trim().is_empty()).unwrap_or(false)
-            }
-            _ => false,
-        };
-
-        // Get Host header for audience verification (matches Go DefraDB behavior)
-        // Go uses strings.ToLower(req.Host) as the expected audience
-        let host_result = extract_host_header(parts);
+        // Fallback: parse from headers (for routes/tests without the middleware).
+        let result = parse_identity_from_headers(&parts.headers);
 
         Box::pin(async move {
-            let auth_value = auth_result?;
-
-            // For authenticated requests, require a valid Host header
-            // This prevents token bypass via missing/malformed Host header
-            let host = match host_result {
-                HostHeaderResult::Valid(h) => h,
-                HostHeaderResult::Missing if has_auth_token => {
-                    return Err(IdentityExtractionError::MissingHost(
-                        "Host header required for authenticated requests".to_string(),
-                    ));
-                }
-                HostHeaderResult::Invalid if has_auth_token => {
-                    return Err(IdentityExtractionError::MissingHost(
-                        "valid Host header required for authenticated requests".to_string(),
-                    ));
-                }
-                // Anonymous requests don't need Host header
-                _ => String::new(),
-            };
-
-            let result = extract_identity_from_auth_header(auth_value.as_deref(), &host)?;
-            Ok(ExtractIdentity(result))
+            let did = result?;
+            Ok(ExtractIdentity(did))
         })
     }
 }
@@ -378,7 +402,7 @@ where
         };
 
         // Get Host header for audience verification (matches Go DefraDB behavior)
-        let host_result = extract_host_header(parts);
+        let host_result = extract_host_header(&parts.headers);
 
         Box::pin(async move {
             let auth_value = auth_result?;

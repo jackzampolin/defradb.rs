@@ -1,4 +1,6 @@
 [advisories]
+# Some ignored crates live in tools/ (excluded from CI workspace) so may not match
+unused-ignored-advisory = "warn"
 ignore = [
     # Unmaintained transitive dependencies - acceptable for now
     "RUSTSEC-2024-0388",  # derivative
@@ -12,6 +14,10 @@ ignore = [
     "RUSTSEC-2025-0046",  # wasmtime fd_renumber
     "RUSTSEC-2025-0118",  # wasmtime linear memory
     "RUSTSEC-2024-0320",  # wasmtime related
+    "RUSTSEC-2026-0020",  # wasmtime WASI resource exhaustion
+    "RUSTSEC-2026-0021",  # wasmtime wasi:http/types.fields panic
+    "RUSTSEC-2026-0022",  # wasmtime Func::call_async drop panic
+    "RUSTSEC-2023-0089",  # atomic-polyfill unmaintained
 ]
 
 [licenses]
@@ -25,6 +31,10 @@ allow = [
     "MPL-2.0",
     "Unicode-3.0",
     "Zlib",
+    "BSL-1.0",
+    "Unlicense",
+    "OpenSSL",
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]
@@ -41,4 +51,5 @@ unknown-git = "warn"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     "https://github.com/sourcenetwork/beetle",
+    "https://github.com/sourcenetwork/backbone",
 ]
