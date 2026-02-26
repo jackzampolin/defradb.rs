@@ -43,10 +43,15 @@ name = "sourcehub"
 path = "tests/sourcehub.rs"
 
 [[test]]
+name = "hubrs"
+path = "tests/hubrs.rs"
+
+[[test]]
 name = "p2p_iroh"
 path = "tests/p2p_iroh/main.rs"
 
 [dependencies]
+hub-harness = { git = "ssh://git@github.com/sourcenetwork/backbone.git", branch = "main" }
 defra-harness = { git = "ssh://git@github.com/sourcenetwork/backbone.git", branch = "main" }
 tokio = { version = "1.35", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }

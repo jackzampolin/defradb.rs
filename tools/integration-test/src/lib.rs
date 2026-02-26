@@ -10,9 +10,6 @@ pub use defra_harness::node;
 pub use defra_harness::observe;
 pub use defra_harness::poll;
 pub use defra_harness::ports;
-pub use defra_harness::process;
-pub use defra_harness::run;
-pub use defra_harness::sourcehub;
 
 // Convenience re-exports
 pub use defra_harness::fixtures::*;
