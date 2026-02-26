@@ -894,7 +894,7 @@ impl Node {
                 database.list_collections().map(|c| c.len()).unwrap_or(0)
             );
 
-            // Create DocumentACP: SourceHub (on-chain) or Local
+            // Create DocumentACP: SourceHub, hub.rs, or Local
             let (document_acp, sourcehub_acp_adapter): (
                 Arc<dyn acp::DocumentACP>,
                 Option<Arc<dyn defra_http::router::AcpOperations>>,
@@ -929,6 +929,35 @@ impl Node {
 
                 info!("Document ACP configured (SourceHub)");
                 (sh_acp as Arc<dyn acp::DocumentACP>, Some(sh_adapter))
+            } else if config.acp.document_type == AcpDocumentType::HubRs {
+                if config.acp.hub_rs_address.is_empty() {
+                    return Err(Error::InvalidConfig(
+                        "hub_rs_address required when document_type is hub-rs".into(),
+                    ));
+                }
+
+                let signer_key_bytes = identity_key_bytes.as_ref().ok_or_else(|| {
+                    Error::InvalidConfig(
+                        "node identity required for hub.rs ACP (use --identity)".into(),
+                    )
+                })?;
+
+                let hub_acp = Arc::new(
+                    sourcehub::HubRsDocumentACP::new(
+                        config.acp.hub_rs_address.clone(),
+                        signer_key_bytes,
+                    )
+                    .await
+                    .map_err(|e| Error::InvalidConfig(format!("hub.rs ACP: {}", e)))?,
+                );
+
+                let hub_adapter = crate::hub_rs_acp_adapter::HubRsAcpAdapter::new_arc(
+                    hub_acp.clone(),
+                    zanzibar_store.clone(),
+                );
+
+                info!("Document ACP configured (hub.rs)");
+                (hub_acp as Arc<dyn acp::DocumentACP>, Some(hub_adapter))
             } else {
                 info!("Document ACP configured (local)");
                 (
@@ -990,7 +1019,9 @@ impl Node {
             // Skip for SourceHub ACP: identity must come from bearer tokens, not defaults.
             // Anonymous requests should be truly anonymous for on-chain policy evaluation.
             if let Some(ref did) = user_did {
-                if config.acp.document_type != AcpDocumentType::SourceHub {
+                if config.acp.document_type != AcpDocumentType::SourceHub
+                    && config.acp.document_type != AcpDocumentType::HubRs
+                {
                     info!("Query runner configured with default identity for ACP");
                     query_runner = query_runner.with_default_identity(did.clone());
                 }

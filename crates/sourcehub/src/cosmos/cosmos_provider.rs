@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 
-use crate::circuit_breaker::CircuitBreaker;
-use crate::client::{ClientError, SourceHubClient};
-use crate::policy_cache::PolicyCache;
-use crate::provider::{ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef};
-use crate::tx::TxSigner;
+use super::circuit_breaker::CircuitBreaker;
+use super::client::{ClientError, SourceHubClient};
+use super::policy_cache::PolicyCache;
+use super::provider::{ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef};
+use super::tx::TxSigner;
 
 /// SourceHub provider backed by Cosmos SDK (REST/LCD + CometBFT).
 ///

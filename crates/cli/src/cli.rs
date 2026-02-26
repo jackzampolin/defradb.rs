@@ -80,6 +80,10 @@ pub struct Cli {
     #[arg(long, global = true, env = "DEFRA_SOURCE_HUB_CHAIN_ID")]
     pub source_hub_chain_id: Option<String>,
 
+    /// hub.rs JSON-RPC endpoint (e.g., "http://localhost:8545")
+    #[arg(long, global = true, env = "DEFRA_HUB_RS_ADDRESS")]
+    pub hub_rs_address: Option<String>,
+
     /// Path to the file containing secrets
     #[arg(long, global = true, env = "DEFRA_SECRET_FILE")]
     pub secret_file: Option<String>,
@@ -91,7 +95,7 @@ pub struct Cli {
     #[arg(long = "node-acp-enable", global = true, env = "DEFRA_ACP_NODE_ENABLE", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub acp_node_enable: Option<bool>,
 
-    /// Document ACP type. Options are none, local, or source-hub
+    /// Document ACP type. Options are none, local, source-hub, or hub-rs
     #[arg(
         long = "document-acp-type",
         global = true,

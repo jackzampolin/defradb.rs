@@ -26,6 +26,7 @@ fn cli_with_defaults() -> Cli {
         source_hub_address: None,
         source_hub_comet_address: None,
         source_hub_chain_id: None,
+        hub_rs_address: None,
         secret_file: None,
         acp_node_enable: None,
         acp_document_type: None,

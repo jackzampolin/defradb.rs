@@ -42,3 +42,13 @@ tracing.workspace = true
 
 # Base64 for bearer token
 base64.workspace = true
+
+# EVM / Alloy (hub.rs ACP backend)
+alloy-sol-types.workspace = true
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-signer.workspace = true
+alloy-signer-local.workspace = true
+alloy-rlp.workspace = true
+bs58.workspace = true

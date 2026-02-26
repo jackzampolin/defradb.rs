@@ -199,6 +199,11 @@ impl Config {
             self.acp.sourcehub_chain_id = id.clone();
         }
 
+        // hub.rs
+        if let Some(ref addr) = cli.hub_rs_address {
+            self.acp.hub_rs_address = addr.clone();
+        }
+
         Ok(())
     }
 

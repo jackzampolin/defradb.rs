@@ -14,6 +14,7 @@ pub mod doc_acp_adapter;
 pub mod dump_adapter;
 pub mod encrypted_index_adapter;
 pub mod error;
+pub mod hub_rs_acp_adapter;
 pub mod index_adapter;
 #[cfg(feature = "iroh")]
 pub mod iroh_p2p_adapter;

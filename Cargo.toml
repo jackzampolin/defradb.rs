@@ -79,6 +79,16 @@ aes-gcm = "0.10"
 hex = "0.4"
 base64 = "0.22"
 
+# EVM / Alloy (hub.rs ACP backend)
+alloy-sol-types = "1"
+alloy-primitives = { version = "1", features = ["serde"] }
+alloy-consensus = { version = "1", features = ["k256"] }
+alloy-eips = "1"
+alloy-signer = "1"
+alloy-signer-local = { version = "1", default-features = false }
+alloy-rlp = "0.3"
+bs58 = "0.5"
+
 # IPLD
 cid = { version = "0.10", features = ["serde"] }
 multihash = "0.18"

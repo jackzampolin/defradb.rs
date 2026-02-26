@@ -2,7 +2,7 @@ use cosmrs::crypto::secp256k1::SigningKey;
 use cosmrs::tx::{Body, Fee, SignDoc, SignerInfo};
 use cosmrs::{AccountId, Any, Coin};
 
-use crate::client::SourceHubClient;
+use super::client::SourceHubClient;
 
 /// Transaction signer for SourceHub (Cosmos SDK).
 ///

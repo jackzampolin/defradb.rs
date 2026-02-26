@@ -324,6 +324,10 @@ pub struct AcpConfig {
     /// SourceHub chain ID (e.g., "sourcehub-test")
     #[serde(default)]
     pub sourcehub_chain_id: String,
+
+    /// hub.rs JSON-RPC endpoint (e.g., "http://localhost:8545")
+    #[serde(default)]
+    pub hub_rs_address: String,
 }
 
 impl Default for AcpConfig {
@@ -334,6 +338,7 @@ impl Default for AcpConfig {
             sourcehub_address: String::new(),
             sourcehub_comet_address: String::new(),
             sourcehub_chain_id: String::new(),
+            hub_rs_address: String::new(),
         }
     }
 }

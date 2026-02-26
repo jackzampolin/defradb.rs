@@ -12,7 +12,7 @@ use identity::Did;
 
 use acp::{DocumentACP, DocumentPermission, Identity, Result};
 
-use crate::provider::{ProviderError, SourceHubProvider, SubjectRef};
+use super::provider::{ProviderError, SourceHubProvider, SubjectRef};
 
 /// DocumentACP backed by SourceHub's on-chain x/acp module.
 ///
