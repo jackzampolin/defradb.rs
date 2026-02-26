@@ -1,9 +1,12 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 
-use super::circuit_breaker::CircuitBreaker;
+use crate::circuit_breaker::CircuitBreaker;
+use crate::policy_cache::PolicyCache;
+use crate::provider::{ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef};
+
 use super::client::{ClientError, SourceHubClient};
-use super::policy_cache::PolicyCache;
-use super::provider::{ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef};
 use super::tx::TxSigner;
 
 /// SourceHub provider backed by Cosmos SDK (REST/LCD + CometBFT).
@@ -82,6 +85,47 @@ fn subject_to_json(subject: &SubjectRef) -> serde_json::Value {
 impl SourceHubProvider for CosmosProvider {
     fn authorized_account(&self) -> String {
         self.signer.address()
+    }
+
+    async fn create_bearer_token(&self, did: &str) -> Result<String, ProviderError> {
+        let signing_config = defra_core::signing::get_identity(did).ok_or_else(|| {
+            tracing::warn!(
+                did,
+                "SourceHub bearer token creation failed: no signing config for DID. \
+                 The identity may have been unregistered. Denying access."
+            );
+            ProviderError::Config(format!("no signing config found for DID: {}", did))
+        })?;
+
+        let key_type: crypto::KeyType = match signing_config.key_type.as_str() {
+            "ed25519" => crypto::KeyType::Ed25519,
+            "secp256k1" => crypto::KeyType::Secp256k1,
+            other => {
+                return Err(ProviderError::Config(format!(
+                    "unsupported key type: {}",
+                    other
+                )))
+            }
+        };
+
+        let raw_identity =
+            identity::RawIdentity::from_bytes(key_type, &signing_config.private_key_bytes)
+                .map_err(|e| ProviderError::Config(format!("failed to create identity: {}", e)))?;
+
+        let token_bytes = identity::new_token(
+            &raw_identity,
+            Duration::from_secs(300),
+            None,
+            Some(self.signer.address()),
+        )
+        .map_err(|e| ProviderError::Config(format!("failed to create bearer token: {}", e)))?;
+
+        String::from_utf8(token_bytes)
+            .map_err(|e| ProviderError::Config(format!("bearer token is not valid UTF-8: {}", e)))
+    }
+
+    fn self_did(&self) -> Option<String> {
+        None
     }
 
     async fn create_policy(&self, policy_yaml: &str) -> Result<String, ProviderError> {

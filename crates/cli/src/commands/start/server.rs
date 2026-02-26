@@ -942,22 +942,23 @@ impl Node {
                     )
                 })?;
 
-                let hub_acp = Arc::new(
-                    sourcehub::HubRsDocumentACP::new(
+                let provider = Arc::new(
+                    sourcehub::HubRsProvider::new(
                         config.acp.hub_rs_address.clone(),
                         signer_key_bytes,
                     )
                     .await
-                    .map_err(|e| Error::InvalidConfig(format!("hub.rs ACP: {}", e)))?,
+                    .map_err(|e| Error::InvalidConfig(format!("hub.rs provider: {}", e)))?,
                 );
 
-                let hub_adapter = crate::hub_rs_acp_adapter::HubRsAcpAdapter::new_arc(
-                    hub_acp.clone(),
+                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider));
+                let sh_adapter = crate::sourcehub_acp_adapter::SourceHubAcpAdapter::new_arc(
+                    sh_acp.clone(),
                     zanzibar_store.clone(),
                 );
 
                 info!("Document ACP configured (hub.rs)");
-                (hub_acp as Arc<dyn acp::DocumentACP>, Some(hub_adapter))
+                (sh_acp as Arc<dyn acp::DocumentACP>, Some(sh_adapter))
             } else {
                 info!("Document ACP configured (local)");
                 (

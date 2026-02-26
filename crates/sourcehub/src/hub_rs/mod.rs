@@ -1,7 +1,7 @@
 mod abi;
 mod bearer;
 mod client;
-mod document_acp;
+mod provider;
 mod signer;
 
-pub use document_acp::{HubRsDocumentACP, HubRsError};
+pub use provider::HubRsProvider;

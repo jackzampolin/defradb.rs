@@ -33,6 +33,10 @@ pub enum ProviderError {
 pub trait SourceHubProvider: MaybeSendSync {
     fn authorized_account(&self) -> String;
 
+    async fn create_bearer_token(&self, did: &str) -> Result<String, ProviderError>;
+
+    fn self_did(&self) -> Option<String>;
+
     async fn create_policy(&self, policy_yaml: &str) -> Result<String, ProviderError>;
 
     async fn register_object(

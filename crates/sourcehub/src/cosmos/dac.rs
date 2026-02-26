@@ -5,14 +5,13 @@
 //! between Cosmos SDK and EVM backends.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use identity::Did;
 
 use acp::{DocumentACP, DocumentPermission, Identity, Result};
 
-use super::provider::{ProviderError, SourceHubProvider, SubjectRef};
+use crate::provider::{ProviderError, SourceHubProvider, SubjectRef};
 
 /// DocumentACP backed by SourceHub's on-chain x/acp module.
 ///
@@ -35,54 +34,11 @@ impl SourceHubDocumentACP {
         self.provider.create_policy(policy_yaml).await
     }
 
-    /// Generate a bearer token for the given DID.
-    ///
-    /// Looks up the identity's signing config from the global store,
-    /// creates a JWT with `authorized_account` set to the provider's account.
-    ///
-    /// If no signing config is found for the DID, the identity may have been
-    /// unregistered remotely. A clear warning is logged and access is denied
-    /// rather than proceeding with an invalid or absent identity.
-    fn create_bearer_token(&self, did: &str) -> std::result::Result<String, acp::Error> {
-        let signing_config = defra_core::signing::get_identity(did).ok_or_else(|| {
-            tracing::warn!(
-                did,
-                "SourceHub bearer token creation failed: no signing config for DID. \
-                 The identity may have been unregistered. Denying access."
-            );
-            acp::Error::PermissionDenied(format!("no signing config found for DID: {}", did))
-        })?;
-
-        let key_type: crypto::KeyType = match signing_config.key_type.as_str() {
-            "ed25519" => crypto::KeyType::Ed25519,
-            "secp256k1" => crypto::KeyType::Secp256k1,
-            other => {
-                return Err(acp::Error::PermissionDenied(format!(
-                    "unsupported key type: {}",
-                    other
-                )))
-            }
-        };
-
-        let raw_identity =
-            identity::RawIdentity::from_bytes(key_type, &signing_config.private_key_bytes)
-                .map_err(|e| {
-                    acp::Error::PermissionDenied(format!("failed to create identity: {}", e))
-                })?;
-
-        let token_bytes = identity::new_token(
-            &raw_identity,
-            Duration::from_secs(300), // 5 minute validity
-            None,
-            Some(self.provider.authorized_account()),
-        )
-        .map_err(|e| {
-            acp::Error::PermissionDenied(format!("failed to create bearer token: {}", e))
-        })?;
-
-        String::from_utf8(token_bytes).map_err(|e| {
-            acp::Error::PermissionDenied(format!("bearer token is not valid UTF-8: {}", e))
-        })
+    async fn create_bearer_token(&self, did: &str) -> std::result::Result<String, acp::Error> {
+        self.provider
+            .create_bearer_token(did)
+            .await
+            .map_err(provider_err)
     }
 }
 
@@ -108,7 +64,7 @@ impl DocumentACP for SourceHubDocumentACP {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<()> {
-        let bearer_token = self.create_bearer_token(identity.as_str())?;
+        let bearer_token = self.create_bearer_token(identity.as_str()).await?;
         self.provider
             .register_object(&bearer_token, policy_id, resource_name, doc_id)
             .await
@@ -195,7 +151,7 @@ impl DocumentACP for SourceHubDocumentACP {
         relation: &str,
         _managing_relations: &[String],
     ) -> Result<bool> {
-        let bearer_token = self.create_bearer_token(requestor.as_str())?;
+        let bearer_token = self.create_bearer_token(requestor.as_str()).await?;
         let subject = did_to_subject(target);
         self.provider
             .set_relationship(
@@ -220,7 +176,7 @@ impl DocumentACP for SourceHubDocumentACP {
         relation: &str,
         _managing_relations: &[String],
     ) -> Result<bool> {
-        let bearer_token = self.create_bearer_token(requestor.as_str())?;
+        let bearer_token = self.create_bearer_token(requestor.as_str()).await?;
         let subject = did_to_subject(target);
         self.provider
             .delete_relationship(
@@ -241,8 +197,6 @@ impl DocumentACP for SourceHubDocumentACP {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<()> {
-        // Unregister needs a bearer token from the owner.
-        // Query the owner first, then use their identity.
         let (_is_registered, owner_did) = self
             .provider
             .query_object_owner(policy_id, resource_name, doc_id)
@@ -253,7 +207,12 @@ impl DocumentACP for SourceHubDocumentACP {
             return Ok(());
         }
 
-        let bearer_token = self.create_bearer_token(&owner_did)?;
+        // hub.rs uses node's DID for archive; Cosmos uses the owner's DID
+        let archive_did = self
+            .provider
+            .self_did()
+            .unwrap_or_else(|| owner_did.clone());
+        let bearer_token = self.create_bearer_token(&archive_did).await?;
         self.provider
             .archive_object(&bearer_token, policy_id, resource_name, doc_id)
             .await
