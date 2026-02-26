@@ -36,17 +36,17 @@ pub(crate) fn translate_query(
         return translate_synthetic_query(&select.projection);
     }
 
+    // Check for JOINs (must come before aggregate check — a query can have both)
+    if join::has_joins(select) {
+        return join::translate_join(select, query);
+    }
+
     // Check for aggregates in projection
     if aggregate::is_aggregate_query(select) {
         if aggregate::has_group_by(select) {
             return aggregate::translate_group_by(select, query);
         }
         return aggregate::translate_aggregate(select, query);
-    }
-
-    // Check for JOINs
-    if join::has_joins(select) {
-        return join::translate_join(select, query);
     }
 
     // Check for DISTINCT

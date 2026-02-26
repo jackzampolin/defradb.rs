@@ -19,6 +19,26 @@ pub(super) fn has_group_by(select: &sqlparser::ast::Select) -> bool {
         && !matches!(select.group_by, GroupByExpr::All(_))
 }
 
+pub(super) fn extract_aggregates(select: &sqlparser::ast::Select) -> Vec<AggregateExpr> {
+    let mut aggregates = Vec::new();
+    for (idx, item) in select.projection.iter().enumerate() {
+        let (expr, alias) = match item {
+            SelectItem::ExprWithAlias { expr, alias } => (expr, Some(alias.value.clone())),
+            SelectItem::UnnamedExpr(expr) => (expr, None),
+            _ => continue,
+        };
+        if let Some(mut agg) = parse_aggregate_function(expr) {
+            if let Some(a) = alias {
+                agg.alias = a;
+            } else if agg.alias.is_empty() {
+                agg.alias = format!("agg_{}", idx);
+            }
+            aggregates.push(agg);
+        }
+    }
+    aggregates
+}
+
 pub(super) fn translate_aggregate(
     select: &sqlparser::ast::Select,
     _query: &sqlparser::ast::Query,

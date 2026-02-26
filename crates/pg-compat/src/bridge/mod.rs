@@ -54,6 +54,7 @@ pub struct AggregateExpr {
 pub struct JoinClause {
     pub table_name: String,
     pub join_type: JoinType,
+    pub left_table: Option<String>,
     pub left_col: String,
     pub right_col: String,
 }
@@ -137,6 +138,8 @@ pub enum SqlStatement {
         limit: Option<String>,
         offset: Option<String>,
         all_select_columns: Vec<(String, String, String)>,
+        group_columns: Vec<String>,
+        group_aggregates: Vec<AggregateExpr>,
     },
     /// SELECT DISTINCT — wraps another statement and deduplicates.
     Distinct {

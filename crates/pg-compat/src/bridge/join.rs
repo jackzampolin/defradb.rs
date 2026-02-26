@@ -2,8 +2,9 @@ use sqlparser::ast::{Expr, JoinConstraint, JoinOperator, OrderByKind, SelectItem
 
 use crate::error::PgCompatError;
 
+use super::aggregate;
 use super::expr::{expr_to_field_name, translate_limit_expr, translate_order, translate_where};
-use super::{extract_table_name, JoinClause, JoinType, SqlStatement};
+use super::{extract_table_name, AggregateExpr, JoinClause, JoinType, SqlStatement};
 
 pub(super) fn has_joins(select: &sqlparser::ast::Select) -> bool {
     !select.from.is_empty() && !select.from[0].joins.is_empty()
@@ -25,10 +26,16 @@ pub(super) fn translate_join(
     for item in &select.projection {
         match item {
             SelectItem::UnnamedExpr(expr) => {
+                if is_function_expr(expr) {
+                    continue;
+                }
                 let (tbl, col) = expr_to_qualified_name(expr, &primary_alias)?;
                 all_select_columns.push((tbl, col.clone(), col));
             }
             SelectItem::ExprWithAlias { expr, alias } => {
+                if is_function_expr(expr) {
+                    continue;
+                }
                 let (tbl, col) = expr_to_qualified_name(expr, &primary_alias)?;
                 all_select_columns.push((tbl, col, alias.value.clone()));
             }
@@ -79,6 +86,9 @@ pub(super) fn translate_join(
         .map(|o| translate_limit_expr(&o.value))
         .transpose()?;
 
+    // Extract GROUP BY + aggregates when a JOIN query also uses GROUP BY
+    let (group_columns, group_aggregates) = extract_join_group_by(select);
+
     Ok(SqlStatement::Join {
         primary_table,
         joins,
@@ -87,6 +97,8 @@ pub(super) fn translate_join(
         limit,
         offset,
         all_select_columns,
+        group_columns,
+        group_aggregates,
     })
 }
 
@@ -118,23 +130,26 @@ fn parse_join_clause(join: &sqlparser::ast::Join) -> Result<JoinClause, PgCompat
         }
     };
 
-    let (left_col, right_col) = parse_join_on(join_type.1)?;
+    let (left_table, left_col, right_col) = parse_join_on(join_type.1)?;
 
     Ok(JoinClause {
         table_name,
         join_type: join_type.0,
+        left_table,
         left_col,
         right_col,
     })
 }
 
-fn parse_join_on(constraint: &JoinConstraint) -> Result<(String, String), PgCompatError> {
+fn parse_join_on(
+    constraint: &JoinConstraint,
+) -> Result<(Option<String>, String, String), PgCompatError> {
     match constraint {
         JoinConstraint::On(expr) => match expr {
             Expr::BinaryOp { left, right, .. } => {
-                let l = expr_to_field_name(left)?;
+                let (left_table, left_col) = expr_to_table_and_field(left)?;
                 let r = expr_to_field_name(right)?;
-                Ok((l, r))
+                Ok((left_table, left_col, r))
             }
             _ => Err(PgCompatError::UnsupportedSql(
                 "only simple ON conditions supported".into(),
@@ -143,6 +158,25 @@ fn parse_join_on(constraint: &JoinConstraint) -> Result<(String, String), PgComp
         _ => Err(PgCompatError::UnsupportedSql(
             "only ON clause supported in JOIN".into(),
         )),
+    }
+}
+
+fn expr_to_table_and_field(expr: &Expr) -> Result<(Option<String>, String), PgCompatError> {
+    match expr {
+        Expr::Identifier(ident) => Ok((None, ident.value.clone())),
+        Expr::CompoundIdentifier(parts) if parts.len() >= 2 => {
+            let table = parts[parts.len() - 2].value.clone();
+            let col = parts[parts.len() - 1].value.clone();
+            Ok((Some(table), col))
+        }
+        Expr::CompoundIdentifier(parts) => parts
+            .last()
+            .map(|p| (None, p.value.clone()))
+            .ok_or_else(|| PgCompatError::UnsupportedSql("empty compound identifier".into())),
+        _ => Err(PgCompatError::UnsupportedSql(format!(
+            "expected column, got: {}",
+            expr
+        ))),
     }
 }
 
@@ -164,9 +198,31 @@ fn expr_to_qualified_name(
     }
 }
 
+fn is_function_expr(expr: &Expr) -> bool {
+    matches!(expr, Expr::Function(_))
+}
+
 fn extract_alias(table: &TableFactor) -> Option<String> {
     match table {
         TableFactor::Table { alias, .. } => alias.as_ref().map(|a| a.name.value.clone()),
         _ => None,
     }
+}
+
+fn extract_join_group_by(select: &sqlparser::ast::Select) -> (Vec<String>, Vec<AggregateExpr>) {
+    if !aggregate::is_aggregate_query(select) || !aggregate::has_group_by(select) {
+        return (vec![], vec![]);
+    }
+
+    let group_columns = match &select.group_by {
+        sqlparser::ast::GroupByExpr::Expressions(exprs, _) => exprs
+            .iter()
+            .filter_map(|e| expr_to_field_name(e).ok())
+            .collect(),
+        _ => vec![],
+    };
+
+    let group_aggregates = aggregate::extract_aggregates(select);
+
+    (group_columns, group_aggregates)
 }

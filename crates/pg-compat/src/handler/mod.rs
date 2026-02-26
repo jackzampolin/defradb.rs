@@ -435,6 +435,8 @@ impl DefraQueryHandler {
                 limit,
                 offset,
                 all_select_columns,
+                group_columns,
+                group_aggregates,
             } => {
                 self.handle_join(
                     &primary_table,
@@ -444,6 +446,8 @@ impl DefraQueryHandler {
                     limit.as_deref(),
                     offset.as_deref(),
                     &all_select_columns,
+                    &group_columns,
+                    &group_aggregates,
                     txn_id.as_deref(),
                     identity_did.as_deref(),
                 )

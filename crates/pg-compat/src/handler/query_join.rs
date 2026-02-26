@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -7,7 +8,7 @@ use pgwire::api::Type;
 use pgwire::error::PgWireResult;
 use tracing::debug;
 
-use crate::bridge::{JoinClause, JoinType};
+use crate::bridge::{AggFunc, AggregateExpr, JoinClause, JoinType};
 use crate::encode;
 
 use super::{pg_error, DefraQueryHandler};
@@ -23,6 +24,8 @@ impl DefraQueryHandler {
         limit: Option<&str>,
         _offset: Option<&str>,
         all_select_columns: &[(String, String, String)],
+        group_columns: &[String],
+        group_aggregates: &[AggregateExpr],
         txn_id: Option<&str>,
         identity_did: Option<&str>,
     ) -> PgWireResult<Response> {
@@ -77,12 +80,20 @@ impl DefraQueryHandler {
 
         debug!(count = primary_docs.len(), "JOIN: primary docs fetched");
 
-        // 2. For each join, query the joined table
+        // 2. For each join, query the joined table.
+        //    Track all fetched docs by table so chained joins can source
+        //    join keys from a previously-joined table (not just the primary).
+        let mut table_docs: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        table_docs.insert(primary_table.to_string(), primary_docs.clone());
+
         let mut join_results: Vec<(String, JoinType, String, String, Vec<serde_json::Value>)> =
             Vec::new();
 
         for jc in joins {
-            let join_values: Vec<String> = primary_docs
+            let source_table = jc.left_table.as_deref().unwrap_or(primary_table);
+            let source_docs = table_docs.get(source_table).cloned().unwrap_or_default();
+
+            let join_values: Vec<String> = source_docs
                 .iter()
                 .filter_map(|doc| {
                     doc.get(&jc.left_col).and_then(|v| match v {
@@ -133,6 +144,8 @@ impl DefraQueryHandler {
                 .cloned()
                 .unwrap_or_default();
 
+            table_docs.insert(jc.table_name.clone(), joined_docs.clone());
+
             join_results.push((
                 jc.table_name.clone(),
                 jc.join_type.clone(),
@@ -142,20 +155,33 @@ impl DefraQueryHandler {
             ));
         }
 
-        // 3. In-memory join + project selected columns
-        let mut result_rows: Vec<Vec<(String, Option<serde_json::Value>)>> = Vec::new();
+        // 3. In-memory join using row contexts that track raw docs per table.
+        //    This allows chained joins to look up left_col from the correct table.
+        let mut contexts: Vec<RowContext> = primary_docs
+            .iter()
+            .map(|doc| {
+                let cols = project_columns(primary_table, doc, all_select_columns);
+                let mut docs = HashMap::new();
+                docs.insert(primary_table.to_string(), doc.clone());
+                RowContext {
+                    table_docs: docs,
+                    columns: cols,
+                }
+            })
+            .collect();
 
-        for primary_doc in &primary_docs {
-            let mut matched_any = true;
-            let mut combined: Vec<Vec<(String, Option<serde_json::Value>)>> = vec![vec![]];
+        for (idx, (join_table, join_type, _left_col, right_col, joined_docs)) in
+            join_results.iter().enumerate()
+        {
+            let left_table_name = joins[idx].left_table.as_deref().unwrap_or(primary_table);
 
-            let primary_cols = project_columns(primary_table, primary_doc, all_select_columns);
-            for row in &mut combined {
-                row.extend(primary_cols.clone());
-            }
+            let mut new_contexts = Vec::new();
 
-            for (join_table, join_type, left_col, right_col, joined_docs) in &join_results {
-                let left_val = primary_doc.get(left_col.as_str());
+            for ctx in &contexts {
+                let left_val = ctx
+                    .table_docs
+                    .get(left_table_name)
+                    .and_then(|d| d.get(_left_col.as_str()));
 
                 let matching: Vec<&serde_json::Value> = joined_docs
                     .iter()
@@ -165,48 +191,55 @@ impl DefraQueryHandler {
                 if matching.is_empty() {
                     match join_type {
                         JoinType::Left => {
-                            for row in &mut combined {
-                                let null_cols =
-                                    null_columns_for_table(join_table, all_select_columns);
-                                row.extend(null_cols);
-                            }
+                            let mut new_ctx = ctx.clone();
+                            let null_cols = null_columns_for_table(join_table, all_select_columns);
+                            new_ctx.columns.extend(null_cols);
+                            new_contexts.push(new_ctx);
                         }
-                        JoinType::Inner => {
-                            matched_any = false;
-                            break;
-                        }
+                        JoinType::Inner => { /* skip — no match */ }
                     }
                 } else {
-                    let mut new_combined = Vec::new();
-                    for existing in &combined {
-                        for jdoc in &matching {
-                            let mut row = existing.clone();
-                            let join_cols = project_columns(join_table, jdoc, all_select_columns);
-                            row.extend(join_cols);
-                            new_combined.push(row);
-                        }
+                    for jdoc in &matching {
+                        let mut new_ctx = ctx.clone();
+                        new_ctx
+                            .table_docs
+                            .insert(join_table.clone(), (*jdoc).clone());
+                        let join_cols = project_columns(join_table, jdoc, all_select_columns);
+                        new_ctx.columns.extend(join_cols);
+                        new_contexts.push(new_ctx);
                     }
-                    combined = new_combined;
                 }
             }
 
-            if matched_any {
-                result_rows.extend(combined);
-            }
+            contexts = new_contexts;
         }
+
+        let mut result_rows: Vec<Vec<(String, Option<serde_json::Value>)>> =
+            contexts.into_iter().map(|ctx| ctx.columns).collect();
 
         // Apply OFFSET/LIMIT to the final joined result
         let offset_n: usize = _offset.and_then(|o| o.parse().ok()).unwrap_or(0);
         let limit_n: Option<usize> = limit.and_then(|l| l.parse().ok());
 
-        let result_rows: Vec<_> = result_rows
+        result_rows = result_rows
             .into_iter()
             .skip(offset_n)
             .take(limit_n.unwrap_or(usize::MAX))
             .collect();
 
+        // Post-join GROUP BY + aggregation
+        if !group_columns.is_empty() && !group_aggregates.is_empty() {
+            return encode_grouped_join_rows(&result_rows, group_columns, group_aggregates);
+        }
+
         encode_join_rows(&result_rows)
     }
+}
+
+#[derive(Clone)]
+struct RowContext {
+    table_docs: HashMap<String, serde_json::Value>,
+    columns: Vec<(String, Option<serde_json::Value>)>,
 }
 
 /// Build the GraphQL field list for a table query.
@@ -227,9 +260,13 @@ fn build_field_list(
         }
     }
 
-    // Add join key columns
+    // Add join key columns — include left_col for the table it belongs to
     for jc in joins {
-        if is_primary {
+        let left_tbl = jc.left_table.as_deref().unwrap_or("");
+        if is_primary && (left_tbl.is_empty() || left_tbl == table) {
+            fields.insert(jc.left_col.clone());
+        }
+        if !is_primary && left_tbl == table {
             fields.insert(jc.left_col.clone());
         }
         if jc.table_name == table {
@@ -268,6 +305,88 @@ fn project_columns(
     }
 
     result
+}
+
+fn encode_grouped_join_rows(
+    rows: &[Vec<(String, Option<serde_json::Value>)>],
+    group_columns: &[String],
+    aggregates: &[AggregateExpr],
+) -> PgWireResult<Response> {
+    // Group rows by the GROUP BY column values
+    let mut groups: Vec<(Vec<String>, usize)> = Vec::new();
+
+    for row in rows {
+        let key: Vec<String> = group_columns
+            .iter()
+            .map(|gc| {
+                row.iter()
+                    .find(|(name, _)| name == gc)
+                    .and_then(|(_, val)| val.as_ref())
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        if let Some(existing) = groups.iter_mut().find(|(k, _)| k == &key) {
+            existing.1 += 1;
+        } else {
+            groups.push((key, 1));
+        }
+    }
+
+    // Build field infos: group columns + aggregates
+    let mut field_infos = Vec::new();
+    for gc in group_columns {
+        field_infos.push(FieldInfo::new(
+            gc.clone(),
+            None,
+            None,
+            Type::TEXT,
+            FieldFormat::Text,
+        ));
+    }
+    for agg in aggregates {
+        let pg_type = match agg.func {
+            AggFunc::Count => Type::INT8,
+            AggFunc::Avg => Type::FLOAT8,
+            _ => Type::INT8,
+        };
+        field_infos.push(FieldInfo::new(
+            agg.alias.clone(),
+            None,
+            None,
+            pg_type,
+            FieldFormat::Text,
+        ));
+    }
+
+    let schema = Arc::new(field_infos);
+    let mut encoded_rows = Vec::new();
+
+    for (key, count) in &groups {
+        let mut encoder = DataRowEncoder::new(schema.clone());
+
+        for val in key {
+            encoder.encode_field(&val.as_str())?;
+        }
+
+        for agg in aggregates {
+            match agg.func {
+                AggFunc::Count => encoder.encode_field(&(*count as i64))?,
+                _ => encoder.encode_field(&(*count as i64))?,
+            }
+        }
+
+        encoded_rows.push(Ok(encoder.take_row()));
+    }
+
+    Ok(Response::Query(QueryResponse::new(
+        schema,
+        stream::iter(encoded_rows),
+    )))
 }
 
 fn null_columns_for_table(
