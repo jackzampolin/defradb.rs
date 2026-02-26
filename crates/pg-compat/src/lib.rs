@@ -37,7 +37,7 @@ impl PgServer {
             collections,
             schema_manager,
         ));
-        let factory = Arc::new(DefraHandlerFactory::new(handler));
+        let factory = Arc::new(DefraHandlerFactory::new(handler, address.to_string()));
         Self { address, factory }
     }
 
