@@ -1,7 +1,6 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use acp_light_client::cache::keys as cache_keys;
 use acp_light_client::AcpLightClient;
 use alloy_primitives::{Bytes, FixedBytes};
 use alloy_sol_types::SolCall;
@@ -136,58 +135,6 @@ impl HubRsProvider {
             h.update(permission.as_bytes());
         }
         hex::encode(h.finalize())
-    }
-
-    /// Check if an AccessDecision is already cached in the light client.
-    fn check_decision_cached(&self, decision_id: &str) -> Option<bool> {
-        let key_bytes = cache_keys::access_decision_key(decision_id);
-        let key_hex = cache_keys::hex_encode_key(&key_bytes);
-        let height = self.light_client.header_chain().latest_height();
-        self.light_client
-            .cache()
-            .get(&key_hex, height)
-            .map(|r| r.allowed)
-    }
-
-    /// Fetch and verify an AccessDecision proof via the light client.
-    async fn verify_decision_proof(&self, decision_id: &str) -> Result<bool, ProviderError> {
-        let key_bytes = cache_keys::access_decision_key(decision_id);
-        let key_hex = cache_keys::hex_encode_key(&key_bytes);
-
-        let height = self.light_client.header_chain().latest_height().max(1);
-        let sync = self.light_client.header_chain().state();
-
-        let (proof, module_state_root) = if let Some(ref sync) = sync {
-            let proof = self
-                .light_client
-                .proof_client()
-                .fetch_and_verify_proof_with_root(
-                    "acp",
-                    &key_hex,
-                    sync.height,
-                    sync.module_state_root,
-                )
-                .await
-                .map_err(|e| ProviderError::Query(format!("decision proof: {}", e)))?;
-            (proof, sync.module_state_root)
-        } else {
-            self.light_client
-                .proof_client()
-                .fetch_and_verify_proof("acp", &key_hex, height)
-                .await
-                .map_err(|e| ProviderError::Query(format!("decision proof: {}", e)))?
-        };
-
-        let allowed = proof.value.is_some();
-        let value_bytes = proof.value.as_ref().map(|v| {
-            let v = v.strip_prefix("0x").unwrap_or(v);
-            hex::decode(v).unwrap_or_default()
-        });
-        self.light_client
-            .cache()
-            .insert(&key_hex, value_bytes, proof.height, module_state_root);
-
-        Ok(allowed)
     }
 }
 
@@ -467,8 +414,8 @@ impl SourceHubProvider for HubRsProvider {
         let decision_id = Self::compute_decision_id(policy_id, &creator_did, actor_did, &ops);
 
         // Fast path: decision already proven and cached by the light client.
-        if let Some(allowed) = self.check_decision_cached(&decision_id) {
-            return Ok(allowed);
+        if let Ok(result) = self.light_client.check_access_decision(&decision_id).await {
+            return Ok(result.allowed);
         }
 
         // Submit checkAccess tx to create the AccessDecision on-chain.
@@ -489,7 +436,12 @@ impl SourceHubProvider for HubRsProvider {
                 let _ = tokio::time::timeout(Duration::from_secs(5), self.wait_for_state_update())
                     .await;
 
-                self.verify_decision_proof(&decision_id).await
+                let result = self
+                    .light_client
+                    .check_access_decision(&decision_id)
+                    .await
+                    .map_err(|e| ProviderError::Query(format!("decision proof: {}", e)))?;
+                Ok(result.allowed)
             }
             Err(ProviderError::Transaction(msg)) if msg.contains("reverted") => {
                 // Tx reverted — access denied by the policy engine.

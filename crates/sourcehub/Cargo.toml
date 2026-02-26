@@ -54,5 +54,4 @@ alloy-rlp.workspace = true
 bs58.workspace = true
 
 # ACP light client (proof-validated cache)
-acp-light-client = { git = "ssh://git@github.com/sourcenetwork/backbone.git", branch = "main" }
-eyre = "0.6"
+acp-light-client = { git = "https://github.com/sourcenetwork/backbone.git", branch = "main" }
