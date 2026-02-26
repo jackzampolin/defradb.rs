@@ -5,17 +5,26 @@ use sqlparser::ast::{
 
 use crate::error::PgCompatError;
 
+use super::aggregate;
 use super::expr::{
     expr_to_field_name, expr_to_graphql_value, translate_limit_expr, translate_order,
     translate_projection, translate_synthetic_query, translate_where, typed_graphql_value,
 };
+use super::join;
+use super::set_ops;
 use super::{extract_table_name, object_name_to_string, FieldTypeMap, MutationKind, SqlStatement};
 
-pub(super) fn translate_query(
+pub(crate) fn translate_query(
     query: &sqlparser::ast::Query,
 ) -> Result<SqlStatement, PgCompatError> {
     let select = match query.body.as_ref() {
         SetExpr::Select(s) => s,
+        SetExpr::SetOperation { .. } => {
+            return set_ops::translate_set_operation(query.body.as_ref(), query);
+        }
+        SetExpr::Query(inner) => {
+            return translate_query(inner);
+        }
         _ => {
             return Err(PgCompatError::UnsupportedSql(
                 "only simple SELECT statements are supported".into(),
@@ -26,6 +35,22 @@ pub(super) fn translate_query(
     if select.from.is_empty() {
         return translate_synthetic_query(&select.projection);
     }
+
+    // Check for aggregates in projection
+    if aggregate::is_aggregate_query(select) {
+        if aggregate::has_group_by(select) {
+            return aggregate::translate_group_by(select, query);
+        }
+        return aggregate::translate_aggregate(select, query);
+    }
+
+    // Check for JOINs
+    if join::has_joins(select) {
+        return join::translate_join(select, query);
+    }
+
+    // Check for DISTINCT
+    let is_distinct = select.distinct.is_some();
 
     if select.from.len() != 1 {
         return Err(PgCompatError::UnsupportedSql(
@@ -77,10 +102,18 @@ pub(super) fn translate_query(
         format!("({})", args.join(", "))
     };
 
-    Ok(SqlStatement::Query(format!(
+    let stmt = SqlStatement::Query(format!(
         "query {{ {}{} {{ {} }} }}",
         table_name, args_str, fields
-    )))
+    ));
+
+    if is_distinct {
+        return Ok(SqlStatement::Distinct {
+            inner: Box::new(stmt),
+        });
+    }
+
+    Ok(stmt)
 }
 
 pub(super) fn translate_insert(

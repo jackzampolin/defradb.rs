@@ -361,25 +361,32 @@ pub fn extract_select_columns(sql: &str) -> Vec<String> {
     };
 
     if let sqlparser::ast::Statement::Query(query) = stmt {
-        if let sqlparser::ast::SetExpr::Select(select) = query.body.as_ref() {
-            return select
-                .projection
-                .iter()
-                .map(|item| match item {
-                    sqlparser::ast::SelectItem::ExprWithAlias { alias, .. } => alias.value.clone(),
-                    sqlparser::ast::SelectItem::UnnamedExpr(expr) => {
-                        extract_column_name_from_expr(expr)
-                    }
-                    sqlparser::ast::SelectItem::QualifiedWildcard(name, _) => {
-                        format!("{}.*", name)
-                    }
-                    sqlparser::ast::SelectItem::Wildcard(_) => "*".to_string(),
-                })
-                .collect();
-        }
+        return extract_columns_from_set_expr(query.body.as_ref());
     }
 
     vec![]
+}
+
+fn extract_columns_from_set_expr(body: &sqlparser::ast::SetExpr) -> Vec<String> {
+    match body {
+        sqlparser::ast::SetExpr::Select(select) => select
+            .projection
+            .iter()
+            .map(|item| match item {
+                sqlparser::ast::SelectItem::ExprWithAlias { alias, .. } => alias.value.clone(),
+                sqlparser::ast::SelectItem::UnnamedExpr(expr) => {
+                    extract_column_name_from_expr(expr)
+                }
+                sqlparser::ast::SelectItem::QualifiedWildcard(name, _) => {
+                    format!("{}.*", name)
+                }
+                sqlparser::ast::SelectItem::Wildcard(_) => "*".to_string(),
+            })
+            .collect(),
+        sqlparser::ast::SetExpr::SetOperation { left, .. } => extract_columns_from_set_expr(left),
+        sqlparser::ast::SetExpr::Query(inner) => extract_columns_from_set_expr(inner.body.as_ref()),
+        _ => vec![],
+    }
 }
 
 fn extract_column_name_from_expr(expr: &sqlparser::ast::Expr) -> String {

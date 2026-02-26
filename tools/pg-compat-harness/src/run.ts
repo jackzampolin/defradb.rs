@@ -28,6 +28,12 @@ import * as t10 from "./tests/10-session-lifecycle";
 import * as t11 from "./tests/11-txn-read-your-writes";
 import * as t12 from "./tests/12-advanced-filters";
 import * as t13 from "./tests/13-edge-cases";
+import * as t14 from "./tests/14-aggregates";
+import * as t15 from "./tests/15-group-by";
+import * as t16 from "./tests/16-joins";
+import * as t17 from "./tests/17-distinct";
+import * as t18 from "./tests/18-subqueries";
+import * as t19 from "./tests/19-set-operations";
 
 const categories: { name: string; run: () => Promise<TestResult[]> }[] = [
   { name: "01-connection", run: t01.run },
@@ -43,6 +49,12 @@ const categories: { name: string; run: () => Promise<TestResult[]> }[] = [
   { name: "11-txn-read-your-writes", run: t11.run },
   { name: "12-advanced-filters", run: t12.run },
   { name: "13-edge-cases", run: t13.run },
+  { name: "14-aggregates", run: t14.run },
+  { name: "15-group-by", run: t15.run },
+  { name: "16-joins", run: t16.run },
+  { name: "17-distinct", run: t17.run },
+  { name: "18-subqueries", run: t18.run },
+  { name: "19-set-operations", run: t19.run },
 ];
 
 async function main() {

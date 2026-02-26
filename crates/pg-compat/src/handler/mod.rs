@@ -2,6 +2,10 @@ pub(crate) mod auth;
 mod cascade;
 mod catalog;
 mod protocol;
+mod query_aggregate;
+mod query_distinct;
+mod query_join;
+mod query_set_ops;
 
 use std::sync::Arc;
 
@@ -388,6 +392,102 @@ impl DefraQueryHandler {
             SqlStatement::DropTable => {
                 debug!(sql, "DDL DROP TABLE accepted");
                 Ok(encode::encode_empty_response("DROP TABLE"))
+            }
+            SqlStatement::Aggregate {
+                table_name,
+                aggregates,
+                filter,
+            } => {
+                self.handle_aggregate(
+                    &table_name,
+                    &aggregates,
+                    filter.as_deref(),
+                    txn_id.as_deref(),
+                    identity_did.as_deref(),
+                )
+                .await
+            }
+            SqlStatement::GroupBy {
+                table_name,
+                group_columns,
+                aggregates,
+                non_agg_columns,
+                filter,
+                having_filter,
+            } => {
+                self.handle_group_by(
+                    &table_name,
+                    &group_columns,
+                    &aggregates,
+                    &non_agg_columns,
+                    filter.as_deref(),
+                    having_filter.as_deref(),
+                    txn_id.as_deref(),
+                    identity_did.as_deref(),
+                )
+                .await
+            }
+            SqlStatement::Join {
+                primary_table,
+                joins,
+                filter,
+                order,
+                limit,
+                offset,
+                all_select_columns,
+            } => {
+                self.handle_join(
+                    &primary_table,
+                    &joins,
+                    filter.as_deref(),
+                    order.as_deref(),
+                    limit.as_deref(),
+                    offset.as_deref(),
+                    &all_select_columns,
+                    txn_id.as_deref(),
+                    identity_did.as_deref(),
+                )
+                .await
+            }
+            SqlStatement::Distinct { inner } => {
+                self.handle_distinct(*inner, client, txn_id, identity_did)
+                    .await
+            }
+            SqlStatement::SetOperation {
+                left_query,
+                right_query,
+                op,
+            } => {
+                self.handle_set_operation(
+                    &left_query,
+                    &right_query,
+                    &op,
+                    txn_id.as_deref(),
+                    identity_did.as_deref(),
+                )
+                .await
+            }
+            SqlStatement::Subquery {
+                outer_table,
+                outer_filter,
+                outer_fields,
+                inner_table,
+                inner_column,
+                join_column,
+                negated,
+            } => {
+                self.handle_subquery(
+                    &outer_table,
+                    outer_filter.as_deref(),
+                    &outer_fields,
+                    &inner_table,
+                    &inner_column,
+                    &join_column,
+                    negated,
+                    txn_id.as_deref(),
+                    identity_did.as_deref(),
+                )
+                .await
             }
         }
     }

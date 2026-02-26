@@ -61,14 +61,7 @@ pub fn extract_table_from_sql(sql: &str) -> Option<String> {
     let statements = Parser::parse_sql(&dialect, sql).ok()?;
     let stmt = statements.first()?;
     match stmt {
-        Statement::Query(query) => {
-            if let SetExpr::Select(select) = query.body.as_ref() {
-                if let Some(from) = select.from.first() {
-                    return extract_table_name(&from.relation).ok();
-                }
-            }
-            None
-        }
+        Statement::Query(query) => extract_table_from_set_expr(query.body.as_ref()),
         Statement::Insert(insert) => match &insert.table {
             TableObject::TableName(name) => Some(object_name_to_string(name)),
             _ => None,
@@ -88,8 +81,11 @@ pub fn extract_table_from_sql(sql: &str) -> Option<String> {
 
 /// Check if a SQL string is a SELECT query (or has RETURNING clause).
 pub fn is_select_or_returning(sql: &str) -> bool {
-    let upper = sql.trim().to_uppercase();
-    upper.starts_with("SELECT") || upper.contains("RETURNING")
+    let trimmed = sql.trim();
+    let upper = trimmed.to_uppercase();
+    // Handle parenthesized set operations: (SELECT ...) UNION (SELECT ...)
+    let stripped = upper.trim_start_matches('(');
+    stripped.starts_with("SELECT") || upper.contains("RETURNING")
 }
 
 /// Check if a SQL string references system catalog tables.
@@ -116,6 +112,18 @@ fn has_pg_system_table(lower: &str) -> bool {
         }
     }
     false
+}
+
+fn extract_table_from_set_expr(body: &SetExpr) -> Option<String> {
+    match body {
+        SetExpr::Select(select) => select
+            .from
+            .first()
+            .and_then(|f| extract_table_name(&f.relation).ok()),
+        SetExpr::SetOperation { left, .. } => extract_table_from_set_expr(left),
+        SetExpr::Query(inner) => extract_table_from_set_expr(inner.body.as_ref()),
+        _ => None,
+    }
 }
 
 /// Check if a SQL string is a transaction control statement.

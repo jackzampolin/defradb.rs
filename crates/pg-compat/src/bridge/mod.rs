@@ -1,7 +1,10 @@
+pub(crate) mod aggregate;
 mod ddl;
-mod dml;
+pub(crate) mod dml;
 mod expr;
+pub(crate) mod join;
 mod params;
+pub(crate) mod set_ops;
 #[cfg(test)]
 mod tests;
 
@@ -28,6 +31,44 @@ pub enum MutationKind {
     Insert,
     Update,
     Delete,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregateExpr {
+    pub func: AggFunc,
+    pub field: Option<String>,
+    pub alias: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct JoinClause {
+    pub table_name: String,
+    pub join_type: JoinType,
+    pub left_col: String,
+    pub right_col: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum JoinType {
+    Inner,
+    Left,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SetOp {
+    Union,
+    UnionAll,
+    Intersect,
+    Except,
 }
 
 #[derive(Debug, PartialEq)]
@@ -70,6 +111,52 @@ pub enum SqlStatement {
         table_name: String,
         insert_mutation_name: String,
         update_mutation_name: String,
+    },
+    /// Aggregate query (COUNT, SUM, AVG, MIN, MAX) without GROUP BY.
+    Aggregate {
+        table_name: String,
+        aggregates: Vec<AggregateExpr>,
+        filter: Option<String>,
+    },
+    /// GROUP BY query with aggregates.
+    GroupBy {
+        table_name: String,
+        group_columns: Vec<String>,
+        aggregates: Vec<AggregateExpr>,
+        non_agg_columns: Vec<String>,
+        filter: Option<String>,
+        having_filter: Option<String>,
+    },
+    /// JOIN query — multiple tables joined in memory.
+    Join {
+        primary_table: String,
+        joins: Vec<JoinClause>,
+        filter: Option<String>,
+        order: Option<String>,
+        limit: Option<String>,
+        offset: Option<String>,
+        all_select_columns: Vec<(String, String, String)>,
+    },
+    /// SELECT DISTINCT — wraps another statement and deduplicates.
+    Distinct {
+        inner: Box<SqlStatement>,
+    },
+    /// Set operations: UNION, INTERSECT, EXCEPT.
+    SetOperation {
+        left_query: Box<sqlparser::ast::Query>,
+        right_query: Box<sqlparser::ast::Query>,
+        op: SetOp,
+    },
+    /// Subquery: IN (subquery) or EXISTS (subquery).
+    #[allow(dead_code)]
+    Subquery {
+        outer_table: String,
+        outer_filter: Option<String>,
+        outer_fields: String,
+        inner_table: String,
+        inner_column: String,
+        join_column: String,
+        negated: bool,
     },
 }
 

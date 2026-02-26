@@ -187,6 +187,9 @@ impl DefraQueryHandler {
             return encode::build_field_infos_from_collection(&collection);
         }
 
+        // For aggregate/JOIN queries, column names are aliases that won't be in
+        // the collection. build_field_infos_for_columns falls back to TEXT for
+        // unknown columns, which is correct for text-format wire protocol.
         encode::build_field_infos_for_columns(&collection, &columns)
     }
 }
