@@ -36,6 +36,7 @@ pub struct Node {
     pub(super) p2p_handle: Option<p2p::P2PHostHandle>,
     pub(super) p2p_tasks: Option<P2PTasks>,
     pub(super) http_server: Option<defra_http::Server>,
+    pub(super) pg_server: Option<pg_compat::PgServer>,
     /// Shutdown signal sender (for tests)
     #[doc(hidden)]
     pub shutdown_tx: mpsc::Sender<()>,
@@ -70,7 +71,7 @@ impl Node {
             };
 
         // Initialize storage, database, and set up P2P and HTTP server
-        let (p2p_handle, p2p_tasks, http_server) = match config.datastore.store {
+        let (p2p_handle, p2p_tasks, http_server, pg_server) = match config.datastore.store {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
                 let store = Arc::new(storage::MemoryStore::new());
@@ -189,6 +190,7 @@ impl Node {
             p2p_handle,
             p2p_tasks,
             http_server: Some(http_server),
+            pg_server,
             shutdown_tx,
             shutdown_rx,
             user_identity,

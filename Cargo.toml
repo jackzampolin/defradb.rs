@@ -25,6 +25,7 @@ members = [
     "crates/lens",
     "crates/orbis",
     "crates/wasm",
+    "crates/pg-compat",
     "tools/ffi-test",
     "tools/integration-test",
 ]

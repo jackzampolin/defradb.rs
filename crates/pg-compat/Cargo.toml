@@ -1,0 +1,39 @@
+[package]
+name = "pg-compat"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Internal crates
+query = { path = "../query" }
+schema = { path = "../schema" }
+identity = { path = "../identity" }
+
+# Postgres wire protocol
+pgwire = "0.38"
+
+# SQL parsing
+sqlparser = { version = "0.55", features = ["visitor"] }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Regex for parameter substitution
+regex = "1"
+
+# Error handling
+thiserror = { workspace = true }
+
+# Async streams
+futures = { workspace = true }

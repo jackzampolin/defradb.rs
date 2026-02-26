@@ -25,6 +25,21 @@ impl Node {
             None
         };
 
+        // Start PG wire protocol server
+        let pg_task: Option<JoinHandle<()>> = if let Some(server) = self.pg_server.take() {
+            info!(
+                "Starting Postgres wire protocol server on {}",
+                server.address()
+            );
+            Some(tokio::spawn(async move {
+                if let Err(e) = server.run().await {
+                    error!("PG server error: {}", e);
+                }
+            }))
+        } else {
+            None
+        };
+
         // Set up signal handling
         let shutdown_tx = self.shutdown_tx.clone();
 
@@ -116,6 +131,12 @@ impl Node {
                          This may occur if requests were still in flight."
                     ),
                 }
+            }
+            if let Some(task) = pg_task {
+                info!("Stopping PG server...");
+                task.abort();
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
+                info!("PG server stopped");
             }
         }
 

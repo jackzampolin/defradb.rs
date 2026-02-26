@@ -75,6 +75,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mutator.clone(),
             caller_identity,
             variables,
+            None,
         )
         .await
     }
@@ -86,9 +87,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         mutator: Arc<dyn DocMutator>,
         caller_identity: Option<Did>,
         variables: Option<&std::collections::HashMap<String, JsonValue>>,
+        fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
     ) -> Result<JsonValue> {
         let mutations = parse_mutations_with_variables(mutation_str, variables)?;
-        self.execute_parsed_mutations(mutations, mutator, caller_identity)
+        self.execute_parsed_mutations(mutations, mutator, caller_identity, fetcher_override)
             .await
     }
 
@@ -98,6 +100,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         mutations: Vec<Mutation>,
         mutator: Arc<dyn DocMutator>,
         caller_identity: Option<Did>,
+        fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
     ) -> Result<JsonValue> {
         // Compute request time once for all mutations in this request.
         // This ensures UTC_NOW resolves to the same timestamp across all mutations,
@@ -114,6 +117,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     mutator.clone(),
                     caller_identity.clone(),
                     request_time,
+                    fetcher_override.clone(),
                 )
                 .await?;
             // Use alias if provided, otherwise full mutation name (e.g., "create_Users")
@@ -131,7 +135,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         mutator: Arc<dyn DocMutator>,
         caller_identity: Option<Did>,
         request_time: DateTime<FixedOffset>,
+        fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
     ) -> Result<JsonValue> {
+        let fetcher: Arc<dyn crate::fetcher::DocFetcher> =
+            fetcher_override.unwrap_or_else(|| self.fetcher.clone());
         use acp::Identity;
 
         // Validate collection exists - resolve on-demand from provider
@@ -161,7 +168,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mapping = self.build_mutation_mapping(mutation)?;
 
         // Resolve filter to doc_ids if filter is provided without doc_ids
-        let resolved_doc_ids = self.resolve_filter_to_doc_ids(mutation).await?;
+        let resolved_doc_ids = self
+            .resolve_filter_to_doc_ids(mutation, fetcher.as_ref())
+            .await?;
 
         // Get doc_ids for permission checking (UPDATE/DELETE need this)
         let doc_ids_for_check = resolved_doc_ids
@@ -311,12 +320,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
             MutationType::Update => {
                 let input = self.build_update_input(mutation)?;
-                let fetcher: Arc<dyn crate::fetcher::DocFetcher> = self.fetcher.clone();
-                let mut node =
-                    UpdateNode::new(&mutation.collection_name, mutator, fetcher, mapping.clone())
-                        .with_collection(collection.clone())
-                        .with_request_time(request_time)
-                        .with_input(input);
+                let mut node = UpdateNode::new(
+                    &mutation.collection_name,
+                    mutator,
+                    fetcher.clone(),
+                    mapping.clone(),
+                )
+                .with_collection(collection.clone())
+                .with_request_time(request_time)
+                .with_input(input);
 
                 // Use ACP-filtered doc_ids (invisible docs removed), or resolved/original
                 if let Some(ref doc_ids) = acp_filtered_doc_ids {
@@ -336,9 +348,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 Box::new(node)
             }
             MutationType::Delete => {
-                let fetcher: Arc<dyn crate::fetcher::DocFetcher> = self.fetcher.clone();
-                let mut node =
-                    DeleteNode::new(&mutation.collection_name, mutator, fetcher, mapping.clone());
+                let mut node = DeleteNode::new(
+                    &mutation.collection_name,
+                    mutator,
+                    fetcher.clone(),
+                    mapping.clone(),
+                );
 
                 // Use ACP-filtered doc_ids (invisible docs removed), or resolved/original
                 if let Some(ref doc_ids) = acp_filtered_doc_ids {
@@ -526,7 +541,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         });
 
         if let Some(version_sel) = version_select {
-            let fetcher: &dyn crate::fetcher::DocFetcher = self.fetcher.as_ref();
+            let fetcher: &dyn crate::fetcher::DocFetcher = fetcher.as_ref();
             let output_name = version_sel.field.output_name().to_string();
             let docid_explicitly_requested = mutation
                 .requested_fields()
@@ -562,6 +577,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     pub(crate) async fn resolve_filter_to_doc_ids(
         &self,
         mutation: &Mutation,
+        fetcher: &dyn crate::fetcher::DocFetcher,
     ) -> Result<Option<Vec<String>>> {
         // Only resolve if there's a filter but no explicit doc_ids
         let filter = match (&mutation.filter, &mutation.doc_ids) {
@@ -579,7 +595,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         // Get all documents from the collection
-        let all_docs = self.fetcher.get_all(&mutation.collection_name).await?;
+        let all_docs = fetcher.get_all(&mutation.collection_name).await?;
 
         // Apply filter to find matching documents
         let mut matching_ids = Vec::new();

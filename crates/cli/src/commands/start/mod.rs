@@ -179,6 +179,10 @@ pub struct StartArgs {
     /// P2P transport backend: "libp2p" (default) or "iroh"
     #[arg(long)]
     pub p2p_transport: Option<String>,
+
+    /// Address for Postgres wire protocol compatibility (e.g., "127.0.0.1:5433")
+    #[arg(long)]
+    pub pg_address: Option<String>,
 }
 
 impl StartArgs {
@@ -415,6 +419,9 @@ impl StartArgs {
         }
         if let Some(timeout) = self.query_timeout {
             config.api.query_timeout = timeout;
+        }
+        if let Some(ref addr) = self.pg_address {
+            config.api.pg_address = addr.clone();
         }
         Ok(())
     }
