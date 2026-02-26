@@ -434,13 +434,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             defra_core::block::SignatureType::ES256K => crypto::KeyType::Secp256k1,
             defra_core::block::SignatureType::ES256 => crypto::KeyType::Secp256r1,
             defra_core::block::SignatureType::EdDSA => crypto::KeyType::Ed25519,
-            defra_core::block::SignatureType::BLS => {
-                tracing::warn!(
-                    cid = %cid,
-                    "BLS signature verification not yet supported — allowing merge"
-                );
-                return Ok(None);
-            }
+            defra_core::block::SignatureType::BLS => crypto::KeyType::Bls12381,
         };
 
         let pub_key = crypto::public_key_from_string(key_type, &sig_identity).map_err(|e| {
@@ -818,6 +812,103 @@ mod tests {
             result.is_err(),
             "corrupt signature block should be rejected"
         );
+        assert!(matches!(
+            result.unwrap_err(),
+            MergeError::SignatureVerificationFailed { .. }
+        ));
+    }
+
+    /// Helper: sign a block with a BLS12-381 key (using blst directly), store signature in blockstore.
+    /// Returns (hex_pubkey, did).
+    async fn sign_block_bls(
+        block: &mut Block,
+        blockstore: &DefraBlockstore<MemoryStore>,
+    ) -> (String, String) {
+        // Generate a BLS secret key from random bytes
+        let mut ikm = [0u8; 32];
+        getrandom::getrandom(&mut ikm).unwrap();
+        let sk = blst::min_pk::SecretKey::key_gen(&ikm, &[]).unwrap();
+        let pk = sk.sk_to_pk();
+
+        let pk_bytes = pk.compress();
+        let pub_hex = hex::encode(pk_bytes);
+
+        let bls_pub = crypto::BlsPublicKey::from_bytes(&pk_bytes).unwrap();
+        let did = crypto::keys::PublicKey::did(&bls_pub).unwrap();
+
+        let signed_bytes = block.to_dag_cbor().unwrap();
+        let dst = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
+        let sig = sk.sign(&signed_bytes, dst, &[]);
+        let sig_bytes = sig.compress().to_vec();
+
+        let sig_block = Signature::new(
+            SignatureHeader::new(SignatureType::BLS, pub_hex.as_bytes().to_vec()),
+            sig_bytes,
+        );
+        let sig_data = sig_block.to_dag_cbor().unwrap();
+        let sig_cid = sig_block.generate_cid().unwrap();
+        blockstore.put(&sig_cid, &sig_data).await.unwrap();
+        block.signature = Some(sig_cid);
+
+        (pub_hex, did)
+    }
+
+    #[tokio::test]
+    async fn verify_valid_bls_signature_returns_did() {
+        let (handler, blockstore) = make_handler();
+
+        let mut block = make_lww_block(None);
+        let (_pub_hex, did) = sign_block_bls(&mut block, &blockstore).await;
+
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+
+        let result = handler
+            .verify_block_signature(&cid, &block, &block_data)
+            .await;
+        let verified_identity = result.expect("valid BLS signature should succeed");
+        assert_eq!(
+            verified_identity.as_deref(),
+            Some(did.as_str()),
+            "should return the signer's DID"
+        );
+        assert!(
+            verified_identity.unwrap().starts_with("did:key:"),
+            "verified identity should be a DID"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_forged_bls_signature_returns_error() {
+        let (handler, blockstore) = make_handler();
+
+        // Sign the original block with one BLS key
+        let mut original_block = make_lww_block(None);
+        sign_block_bls(&mut original_block, &blockstore).await;
+        let sig_cid = original_block.signature.unwrap();
+
+        // Create a different block but attach the original signature
+        let tampered_payload = LwwDeltaPayload {
+            doc_id: b"doc1".to_vec(),
+            field_name: "name".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            data: b"FORGED".to_vec(),
+        };
+        let tampered_block = Block {
+            delta: CrdtDelta::Lww(tampered_payload),
+            heads: None,
+            links: None,
+            encryption: None,
+            signature: Some(sig_cid),
+        };
+        let cid = tampered_block.generate_cid().unwrap();
+        let block_data = tampered_block.to_dag_cbor().unwrap();
+
+        let result = handler
+            .verify_block_signature(&cid, &tampered_block, &block_data)
+            .await;
+        assert!(result.is_err(), "forged BLS signature should be rejected");
         assert!(matches!(
             result.unwrap_err(),
             MergeError::SignatureVerificationFailed { .. }

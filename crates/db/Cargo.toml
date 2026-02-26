@@ -79,3 +79,5 @@ p2p = { path = "../p2p", optional = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 proptest.workspace = true
+blst = "0.3"
+getrandom = "0.2"
