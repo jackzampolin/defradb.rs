@@ -325,6 +325,82 @@ fn extract_table_from_begin() {
     assert_eq!(extract_table_from_sql("BEGIN"), None);
 }
 
+// ── ILIKE / BETWEEN / NOT tests ──
+
+#[test]
+fn ilike_basic() {
+    let stmt = sql_to_graphql("SELECT name FROM User WHERE name ILIKE '%alice%'").unwrap();
+    match stmt {
+        SqlStatement::Query(gql) => {
+            assert!(gql.contains("_ilike: \"%alice%\""), "got: {}", gql);
+        }
+        _ => panic!("expected Query"),
+    }
+}
+
+#[test]
+fn not_ilike() {
+    let stmt = sql_to_graphql("SELECT name FROM User WHERE name NOT ILIKE '%bob%'").unwrap();
+    match stmt {
+        SqlStatement::Query(gql) => {
+            assert!(gql.contains("_nilike: \"%bob%\""), "got: {}", gql);
+        }
+        _ => panic!("expected Query"),
+    }
+}
+
+#[test]
+fn between_basic() {
+    let stmt = sql_to_graphql("SELECT name FROM User WHERE age BETWEEN 10 AND 30").unwrap();
+    match stmt {
+        SqlStatement::Query(gql) => {
+            assert!(gql.contains("_and:"), "got: {}", gql);
+            assert!(gql.contains("_ge: 10"), "got: {}", gql);
+            assert!(gql.contains("_le: 30"), "got: {}", gql);
+        }
+        _ => panic!("expected Query"),
+    }
+}
+
+#[test]
+fn not_between() {
+    let stmt = sql_to_graphql("SELECT name FROM User WHERE age NOT BETWEEN 10 AND 30").unwrap();
+    match stmt {
+        SqlStatement::Query(gql) => {
+            assert!(gql.contains("_or:"), "got: {}", gql);
+            assert!(gql.contains("_lt: 10"), "got: {}", gql);
+            assert!(gql.contains("_gt: 30"), "got: {}", gql);
+        }
+        _ => panic!("expected Query"),
+    }
+}
+
+#[test]
+fn not_condition() {
+    let stmt = sql_to_graphql("SELECT name FROM User WHERE NOT (age > 25)").unwrap();
+    match stmt {
+        SqlStatement::Query(gql) => {
+            assert!(gql.contains("_not:"), "got: {}", gql);
+            assert!(gql.contains("_gt: 25"), "got: {}", gql);
+        }
+        _ => panic!("expected Query"),
+    }
+}
+
+#[test]
+fn count_distinct_detection() {
+    let stmt = sql_to_graphql("SELECT COUNT(DISTINCT status) AS cnt FROM todo").unwrap();
+    match stmt {
+        SqlStatement::Aggregate { aggregates, .. } => {
+            assert_eq!(aggregates.len(), 1);
+            assert!(aggregates[0].distinct, "expected distinct=true");
+            assert_eq!(aggregates[0].field, Some("status".to_string()));
+            assert_eq!(aggregates[0].alias, "cnt");
+        }
+        _ => panic!("expected Aggregate, got: {:?}", stmt),
+    }
+}
+
 // ── Schema-aware type coercion tests ──
 
 #[test]

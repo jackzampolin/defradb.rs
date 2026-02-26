@@ -47,6 +47,7 @@ pub struct AggregateExpr {
     pub func: AggFunc,
     pub field: Option<String>,
     pub alias: String,
+    pub distinct: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

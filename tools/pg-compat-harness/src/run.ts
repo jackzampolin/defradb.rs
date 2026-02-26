@@ -34,6 +34,8 @@ import * as t16 from "./tests/16-joins";
 import * as t17 from "./tests/17-distinct";
 import * as t18 from "./tests/18-subqueries";
 import * as t19 from "./tests/19-set-operations";
+import * as t20 from "./tests/20-extended-filters";
+import * as t21 from "./tests/21-advanced-aggregates-joins";
 
 const categories: { name: string; run: () => Promise<TestResult[]> }[] = [
   { name: "01-connection", run: t01.run },
@@ -55,6 +57,8 @@ const categories: { name: string; run: () => Promise<TestResult[]> }[] = [
   { name: "17-distinct", run: t17.run },
   { name: "18-subqueries", run: t18.run },
   { name: "19-set-operations", run: t19.run },
+  { name: "20-extended-filters", run: t20.run },
+  { name: "21-advanced-aggregates-joins", run: t21.run },
 ];
 
 async function main() {

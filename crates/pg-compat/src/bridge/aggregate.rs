@@ -1,4 +1,4 @@
-use sqlparser::ast::{Expr, FunctionArgExpr, GroupByExpr, SelectItem};
+use sqlparser::ast::{DuplicateTreatment, Expr, FunctionArgExpr, GroupByExpr, SelectItem};
 
 use crate::error::PgCompatError;
 
@@ -137,9 +137,13 @@ fn parse_aggregate_function(expr: &Expr) -> Option<AggregateExpr> {
                 _ => return None,
             };
 
-            let field = match &func.args {
+            let (field, distinct) = match &func.args {
                 sqlparser::ast::FunctionArguments::List(arg_list) => {
-                    if arg_list.args.is_empty() {
+                    let is_distinct = matches!(
+                        arg_list.duplicate_treatment,
+                        Some(DuplicateTreatment::Distinct)
+                    );
+                    let f = if arg_list.args.is_empty() {
                         None
                     } else {
                         match &arg_list.args[0] {
@@ -149,10 +153,11 @@ fn parse_aggregate_function(expr: &Expr) -> Option<AggregateExpr> {
                             }
                             _ => None,
                         }
-                    }
+                    };
+                    (f, is_distinct)
                 }
-                sqlparser::ast::FunctionArguments::None => None,
-                sqlparser::ast::FunctionArguments::Subquery(_) => None,
+                sqlparser::ast::FunctionArguments::None => (None, false),
+                sqlparser::ast::FunctionArguments::Subquery(_) => (None, false),
             };
 
             let alias = match &agg_func {
@@ -167,6 +172,7 @@ fn parse_aggregate_function(expr: &Expr) -> Option<AggregateExpr> {
                 func: agg_func,
                 field,
                 alias,
+                distinct,
             })
         }
         _ => None,
@@ -175,6 +181,24 @@ fn parse_aggregate_function(expr: &Expr) -> Option<AggregateExpr> {
 
 fn translate_having(expr: &Expr) -> Result<String, PgCompatError> {
     match expr {
+        Expr::BinaryOp {
+            left,
+            op: sqlparser::ast::BinaryOperator::And,
+            right,
+        } => Ok(format!(
+            "({}) AND ({})",
+            translate_having(left)?,
+            translate_having(right)?
+        )),
+        Expr::BinaryOp {
+            left,
+            op: sqlparser::ast::BinaryOperator::Or,
+            right,
+        } => Ok(format!(
+            "({}) OR ({})",
+            translate_having(left)?,
+            translate_having(right)?
+        )),
         Expr::BinaryOp { left, op, right } => {
             let left_str = format!("{}", left);
             let right_str = format!("{}", right);

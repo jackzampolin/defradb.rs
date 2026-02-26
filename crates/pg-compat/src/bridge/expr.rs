@@ -38,6 +38,45 @@ pub(crate) fn translate_where(expr: &Expr) -> Result<String, PgCompatError> {
             let op = if *negated { "_nlike" } else { "_like" };
             Ok(format!("{}: {{{}: {}}}", field, op, pat))
         }
+        Expr::ILike {
+            expr: inner,
+            pattern,
+            negated,
+            ..
+        } => {
+            let field = expr_to_field_name(inner)?;
+            let pat = expr_to_graphql_value(pattern)?;
+            let op = if *negated { "_nilike" } else { "_ilike" };
+            Ok(format!("{}: {{{}: {}}}", field, op, pat))
+        }
+        Expr::Between {
+            expr: inner,
+            negated,
+            low,
+            high,
+        } => {
+            let field = expr_to_field_name(inner)?;
+            let low_val = expr_to_graphql_value(low)?;
+            let high_val = expr_to_graphql_value(high)?;
+            if *negated {
+                Ok(format!(
+                    "_or: [{{{}: {{_lt: {}}}}}, {{{}: {{_gt: {}}}}}]",
+                    field, low_val, field, high_val
+                ))
+            } else {
+                Ok(format!(
+                    "_and: [{{{}: {{_ge: {}}}}}, {{{}: {{_le: {}}}}}]",
+                    field, low_val, field, high_val
+                ))
+            }
+        }
+        Expr::UnaryOp {
+            op: sqlparser::ast::UnaryOperator::Not,
+            expr: inner,
+        } => {
+            let inner_filter = translate_where(inner)?;
+            Ok(format!("_not: {{{}}}", inner_filter))
+        }
         _ => Err(PgCompatError::UnsupportedSql(format!(
             "unsupported WHERE expression: {}",
             expr

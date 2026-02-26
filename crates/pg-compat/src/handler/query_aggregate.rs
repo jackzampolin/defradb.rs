@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use futures::stream;
@@ -19,10 +20,17 @@ impl DefraQueryHandler {
         txn_id: Option<&str>,
         identity_did: Option<&str>,
     ) -> PgWireResult<Response> {
-        // DefraDB uses UPPERCASE top-level aggregate functions:
-        //   COUNT(Table: {}), SUM(Table: {field: "col"}), etc.
-        let mut agg_parts = Vec::new();
+        let mut result_values: Vec<(String, serde_json::Value)> = Vec::new();
+
         for agg in aggregates {
+            if agg.distinct && agg.func == AggFunc::Count {
+                let value = self
+                    .count_distinct(table_name, agg, filter, txn_id, identity_did)
+                    .await?;
+                result_values.push((agg.alias.clone(), value));
+                continue;
+            }
+
             let gql_name = agg_func_name(&agg.func);
             let mut inner_args = Vec::new();
             if let Some(ref field) = agg.field {
@@ -36,24 +44,18 @@ impl DefraQueryHandler {
             } else {
                 inner_args.join(", ")
             };
-            agg_parts.push(format!("{}({}: {{{}}})", gql_name, table_name, inner));
-        }
+            let graphql = format!("query {{ {}({}: {{{}}}) }}", gql_name, table_name, inner);
+            debug!(graphql = %graphql, "Executing aggregate query");
 
-        let graphql = format!("query {{ {} }}", agg_parts.join(" "));
-        debug!(graphql = %graphql, "Executing aggregate query");
+            let response = self.execute_graphql(&graphql, txn_id, identity_did).await?;
 
-        let response = self.execute_graphql(&graphql, txn_id, identity_did).await?;
+            if response.has_errors() {
+                return Err(super::pg_error(
+                    "XX000",
+                    super::format_errors(&response.errors),
+                ));
+            }
 
-        if response.has_errors() {
-            return Err(super::pg_error(
-                "XX000",
-                super::format_errors(&response.errors),
-            ));
-        }
-
-        let mut result_values: Vec<(String, serde_json::Value)> = Vec::new();
-        for agg in aggregates {
-            let gql_name = agg_func_name(&agg.func);
             let value = response
                 .data
                 .as_ref()
@@ -64,6 +66,58 @@ impl DefraQueryHandler {
         }
 
         encode_aggregate_response(&result_values)
+    }
+
+    async fn count_distinct(
+        &self,
+        table_name: &str,
+        agg: &AggregateExpr,
+        filter: Option<&str>,
+        txn_id: Option<&str>,
+        identity_did: Option<&str>,
+    ) -> PgWireResult<serde_json::Value> {
+        let field = agg.field.as_deref().unwrap_or("_docID");
+        let filter_part = match filter {
+            Some(f) => format!("(filter: {{{}}})", f),
+            None => String::new(),
+        };
+        let graphql = format!("query {{ {}{} {{ {} }} }}", table_name, filter_part, field);
+        debug!(graphql = %graphql, "Executing COUNT(DISTINCT) via field query");
+
+        let response = self.execute_graphql(&graphql, txn_id, identity_did).await?;
+
+        if response.has_errors() {
+            return Err(super::pg_error(
+                "XX000",
+                super::format_errors(&response.errors),
+            ));
+        }
+
+        let docs = response
+            .data
+            .as_ref()
+            .and_then(|d| d.get(table_name))
+            .and_then(|v| v.as_array());
+
+        let count = match docs {
+            Some(arr) => {
+                let mut unique = HashSet::new();
+                for doc in arr {
+                    let val = doc
+                        .get(field)
+                        .map(|v| match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        })
+                        .unwrap_or_default();
+                    unique.insert(val);
+                }
+                unique.len() as i64
+            }
+            None => 0,
+        };
+
+        Ok(serde_json::Value::Number(count.into()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -276,6 +330,69 @@ fn encode_grouped_response(
 }
 
 fn evaluate_having(doc: &serde_json::Value, aggregates: &[AggregateExpr], having: &str) -> bool {
+    let trimmed = having.trim();
+
+    // Split on top-level AND/OR (respecting parentheses)
+    if let Some((left, right)) = split_compound(trimmed, " AND ") {
+        return evaluate_having(doc, aggregates, left) && evaluate_having(doc, aggregates, right);
+    }
+    if let Some((left, right)) = split_compound(trimmed, " OR ") {
+        return evaluate_having(doc, aggregates, left) || evaluate_having(doc, aggregates, right);
+    }
+
+    // Strip outer parentheses
+    if trimmed.starts_with('(') && trimmed.ends_with(')') {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        if parentheses_balanced(inner) {
+            return evaluate_having(doc, aggregates, inner);
+        }
+    }
+
+    evaluate_single_having(doc, aggregates, trimmed)
+}
+
+fn split_compound<'a>(s: &'a str, delimiter: &str) -> Option<(&'a str, &'a str)> {
+    let mut depth = 0;
+    let bytes = s.as_bytes();
+    let delim_bytes = delimiter.as_bytes();
+
+    for i in 0..bytes.len() {
+        if bytes[i] == b'(' {
+            depth += 1;
+        } else if bytes[i] == b')' {
+            depth -= 1;
+        } else if depth == 0
+            && i + delim_bytes.len() <= bytes.len()
+            && &bytes[i..i + delim_bytes.len()] == delim_bytes
+        {
+            return Some((&s[..i], &s[i + delim_bytes.len()..]));
+        }
+    }
+    None
+}
+
+fn parentheses_balanced(s: &str) -> bool {
+    let mut depth = 0i32;
+    for b in s.bytes() {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+fn evaluate_single_having(
+    doc: &serde_json::Value,
+    aggregates: &[AggregateExpr],
+    having: &str,
+) -> bool {
     let having_lower = having.to_lowercase();
 
     for agg in aggregates {
@@ -294,16 +411,9 @@ fn evaluate_having(doc: &serde_json::Value, aggregates: &[AggregateExpr], having
         let gql_name = agg_func_name(&agg.func);
         let agg_val = doc.get(gql_name).and_then(|v| v.as_f64()).unwrap_or(0.0);
 
-        let ops = [
-            (">=", ">="),
-            ("<=", "<="),
-            ("!=", "!="),
-            ("==", "=="),
-            (">", ">"),
-            ("<", "<"),
-        ];
+        let ops = [">=", "<=", "!=", "==", ">", "<"];
 
-        for (op_str, _) in &ops {
+        for op_str in &ops {
             if let Some(idx) = having.find(op_str) {
                 let threshold_str = having[idx + op_str.len()..].trim();
                 if let Ok(threshold) = threshold_str.parse::<f64>() {
