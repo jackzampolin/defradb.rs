@@ -1,12 +1,14 @@
 use std::sync::Mutex;
+use std::time::Duration;
 
+use acp_light_client::cache::keys as cache_keys;
+use acp_light_client::AcpLightClient;
 use alloy_primitives::{Bytes, FixedBytes};
 use alloy_sol_types::SolCall;
 use async_trait::async_trait;
 use k256::ecdsa::SigningKey;
+use sha2::{Digest, Sha256};
 
-use crate::circuit_breaker::CircuitBreaker;
-use crate::policy_cache::PolicyCache;
 use crate::provider::{ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef};
 
 use super::abi::{IAcp, ACP_ADDRESS};
@@ -15,16 +17,26 @@ use super::client::{ClientError, HubRsClient};
 use super::signer::EvmSigner;
 
 pub struct HubRsProvider {
+    light_client: AcpLightClient,
     client: HubRsClient,
     signer: EvmSigner,
     signing_key: SigningKey,
     nonce: Mutex<u64>,
-    circuit_breaker: CircuitBreaker,
-    policy_cache: PolicyCache,
+}
+
+fn derive_ws_url(rpc_url: &str) -> String {
+    rpc_url
+        .replacen("http://", "ws://", 1)
+        .replacen("https://", "wss://", 1)
 }
 
 impl HubRsProvider {
     pub async fn new(rpc_url: String, private_key: &[u8]) -> Result<Self, ProviderError> {
+        let ws_url = derive_ws_url(&rpc_url);
+        let light_client = AcpLightClient::new(&rpc_url, &ws_url, 10)
+            .await
+            .map_err(|e| ProviderError::Config(format!("light client: {}", e)))?;
+
         let client = HubRsClient::new(rpc_url);
         let chain_id = client
             .chain_id()
@@ -39,12 +51,11 @@ impl HubRsProvider {
             .await
             .map_err(|e| ProviderError::Config(format!("nonce: {}", e)))?;
         Ok(Self {
+            light_client,
             client,
             signer,
             signing_key,
             nonce: Mutex::new(nonce),
-            circuit_breaker: CircuitBreaker::new(),
-            policy_cache: PolicyCache::new(),
         })
     }
 
@@ -74,31 +85,17 @@ impl HubRsProvider {
             .map_err(|e| ProviderError::Transaction(format!("receipt: {}", e)))
     }
 
-    async fn with_circuit_breaker<F, Fut, T>(&self, op: F) -> Result<T, ProviderError>
+    async fn guarded_eth_call<F, Fut, T>(&self, op: F) -> Result<T, ProviderError>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, ClientError>>,
     {
-        if !self.circuit_breaker.allow_request() {
-            tracing::warn!("hub.rs circuit breaker open: denying access (fail-closed)");
-            return Err(ProviderError::Unavailable(
-                "hub.rs unreachable; circuit breaker open".to_string(),
-            ));
-        }
-
         match op().await {
-            Ok(value) => {
-                self.circuit_breaker.record_success();
-                Ok(value)
-            }
+            Ok(value) => Ok(value),
             Err(ClientError::Timeout(msg)) => {
-                self.circuit_breaker.record_failure();
                 Err(ProviderError::Unavailable(format!("timeout: {}", msg)))
             }
-            Err(e) => {
-                self.circuit_breaker.record_failure();
-                Err(ProviderError::Query(e.to_string()))
-            }
+            Err(e) => Err(ProviderError::Query(e.to_string())),
         }
     }
 
@@ -109,6 +106,88 @@ impl HubRsProvider {
         let start = 32usize.saturating_sub(bytes.len());
         arr[start..].copy_from_slice(&bytes[..bytes.len().min(32)]);
         FixedBytes::from(arr)
+    }
+
+    async fn wait_for_state_update(&self) {
+        if let Some(root) = self.light_client.header_chain().latest_module_state_root() {
+            let _ = self
+                .light_client
+                .wait_for_root_change(root, Duration::from_secs(5))
+                .await;
+        }
+    }
+
+    /// Compute the deterministic AccessDecision ID.
+    ///
+    /// Matches hub.rs `compute_decision_id`: SHA256(policy_id || creator || actor || ops).
+    fn compute_decision_id(
+        policy_id: &str,
+        creator_did: &str,
+        actor_did: &str,
+        operations: &[(&str, &str, &str)],
+    ) -> String {
+        let mut h = Sha256::new();
+        h.update(policy_id.as_bytes());
+        h.update(creator_did.as_bytes());
+        h.update(actor_did.as_bytes());
+        for &(resource, object_id, permission) in operations {
+            h.update(resource.as_bytes());
+            h.update(object_id.as_bytes());
+            h.update(permission.as_bytes());
+        }
+        hex::encode(h.finalize())
+    }
+
+    /// Check if an AccessDecision is already cached in the light client.
+    fn check_decision_cached(&self, decision_id: &str) -> Option<bool> {
+        let key_bytes = cache_keys::access_decision_key(decision_id);
+        let key_hex = cache_keys::hex_encode_key(&key_bytes);
+        let height = self.light_client.header_chain().latest_height();
+        self.light_client
+            .cache()
+            .get(&key_hex, height)
+            .map(|r| r.allowed)
+    }
+
+    /// Fetch and verify an AccessDecision proof via the light client.
+    async fn verify_decision_proof(&self, decision_id: &str) -> Result<bool, ProviderError> {
+        let key_bytes = cache_keys::access_decision_key(decision_id);
+        let key_hex = cache_keys::hex_encode_key(&key_bytes);
+
+        let height = self.light_client.header_chain().latest_height().max(1);
+        let sync = self.light_client.header_chain().state();
+
+        let (proof, module_state_root) = if let Some(ref sync) = sync {
+            let proof = self
+                .light_client
+                .proof_client()
+                .fetch_and_verify_proof_with_root(
+                    "acp",
+                    &key_hex,
+                    sync.height,
+                    sync.module_state_root,
+                )
+                .await
+                .map_err(|e| ProviderError::Query(format!("decision proof: {}", e)))?;
+            (proof, sync.module_state_root)
+        } else {
+            self.light_client
+                .proof_client()
+                .fetch_and_verify_proof("acp", &key_hex, height)
+                .await
+                .map_err(|e| ProviderError::Query(format!("decision proof: {}", e)))?
+        };
+
+        let allowed = proof.value.is_some();
+        let value_bytes = proof.value.as_ref().map(|v| {
+            let v = v.strip_prefix("0x").unwrap_or(v);
+            hex::decode(v).unwrap_or_default()
+        });
+        self.light_client
+            .cache()
+            .insert(&key_hex, value_bytes, proof.height, module_state_root);
+
+        Ok(allowed)
     }
 }
 
@@ -181,8 +260,6 @@ impl SourceHubProvider for HubRsProvider {
     }
 
     async fn create_bearer_token(&self, did: &str) -> Result<String, ProviderError> {
-        // For the node's own DID, use the stored signing key directly
-        // (the node identity may not be in the global signing store).
         if Some(did.to_string()) == self.self_did() {
             return bearer::create_bearer_token(&self.signing_key, did, 300).map_err(|e| {
                 ProviderError::Config(format!("node bearer token creation failed: {}", e))
@@ -251,6 +328,9 @@ impl SourceHubProvider for HubRsProvider {
         };
         let calldata = Bytes::from(call.abi_encode());
         self.send_tx(calldata).await?;
+
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.wait_for_state_update()).await;
+
         Ok(())
     }
 
@@ -270,6 +350,9 @@ impl SourceHubProvider for HubRsProvider {
         };
         let calldata = Bytes::from(call.abi_encode());
         self.send_tx(calldata).await?;
+
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.wait_for_state_update()).await;
+
         Ok(())
     }
 
@@ -291,6 +374,9 @@ impl SourceHubProvider for HubRsProvider {
         };
         let calldata = Bytes::from(call.abi_encode());
         self.send_tx(calldata).await?;
+
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.wait_for_state_update()).await;
+
         Ok(true)
     }
 
@@ -312,6 +398,9 @@ impl SourceHubProvider for HubRsProvider {
         };
         let calldata = Bytes::from(call.abi_encode());
         self.send_tx(calldata).await?;
+
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.wait_for_state_update()).await;
+
         Ok(true)
     }
 
@@ -319,32 +408,20 @@ impl SourceHubProvider for HubRsProvider {
         &self,
         policy_id: &str,
     ) -> Result<Option<ProviderPolicyInfo>, ProviderError> {
-        if let Some(cached) = self.policy_cache.get(policy_id) {
-            return Ok(Some(ProviderPolicyInfo {
-                id: cached.id,
-                name: cached.name,
-            }));
-        }
-
-        tracing::debug!(policy_id, "policy cache miss; querying on-chain");
-        let pid = Self::policy_id_to_bytes32(policy_id);
-        let call = IAcp::getPolicyCall { policyId: pid };
-        let calldata = Bytes::from(call.abi_encode());
-
         let result = self
-            .with_circuit_breaker(|| self.client.eth_call(ACP_ADDRESS, calldata.clone()))
-            .await?;
+            .light_client
+            .check_policy(policy_id)
+            .await
+            .map_err(|e| ProviderError::Query(format!("light client: {}", e)))?;
 
-        if result.is_empty() {
-            return Ok(None);
+        if result.allowed {
+            Ok(Some(ProviderPolicyInfo {
+                id: policy_id.to_string(),
+                name: policy_id.to_string(),
+            }))
+        } else {
+            Ok(None)
         }
-
-        let info = ProviderPolicyInfo {
-            id: policy_id.to_string(),
-            name: policy_id.to_string(),
-        };
-        self.policy_cache.insert(policy_id, info.name.clone());
-        Ok(Some(info))
     }
 
     async fn query_object_owner(
@@ -362,13 +439,12 @@ impl SourceHubProvider for HubRsProvider {
         let calldata = Bytes::from(call.abi_encode());
 
         let result = self
-            .with_circuit_breaker(|| self.client.eth_call(ACP_ADDRESS, calldata.clone()))
+            .guarded_eth_call(|| self.client.eth_call(ACP_ADDRESS, calldata.clone()))
             .await?;
 
         let decoded = IAcp::getObjectOwnerCall::abi_decode_returns(&result)
             .map_err(|e| ProviderError::Query(format!("ABI decode: {}", e)))?;
 
-        // Extract owner DID from the record bytes if registered
         let owner = if decoded.registered {
             String::from_utf8(decoded.record.to_vec()).unwrap_or_default()
         } else {
@@ -386,8 +462,18 @@ impl SourceHubProvider for HubRsProvider {
         permission: &str,
         actor_did: &str,
     ) -> Result<bool, ProviderError> {
+        let creator_did = self.signer.did();
+        let ops = [(resource, object_id, permission)];
+        let decision_id = Self::compute_decision_id(policy_id, &creator_did, actor_did, &ops);
+
+        // Fast path: decision already proven and cached by the light client.
+        if let Some(allowed) = self.check_decision_cached(&decision_id) {
+            return Ok(allowed);
+        }
+
+        // Submit checkAccess tx to create the AccessDecision on-chain.
         let pid = Self::policy_id_to_bytes32(policy_id);
-        let call = IAcp::verifyAccessRequestCall {
+        let call = IAcp::checkAccessCall {
             policyId: pid,
             resources: vec![resource.to_string()],
             objectIds: vec![object_id.to_string()],
@@ -396,13 +482,20 @@ impl SourceHubProvider for HubRsProvider {
         };
         let calldata = Bytes::from(call.abi_encode());
 
-        let result = self
-            .with_circuit_breaker(|| self.client.eth_call(ACP_ADDRESS, calldata.clone()))
-            .await?;
+        match self.send_tx(calldata).await {
+            Ok(_) => {
+                // Tx succeeded — decision persisted. Wait for state finalization
+                // then verify the decision via light client proof.
+                let _ = tokio::time::timeout(Duration::from_secs(5), self.wait_for_state_update())
+                    .await;
 
-        let has_access = IAcp::verifyAccessRequestCall::abi_decode_returns(&result)
-            .map_err(|e| ProviderError::Query(format!("ABI decode: {}", e)))?;
-
-        Ok(has_access)
+                self.verify_decision_proof(&decision_id).await
+            }
+            Err(ProviderError::Transaction(msg)) if msg.contains("reverted") => {
+                // Tx reverted — access denied by the policy engine.
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
     }
 }

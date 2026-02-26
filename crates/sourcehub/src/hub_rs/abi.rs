@@ -15,6 +15,7 @@ sol! {
         function archiveObject(bytes32 policyId, string objectId, string resource) external returns (bool found, uint64 relationshipsRemoved);
         function bearerPolicyCmd(string bearerToken, bytes32 policyId, bytes cmd) external returns (bytes);
 
+        function checkAccess(bytes32 policyId, string[] resources, string[] objectIds, string[] permissions, string actor) external returns (bytes);
         function verifyAccessRequest(bytes32 policyId, string[] resources, string[] objectIds, string[] permissions, string actor) external view returns (bool);
         function getObjectOwner(bytes32 policyId, string resource, string objectId) external view returns (bool registered, bytes record);
         function getPolicy(bytes32 policyId) external view returns (bytes);
