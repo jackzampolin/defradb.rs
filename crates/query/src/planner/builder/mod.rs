@@ -74,6 +74,8 @@ pub struct Planner {
     acp: Option<Arc<dyn DocumentACP>>,
     /// Identity for ACP permission checks
     identity_did: Option<Did>,
+    /// Pre-computed FTS scores: output_name → (doc_id → score)
+    pub(crate) fts_scores: HashMap<String, HashMap<String, f64>>,
 }
 
 impl Planner {
@@ -102,6 +104,7 @@ impl Planner {
             lens_store: None,
             acp: None,
             identity_did: None,
+            fts_scores: HashMap::new(),
         }
     }
 
@@ -117,6 +120,12 @@ impl Planner {
     /// Set a lens transform store for view queries with transforms.
     pub fn with_lens_store(mut self, store: Arc<dyn lens::TransformStore>) -> Self {
         self.lens_store = Some(store);
+        self
+    }
+
+    /// Set pre-computed FTS scores for BM25 nodes.
+    pub fn with_fts_scores(mut self, scores: HashMap<String, HashMap<String, f64>>) -> Self {
+        self.fts_scores = scores;
         self
     }
 

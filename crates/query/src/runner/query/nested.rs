@@ -10,6 +10,7 @@ use crate::error::Result;
 use crate::mapper::{Requestable, Select};
 use crate::planner::Planner;
 use crate::txn::TransactionRegistry;
+use std::collections::HashMap;
 
 use super::super::fetcher::FetcherWrapper;
 use super::super::{DocFetcher, QueryRunner};
@@ -36,7 +37,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let collections: Vec<CollectionVersion> =
             collections_map.values().map(|c| (**c).clone()).collect();
 
+        // Pre-compute FTS scores from the inverted index before planning
+        let mut fts_scores: HashMap<String, HashMap<String, f64>> = HashMap::new();
+        for field in &select.fields {
+            if let Requestable::FullTextSearch(fts) = field {
+                let mut combined_scores: HashMap<String, f64> = HashMap::new();
+                for target_field in &fts.target_fields {
+                    if let Ok(scores) = fetcher
+                        .search_fulltext_scored(&select.collection_name, target_field, &fts.query)
+                        .await
+                    {
+                        for (doc_id, score) in scores {
+                            *combined_scores.entry(doc_id).or_insert(0.0) += score;
+                        }
+                    }
+                }
+                fts_scores.insert(fts.output_name().to_string(), combined_scores);
+            }
+        }
+
         let mut planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+        if !fts_scores.is_empty() {
+            planner = planner.with_fts_scores(fts_scores);
+        }
         if let Some(ref acp) = self.acp {
             planner = planner.with_acp(acp.clone(), identity);
         }

@@ -436,6 +436,34 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }
 
+    async fn search_fulltext_scored(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        query: &str,
+    ) -> query::error::Result<std::collections::HashMap<String, f64>> {
+        let (_collection, datastore, index_manager) =
+            get_collection_with_index_manager(&self.txn, collection_name).await?;
+
+        let idx_name = format!("{}_fulltext", field_name);
+        let ft_index = index_manager
+            .get_index(&idx_name)
+            .and_then(|idx| idx.as_fulltext())
+            .ok_or_else(|| {
+                query::error::QueryError::execution(format!(
+                    "fulltext index for field '{}' not found on collection '{}'",
+                    field_name, collection_name
+                ))
+            })?;
+
+        ft_index
+            .search_scored(&datastore, query)
+            .await
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("fulltext search error: {}", e))
+            })
+    }
+
     async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Vec<u8>>> {
         use storage::corekv::IterOptions;
         use storage::keys::datastore::ViewCacheKey;

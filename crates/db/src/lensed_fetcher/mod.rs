@@ -117,6 +117,51 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
             .await
     }
 
+    async fn search_fulltext_scored(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        query: &str,
+    ) -> query::error::Result<std::collections::HashMap<String, f64>> {
+        use crate::collection::collection_short_id;
+        use crate::collection_loader::get_collection_with_lazy_load;
+        use crate::index_manager::IndexManager;
+
+        let (collection, datastore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+
+        let short_id = if collection.schema().root_id > 0 {
+            collection.schema().root_id
+        } else {
+            collection_short_id(collection.collection_id())
+        };
+        let index_manager =
+            IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to create index manager: {}",
+                    e
+                ))
+            })?;
+
+        let idx_name = format!("{}_fulltext", field_name);
+        let ft_index = index_manager
+            .get_index(&idx_name)
+            .and_then(|idx| idx.as_fulltext())
+            .ok_or_else(|| {
+                query::error::QueryError::execution(format!(
+                    "fulltext index for field '{}' not found on collection '{}'",
+                    field_name, collection_name
+                ))
+            })?;
+
+        ft_index
+            .search_scored(&datastore, query)
+            .await
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("fulltext search error: {}", e))
+            })
+    }
+
     async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Vec<u8>>> {
         self.get_view_cache_items_impl(collection_id).await
     }

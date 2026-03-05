@@ -238,6 +238,64 @@ impl FullTextIndex {
         let items = iter.collect_all().await?;
         Ok(items.len() as u64)
     }
+
+    /// Compute BM25 scores for all documents matching the query.
+    ///
+    /// Uses the stored inverted index and corpus statistics to compute full
+    /// BM25 scores without re-tokenizing any document text.
+    pub async fn search_scored<R: Reader + MaybeSend>(
+        &self,
+        txn: &R,
+        query: &str,
+    ) -> Result<HashMap<String, f64>> {
+        let query_terms = self.tokenizer.tokenize(query);
+        if query_terms.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let (total_docs, avg_field_len) = self.stats(txn).await?;
+        if total_docs == 0 {
+            return Ok(HashMap::new());
+        }
+
+        let n = total_docs as f64;
+        let avgdl = avg_field_len;
+        let k1 = self.k1();
+        let b = self.b();
+        let mut scores: HashMap<String, f64> = HashMap::new();
+
+        for term in &query_terms {
+            let mut key_prefix = self.index_prefix();
+            key_prefix.extend_from_slice(term.as_bytes());
+            key_prefix.push(b'/');
+
+            let opts = IterOptions::default().with_prefix(key_prefix.clone());
+            let mut iter = txn.iterator(opts).await?;
+            let items = iter.collect_all().await?;
+
+            let df = items.len() as f64;
+            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+
+            for kv in &items {
+                if kv.value.len() == 12 {
+                    let doc_id_bytes = &kv.key[key_prefix.len()..];
+                    let doc_id = String::from_utf8_lossy(doc_id_bytes).to_string();
+                    let tf = u32::from_be_bytes(kv.value[0..4].try_into().unwrap()) as f64;
+                    let dl = u64::from_be_bytes(kv.value[4..12].try_into().unwrap()) as f64;
+
+                    let denom = if avgdl > 0.0 {
+                        tf + k1 * (1.0 - b + b * dl / avgdl)
+                    } else {
+                        tf + k1
+                    };
+                    let tf_norm = (tf * (k1 + 1.0)) / denom;
+                    *scores.entry(doc_id).or_insert(0.0) += idf * tf_norm;
+                }
+            }
+        }
+
+        Ok(scores)
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

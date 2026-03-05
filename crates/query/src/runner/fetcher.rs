@@ -158,6 +158,23 @@ impl DocFetcher for FetcherWrapper {
         self.get_fetcher().supports_index_queries()
     }
 
+    async fn search_fulltext_scored(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        query: &str,
+    ) -> Result<std::collections::HashMap<String, f64>> {
+        self.get_fetcher()
+            .search_fulltext_scored(collection_name, field_name, query)
+            .await
+            .map_err(|e| {
+                QueryError::execution(format!(
+                    "fetcher error during fulltext search for collection '{}' field '{}': {}",
+                    collection_name, field_name, e
+                ))
+            })
+    }
+
     async fn get_view_cache_items(&self, collection_id: u32) -> Result<Vec<Vec<u8>>> {
         self.get_fetcher()
             .get_view_cache_items(collection_id)

@@ -296,6 +296,20 @@ pub trait DocFetcher: MaybeSendSync {
         let _ = collection_id;
         Ok(Vec::new())
     }
+
+    /// Compute BM25 scores for documents matching a full-text search query.
+    ///
+    /// Uses the stored inverted index for the given field to compute scores
+    /// without re-tokenizing document text.
+    async fn search_fulltext_scored(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        query: &str,
+    ) -> Result<std::collections::HashMap<String, f64>> {
+        let _ = (collection_name, field_name, query);
+        Ok(std::collections::HashMap::new())
+    }
 }
 
 /// Options for _commits queries

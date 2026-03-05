@@ -60,8 +60,7 @@ impl Planner {
 
     /// Add BM25Node(s) to the plan for each _bm25 field in the select.
     ///
-    /// Looks up the collection's fulltext index configuration to get k1, b,
-    /// and language parameters for proper BM25 scoring.
+    /// Scores are pre-computed from the inverted index and injected here.
     pub(super) fn add_bm25_nodes(
         &self,
         mut plan: Box<dyn PlanNode>,
@@ -70,19 +69,6 @@ impl Planner {
     ) -> Result<Box<dyn PlanNode>> {
         for field in &select.fields {
             if let Requestable::FullTextSearch(fts) = field {
-                let field_indices: Vec<usize> = fts
-                    .target_fields
-                    .iter()
-                    .filter_map(|f| mapping.first_index_of_name(f))
-                    .collect();
-
-                if field_indices.is_empty() {
-                    return Err(QueryError::internal(format!(
-                        "BM25 target fields {:?} not found in mapping",
-                        fts.target_fields
-                    )));
-                }
-
                 let score_index = mapping
                     .try_find_index_from_render_key(fts.output_name())
                     .ok_or_else(|| {
@@ -92,29 +78,18 @@ impl Planner {
                         ))
                     })?;
 
-                // Look up k1/b/language from the collection's fulltext index config
-                let (k1, b, language) = self
-                    .collections
-                    .get(&select.collection_name)
-                    .and_then(|col| {
-                        fts.target_fields.first().and_then(|field_name| {
-                            col.fulltext_indexes
-                                .iter()
-                                .find(|ft| ft.field_name == *field_name)
-                        })
-                    })
-                    .map(|ft| (ft.k1, ft.b, ft.language.as_str()))
-                    .unwrap_or((1.2, 0.75, "english"));
+                let precomputed = self
+                    .fts_scores
+                    .get(fts.output_name())
+                    .cloned()
+                    .unwrap_or_default();
 
                 plan = Box::new(BM25Node::new(
                     plan,
                     mapping.clone(),
-                    field_indices,
                     score_index,
                     fts.query.clone(),
-                    k1,
-                    b,
-                    language,
+                    precomputed,
                 ));
             }
         }
