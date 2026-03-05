@@ -82,6 +82,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Configure private repo access
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -137,6 +140,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Configure private repo access
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -243,6 +249,9 @@ jobs:
             features: "--features rocksdb"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Configure private repo access
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
