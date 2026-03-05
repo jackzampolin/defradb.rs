@@ -39,6 +39,9 @@ thiserror.workspace = true
 # Logging
 tracing.workspace = true
 
+# Full-text search
+bm25.workspace = true
+
 # GraphQL parsing
 graphql-parser.workspace = true
 

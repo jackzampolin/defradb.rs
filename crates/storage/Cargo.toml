@@ -40,6 +40,9 @@ anyhow.workspace = true
 # Logging
 tracing.workspace = true
 
+# Full-text search
+bm25.workspace = true
+
 # Utilities
 hex = "0.4"
 parking_lot = "0.12"

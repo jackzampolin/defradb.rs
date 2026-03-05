@@ -98,6 +98,11 @@ impl Planner {
                     mapping.add(index, "SIMILARITY");
                     mapping.add_render_key(index, sim.output_name());
                 }
+                Requestable::FullTextSearch(fts) => {
+                    let index = mapping.next_index();
+                    mapping.add(index, "BM25");
+                    mapping.add_render_key(index, fts.output_name());
+                }
             }
         }
 
@@ -185,6 +190,7 @@ impl Planner {
                 }
                 Requestable::Aggregate(_) => {}
                 Requestable::Similarity(_) => {}
+                Requestable::FullTextSearch(_) => {}
             }
         }
 

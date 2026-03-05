@@ -25,7 +25,7 @@ const INTROSPECTION_QUERY: &str = r#"
 fn is_aggregate_field(name: &str) -> bool {
     matches!(
         name,
-        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "GROUP" | "SIMILARITY"
+        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "GROUP" | "SIMILARITY" | "BM25"
     ) || (name.starts_with('_') && name != "_docID")
 }
 

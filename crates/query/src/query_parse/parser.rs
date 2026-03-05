@@ -17,7 +17,7 @@ use crate::mapper::{AggregateType, Field as SelectField, Limit, Mutation, Reques
 use super::aggregates::{parse_aggregate_field, parse_group_by_value, parse_top_level_aggregate};
 use super::filters::parse_filter_value;
 use super::limits::validate_select_limits;
-use super::mutations::{parse_field_to_mutation, parse_similarity_field};
+use super::mutations::{parse_bm25_field, parse_field_to_mutation, parse_similarity_field};
 use super::ordering::parse_order_value;
 
 /// Type of explain output requested.
@@ -708,6 +708,23 @@ pub(super) fn parse_selection_set(
                 let field_name = field.name.clone();
                 let alias = field.alias.clone();
 
+                // Check if this is a _bm25 field
+                if field_name == "BM25" {
+                    let fts = parse_bm25_field(field, variables)?;
+                    let fts = if let Some(ref a) = alias {
+                        fts.with_alias(a.clone())
+                    } else {
+                        fts
+                    };
+
+                    let index = mapping.next_index();
+                    mapping.add(index, "BM25");
+                    mapping.add_render_key(index, fts.output_name());
+
+                    fields.push(Requestable::FullTextSearch(fts));
+                    continue;
+                }
+
                 // Check if this is a _similarity field
                 if field_name == "SIMILARITY" {
                     let similarity = parse_similarity_field(field, variables)?;
@@ -817,6 +834,10 @@ pub(super) fn parse_selection_set(
                             mapping.add(index, "SIMILARITY");
                             mapping.add_render_key(index, sim.output_name());
                         }
+                        Requestable::FullTextSearch(fts) => {
+                            mapping.add(index, "BM25");
+                            mapping.add_render_key(index, fts.output_name());
+                        }
                     }
                     fields.push(frag_field);
                 }
@@ -852,6 +873,10 @@ pub(super) fn parse_selection_set(
                         Requestable::Similarity(sim) => {
                             mapping.add(index, "SIMILARITY");
                             mapping.add_render_key(index, sim.output_name());
+                        }
+                        Requestable::FullTextSearch(fts) => {
+                            mapping.add(index, "BM25");
+                            mapping.add_render_key(index, fts.output_name());
                         }
                     }
                     fields.push(inline_field);

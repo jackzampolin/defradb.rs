@@ -7,6 +7,6 @@ mod types;
 pub use filter::{like_pattern_match, Filter, FilterOp};
 pub use mutation::{parse_mutation_name, Mutation, MutationType};
 pub use types::{
-    Aggregate, AggregateTarget, AggregateType, Field, GroupBy, Limit, OrderBy, OrderCondition,
-    OrderDirection, Requestable, Select, SelectionType, Similarity,
+    Aggregate, AggregateTarget, AggregateType, Field, FullTextSearch, GroupBy, Limit, OrderBy,
+    OrderCondition, OrderDirection, Requestable, Select, SelectionType, Similarity,
 };

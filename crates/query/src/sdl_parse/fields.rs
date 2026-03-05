@@ -79,6 +79,19 @@ impl<'a> SdlParser<'a> {
                     // Searchable encryption index
                     result.encrypted_index = true;
                 }
+                "fulltext" => {
+                    let language = self.get_string_with_warning(
+                        directive,
+                        "language",
+                        &type_name,
+                        Some(field_name),
+                    );
+                    let k1 =
+                        self.get_float_with_warning(directive, "k1", &type_name, Some(field_name));
+                    let b =
+                        self.get_float_with_warning(directive, "b", &type_name, Some(field_name));
+                    result.fulltext = Some(super::directives::FullTextConfig { language, k1, b });
+                }
                 "embedding" => {
                     let provider = get_directive_string(directive, "provider").unwrap_or_default();
                     let model = get_directive_string(directive, "model").unwrap_or_default();
@@ -228,6 +241,34 @@ impl<'a> SdlParser<'a> {
                         directive_name: directive.name.clone(),
                         argument_name: arg_name.to_string(),
                         expected_type: "integer".to_string(),
+                        type_name: type_name.to_string(),
+                        field_name: field_name.map(|s| s.to_string()),
+                    });
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Get a float argument, emitting a warning if the type is wrong.
+    pub(super) fn get_float_with_warning(
+        &mut self,
+        directive: &Directive<'_, String>,
+        arg_name: &str,
+        type_name: &str,
+        field_name: Option<&str>,
+    ) -> Option<f64> {
+        if let Some(value) = get_directive_arg(directive, arg_name) {
+            match value {
+                graphql_parser::schema::Value::Float(f) => Some(*f),
+                graphql_parser::schema::Value::Int(n) => n.as_i64().map(|i| i as f64),
+                _ => {
+                    self.warnings.push(ParseWarning::InvalidArgumentType {
+                        directive_name: directive.name.clone(),
+                        argument_name: arg_name.to_string(),
+                        expected_type: "float".to_string(),
                         type_name: type_name.to_string(),
                         field_name: field_name.map(|s| s.to_string()),
                     });

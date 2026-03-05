@@ -202,6 +202,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .iter()
             .any(|f| matches!(f, Requestable::Similarity(_)));
 
+        // Check if any BM25 full-text search fields are present (require BM25Node in planner)
+        let has_fulltext_search = select
+            .fields
+            .iter()
+            .any(|f| matches!(f, Requestable::FullTextSearch(_)));
+
         // Validate similarity fields against the collection schema
         if has_similarity {
             for field in &select.fields {
@@ -284,7 +290,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             || has_secondary_relation_id
             || has_ordering_index
             || has_or_filter_index
-            || has_similarity;
+            || has_similarity
+            || has_fulltext_search;
 
         if needs_planner {
             // Use the Planner for queries with nested selections (joins) or relation filters.

@@ -22,6 +22,7 @@ pub fn select_to_go_json(select: &crate::Select) -> serde_json::Value {
             }
             crate::mapper::Requestable::Select(sub) => select_to_go_json(sub),
             crate::mapper::Requestable::Similarity(_) => serde_json::Value::Null,
+            crate::mapper::Requestable::FullTextSearch(_) => serde_json::Value::Null,
             crate::mapper::Requestable::Aggregate(agg) => {
                 let mut m = serde_json::Map::new();
                 m.insert(

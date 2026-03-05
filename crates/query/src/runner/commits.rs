@@ -233,6 +233,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 Requestable::Similarity(_) => {
                     // Similarity is not applicable in commit context
                 }
+                Requestable::FullTextSearch(_) => {
+                    // Full-text search is not applicable in commit context
+                }
             }
         }
 
@@ -846,6 +849,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     }
                     Requestable::Similarity(_) => {
                         // Similarity is not applicable in commit context
+                    }
+                    Requestable::FullTextSearch(_) => {
+                        // Full-text search is not applicable in commit context
                     }
                 }
             }

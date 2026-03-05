@@ -47,6 +47,10 @@ name = "hubrs"
 path = "tests/hubrs.rs"
 
 [[test]]
+name = "fts"
+path = "tests/fts.rs"
+
+[[test]]
 name = "p2p_iroh"
 path = "tests/p2p_iroh/main.rs"
 

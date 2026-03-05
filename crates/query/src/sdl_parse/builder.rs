@@ -839,6 +839,27 @@ impl<'a> SdlParser<'a> {
             .map(|f| schema::EncryptedIndexDescription::new(&f.name))
             .collect();
 
+        // Build full-text indexes from @fulltext directives
+        let fulltext_indexes: Vec<schema::FullTextIndexDescription> = type_def
+            .fields
+            .iter()
+            .filter_map(|f| {
+                f.directives.fulltext.as_ref().map(|ft| {
+                    let mut desc = schema::FullTextIndexDescription::new(&f.name);
+                    if let Some(ref lang) = ft.language {
+                        desc.language = lang.clone();
+                    }
+                    if let Some(k1) = ft.k1 {
+                        desc.k1 = k1;
+                    }
+                    if let Some(b) = ft.b {
+                        desc.b = b;
+                    }
+                    desc
+                })
+            })
+            .collect();
+
         // Build vector embeddings from @embedding directives
         let vector_embeddings: Vec<VectorEmbeddingDescription> = type_def
             .fields
@@ -857,6 +878,7 @@ impl<'a> SdlParser<'a> {
             CollectionVersion::new(&type_def.name, &version_id, &collection_id, fields);
         collection.indexes = indexes;
         collection.encrypted_indexes = encrypted_indexes;
+        collection.fulltext_indexes = fulltext_indexes;
         collection.vector_embeddings = vector_embeddings;
         collection.is_materialized = type_def.directives.is_materialized;
         collection.is_branchable = type_def.directives.is_branchable;

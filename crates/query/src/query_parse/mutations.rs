@@ -14,7 +14,7 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 
 use crate::error::{QueryError, Result};
-use crate::mapper::{parse_mutation_name, Mutation, MutationType, Similarity};
+use crate::mapper::{parse_mutation_name, FullTextSearch, Mutation, MutationType, Similarity};
 
 use super::filters::parse_filter_value;
 use super::parser::{graphql_value_to_json, parse_doc_ids_value, parse_selection_set, FragmentMap};
@@ -310,6 +310,76 @@ fn parse_document_input(
         fields.insert(key.clone(), json_value);
     }
     Ok(fields)
+}
+
+/// Parse a _bm25 field from a GraphQL query.
+///
+/// Format: `_bm25(query: "search terms", fields: ["title", "body"])`
+pub(super) fn parse_bm25_field(
+    field: &Field<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<FullTextSearch> {
+    let mut query_str = None;
+    let mut fields = Vec::new();
+
+    for (arg_name, arg_value) in &field.arguments {
+        match arg_name.as_str() {
+            "query" => {
+                query_str = Some(match arg_value {
+                    Value::String(s) => s.clone(),
+                    Value::Variable(var_name) => {
+                        let vars = variables.ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "variable '{}' used but no variables provided",
+                                var_name
+                            ))
+                        })?;
+                        vars.get(var_name.as_str())
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                QueryError::parse(format!(
+                                    "Variable \"${}\" must be a string",
+                                    var_name
+                                ))
+                            })?
+                            .to_string()
+                    }
+                    _ => {
+                        return Err(QueryError::parse("_bm25 query argument must be a string"));
+                    }
+                });
+            }
+            "fields" => {
+                fields = match arg_value {
+                    Value::List(items) => items
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::String(s) => Some(s.clone()),
+                            Value::Enum(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => {
+                        return Err(QueryError::parse(
+                            "_bm25 fields argument must be a list of strings",
+                        ));
+                    }
+                };
+            }
+            _ => {}
+        }
+    }
+
+    let query_str =
+        query_str.ok_or_else(|| QueryError::parse("_bm25 requires a 'query' argument"))?;
+
+    if fields.is_empty() {
+        return Err(QueryError::parse(
+            "_bm25 requires a non-empty 'fields' argument",
+        ));
+    }
+
+    Ok(FullTextSearch::new(fields, query_str))
 }
 
 /// Parse a _similarity field from a GraphQL query.

@@ -546,6 +546,7 @@ mod tests {
             fields: vec![],
             indexes: vec![],
             encrypted_indexes: vec![],
+            fulltext_indexes: vec![],
             policy: None,
             is_active: true,
             is_materialized: false,

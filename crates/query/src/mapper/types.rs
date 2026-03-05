@@ -197,7 +197,37 @@ impl Similarity {
     }
 }
 
-/// Requestable items in a select (field, aggregate, sub-select, or similarity)
+/// A full-text search scoring request
+#[derive(Debug, Clone)]
+pub struct FullTextSearch {
+    /// Fields to search across
+    pub target_fields: Vec<String>,
+    /// The search query string
+    pub query: String,
+    /// Optional alias for output
+    pub alias: Option<String>,
+}
+
+impl FullTextSearch {
+    pub fn new(target_fields: Vec<String>, query: impl Into<String>) -> Self {
+        Self {
+            target_fields,
+            query: query.into(),
+            alias: None,
+        }
+    }
+
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
+        self.alias = Some(alias.into());
+        self
+    }
+
+    pub fn output_name(&self) -> &str {
+        self.alias.as_deref().unwrap_or("BM25")
+    }
+}
+
+/// Requestable items in a select (field, aggregate, sub-select, similarity, or full-text search)
 #[derive(Debug, Clone)]
 pub enum Requestable {
     /// Simple field
@@ -208,6 +238,8 @@ pub enum Requestable {
     Aggregate(Aggregate),
     /// Similarity computation (dot product)
     Similarity(Similarity),
+    /// Full-text search scoring (BM25)
+    FullTextSearch(FullTextSearch),
 }
 
 /// Aggregate function type
@@ -454,6 +486,12 @@ impl Select {
     /// Add a similarity computation
     pub fn with_similarity(mut self, similarity: Similarity) -> Self {
         self.fields.push(Requestable::Similarity(similarity));
+        self
+    }
+
+    /// Add a full-text search scoring request
+    pub fn with_fulltext_search(mut self, fts: FullTextSearch) -> Self {
+        self.fields.push(Requestable::FullTextSearch(fts));
         self
     }
 

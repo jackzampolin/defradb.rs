@@ -13,7 +13,7 @@ use document::Document;
 use schema::{CollectionVersion, FieldDescription, IndexDescription, IndexedFieldDescription};
 use std::collections::HashMap;
 use storage::corekv::Key;
-use storage::index::IndexType;
+use storage::index::{FullTextIndex, IndexType};
 use storage::keys::IndexIDSequenceKey;
 
 /// Result of a bulk index operation.
@@ -100,6 +100,35 @@ impl IndexManager {
             }
             let index = IndexType::new(collection_short_id, desc.clone());
             manager.indexes.insert(desc.name.clone(), index);
+        }
+        // Load full-text indexes.
+        // IDs are derived deterministically from the field name to avoid collisions
+        // with regular indexes (which use the IndexIDSequenceKey mechanism).
+        // The high-bit (0x8000_0000) separates the namespace from regular index IDs.
+        for ft_desc in &schema.fulltext_indexes {
+            let idx_name = format!("{}_fulltext", ft_desc.field_name);
+            let idx_id = {
+                // FNV-1a: stable across Rust versions unlike DefaultHasher
+                let mut h: u32 = 2166136261;
+                for byte in ft_desc.field_name.as_bytes() {
+                    h ^= *byte as u32;
+                    h = h.wrapping_mul(16777619);
+                }
+                h | 0x8000_0000
+            };
+            let desc = IndexDescription {
+                name: idx_name.clone(),
+                id: idx_id,
+                fields: vec![IndexedFieldDescription {
+                    name: ft_desc.field_name.clone(),
+                    descending: false,
+                }],
+                unique: false,
+            };
+            let ft_index = FullTextIndex::new(collection_short_id, desc, ft_desc.clone());
+            manager
+                .indexes
+                .insert(idx_name, IndexType::FullText(ft_index));
         }
         Ok(manager)
     }

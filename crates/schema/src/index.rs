@@ -98,6 +98,49 @@ impl EncryptedIndexDescription {
     }
 }
 
+/// Describes a BM25 full-text search index on a collection field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FullTextIndexDescription {
+    /// Name of the field being indexed.
+    #[serde(rename = "FieldName")]
+    pub field_name: String,
+
+    /// Language for tokenization and stemming (default: "english").
+    #[serde(rename = "Language", default = "default_language")]
+    pub language: String,
+
+    /// BM25 term frequency saturation parameter (default: 1.2).
+    #[serde(rename = "K1", default = "default_k1")]
+    pub k1: f64,
+
+    /// BM25 document length normalization parameter (default: 0.75).
+    #[serde(rename = "B", default = "default_b")]
+    pub b: f64,
+}
+
+fn default_language() -> String {
+    "english".to_string()
+}
+
+fn default_k1() -> f64 {
+    1.2
+}
+
+fn default_b() -> f64 {
+    0.75
+}
+
+impl FullTextIndexDescription {
+    pub fn new(field_name: impl Into<String>) -> Self {
+        Self {
+            field_name: field_name.into(),
+            language: default_language(),
+            k1: default_k1(),
+            b: default_b(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -142,6 +142,9 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
                 Requestable::Similarity(_) => {
                     // Similarity is allowed at group level
                 }
+                Requestable::FullTextSearch(_) => {
+                    // Full-text search is allowed at group level
+                }
             }
         }
     }
@@ -298,6 +301,11 @@ pub(crate) fn build_mapping(
                 let index = mapping.next_index();
                 mapping.add(index, "SIMILARITY");
                 mapping.add_render_key(index, sim.output_name());
+            }
+            Requestable::FullTextSearch(fts) => {
+                let index = mapping.next_index();
+                mapping.add(index, "BM25");
+                mapping.add_render_key(index, fts.output_name());
             }
         }
     }

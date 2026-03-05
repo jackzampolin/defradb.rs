@@ -131,6 +131,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         Requestable::Similarity(s) => {
                             allowed.insert(s.output_name().to_string());
                         }
+                        Requestable::FullTextSearch(fts) => {
+                            allowed.insert(fts.output_name().to_string());
+                        }
                     }
                 }
                 relation_allowed_fields

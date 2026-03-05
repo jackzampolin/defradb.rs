@@ -3,12 +3,16 @@ use schema::IndexDescription;
 
 use crate::corekv::{MaybeSend, Reader, Result, Writer};
 
-use super::{Bound, CollectionIndex, ExactMatchIterator, RangeIterator, SimpleIndex, UniqueIndex};
+use super::{
+    Bound, CollectionIndex, ExactMatchIterator, FullTextIndex, RangeIterator, SimpleIndex,
+    UniqueIndex,
+};
 
 /// Enum for index types (avoids dyn trait issues).
 pub enum IndexType {
     Simple(SimpleIndex),
     Unique(UniqueIndex),
+    FullText(FullTextIndex),
 }
 
 impl IndexType {
@@ -26,6 +30,15 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.description(),
             IndexType::Unique(idx) => idx.description(),
+            IndexType::FullText(idx) => idx.description(),
+        }
+    }
+
+    /// Get a reference to the FullTextIndex if this is one.
+    pub fn as_fulltext(&self) -> Option<&FullTextIndex> {
+        match self {
+            IndexType::FullText(idx) => Some(idx),
+            _ => None,
         }
     }
 
@@ -39,6 +52,7 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.save(txn, doc_id, values).await,
             IndexType::Unique(idx) => idx.save(txn, doc_id, values).await,
+            IndexType::FullText(idx) => idx.save(txn, doc_id, values).await,
         }
     }
 
@@ -52,6 +66,7 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.save(txn, doc_id, values).await,
             IndexType::Unique(idx) => idx.save_blind(txn, doc_id, values).await,
+            IndexType::FullText(idx) => idx.save(txn, doc_id, values).await,
         }
     }
 
@@ -66,6 +81,7 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.update(txn, doc_id, old_values, new_values).await,
             IndexType::Unique(idx) => idx.update(txn, doc_id, old_values, new_values).await,
+            IndexType::FullText(idx) => idx.update(txn, doc_id, old_values, new_values).await,
         }
     }
 
@@ -79,6 +95,7 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.delete(txn, doc_id, values).await,
             IndexType::Unique(idx) => idx.delete(txn, doc_id, values).await,
+            IndexType::FullText(idx) => idx.delete(txn, doc_id, values).await,
         }
     }
 
@@ -87,6 +104,7 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.remove_all(txn).await,
             IndexType::Unique(idx) => idx.remove_all(txn).await,
+            IndexType::FullText(idx) => idx.remove_all(txn).await,
         }
     }
 
@@ -99,6 +117,9 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.get(txn, values).await,
             IndexType::Unique(idx) => idx.get(txn, values).await,
+            IndexType::FullText(_) => Err(crate::corekv::Error::Other(
+                "exact match get not supported on full-text indexes".to_string(),
+            )),
         }
     }
 
@@ -111,6 +132,9 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.scan(txn, reverse).await,
             IndexType::Unique(idx) => idx.scan(txn, reverse).await,
+            IndexType::FullText(_) => Err(crate::corekv::Error::Other(
+                "scan not supported on full-text indexes".to_string(),
+            )),
         }
     }
 
@@ -124,6 +148,9 @@ impl IndexType {
         match self {
             IndexType::Simple(idx) => idx.scan_prefix(txn, prefix_values, reverse).await,
             IndexType::Unique(idx) => idx.scan_prefix(txn, prefix_values, reverse).await,
+            IndexType::FullText(_) => Err(crate::corekv::Error::Other(
+                "scan_prefix not supported on full-text indexes".to_string(),
+            )),
         }
     }
 
@@ -145,6 +172,9 @@ impl IndexType {
                 idx.scan_range(txn, prefix_values, lower, upper, reverse)
                     .await
             }
+            IndexType::FullText(_) => Err(crate::corekv::Error::Other(
+                "scan_range not supported on full-text indexes".to_string(),
+            )),
         }
     }
 }

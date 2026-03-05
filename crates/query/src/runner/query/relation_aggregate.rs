@@ -93,6 +93,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             Requestable::Similarity(sim) => {
                                 fields.insert(sim.output_name().to_string());
                             }
+                            Requestable::FullTextSearch(fts) => {
+                                fields.insert(fts.output_name().to_string());
+                            }
                         }
                     }
                     Some((s.field.output_name().to_string(), fields))

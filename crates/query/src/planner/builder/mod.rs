@@ -204,6 +204,7 @@ impl Planner {
             .filter_map(|f| match f {
                 Requestable::Aggregate(agg) => Some(agg.output_name()),
                 Requestable::Similarity(sim) => Some(sim.output_name()),
+                Requestable::FullTextSearch(fts) => Some(fts.output_name()),
                 _ => None,
             })
             .collect();
@@ -496,6 +497,9 @@ impl Planner {
         // 4c. Add SimilarityNodes for _similarity fields.
         // These compute per-document dot product before filters/ordering can reference results.
         plan = self.add_similarity_nodes(plan, select, &scan_mapping)?;
+
+        // 4c2. Add BM25Nodes for _bm25 full-text search fields.
+        plan = self.add_bm25_nodes(plan, select, &scan_mapping)?;
 
         // 4d. Apply deferred _alias filter for similarity results (non-grouped queries only).
         // Only apply alias conditions that do NOT reference aggregate fields.

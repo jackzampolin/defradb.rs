@@ -33,7 +33,8 @@ pub use error::{Result, SchemaError};
 pub use field::FieldDescription;
 pub use field_kind::{FieldKind, ScalarArrayKind, ScalarKind};
 pub use index::{
-    EncryptedIndexDescription, EncryptedIndexType, IndexDescription, IndexedFieldDescription,
+    EncryptedIndexDescription, EncryptedIndexType, FullTextIndexDescription, IndexDescription,
+    IndexedFieldDescription,
 };
 pub use policy::PolicyDescription;
 pub use source::{CollectionSetDescription, CollectionSource, QuerySource};

@@ -2,8 +2,8 @@
 
 use crate::{
     CollectionSetDescription, CollectionSource, EncryptedIndexDescription, FieldDescription,
-    FieldKind, IndexDescription, PolicyDescription, QuerySource, Result, SchemaError,
-    VectorEmbeddingDescription,
+    FieldKind, FullTextIndexDescription, IndexDescription, PolicyDescription, QuerySource, Result,
+    SchemaError, VectorEmbeddingDescription,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -88,6 +88,15 @@ pub struct CollectionVersion {
     )]
     pub encrypted_indexes: Vec<EncryptedIndexDescription>,
 
+    /// BM25 full-text search indexes
+    #[serde(
+        rename = "FullTextIndexes",
+        default,
+        deserialize_with = "deserialize_null_as_empty_vec",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub fulltext_indexes: Vec<FullTextIndexDescription>,
+
     /// Access control policy for this collection
     #[serde(rename = "Policy", default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<PolicyDescription>,
@@ -150,6 +159,7 @@ impl CollectionVersion {
             fields,
             indexes: Vec::new(),
             encrypted_indexes: Vec::new(),
+            fulltext_indexes: Vec::new(),
             policy: None,
             is_active: true,
             is_materialized: false,

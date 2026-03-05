@@ -17,6 +17,7 @@ pub const KNOWN_FIELD_DIRECTIVES: &[&str] = &[
     "constraints",
     "embedding",
     "encryptedIndex",
+    "fulltext",
     "policy", // Go allows @policy on fields in some contexts
 ];
 
@@ -40,6 +41,7 @@ pub fn known_directive_arguments(directive_name: &str) -> &'static [&'static str
         "policy" => &["id", "resource"],
         "embedding" => &["provider", "model", "url", "fields", "template"],
         "encryptedIndex" => &["type"],
+        "fulltext" => &["language", "k1", "b"],
         _ => &[],
     }
 }
@@ -135,6 +137,16 @@ pub struct ParsedDirectives {
     pub encrypted_index: bool,
     /// Embedding configuration from @embedding directive
     pub embedding: Option<EmbeddingConfig>,
+    /// Full-text search configuration from @fulltext directive
+    pub fulltext: Option<FullTextConfig>,
+}
+
+/// Full-text search configuration from @fulltext directive
+#[derive(Debug, Clone)]
+pub struct FullTextConfig {
+    pub language: Option<String>,
+    pub k1: Option<f64>,
+    pub b: Option<f64>,
 }
 
 /// Index configuration from @index directive

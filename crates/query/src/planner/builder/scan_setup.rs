@@ -344,6 +344,31 @@ impl Planner {
             }
         }
 
+        // Add BM25 full-text search fields to scan_mapping.
+        for field in &select.fields {
+            if let Requestable::FullTextSearch(fts) = field {
+                let output_name = fts.output_name();
+                if scan_mapping
+                    .try_find_index_from_render_key(output_name)
+                    .is_none()
+                {
+                    let scan_index = scan_mapping.next_index();
+                    scan_mapping.add(scan_index, "BM25");
+                    scan_mapping.add_render_key(scan_index, output_name);
+                }
+
+                // Ensure each target text field is in scan_mapping
+                for target_field in &fts.target_fields {
+                    if scan_mapping.first_index_of_name(target_field).is_none()
+                        && collection.field_by_name(target_field).is_some()
+                    {
+                        let idx = scan_mapping.next_index();
+                        scan_mapping.add(idx, target_field);
+                    }
+                }
+            }
+        }
+
         Ok(ScanSetup {
             scan_mapping,
             needs_joins,

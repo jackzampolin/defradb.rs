@@ -28,6 +28,7 @@
 //! - Full scan (`scan`): Iterate all index entries
 
 mod eq_iterator;
+mod fulltext;
 mod in_iterator;
 mod index_type;
 mod iterator;
@@ -41,6 +42,7 @@ mod unique;
 mod tests;
 
 pub use eq_iterator::ExactMatchIterator;
+pub use fulltext::{parse_language, FullTextIndex};
 pub use in_iterator::InIterator;
 pub use index_type::IndexType;
 pub use iterator::{Bound, IndexEntry, IndexIterator};
