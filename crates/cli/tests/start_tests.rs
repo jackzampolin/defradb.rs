@@ -43,6 +43,7 @@ fn default_start_args() -> StartArgs {
         max_merge_depth: None,
         query_timeout: None,
         p2p_transport: None,
+        pg_address: None,
     }
 }
 
@@ -120,6 +121,7 @@ fn test_apply_to_config_all_flags() {
         max_merge_depth: Some(2048),
         query_timeout: Some(45),
         p2p_transport: None,
+        pg_address: None,
     };
 
     let result = args.apply_to_config(&mut config);
