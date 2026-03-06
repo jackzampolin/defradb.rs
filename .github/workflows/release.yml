@@ -346,8 +346,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/jackzampolin/defradb-rs:${{ github.ref_name }}
-            ghcr.io/jackzampolin/defradb-rs:latest
+            ghcr.io/sourcenetwork/defradb-rs:${{ github.ref_name }}
+            ghcr.io/sourcenetwork/defradb-rs:latest
 
   release:
     name: Release
