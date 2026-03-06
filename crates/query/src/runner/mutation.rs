@@ -444,8 +444,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         plan.close().await.map_err(&map_doc_not_found)?;
 
-        // Clear broadcast identity after plan execution
+        // Clear broadcast identity and request bearer token after plan execution
         defra_core::signing::set_broadcast_creator_did(None);
+        defra_core::signing::set_request_bearer_token(None);
 
         // For CREATE/UPSERT operations with caller_identity: register created docs with ACP
         if matches!(

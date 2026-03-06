@@ -213,19 +213,30 @@ impl SourceHubProvider for HubRsProvider {
             });
         }
 
-        let signing_config = defra_core::signing::get_identity(did).ok_or_else(|| {
-            tracing::warn!(
-                did,
-                "hub.rs bearer token creation failed: no signing config for DID"
-            );
-            ProviderError::Config(format!("no signing config found for DID: {}", did))
-        })?;
+        // Try locally stored signing config (e.g. from create_identity)
+        if let Some(signing_config) = defra_core::signing::get_identity(did) {
+            let key = SigningKey::from_slice(&signing_config.private_key_bytes)
+                .map_err(|e| ProviderError::Config(format!("invalid signing key: {}", e)))?;
 
-        let key = SigningKey::from_slice(&signing_config.private_key_bytes)
-            .map_err(|e| ProviderError::Config(format!("invalid signing key: {}", e)))?;
+            return bearer::create_bearer_token(&key, did, 300)
+                .map_err(|e| ProviderError::Config(format!("bearer token creation failed: {}", e)));
+        }
 
-        bearer::create_bearer_token(&key, did, 300)
-            .map_err(|e| ProviderError::Config(format!("bearer token creation failed: {}", e)))
+        // Fall back to the original JWT from the HTTP request.
+        // Go DefraDB's BearerToken() pattern: the user's JWT is already signed
+        // by their private key, so we can forward it to hub.rs as-is.
+        if let Some(token) = defra_core::signing::get_request_bearer_token() {
+            return Ok(token);
+        }
+
+        tracing::warn!(
+            did,
+            "hub.rs bearer token creation failed: no signing config for DID and no request token"
+        );
+        Err(ProviderError::Config(format!(
+            "no signing config found for DID: {}",
+            did
+        )))
     }
 
     fn self_did(&self) -> Option<String> {

@@ -121,6 +121,9 @@ pub(crate) struct MiddlewareIdentity(pub Option<Did>);
 pub(crate) fn parse_identity_from_headers(
     headers: &axum::http::HeaderMap,
 ) -> Result<Option<Did>, IdentityExtractionError> {
+    // Clear any stale request bearer token from a previous request on this thread.
+    defra_core::signing::set_request_bearer_token(None);
+
     let auth_value = match headers.get(AUTHORIZATION) {
         Some(value) => match value.to_str() {
             Ok(s) => Some(s.to_string()),
@@ -233,6 +236,11 @@ fn extract_identity_from_auth_header(
     // Go DefraDB uses req.Host as expected audience
     verify_auth_token(&token_identity, expected_audience)
         .map_err(|e| IdentityExtractionError::TokenVerificationFailed(e.to_string()))?;
+
+    // Store the raw JWT for passthrough to SourceHub/hub.rs ACP operations.
+    // Go DefraDB's BearerToken() pattern: the original JWT (signed by the user's key)
+    // is forwarded to SourceHub for register_object and other bearer policy commands.
+    defra_core::signing::set_request_bearer_token(Some(token.to_string()));
 
     // Extract DID
     let did = token_identity

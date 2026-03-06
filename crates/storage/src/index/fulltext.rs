@@ -262,6 +262,7 @@ impl FullTextIndex {
         let avgdl = avg_field_len;
         let k1 = self.k1();
         let b = self.b();
+
         let mut scores: HashMap<String, f64> = HashMap::new();
 
         for term in &query_terms {
@@ -289,6 +290,7 @@ impl FullTextIndex {
                         tf + k1
                     };
                     let tf_norm = (tf * (k1 + 1.0)) / denom;
+
                     *scores.entry(doc_id).or_insert(0.0) += idf * tf_norm;
                 }
             }

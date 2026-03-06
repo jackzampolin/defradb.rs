@@ -88,14 +88,26 @@ impl SourceHubProvider for CosmosProvider {
     }
 
     async fn create_bearer_token(&self, did: &str) -> Result<String, ProviderError> {
-        let signing_config = defra_core::signing::get_identity(did).ok_or_else(|| {
-            tracing::warn!(
-                did,
-                "SourceHub bearer token creation failed: no signing config for DID. \
-                 The identity may have been unregistered. Denying access."
-            );
-            ProviderError::Config(format!("no signing config found for DID: {}", did))
-        })?;
+        let signing_config = match defra_core::signing::get_identity(did) {
+            Some(config) => config,
+            None => {
+                // Fall back to the original JWT from the HTTP request.
+                // Go DefraDB's BearerToken() pattern: the user's JWT is already signed
+                // by their private key, so we can forward it to SourceHub as-is.
+                if let Some(token) = defra_core::signing::get_request_bearer_token() {
+                    return Ok(token);
+                }
+                tracing::warn!(
+                    did,
+                    "SourceHub bearer token creation failed: no signing config for DID \
+                     and no request token. The identity may have been unregistered."
+                );
+                return Err(ProviderError::Config(format!(
+                    "no signing config found for DID: {}",
+                    did
+                )));
+            }
+        };
 
         let key_type: crypto::KeyType = match signing_config.key_type.as_str() {
             "ed25519" => crypto::KeyType::Ed25519,

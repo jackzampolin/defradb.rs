@@ -106,6 +106,31 @@ pub fn clear_identity_store() {
 }
 
 // ---------------------------------------------------------------------------
+// Request Bearer Token — thread-local for ACP registration passthrough
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static REQUEST_BEARER_TOKEN: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Store the raw JWT from the HTTP Authorization header for the current request.
+///
+/// When a user authenticates via JWT, the node doesn't have their private key
+/// and can't create new bearer tokens for them. Instead, we pass through the
+/// original JWT — which IS signed by the user's key — to hub.rs/SourceHub
+/// for ACP operations like register_object.
+pub fn set_request_bearer_token(token: Option<String>) {
+    REQUEST_BEARER_TOKEN.with(|c| {
+        *c.borrow_mut() = token;
+    });
+}
+
+/// Get the stored request bearer token for this thread.
+pub fn get_request_bearer_token() -> Option<String> {
+    REQUEST_BEARER_TOKEN.with(|c| c.borrow().clone())
+}
+
+// ---------------------------------------------------------------------------
 // Broadcast Creator DID — thread-local for P2P ACP propagation
 // ---------------------------------------------------------------------------
 
