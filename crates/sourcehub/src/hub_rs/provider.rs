@@ -146,19 +146,17 @@ fn subject_to_cmd_json(subject: &SubjectRef) -> serde_json::Value {
 }
 
 fn encode_register_object_cmd(resource: &str, object_id: &str) -> Vec<u8> {
+    // Matches hub.rs PolicyCmd::RegisterObject(Object { resource, id })
     serde_json::to_vec(&serde_json::json!({
-        "register_object_cmd": {
-            "object": { "resource": resource, "id": object_id }
-        }
+        "RegisterObject": { "resource": resource, "id": object_id }
     }))
     .unwrap_or_default()
 }
 
 fn encode_archive_object_cmd(resource: &str, object_id: &str) -> Vec<u8> {
+    // Matches hub.rs PolicyCmd::ArchiveObject(Object { resource, id })
     serde_json::to_vec(&serde_json::json!({
-        "archive_object_cmd": {
-            "object": { "resource": resource, "id": object_id }
-        }
+        "ArchiveObject": { "resource": resource, "id": object_id }
     }))
     .unwrap_or_default()
 }
@@ -225,7 +223,7 @@ impl SourceHubProvider for HubRsProvider {
         // Fall back to the original JWT from the HTTP request.
         // Go DefraDB's BearerToken() pattern: the user's JWT is already signed
         // by their private key, so we can forward it to hub.rs as-is.
-        if let Some(token) = defra_core::signing::get_request_bearer_token() {
+        if let Some(token) = defra_core::signing::get_request_bearer_token(did) {
             return Ok(token);
         }
 
@@ -424,12 +422,9 @@ impl SourceHubProvider for HubRsProvider {
         let ops = [(resource, object_id, permission)];
         let decision_id = Self::compute_decision_id(policy_id, &creator_did, actor_did, &ops);
 
-        // Fast path: decision already proven and cached by the light client.
-        if let Ok(result) = self.light_client.check_access_decision(&decision_id).await {
-            return Ok(result.allowed);
-        }
-
-        // Submit checkAccess tx to create the AccessDecision on-chain.
+        // Always submit checkAccess tx — we cannot use cached positive decisions
+        // because AccessDecision records persist on-chain even after the underlying
+        // relationship is revoked. The tx evaluates current relationships.
         let pid = Self::policy_id_to_bytes32(policy_id);
         let call = IAcp::checkAccessCall {
             policyId: pid,

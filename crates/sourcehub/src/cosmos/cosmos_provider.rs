@@ -94,7 +94,7 @@ impl SourceHubProvider for CosmosProvider {
                 // Fall back to the original JWT from the HTTP request.
                 // Go DefraDB's BearerToken() pattern: the user's JWT is already signed
                 // by their private key, so we can forward it to SourceHub as-is.
-                if let Some(token) = defra_core::signing::get_request_bearer_token() {
+                if let Some(token) = defra_core::signing::get_request_bearer_token(did) {
                     return Ok(token);
                 }
                 tracing::warn!(

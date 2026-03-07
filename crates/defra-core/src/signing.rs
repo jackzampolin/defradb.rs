@@ -106,28 +106,43 @@ pub fn clear_identity_store() {
 }
 
 // ---------------------------------------------------------------------------
-// Request Bearer Token — thread-local for ACP registration passthrough
+// Request Bearer Token — keyed by DID for ACP registration passthrough
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    static REQUEST_BEARER_TOKEN: RefCell<Option<String>> = const { RefCell::new(None) };
+use std::sync::OnceLock;
+
+/// Global map of DID → JWT for in-flight requests.
+///
+/// `thread_local!` doesn't work here because tokio can migrate async tasks
+/// between OS threads at `.await` points. A global map keyed by DID ensures
+/// the token is available regardless of which thread reads it.
+fn request_token_store() -> &'static Mutex<HashMap<String, String>> {
+    static STORE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Store the raw JWT from the HTTP Authorization header for the current request.
+/// Store the raw JWT from the HTTP Authorization header, keyed by the caller's DID.
 ///
 /// When a user authenticates via JWT, the node doesn't have their private key
 /// and can't create new bearer tokens for them. Instead, we pass through the
 /// original JWT — which IS signed by the user's key — to hub.rs/SourceHub
 /// for ACP operations like register_object.
-pub fn set_request_bearer_token(token: Option<String>) {
-    REQUEST_BEARER_TOKEN.with(|c| {
-        *c.borrow_mut() = token;
-    });
+pub fn set_request_bearer_token(did: &str, token: String) {
+    if let Ok(mut store) = request_token_store().lock() {
+        store.insert(did.to_string(), token);
+    }
 }
 
-/// Get the stored request bearer token for this thread.
-pub fn get_request_bearer_token() -> Option<String> {
-    REQUEST_BEARER_TOKEN.with(|c| c.borrow().clone())
+/// Get the stored request bearer token for a specific DID.
+pub fn get_request_bearer_token(did: &str) -> Option<String> {
+    request_token_store().lock().ok()?.get(did).cloned()
+}
+
+/// Remove the stored request bearer token for a specific DID.
+pub fn clear_request_bearer_token(did: &str) {
+    if let Ok(mut store) = request_token_store().lock() {
+        store.remove(did);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -279,8 +279,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     }
                 }
                 MutationType::Create => {
-                    // CREATE permission is checked implicitly - anyone can create
-                    // but ownership is established via registration
+                    // CREATE permission is checked implicitly — anyone can create
+                    // but ownership is established via registration after the write.
                 }
             }
         }
@@ -444,9 +444,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         plan.close().await.map_err(&map_doc_not_found)?;
 
-        // Clear broadcast identity and request bearer token after plan execution
+        // Clear broadcast identity after plan execution (but keep request bearer
+        // token alive — ACP registration below needs it for hub.rs auth).
         defra_core::signing::set_broadcast_creator_did(None);
-        defra_core::signing::set_request_bearer_token(None);
 
         // For CREATE/UPSERT operations with caller_identity: register created docs with ACP
         if matches!(
@@ -474,9 +474,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
                         // Only register if not already registered (new document)
                         if !is_registered {
-                            // Register the document with the creator as owner
-                            // CRITICAL: Registration failure must fail the mutation to prevent
-                            // documents from being created without proper access control
                             acp.register_doc_object(
                                 identity_did,
                                 &policy.id,
@@ -496,6 +493,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     }
                 }
             }
+        }
+
+        // Clear request bearer token after ACP registration is complete
+        if let Some(ref identity_did) = caller_identity {
+            defra_core::signing::clear_request_bearer_token(identity_did.as_str());
         }
 
         // For DELETE operations: unregister deleted docs from ACP
