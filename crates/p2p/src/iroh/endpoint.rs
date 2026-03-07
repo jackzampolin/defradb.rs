@@ -462,7 +462,8 @@ async fn handle_command(
             }
         }
         IrohCommand::Publish { topic, msg, reply } => {
-            let result = handle_publish(subscriptions, &topic, &msg).await;
+            let result =
+                handle_publish(gossip, subscriptions, peer_map, topic, &msg, event_tx).await;
             let _ = reply.send(result);
         }
         IrohCommand::SendPushLogResponse {
@@ -946,12 +947,26 @@ async fn join_peer_to_subscriptions(
 }
 
 /// Publish a message on a gossip topic.
+///
+/// If the topic is not yet subscribed, lazily subscribes first (matching Go gossipsub
+/// behavior where publishing to a topic implicitly joins it). This is needed for
+/// document-level topics which are not subscribed at startup.
 async fn handle_publish(
+    gossip: &Gossip,
     subscriptions: &mut HashMap<String, TopicSubscription>,
-    topic: &crate::topics::DefraTopic,
+    peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
+    topic: crate::topics::DefraTopic,
     msg: &crate::message::PushLogBroadcast,
+    event_tx: &mpsc::Sender<TransportEvent>,
 ) -> crate::error::Result<MessageId> {
     let topic_str = topic.to_string();
+
+    // Auto-subscribe to the topic if not already subscribed
+    if !subscriptions.contains_key(&topic_str) {
+        debug!(topic = %topic_str, "Auto-subscribing to topic on first publish");
+        handle_subscribe(gossip, subscriptions, peer_map, topic, event_tx).await?;
+    }
+
     let sub = subscriptions
         .get_mut(&topic_str)
         .ok_or_else(|| crate::error::Error::InvalidTopic(topic_str.clone()))?;
