@@ -1,0 +1,20 @@
+[package]
+name = "defra-fs"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "FUSE filesystem overlay for DefraDB"
+
+[dependencies]
+fuser = "0.15"
+libc = "0.2"
+db = { path = "../db" }
+document = { path = "../document" }
+storage = { path = "../storage" }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
