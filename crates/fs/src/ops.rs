@@ -6,6 +6,7 @@
 /// - lookup/read(doc) → collection.get()
 /// - write/create → collection.create() or collection.save()
 /// - unlink → collection.delete()
+/// - rmdir → ENOTEMPTY (collections cannot be dropped via fs)
 use std::ffi::OsStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,6 +19,7 @@ use parking_lot::Mutex;
 use storage::corekv::Store;
 use tokio::runtime::Handle;
 
+use crate::errno::db_err_to_errno;
 use crate::inode::{InodeTable, InodeTarget, ROOT_INO};
 
 /// TTL for filesystem attributes (short, since DB can change).
@@ -31,22 +33,23 @@ pub struct DefraFs<S: Store> {
     db: Arc<db::DB<S>>,
     inodes: Mutex<InodeTable>,
     rt: Handle,
+    read_only: bool,
     /// Per-inode write buffers for accumulating write() data before flush.
     write_buffers: Mutex<std::collections::HashMap<u64, Vec<u8>>>,
 }
 
 impl<S: Store> DefraFs<S> {
-    pub fn new(db: Arc<db::DB<S>>, rt: Handle) -> Self {
+    pub fn new(db: Arc<db::DB<S>>, rt: Handle, read_only: bool) -> Self {
         Self {
             db,
             inodes: Mutex::new(InodeTable::new()),
             rt,
+            read_only,
             write_buffers: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
-    /// Build a directory FileAttr.
-    fn dir_attr(ino: u64) -> FileAttr {
+    fn dir_attr(ino: u64, perm: u16) -> FileAttr {
         FileAttr {
             ino,
             size: 0,
@@ -56,7 +59,7 @@ impl<S: Store> DefraFs<S> {
             ctime: EPOCH,
             crtime: EPOCH,
             kind: FileType::Directory,
-            perm: 0o755,
+            perm,
             nlink: 2,
             uid: 0,
             gid: 0,
@@ -66,8 +69,7 @@ impl<S: Store> DefraFs<S> {
         }
     }
 
-    /// Build a regular file FileAttr.
-    fn file_attr(ino: u64, size: u64) -> FileAttr {
+    fn file_attr(ino: u64, size: u64, perm: u16) -> FileAttr {
         FileAttr {
             ino,
             size,
@@ -77,7 +79,7 @@ impl<S: Store> DefraFs<S> {
             ctime: EPOCH,
             crtime: EPOCH,
             kind: FileType::RegularFile,
-            perm: 0o644,
+            perm,
             nlink: 1,
             uid: 0,
             gid: 0,
@@ -87,22 +89,37 @@ impl<S: Store> DefraFs<S> {
         }
     }
 
+    fn dir_perm(&self) -> u16 {
+        if self.read_only { 0o555 } else { 0o755 }
+    }
+
+    fn file_perm(&self) -> u16 {
+        if self.read_only { 0o444 } else { 0o644 }
+    }
+
     /// Fetch document JSON bytes for a given collection + doc_id.
-    fn fetch_doc_json(&self, collection_name: &str, doc_id_str: &str) -> Option<Vec<u8>> {
+    /// Returns Ok(bytes) on success, Err(errno) on failure.
+    fn fetch_doc_json(&self, collection_name: &str, doc_id_str: &str) -> Result<Vec<u8>, i32> {
         let db = self.db.clone();
         let collection_name = collection_name.to_string();
         let doc_id_str = doc_id_str.to_string();
 
-        self.rt
-            .block_on(async move {
-                let col = db.get_collection(&collection_name).ok()??;
-                let doc_id = document::DocID::from_string(&doc_id_str).ok()?;
-                let txn = db.new_txn(true).await.ok()?;
-                let doc = col.get(&txn, &doc_id).await.ok()??;
-                txn.commit().await.ok()?;
-                let map = doc.to_map().ok()?;
-                serde_json::to_vec_pretty(&map).ok()
-            })
+        self.rt.block_on(async move {
+            let col = db
+                .get_collection(&collection_name)
+                .map_err(|e| db_err_to_errno(&e))?
+                .ok_or(libc::ENOENT)?;
+            let doc_id = document::DocID::from_string(&doc_id_str).map_err(|_| libc::EINVAL)?;
+            let txn = db.new_txn(true).await.map_err(|e| db_err_to_errno(&e))?;
+            let doc = col
+                .get(&txn, &doc_id)
+                .await
+                .map_err(|e| db_err_to_errno(&e))?
+                .ok_or(libc::ENOENT)?;
+            txn.commit().await.map_err(|e| db_err_to_errno(&e))?;
+            let map = doc.to_map().map_err(|_| libc::EIO)?;
+            serde_json::to_vec_pretty(&map).map_err(|_| libc::EIO)
+        })
     }
 
     /// List all doc IDs in a collection.
@@ -129,6 +146,18 @@ impl<S: Store> DefraFs<S> {
                 .collect()
         })
     }
+
+    /// Validate that a filename represents a valid doc ID.
+    /// Strips .json suffix and checks the bae-xxx format.
+    fn parse_doc_id_from_filename(name: &str) -> Result<&str, i32> {
+        let doc_id_str = name.strip_suffix(".json").unwrap_or(name);
+        if !doc_id_str.starts_with("bae-") {
+            return Err(libc::EINVAL);
+        }
+        // Validate it parses as a DocID
+        document::DocID::from_string(doc_id_str).map_err(|_| libc::EINVAL)?;
+        Ok(doc_id_str)
+    }
 }
 
 impl<S: Store + 'static> Filesystem for DefraFs<S> {
@@ -146,24 +175,29 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
 
         match target {
             Some(InodeTarget::Root) => {
-                // Looking up a collection directory
                 match self.db.get_collection(name_str) {
                     Ok(Some(_)) => {
                         let ino = inodes.collection_ino(name_str);
-                        reply.entry(&TTL, &Self::dir_attr(ino), 0);
+                        reply.entry(&TTL, &Self::dir_attr(ino, self.dir_perm()), 0);
                     }
                     _ => reply.error(libc::ENOENT),
                 }
             }
             Some(InodeTarget::Collection { name: col_name }) => {
-                // Looking up a document file
-                let doc_id_str = name_str.strip_suffix(".json").unwrap_or(name_str);
-                match self.fetch_doc_json(&col_name, doc_id_str) {
-                    Some(json) => {
-                        let ino = inodes.doc_ino(&col_name, doc_id_str);
-                        reply.entry(&TTL, &Self::file_attr(ino, json.len() as u64), 0);
+                let doc_id_str = match Self::parse_doc_id_from_filename(name_str) {
+                    Ok(id) => id.to_string(),
+                    Err(errno) => {
+                        reply.error(errno);
+                        return;
                     }
-                    None => reply.error(libc::ENOENT),
+                };
+                match self.fetch_doc_json(&col_name, &doc_id_str) {
+                    Ok(json) => {
+                        let ino = inodes.doc_ino(&col_name, &doc_id_str);
+                        let attr = Self::file_attr(ino, json.len() as u64, self.file_perm());
+                        reply.entry(&TTL, &attr, 0);
+                    }
+                    Err(errno) => reply.error(errno),
                 }
             }
             _ => reply.error(libc::ENOENT),
@@ -174,7 +208,7 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
         let inodes = self.inodes.lock();
         match inodes.get(ino) {
             Some(InodeTarget::Root) | Some(InodeTarget::Collection { .. }) => {
-                reply.attr(&TTL, &Self::dir_attr(ino));
+                reply.attr(&TTL, &Self::dir_attr(ino, self.dir_perm()));
             }
             Some(InodeTarget::Document {
                 collection, doc_id, ..
@@ -183,8 +217,11 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                 let did = doc_id.clone();
                 drop(inodes);
                 match self.fetch_doc_json(&col, &did) {
-                    Some(json) => reply.attr(&TTL, &Self::file_attr(ino, json.len() as u64)),
-                    None => reply.error(libc::ENOENT),
+                    Ok(json) => {
+                        let attr = Self::file_attr(ino, json.len() as u64, self.file_perm());
+                        reply.attr(&TTL, &attr);
+                    }
+                    Err(errno) => reply.error(errno),
                 }
             }
             None => reply.error(libc::ENOENT),
@@ -262,7 +299,7 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
             Some(InodeTarget::Document { collection, doc_id }) => {
                 drop(inodes);
                 match self.fetch_doc_json(&collection, &doc_id) {
-                    Some(json) => {
+                    Ok(json) => {
                         let start = offset as usize;
                         let end = (start + size as usize).min(json.len());
                         if start >= json.len() {
@@ -271,7 +308,7 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                             reply.data(&json[start..end]);
                         }
                     }
-                    None => reply.error(libc::ENOENT),
+                    Err(errno) => reply.error(errno),
                 }
             }
             _ => reply.error(libc::EISDIR),
@@ -290,6 +327,11 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
+        if self.read_only {
+            reply.error(libc::EROFS);
+            return;
+        }
+
         let inodes = self.inodes.lock();
         match inodes.get(ino).cloned() {
             Some(InodeTarget::Document { .. }) => {
@@ -307,7 +349,14 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
         }
     }
 
-    fn flush(&mut self, _req: &Request<'_>, ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+    fn flush(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        _lock_owner: u64,
+        reply: ReplyEmpty,
+    ) {
         let data = self.write_buffers.lock().remove(&ino);
         let Some(buf) = data else {
             reply.ok();
@@ -325,16 +374,21 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                 let result = self.rt.block_on(async move {
                     let col = db
                         .get_collection(&collection)
-                        .map_err(|_| libc::EIO)?
+                        .map_err(|e| db_err_to_errno(&e))?
                         .ok_or(libc::ENOENT)?;
                     let doc_id_parsed =
                         document::DocID::from_string(&doc_id).map_err(|_| libc::EINVAL)?;
-                    let mut doc = document::Document::from_json(&buf).map_err(|_| libc::EINVAL)?;
+
+                    let mut doc =
+                        document::Document::from_json(&buf).map_err(|_| libc::EINVAL)?;
                     doc.set_id(doc_id_parsed);
                     doc.set_collection(col.schema().clone());
-                    let txn = db.new_txn(false).await.map_err(|_| libc::EIO)?;
-                    col.save(&txn, &doc).await.map_err(|_| libc::EIO)?;
-                    txn.commit().await.map_err(|_| libc::EIO)?;
+
+                    let txn = db.new_txn(false).await.map_err(|e| db_err_to_errno(&e))?;
+                    col.save(&txn, &doc)
+                        .await
+                        .map_err(|e| db_err_to_errno(&e))?;
+                    txn.commit().await.map_err(|e| db_err_to_errno(&e))?;
                     Ok::<(), i32>(())
                 });
 
@@ -360,6 +414,11 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
         _flags: i32,
         reply: ReplyCreate,
     ) {
+        if self.read_only {
+            reply.error(libc::EROFS);
+            return;
+        }
+
         let name_str = match name.to_str() {
             Some(n) => n,
             None => {
@@ -368,27 +427,10 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
             }
         };
 
-        let mut inodes = self.inodes.lock();
-        let target = inodes.get(parent).cloned();
-
-        match target {
-            Some(InodeTarget::Collection { name: col_name }) => {
-                let doc_id_str = name_str.strip_suffix(".json").unwrap_or(name_str);
-                let ino = inodes.doc_ino(&col_name, doc_id_str);
-                inodes.invalidate(&col_name);
-                drop(inodes);
-                let attr = Self::file_attr(ino, 0);
-                reply.created(&TTL, &attr, 0, 0, 0);
-            }
-            _ => reply.error(libc::ENOTDIR),
-        }
-    }
-
-    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
-        let name_str = match name.to_str() {
-            Some(n) => n,
-            None => {
-                reply.error(libc::ENOENT);
+        let doc_id_str = match Self::parse_doc_id_from_filename(name_str) {
+            Ok(id) => id.to_string(),
+            Err(errno) => {
+                reply.error(errno);
                 return;
             }
         };
@@ -398,23 +440,62 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
 
         match target {
             Some(InodeTarget::Collection { name: col_name }) => {
-                let doc_id_str = name_str.strip_suffix(".json").unwrap_or(name_str);
+                let ino = inodes.doc_ino(&col_name, &doc_id_str);
+                inodes.invalidate(&col_name);
+                drop(inodes);
+                let attr = Self::file_attr(ino, 0, self.file_perm());
+                reply.created(&TTL, &attr, 0, 0, 0);
+            }
+            _ => reply.error(libc::ENOTDIR),
+        }
+    }
+
+    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        if self.read_only {
+            reply.error(libc::EROFS);
+            return;
+        }
+
+        let name_str = match name.to_str() {
+            Some(n) => n,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        let doc_id_str = match Self::parse_doc_id_from_filename(name_str) {
+            Ok(id) => id.to_string(),
+            Err(errno) => {
+                reply.error(errno);
+                return;
+            }
+        };
+
+        let mut inodes = self.inodes.lock();
+        let target = inodes.get(parent).cloned();
+
+        match target {
+            Some(InodeTarget::Collection { name: col_name }) => {
                 let db = self.db.clone();
                 let col_name_clone = col_name.clone();
-                let doc_id_string = doc_id_str.to_string();
+                let doc_id_string = doc_id_str.clone();
 
                 drop(inodes);
 
                 let result = self.rt.block_on(async move {
                     let col = db
                         .get_collection(&col_name_clone)
-                        .map_err(|_| libc::EIO)?
+                        .map_err(|e| db_err_to_errno(&e))?
                         .ok_or(libc::ENOENT)?;
                     let doc_id =
                         document::DocID::from_string(&doc_id_string).map_err(|_| libc::EINVAL)?;
-                    let txn = db.new_txn(false).await.map_err(|_| libc::EIO)?;
-                    let deleted = col.delete(&txn, &doc_id).await.map_err(|_| libc::EIO)?;
-                    txn.commit().await.map_err(|_| libc::EIO)?;
+                    let txn = db.new_txn(false).await.map_err(|e| db_err_to_errno(&e))?;
+                    let deleted = col
+                        .delete(&txn, &doc_id)
+                        .await
+                        .map_err(|e| db_err_to_errno(&e))?;
+                    txn.commit().await.map_err(|e| db_err_to_errno(&e))?;
                     if deleted {
                         Ok(())
                     } else {
@@ -425,11 +506,34 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                 match result {
                     Ok(()) => {
                         let mut inodes = self.inodes.lock();
-                        inodes.remove_doc(&col_name, doc_id_str);
+                        inodes.remove_doc(&col_name, &doc_id_str);
                         inodes.invalidate(&col_name);
                         reply.ok();
                     }
                     Err(errno) => reply.error(errno),
+                }
+            }
+            _ => reply.error(libc::ENOTDIR),
+        }
+    }
+
+    /// rmdir on a collection directory is not allowed.
+    /// Collections contain schema and data — dropping them via `rm -r` would be destructive.
+    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let name_str = match name.to_str() {
+            Some(n) => n,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        let inodes = self.inodes.lock();
+        match inodes.get(parent) {
+            Some(InodeTarget::Root) => {
+                match self.db.get_collection(name_str) {
+                    Ok(Some(_)) => reply.error(libc::EPERM),
+                    _ => reply.error(libc::ENOENT),
                 }
             }
             _ => reply.error(libc::ENOTDIR),
@@ -454,6 +558,11 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
+        if size.is_some() && self.read_only {
+            reply.error(libc::EROFS);
+            return;
+        }
+
         // Support truncate (size=0) for write-then-flush pattern.
         if let Some(new_size) = size {
             if new_size == 0 {
@@ -464,13 +573,13 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
         let inodes = self.inodes.lock();
         match inodes.get(ino) {
             Some(InodeTarget::Root) | Some(InodeTarget::Collection { .. }) => {
-                reply.attr(&TTL, &Self::dir_attr(ino));
+                reply.attr(&TTL, &Self::dir_attr(ino, self.dir_perm()));
             }
             Some(InodeTarget::Document { .. }) => {
                 let buffers = self.write_buffers.lock();
                 let buf_size = buffers.get(&ino).map(|b| b.len() as u64).unwrap_or(0);
                 let actual_size = size.unwrap_or(buf_size);
-                reply.attr(&TTL, &Self::file_attr(ino, actual_size));
+                reply.attr(&TTL, &Self::file_attr(ino, actual_size, self.file_perm()));
             }
             None => reply.error(libc::ENOENT),
         }

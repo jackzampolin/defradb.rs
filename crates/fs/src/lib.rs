@@ -13,10 +13,11 @@
 /// │   └── ...
 /// └── ...
 /// ```
+mod errno;
 mod error;
 mod inode;
 mod mount;
 mod ops;
 
 pub use error::Error;
-pub use mount::{mount, MountHandle};
+pub use mount::{mount, MountHandle, MountOptions};
