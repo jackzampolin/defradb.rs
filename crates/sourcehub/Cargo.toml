@@ -28,11 +28,11 @@ thiserror.workspace = true
 
 # Cryptography (secp256k1 signing key)
 k256.workspace = true
-sha2.workspace = true
 hex.workspace = true
 
 # Internal crates
 acp = { path = "../acp" }
+zanzibar = { path = "../zanzibar" }
 identity = { path = "../identity" }
 defra-core = { path = "../defra-core" }
 crypto = { path = "../crypto" }

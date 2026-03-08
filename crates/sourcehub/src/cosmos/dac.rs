@@ -113,32 +113,10 @@ impl DocumentACP for SourceHubDocumentACP {
             }
         };
 
-        // For read permission, also check update and delete (implied read access).
-        // Go's bridge.go: "if identity has access to any write permission,
-        // they don't need to explicitly have read permission to read."
-        let permissions_to_check = if permission == DocumentPermission::Read {
-            vec![
-                DocumentPermission::Read,
-                DocumentPermission::Update,
-                DocumentPermission::Delete,
-            ]
-        } else {
-            vec![permission]
-        };
-
-        for perm in permissions_to_check {
-            let has_access = self
-                .provider
-                .verify_access(policy_id, resource_name, doc_id, perm.as_str(), &actor_did)
-                .await
-                .map_err(provider_err)?;
-
-            if has_access {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
+        self.provider
+            .verify_access(policy_id, resource_name, doc_id, permission.as_str(), &actor_did)
+            .await
+            .map_err(provider_err)
     }
 
     async fn add_actor_relationship(

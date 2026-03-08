@@ -6,8 +6,6 @@ use alloy_primitives::{Bytes, FixedBytes};
 use alloy_sol_types::SolCall;
 use async_trait::async_trait;
 use k256::ecdsa::SigningKey;
-use sha2::{Digest, Sha256};
-
 use crate::provider::{ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef};
 
 use super::abi::{IAcp, ACP_ADDRESS};
@@ -116,26 +114,6 @@ impl HubRsProvider {
         }
     }
 
-    /// Compute the deterministic AccessDecision ID.
-    ///
-    /// Matches hub.rs `compute_decision_id`: SHA256(policy_id || creator || actor || ops).
-    fn compute_decision_id(
-        policy_id: &str,
-        creator_did: &str,
-        actor_did: &str,
-        operations: &[(&str, &str, &str)],
-    ) -> String {
-        let mut h = Sha256::new();
-        h.update(policy_id.as_bytes());
-        h.update(creator_did.as_bytes());
-        h.update(actor_did.as_bytes());
-        for &(resource, object_id, permission) in operations {
-            h.update(resource.as_bytes());
-            h.update(object_id.as_bytes());
-            h.update(permission.as_bytes());
-        }
-        hex::encode(h.finalize())
-    }
 }
 
 fn subject_to_cmd_json(subject: &SubjectRef) -> serde_json::Value {
@@ -418,42 +396,51 @@ impl SourceHubProvider for HubRsProvider {
         permission: &str,
         actor_did: &str,
     ) -> Result<bool, ProviderError> {
-        let creator_did = self.signer.did();
-        let ops = [(resource, object_id, permission)];
-        let decision_id = Self::compute_decision_id(policy_id, &creator_did, actor_did, &ops);
-
-        // Always submit checkAccess tx — we cannot use cached positive decisions
-        // because AccessDecision records persist on-chain even after the underlying
-        // relationship is revoked. The tx evaluates current relationships.
-        let pid = Self::policy_id_to_bytes32(policy_id);
-        let call = IAcp::checkAccessCall {
-            policyId: pid,
-            resources: vec![resource.to_string()],
-            objectIds: vec![object_id.to_string()],
-            permissions: vec![permission.to_string()],
-            actor: actor_did.to_string(),
+        // Map permission to the relations that grant it.
+        // DefraDB standard policy expressions:
+        //   read   = owner + writer + reader
+        //   update = owner + writer
+        //   delete = owner
+        let relations: &[&str] = match permission {
+            "read" => &["owner", "writer", "reader"],
+            "update" => &["owner", "writer"],
+            "delete" => &["owner"],
+            _ => &["owner"],
         };
-        let calldata = Bytes::from(call.abi_encode());
 
-        match self.send_tx(calldata).await {
-            Ok(_) => {
-                // Tx succeeded — decision persisted. Wait for state finalization
-                // then verify the decision via light client proof.
-                let _ = tokio::time::timeout(Duration::from_secs(5), self.wait_for_state_update())
-                    .await;
+        let actor_subject =
+            zanzibar::Subject::Entity(zanzibar::Did::new_unchecked(actor_did.to_string()));
+        let actor_hash = actor_subject.storage_hash();
+        let wildcard_hash = zanzibar::Subject::Wildcard.storage_hash();
 
-                let result = self
-                    .light_client
-                    .check_access_decision(&decision_id)
-                    .await
-                    .map_err(|e| ProviderError::Query(format!("decision proof: {}", e)))?;
-                Ok(result.allowed)
+        for relation in relations {
+            let storage_key = format!(
+                "/rel/{}/{}/{}/{}",
+                resource, object_id, relation, actor_hash
+            );
+            let result = self
+                .light_client
+                .check_access(policy_id, &storage_key)
+                .await
+                .map_err(|e| ProviderError::Query(format!("light client: {}", e)))?;
+            if result.allowed {
+                return Ok(true);
             }
-            Err(ProviderError::Transaction(msg)) if msg.contains("reverted") => {
-                // Tx reverted — access denied by the policy engine.
-                Ok(false)
+
+            let wildcard_key = format!(
+                "/rel/{}/{}/{}/{}",
+                resource, object_id, relation, wildcard_hash
+            );
+            let result = self
+                .light_client
+                .check_access(policy_id, &wildcard_key)
+                .await
+                .map_err(|e| ProviderError::Query(format!("light client: {}", e)))?;
+            if result.allowed {
+                return Ok(true);
             }
-            Err(e) => Err(e),
         }
+
+        Ok(false)
     }
 }
