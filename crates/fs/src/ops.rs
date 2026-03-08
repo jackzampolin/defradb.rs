@@ -32,6 +32,7 @@ use tokio::runtime::Handle;
 
 use crate::errno::db_err_to_errno;
 use crate::inode::{InodeTable, InodeTarget, NAME_FIELD, ROOT_INO};
+use crate::virtual_files::{self, SCHEMA_FILE, VIEW_FILE};
 
 const TTL: Duration = Duration::from_secs(1);
 const EPOCH: SystemTime = UNIX_EPOCH;
@@ -93,6 +94,56 @@ impl<S: Store> DefraFs<S> {
             blksize: 512,
             flags: 0,
         }
+    }
+
+    fn readonly_file_attr(ino: u64, size: u64) -> FileAttr {
+        FileAttr {
+            ino,
+            size,
+            blocks: (size + 511) / 512,
+            atime: EPOCH,
+            mtime: EPOCH,
+            ctime: EPOCH,
+            crtime: EPOCH,
+            kind: FileType::RegularFile,
+            perm: 0o444,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            blksize: 512,
+            flags: 0,
+        }
+    }
+
+    /// Generate content for a virtual file (_schema.graphql or _view.json).
+    fn fetch_virtual_content(&self, collection: &str, filename: &str) -> Result<Vec<u8>, i32> {
+        let db = self.db.clone();
+        let collection = collection.to_string();
+        let filename = filename.to_string();
+
+        self.rt.block_on(async move {
+            let col = db
+                .get_collection(&collection)
+                .map_err(|e| db_err_to_errno(&e))?
+                .ok_or(libc::ENOENT)?;
+
+            if filename == SCHEMA_FILE {
+                let sdl = virtual_files::generate_sdl(col.schema());
+                Ok(sdl.into_bytes())
+            } else if filename == VIEW_FILE {
+                let txn = db.new_txn(true).await.map_err(|e| db_err_to_errno(&e))?;
+                let docs = col.get_all(&txn).await.map_err(|e| db_err_to_errno(&e))?;
+                txn.commit().await.map_err(|e| db_err_to_errno(&e))?;
+                let maps: Vec<_> = docs
+                    .iter()
+                    .filter_map(|d| d.to_map().ok())
+                    .collect();
+                Ok(virtual_files::generate_view_json(&maps))
+            } else {
+                Err(libc::ENOENT)
+            }
+        })
     }
 
     /// Fetch document JSON bytes by doc_id.
@@ -219,6 +270,22 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                 _ => reply.error(libc::ENOENT),
             },
             Some(InodeTarget::Collection { name: col_name }) => {
+                // Check for virtual files first
+                if name_str == SCHEMA_FILE || name_str == VIEW_FILE {
+                    match self.fetch_virtual_content(&col_name, name_str) {
+                        Ok(content) => {
+                            let ino = inodes.virtual_ino(&col_name, name_str);
+                            reply.entry(
+                                &TTL,
+                                &Self::readonly_file_attr(ino, content.len() as u64),
+                                0,
+                            );
+                        }
+                        Err(errno) => reply.error(errno),
+                    }
+                    return;
+                }
+
                 let filename = strip_json_suffix(name_str);
                 let doc_id = match self.resolve_filename(&mut inodes, &col_name, filename) {
                     Ok(id) => id,
@@ -253,6 +320,20 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                 drop(inodes);
                 match self.fetch_doc_json(&col, &did) {
                     Ok(json) => reply.attr(&TTL, &Self::file_attr(ino, json.len() as u64)),
+                    Err(errno) => reply.error(errno),
+                }
+            }
+            Some(InodeTarget::VirtualFile {
+                collection,
+                filename,
+            }) => {
+                let col = collection.clone();
+                let fname = filename.clone();
+                drop(inodes);
+                match self.fetch_virtual_content(&col, &fname) {
+                    Ok(content) => {
+                        reply.attr(&TTL, &Self::readonly_file_attr(ino, content.len() as u64))
+                    }
                     Err(errno) => reply.error(errno),
                 }
             }
@@ -296,6 +377,12 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                     (col_ino, FileType::Directory, ".".into()),
                     (ROOT_INO, FileType::Directory, "..".into()),
                 ];
+                // Virtual files
+                let schema_ino = inodes.virtual_ino(&col_name, SCHEMA_FILE);
+                entries.push((schema_ino, FileType::RegularFile, SCHEMA_FILE.into()));
+                let view_ino = inodes.virtual_ino(&col_name, VIEW_FILE);
+                entries.push((view_ino, FileType::RegularFile, VIEW_FILE.into()));
+                // Document files
                 for (doc_id, display_name) in &docs {
                     let child_ino = inodes.doc_ino(&col_name, doc_id, display_name);
                     entries.push((
@@ -343,6 +430,21 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                     Err(errno) => reply.error(errno),
                 }
             }
+            Some(InodeTarget::VirtualFile { collection, filename }) => {
+                drop(inodes);
+                match self.fetch_virtual_content(&collection, &filename) {
+                    Ok(content) => {
+                        let start = offset as usize;
+                        let end = (start + size as usize).min(content.len());
+                        if start >= content.len() {
+                            reply.data(&[]);
+                        } else {
+                            reply.data(&content[start..end]);
+                        }
+                    }
+                    Err(errno) => reply.error(errno),
+                }
+            }
             _ => reply.error(libc::EISDIR),
         }
     }
@@ -372,6 +474,7 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                 buf[offset as usize..end].copy_from_slice(data);
                 reply.written(data.len() as u32);
             }
+            Some(InodeTarget::VirtualFile { .. }) => reply.error(libc::EPERM),
             _ => reply.error(libc::EBADF),
         }
     }
@@ -522,6 +625,12 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
 
         let filename = strip_json_suffix(name_str);
 
+        // Virtual files cannot be deleted
+        if name_str == SCHEMA_FILE || name_str == VIEW_FILE {
+            reply.error(libc::EPERM);
+            return;
+        }
+
         let mut inodes = self.inodes.lock();
         let target = inodes.get(parent).cloned();
 
@@ -631,6 +740,20 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                 let actual_size = size.unwrap_or(buf_size);
                 reply.attr(&TTL, &Self::file_attr(ino, actual_size));
             }
+            Some(InodeTarget::VirtualFile {
+                collection,
+                filename,
+            }) => {
+                let col = collection.clone();
+                let fname = filename.clone();
+                drop(inodes);
+                match self.fetch_virtual_content(&col, &fname) {
+                    Ok(content) => {
+                        reply.attr(&TTL, &Self::readonly_file_attr(ino, content.len() as u64))
+                    }
+                    Err(errno) => reply.error(errno),
+                }
+            }
             None => reply.error(libc::ENOENT),
         }
     }
@@ -638,7 +761,9 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
     fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
         let inodes = self.inodes.lock();
         match inodes.get(ino) {
-            Some(InodeTarget::Document { .. }) => reply.opened(0, 0),
+            Some(InodeTarget::Document { .. }) | Some(InodeTarget::VirtualFile { .. }) => {
+                reply.opened(0, 0)
+            }
             _ => reply.error(libc::EISDIR),
         }
     }

@@ -28,6 +28,11 @@ pub enum InodeTarget {
         /// Filesystem display name (from _name field, or doc_id if unset).
         display_name: String,
     },
+    /// A virtual read-only file within a collection directory.
+    VirtualFile {
+        collection: String,
+        filename: String,
+    },
 }
 
 /// Bidirectional mapping between inodes and DefraDB entities.
@@ -39,6 +44,8 @@ pub struct InodeTable {
     doc_inos: HashMap<(String, String), u64>,
     /// Reverse: (collection, display_name) -> doc_id
     name_to_doc_id: HashMap<(String, String), String>,
+    /// Virtual file inodes: (collection, filename) -> inode
+    virtual_inos: HashMap<(String, String), u64>,
 }
 
 impl InodeTable {
@@ -52,6 +59,7 @@ impl InodeTable {
             collection_inos: HashMap::new(),
             doc_inos: HashMap::new(),
             name_to_doc_id: HashMap::new(),
+            virtual_inos: HashMap::new(),
         }
     }
 
@@ -99,6 +107,25 @@ impl InodeTable {
             (collection.to_string(), display_name.to_string()),
             doc_id.to_string(),
         );
+        ino
+    }
+
+    /// Allocate or return existing inode for a virtual file.
+    pub fn virtual_ino(&mut self, collection: &str, filename: &str) -> u64 {
+        let key = (collection.to_string(), filename.to_string());
+        if let Some(&ino) = self.virtual_inos.get(&key) {
+            return ino;
+        }
+        let ino = self.next_ino;
+        self.next_ino += 1;
+        self.by_ino.insert(
+            ino,
+            InodeTarget::VirtualFile {
+                collection: collection.to_string(),
+                filename: filename.to_string(),
+            },
+        );
+        self.virtual_inos.insert(key, ino);
         ino
     }
 

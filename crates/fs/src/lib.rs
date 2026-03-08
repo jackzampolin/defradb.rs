@@ -9,7 +9,10 @@
 /// ```text
 /// <mountpoint>/
 /// ├── <collection_name>/           # directory per collection
-/// │   ├── <bae-docid>.json         # file per document
+/// │   ├── _schema.graphql          # virtual: collection SDL (read-only)
+/// │   ├── _view.json               # virtual: all docs as JSON array (read-only)
+/// │   ├── alice.json               # document (via _name field)
+/// │   ├── <bae-docid>.json         # document (raw docID)
 /// │   └── ...
 /// └── ...
 /// ```
@@ -18,6 +21,7 @@ mod error;
 mod inode;
 mod mount;
 mod ops;
+mod virtual_files;
 
 pub use error::Error;
 pub use mount::{mount, MountHandle};
