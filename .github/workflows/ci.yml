@@ -42,16 +42,6 @@ jobs:
       - name: Configure private repo access
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
 
-      - name: Prune build cache if oversized
-        run: |
-          if [ -d target ]; then
-            TARGET_SIZE=$(du -sm target | cut -f1)
-            if [ "$TARGET_SIZE" -gt 100000 ]; then
-              echo "Build cache is ${TARGET_SIZE}MB, pruning..."
-              cargo clean
-            fi
-          fi
-
       - run: cargo test --workspace --exclude integration-test --exclude ffi-test
 
       - name: Cache pre-built binaries
