@@ -146,8 +146,5 @@ strip = true
 panic = "abort"
 overflow-checks = true
 
-[profile.test]
-opt-level = 1
-
 [profile.bench]
 opt-level = 3
