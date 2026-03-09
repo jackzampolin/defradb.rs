@@ -10,6 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ---- Lightweight jobs: GitHub-hosted runners ----
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -33,18 +35,6 @@ jobs:
       - name: Exclude tools with private deps from workspace
         run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
       - run: cargo clippy --all -- -D warnings
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
-      - name: Exclude tools with private deps from workspace
-        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
-      - run: cargo test --workspace
 
   deny:
     name: Cargo Deny
@@ -71,3 +61,122 @@ jobs:
         run: cbindgen --config crates/ffi/cbindgen.toml --crate ffi --output defra.h.generated
       - name: Verify header matches
         run: diff -u defra.h defra.h.generated || (echo "Generated header does not match committed header"; exit 1)
+
+  # ---- Heavy jobs: self-hosted Mac Studio runners ----
+
+  test:
+    name: Unit Tests
+    runs-on: [self-hosted, macOS, ARM64, studio]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prune build cache if oversized
+        run: |
+          if [ -d target ]; then
+            TARGET_SIZE=$(du -sm target | cut -f1)
+            if [ "$TARGET_SIZE" -gt 20000 ]; then
+              echo "Build cache is ${TARGET_SIZE}MB, pruning..."
+              cargo clean
+            fi
+          fi
+
+      - name: Exclude tools with private deps from workspace
+        run: sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+
+      - run: cargo test --workspace
+
+      - name: Cache binary for backbone CI
+        run: |
+          HASH=$(git rev-parse HEAD)
+          CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
+          mkdir -p "$CACHE_DIR"
+          cp target/debug/defra "$CACHE_DIR/defra" || cp target/release/defra "$CACHE_DIR/defra" || true
+          [ -f "$CACHE_DIR/defra" ] && ln -sf "$CACHE_DIR/defra" "$HOME/.sourcenetwork/bin/defra"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          git checkout -- .
+          git clean -fd
+          pkill -f "target/.*defra" || true
+
+  integration:
+    name: Integration (${{ matrix.suite }})
+    runs-on: [self-hosted, macOS, ARM64, studio]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: rust
+            needs_go: false
+          - suite: go-compat
+            needs_go: true
+          - suite: iroh
+            needs_go: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure private repo access
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+
+      - name: Download Go DefraDB binary
+        if: matrix.needs_go
+        run: |
+          GO_TAG=$(grep 'GO_COMPAT_TAG' crates/defra-version/src/lib.rs | sed "s/.*\"\(.*\)\".*/\1/")
+          if [ -z "$GO_TAG" ]; then
+            echo "::error::GO_COMPAT_TAG is empty in crates/defra-version/src/lib.rs"
+            exit 1
+          fi
+          VER_NUM="${GO_TAG#v}"
+          ASSET="defradb_${VER_NUM}_darwin_arm64"
+          URL="https://github.com/sourcenetwork/defradb/releases/download/${GO_TAG}/${ASSET}"
+          CACHE_DIR="$HOME/.cache/defra-harness/${GO_TAG}"
+          mkdir -p "$CACHE_DIR"
+          if [ ! -x "$CACHE_DIR/defradb" ]; then
+            echo "Downloading Go DefraDB ${GO_TAG}..."
+            curl -fSL -o "$CACHE_DIR/defradb" "$URL"
+            chmod +x "$CACHE_DIR/defradb"
+          fi
+          echo "$CACHE_DIR" >> "$GITHUB_PATH"
+          "$CACHE_DIR/defradb" version --format json
+
+      - name: Prune build cache if oversized
+        run: |
+          if [ -d target ]; then
+            TARGET_SIZE=$(du -sm target | cut -f1)
+            if [ "$TARGET_SIZE" -gt 20000 ]; then
+              echo "Build cache is ${TARGET_SIZE}MB, pruning..."
+              cargo clean
+            fi
+          fi
+
+      - name: Run rust integration tests
+        if: matrix.suite == 'rust'
+        run: >-
+          cargo test -p integration-test
+          --test basic --test query --test acp --test nac
+          --test p2p --test encryption --test identity
+          --test backup --test fts
+          -- rust_
+
+      - name: Run go-compat integration tests
+        if: matrix.suite == 'go-compat'
+        run: >-
+          cargo test -p integration-test
+          --test basic --test query
+          -- go_
+
+      - name: Run iroh integration tests
+        if: matrix.suite == 'iroh'
+        run: >-
+          cargo test -p integration-test
+          --test p2p_iroh
+          -- connection::
+
+      - name: Cleanup
+        if: always()
+        run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git checkout -- .
+          git clean -fd
+          pkill -f "target/.*defra" || true

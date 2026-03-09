@@ -5,7 +5,7 @@ pub const GO_COMPAT_COMMIT: &str = "4b8993f8";
 /// Go upstream branch.
 pub const GO_COMPAT_BRANCH: &str = "develop";
 /// Go release tag (empty until Go cuts a release).
-pub const GO_COMPAT_TAG: &str = "";
+pub const GO_COMPAT_TAG: &str = "v1.0.0-rc1";
 
 /// Go compatibility metadata.
 #[derive(Debug, Clone, Serialize)]
