@@ -114,7 +114,13 @@ impl DocumentACP for SourceHubDocumentACP {
         };
 
         self.provider
-            .verify_access(policy_id, resource_name, doc_id, permission.as_str(), &actor_did)
+            .verify_access(
+                policy_id,
+                resource_name,
+                doc_id,
+                permission.as_str(),
+                &actor_did,
+            )
             .await
             .map_err(provider_err)
     }

@@ -1,12 +1,12 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::provider::{ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef};
 use acp_light_client::AcpLightClient;
 use alloy_primitives::{Bytes, FixedBytes};
 use alloy_sol_types::SolCall;
 use async_trait::async_trait;
 use k256::ecdsa::SigningKey;
-use crate::provider::{ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef};
 
 use super::abi::{IAcp, ACP_ADDRESS};
 use super::bearer;
@@ -113,7 +113,6 @@ impl HubRsProvider {
                 .await;
         }
     }
-
 }
 
 fn subject_to_cmd_json(subject: &SubjectRef) -> serde_json::Value {
@@ -194,8 +193,9 @@ impl SourceHubProvider for HubRsProvider {
             let key = SigningKey::from_slice(&signing_config.private_key_bytes)
                 .map_err(|e| ProviderError::Config(format!("invalid signing key: {}", e)))?;
 
-            return bearer::create_bearer_token(&key, did, 300)
-                .map_err(|e| ProviderError::Config(format!("bearer token creation failed: {}", e)));
+            return bearer::create_bearer_token(&key, did, 300).map_err(|e| {
+                ProviderError::Config(format!("bearer token creation failed: {}", e))
+            });
         }
 
         // Fall back to the original JWT from the HTTP request.

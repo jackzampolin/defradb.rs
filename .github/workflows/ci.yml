@@ -27,6 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Configure private repo access
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -41,8 +43,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Exclude tools with private deps from workspace
-        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+      - name: Exclude crates with private deps from workspace
+        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"crates\/sourcehub"/d' Cargo.toml
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   cbindgen:
@@ -50,6 +52,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Configure private repo access
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
@@ -69,6 +73,9 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, studio]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Configure private repo access
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
 
       - name: Prune build cache if oversized
         run: |
@@ -96,6 +103,7 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- .
           git clean -fd
           pkill -f "target/.*defra" || true
@@ -122,7 +130,7 @@ jobs:
       - name: Download Go DefraDB binary
         if: matrix.needs_go
         run: |
-          GO_TAG=$(grep 'GO_COMPAT_TAG' crates/defra-version/src/lib.rs | sed "s/.*\"\(.*\)\".*/\1/")
+          GO_TAG=$(grep 'pub const GO_COMPAT_TAG' crates/defra-version/src/lib.rs | sed "s/.*\"\(.*\)\".*/\1/")
           if [ -z "$GO_TAG" ]; then
             echo "::error::GO_COMPAT_TAG is empty in crates/defra-version/src/lib.rs"
             exit 1
