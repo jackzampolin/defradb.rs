@@ -93,15 +93,25 @@ jobs:
       - name: Configure private repo access
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
 
-      - name: Restore pre-built binaries
+      - name: Restore or build binaries
         run: |
           HASH=$(git rev-parse HEAD)
           CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
           mkdir -p target/ci
-          cp "$CACHE_DIR/defra" target/ci/defra
-          cp "$CACHE_DIR/defra-iroh" target/ci/defra-iroh
+
+          if [ -f "$CACHE_DIR/defra" ] && [ -f "$CACHE_DIR/defra-iroh" ]; then
+            echo "Cache hit — restoring from $CACHE_DIR"
+            cp "$CACHE_DIR/defra" target/ci/defra
+            cp "$CACHE_DIR/defra-iroh" target/ci/defra-iroh
+          else
+            echo "Cache miss — building binaries"
+            cargo build -p cli
+            cp target/debug/defra target/ci/defra
+            cargo build -p cli --features iroh
+            cp target/debug/defra target/ci/defra-iroh
+          fi
+
           chmod +x target/ci/defra target/ci/defra-iroh
-          echo "Restored binaries from $CACHE_DIR"
           target/ci/defra version --format json
 
       - name: Download Go DefraDB binary
