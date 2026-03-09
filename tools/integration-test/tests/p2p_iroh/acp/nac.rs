@@ -400,11 +400,11 @@ async fn nac_document_add_authorized() {
     let node = cluster.client(0);
     let r = node
         .query_with_identity(
-            r#"mutation { create_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
             &admin_key,
         )
         .expect("create doc");
-    let doc_id = r["create_Users"][0]["_docID"]
+    let doc_id = r["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID");
     let result = node.p2p_document_add_with_identity(&[doc_id], &admin_key);
@@ -422,11 +422,11 @@ async fn nac_document_add_no_identity() {
     let node = cluster.client(0);
     let r = node
         .query_with_identity(
-            r#"mutation { create_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
             &admin_key,
         )
         .expect("create doc");
-    let doc_id = r["create_Users"][0]["_docID"]
+    let doc_id = r["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID");
     let result = node.p2p_document_add(&[doc_id]);
@@ -444,11 +444,11 @@ async fn nac_document_add_wrong_identity() {
     let node = cluster.client(0);
     let r = node
         .query_with_identity(
-            r#"mutation { create_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
             &admin_key,
         )
         .expect("create doc");
-    let doc_id = r["create_Users"][0]["_docID"]
+    let doc_id = r["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID");
     let result = node.p2p_document_add_with_identity(&[doc_id], &outsider_key);
@@ -509,11 +509,11 @@ async fn nac_document_delete_authorized() {
     let node = cluster.client(0);
     let r = node
         .query_with_identity(
-            r#"mutation { create_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
             &admin_key,
         )
         .expect("create doc");
-    let doc_id = r["create_Users"][0]["_docID"]
+    let doc_id = r["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID");
     node.p2p_document_add_with_identity(&[doc_id], &admin_key)
@@ -533,11 +533,11 @@ async fn nac_document_delete_no_identity() {
     let node = cluster.client(0);
     let r = node
         .query_with_identity(
-            r#"mutation { create_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
             &admin_key,
         )
         .expect("create doc");
-    let doc_id = r["create_Users"][0]["_docID"]
+    let doc_id = r["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID");
     node.p2p_document_add_with_identity(&[doc_id], &admin_key)
@@ -557,11 +557,11 @@ async fn nac_document_delete_wrong_identity() {
     let node = cluster.client(0);
     let r = node
         .query_with_identity(
-            r#"mutation { create_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
             &admin_key,
         )
         .expect("create doc");
-    let doc_id = r["create_Users"][0]["_docID"]
+    let doc_id = r["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID");
     node.p2p_document_add_with_identity(&[doc_id], &admin_key)
@@ -851,11 +851,11 @@ async fn nac_admin_document_add() {
     let node = cluster.client(0);
     let r = node
         .query_with_identity(
-            r#"mutation { create_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
             &admin_key,
         )
         .expect("create");
-    let doc_id = r["create_Users"][0]["_docID"].as_str().expect("_docID");
+    let doc_id = r["add_Users"][0]["_docID"].as_str().expect("_docID");
     node.p2p_document_add_with_identity(&[doc_id], &admin_key)
         .expect("admin should add document");
 }
@@ -879,11 +879,11 @@ async fn nac_admin_document_delete() {
     let node = cluster.client(0);
     let r = node
         .query_with_identity(
-            r#"mutation { create_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "Alice", age: 30}) { _docID } }"#,
             &admin_key,
         )
         .expect("create");
-    let doc_id = r["create_Users"][0]["_docID"].as_str().expect("_docID");
+    let doc_id = r["add_Users"][0]["_docID"].as_str().expect("_docID");
     node.p2p_document_add_with_identity(&[doc_id], &admin_key)
         .expect("add");
     node.p2p_document_delete_with_identity(&[doc_id], &admin_key)

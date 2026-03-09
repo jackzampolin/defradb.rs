@@ -264,9 +264,9 @@ async fn iroh_replication() {
 
     // Create document on node0
     let data = node0
-        .query(r#"mutation { create_User(input: {name: "Alice", age: 30}) { _docID name age } }"#)
+        .query(r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID name age } }"#)
         .expect("create user");
-    let doc_id = data["create_User"][0]["_docID"]
+    let doc_id = data["add_User"][0]["_docID"]
         .as_str()
         .expect("missing _docID");
 

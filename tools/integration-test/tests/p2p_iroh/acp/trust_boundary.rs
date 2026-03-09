@@ -88,13 +88,13 @@ async fn iroh_trust_boundary() {
 
     // Jack creates ACP-protected doc on Core
     core.query_with_identity(
-        r#"mutation { create_User(input: {name: "Core Secret", age: 42}) { _docID } }"#,
+        r#"mutation { add_User(input: {name: "Core Secret", age: 42}) { _docID } }"#,
         &jack.private_key_hex,
     )
     .expect("create protected doc on core");
 
     // Jack creates a public (no identity) doc on Core
-    core.query(r#"mutation { create_User(input: {name: "Public Info", age: 99}) { _docID } }"#)
+    core.query(r#"mutation { add_User(input: {name: "Public Info", age: 99}) { _docID } }"#)
         .expect("create public doc on core");
 
     // Verify ACP on Core: jack sees 2, vps_service sees 1 (public only), anon sees 1

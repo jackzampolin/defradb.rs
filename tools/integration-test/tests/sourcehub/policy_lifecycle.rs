@@ -66,11 +66,11 @@ async fn rust_sourcehub_policy_lifecycle() {
     // Step 4: Create a document as Alice
     let data = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Alice", age: 25}) { _docID name } }"#,
+            r#"mutation { add_User(input: {name: "Alice", age: 25}) { _docID name } }"#,
             &alice.private_key_hex,
         )
         .expect("create user");
-    let doc_id = data["create_User"][0]["_docID"].as_str().expect("_docID");
+    let doc_id = data["add_User"][0]["_docID"].as_str().expect("_docID");
 
     // Bob initially cannot see the document
     let bob_before = node

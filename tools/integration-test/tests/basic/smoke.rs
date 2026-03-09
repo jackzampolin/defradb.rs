@@ -40,9 +40,9 @@ async fn smoke_single_rust_node() {
 
     // 3. Create document via mutation
     let data = client
-        .query(r#"mutation { create_User(input: {name: "Alice", age: 30}) { _docID name age } }"#)
+        .query(r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID name age } }"#)
         .unwrap();
-    assert_eq!(data["create_User"][0]["name"], "Alice");
+    assert_eq!(data["add_User"][0]["name"], "Alice");
 
     // 4. Query document back
     let data = client.query("query { User { _docID name age } }").unwrap();

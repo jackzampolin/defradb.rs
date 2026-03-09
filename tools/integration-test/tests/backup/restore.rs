@@ -13,29 +13,29 @@ async fn backup_restore_test(cluster: TestCluster) {
 
     // 2. Create 2 Users and 3 Posts
     let alice = client
-        .query(r#"mutation { create_User(input: {name: "Alice"}) { _docID name } }"#)
+        .query(r#"mutation { add_User(input: {name: "Alice"}) { _docID name } }"#)
         .expect("create Alice");
-    let alice_id = alice["create_User"][0]["_docID"]
+    let alice_id = alice["add_User"][0]["_docID"]
         .as_str()
         .expect("missing Alice _docID")
         .to_string();
 
     let bob = client
-        .query(r#"mutation { create_User(input: {name: "Bob"}) { _docID name } }"#)
+        .query(r#"mutation { add_User(input: {name: "Bob"}) { _docID name } }"#)
         .expect("create Bob");
-    let bob_id = bob["create_User"][0]["_docID"]
+    let bob_id = bob["add_User"][0]["_docID"]
         .as_str()
         .expect("missing Bob _docID")
         .to_string();
 
     client
-        .query(r#"mutation { create_Post(input: {title: "Hello World"}) { _docID } }"#)
+        .query(r#"mutation { add_Post(input: {title: "Hello World"}) { _docID } }"#)
         .expect("create post 1");
     client
-        .query(r#"mutation { create_Post(input: {title: "Rust Tips"}) { _docID } }"#)
+        .query(r#"mutation { add_Post(input: {title: "Rust Tips"}) { _docID } }"#)
         .expect("create post 2");
     client
-        .query(r#"mutation { create_Post(input: {title: "P2P Guide"}) { _docID } }"#)
+        .query(r#"mutation { add_Post(input: {title: "P2P Guide"}) { _docID } }"#)
         .expect("create post 3");
 
     // Build backup paths inside the node's rootdir

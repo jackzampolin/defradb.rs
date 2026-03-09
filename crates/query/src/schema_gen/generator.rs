@@ -347,9 +347,9 @@ pub fn generate_mutation_type(collections: &[&CollectionVersion]) -> GqlObjectTy
     for collection in collections {
         let type_name = &collection.name;
 
-        // Create mutation
+        // Add mutation (create document)
         mutation = mutation.with_field(GqlField::new(
-            format!("create_{}", type_name),
+            format!("add_{}", type_name),
             GqlType::list(GqlType::named(type_name)),
         ));
 
@@ -474,7 +474,7 @@ mod tests {
 
         assert_eq!(mutation.name, "Mutation");
 
-        let create = mutation.fields.iter().find(|f| f.name == "create_User");
+        let create = mutation.fields.iter().find(|f| f.name == "add_User");
         assert!(create.is_some());
 
         let update = mutation.fields.iter().find(|f| f.name == "update_User");

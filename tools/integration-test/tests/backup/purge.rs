@@ -9,7 +9,7 @@ async fn purge_dev_mode_test(cluster: TestCluster) {
         .expect("failed to add schema");
 
     client
-        .query(r#"mutation { create_Note(input: {text: "hello"}) { _docID } }"#)
+        .query(r#"mutation { add_Note(input: {text: "hello"}) { _docID } }"#)
         .expect("create doc failed");
 
     // 2. Verify document exists

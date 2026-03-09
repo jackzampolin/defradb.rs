@@ -92,7 +92,7 @@ mod tests {
 
     fn create_user(node: usize, name: &str, age: i32) {
         let mutation = CString::new(format!(
-            r#"mutation {{ create_User(input: {{name: "{}", age: {}}}) {{ _docID }} }}"#,
+            r#"mutation {{ add_User(input: {{name: "{}", age: {}}}) {{ _docID }} }}"#,
             name, age
         ))
         .unwrap();
@@ -208,7 +208,7 @@ mod tests {
 
         // Create documents in both
         let mutation =
-            CString::new(r#"mutation { create_User(input: {name: "Alice"}) { _docID } }"#).unwrap();
+            CString::new(r#"mutation { add_User(input: {name: "Alice"}) { _docID } }"#).unwrap();
         let result = unsafe {
             exec_request(
                 node,
@@ -225,8 +225,7 @@ mod tests {
         }
 
         let mutation =
-            CString::new(r#"mutation { create_Address(input: {city: "NYC"}) { _docID } }"#)
-                .unwrap();
+            CString::new(r#"mutation { add_Address(input: {city: "NYC"}) { _docID } }"#).unwrap();
         let result = unsafe {
             exec_request(
                 node,

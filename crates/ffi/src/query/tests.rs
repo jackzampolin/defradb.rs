@@ -63,8 +63,7 @@ fn test_exec_mutation() {
 
     // Create a user
     let mutation =
-        CString::new(r#"mutation { create_User(input: {name: "Alice"}) { _docID name } }"#)
-            .unwrap();
+        CString::new(r#"mutation { add_User(input: {name: "Alice"}) { _docID name } }"#).unwrap();
     let result = unsafe {
         exec_request(
             node,

@@ -19,10 +19,10 @@ async fn rust_lens_survives_restart() {
         .expect("add Article schema");
 
     client
-        .query(r#"mutation { create_Article(input: {title: "First"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "First"}) { _docID } }"#)
         .expect("create article 1");
     client
-        .query(r#"mutation { create_Article(input: {title: "Second"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Second"}) { _docID } }"#)
         .expect("create article 2");
 
     // Query before restart to establish baseline

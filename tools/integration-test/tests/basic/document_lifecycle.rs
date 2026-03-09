@@ -36,19 +36,19 @@ async fn document_lifecycle_test(cluster: TestCluster) {
 
     // 3. Create 3 articles via mutation
     let a1 = client
-        .query(r#"mutation { create_Article(input: {title: "Rust 101", author: "Alice", views: 10}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Rust 101", author: "Alice", views: 10}) { _docID } }"#)
         .expect("create article 1");
-    let id1 = a1["create_Article"][0]["_docID"]
+    let id1 = a1["add_Article"][0]["_docID"]
         .as_str()
         .expect("missing _docID for article 1")
         .to_string();
 
     client
-        .query(r#"mutation { create_Article(input: {title: "Go Patterns", author: "Bob", views: 20}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Go Patterns", author: "Bob", views: 20}) { _docID } }"#)
         .expect("create article 2");
 
     client
-        .query(r#"mutation { create_Article(input: {title: "P2P Networking", author: "Alice", views: 5}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "P2P Networking", author: "Alice", views: 5}) { _docID } }"#)
         .expect("create article 3");
 
     // 4. Collection doc-ids — verify 3 documents exist

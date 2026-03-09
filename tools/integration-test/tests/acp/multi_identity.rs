@@ -27,27 +27,27 @@ async fn acp_multi_identity_test(cluster: TestCluster) {
     // Alice creates 3 documents
     let d1 = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Alpha", age: 10}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Alpha", age: 10}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("create Alpha");
-    let id1 = d1["create_User"][0]["_docID"].as_str().expect("id1");
+    let id1 = d1["add_User"][0]["_docID"].as_str().expect("id1");
 
     let d2 = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Beta", age: 20}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Beta", age: 20}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("create Beta");
-    let id2 = d2["create_User"][0]["_docID"].as_str().expect("id2");
+    let id2 = d2["add_User"][0]["_docID"].as_str().expect("id2");
 
     let d3 = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Gamma", age: 30}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Gamma", age: 30}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("create Gamma");
-    let id3 = d3["create_User"][0]["_docID"].as_str().expect("id3");
+    let id3 = d3["add_User"][0]["_docID"].as_str().expect("id3");
 
     let query = "query { User { _docID name age } }";
 

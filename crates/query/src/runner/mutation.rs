@@ -120,7 +120,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     fetcher_override.clone(),
                 )
                 .await?;
-            // Use alias if provided, otherwise full mutation name (e.g., "create_Users")
+            // Use alias if provided, otherwise full mutation name (e.g., "add_Users")
             let key = mutation.output_name();
             results.insert(key, result);
         }

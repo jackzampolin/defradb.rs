@@ -82,7 +82,9 @@ async fn public_doc_fetch_key_decrypt() {
 
     cluster
         .client(0)
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}, encrypt: true) { _docID } }"#)
+        .query(
+            r#"mutation { add_Users(input: {name: "John", age: 21}, encrypt: true) { _docID } }"#,
+        )
         .expect("create encrypted doc");
 
     wait_for_merge_events(&merges, 1, MERGE_TIMEOUT).await;
@@ -100,7 +102,7 @@ async fn public_doc_encrypted_field_fetch_key_decrypt() {
     cluster
         .client(0)
         .query(
-            r#"mutation { create_Users(input: {name: "John", age: 21}, encryptFields: ["age"]) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "John", age: 21}, encryptFields: ["age"]) { _docID } }"#,
         )
         .expect("create doc with encrypted field");
 
@@ -120,7 +122,7 @@ async fn encrypted_public_doc_encrypted_field() {
     cluster
         .client(0)
         .query(
-            r#"mutation { create_Users(input: {name: "John", age: 21}, encrypt: true, encryptFields: ["age"]) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "John", age: 21}, encrypt: true, encryptFields: ["age"]) { _docID } }"#,
         )
         .expect("create encrypted doc with encrypted field");
 
@@ -139,7 +141,7 @@ async fn all_fields_individually_encrypted() {
     cluster
         .client(0)
         .query(
-            r#"mutation { create_Users(input: {name: "John", age: 21}, encrypt: true, encryptFields: ["name","age"]) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "John", age: 21}, encrypt: true, encryptFields: ["name","age"]) { _docID } }"#,
         )
         .expect("create encrypted doc with all fields encrypted");
 
@@ -159,7 +161,7 @@ async fn all_fields_of_public_doc_individually_encrypted() {
     cluster
         .client(0)
         .query(
-            r#"mutation { create_Users(input: {name: "John", age: 21}, encryptFields: ["name","age"]) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "John", age: 21}, encryptFields: ["name","age"]) { _docID } }"#,
         )
         .expect("create public doc with all fields encrypted");
 
@@ -183,10 +185,10 @@ async fn updates_encrypted_delta_crdt_field() {
     // Create doc with encrypted age field (pcounter initial: 21)
     let result = node0
         .query(
-            r#"mutation { create_Users(input: {name: "John", age: 21}, encryptFields: ["age"]) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "John", age: 21}, encryptFields: ["age"]) { _docID } }"#,
         )
         .expect("create");
-    let doc_id = extract_doc_id(&result, "create_Users");
+    let doc_id = extract_doc_id(&result, "add_Users");
 
     // Update age by 3 (pcounter: 21 + 3 = 24)
     node0
@@ -221,10 +223,10 @@ async fn updates_delta_crdt_field_of_encrypted_doc() {
     // Create fully encrypted doc (pcounter initial: 21)
     let result = node0
         .query(
-            r#"mutation { create_Users(input: {name: "John", age: 21}, encrypt: true) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "John", age: 21}, encrypt: true) { _docID } }"#,
         )
         .expect("create");
-    let doc_id = extract_doc_id(&result, "create_Users");
+    let doc_id = extract_doc_id(&result, "add_Users");
 
     // Update age by 3 (pcounter: 21 + 3 = 24)
     node0
@@ -264,10 +266,10 @@ async fn updates_set_empty_string() {
     // Create encrypted doc
     let result = node0
         .query(
-            r#"mutation { create_Users(input: {name: "John", age: 21}, encrypt: true) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "John", age: 21}, encrypt: true) { _docID } }"#,
         )
         .expect("create");
-    let doc_id = extract_doc_id(&result, "create_Users");
+    let doc_id = extract_doc_id(&result, "add_Users");
 
     // Wait for initial replication
     wait_for_merge_events(&merges, 1, MERGE_TIMEOUT).await;
@@ -314,10 +316,10 @@ async fn updates_set_string_to_null() {
     // Create encrypted doc
     let result = node0
         .query(
-            r#"mutation { create_Users(input: {name: "John", age: 21}, encrypt: true) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "John", age: 21}, encrypt: true) { _docID } }"#,
         )
         .expect("create");
-    let doc_id = extract_doc_id(&result, "create_Users");
+    let doc_id = extract_doc_id(&result, "add_Users");
 
     // Wait for initial replication
     wait_for_merge_events(&merges, 1, MERGE_TIMEOUT).await;
@@ -367,10 +369,10 @@ async fn sync_encrypted_dag() {
     // Create encrypted doc
     let result = node0
         .query(
-            r#"mutation { create_Users(input: {name: "John", age: 21}, encrypt: true) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "John", age: 21}, encrypt: true) { _docID } }"#,
         )
         .expect("create");
-    let doc_id = extract_doc_id(&result, "create_Users");
+    let doc_id = extract_doc_id(&result, "add_Users");
 
     // Wait for replication
     wait_for_merge_events(&merges, 1, MERGE_TIMEOUT).await;
@@ -433,19 +435,19 @@ async fn encrypted_doc_indexed_field() {
 
     // Create mix of encrypted and non-encrypted docs
     node0
-        .query(r#"mutation { create_Users(input: {name: "Shahzad", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Shahzad", age: 25}) { _docID } }"#)
         .expect("create Shahzad");
     node0
         .query(
-            r#"mutation { create_Users(input: {name: "Islam", age: 33}, encrypt: true) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "Islam", age: 33}, encrypt: true) { _docID } }"#,
         )
         .expect("create Islam encrypted");
     node0
-        .query(r#"mutation { create_Users(input: {name: "Andy", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Andy", age: 21}) { _docID } }"#)
         .expect("create Andy");
     node0
         .query(
-            r#"mutation { create_Users(input: {name: "John", age: 21}, encrypt: true) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "John", age: 21}, encrypt: true) { _docID } }"#,
         )
         .expect("create John encrypted");
 
@@ -481,19 +483,19 @@ async fn doc_encrypted_indexed_field() {
 
     // Create docs with encrypted indexed fields
     node0
-        .query(r#"mutation { create_Users(input: {name: "Shahzad", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Shahzad", age: 25}) { _docID } }"#)
         .expect("create Shahzad");
     node0
         .query(
-            r#"mutation { create_Users(input: {name: "Islam", age: 33}, encryptFields: ["age"]) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "Islam", age: 33}, encryptFields: ["age"]) { _docID } }"#,
         )
         .expect("create Islam with encrypted age");
     node0
-        .query(r#"mutation { create_Users(input: {name: "Andy", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Andy", age: 21}) { _docID } }"#)
         .expect("create Andy");
     node0
         .query(
-            r#"mutation { create_Users(input: {name: "John", age: 21}, encryptFields: ["age"]) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "John", age: 21}, encryptFields: ["age"]) { _docID } }"#,
         )
         .expect("create John with encrypted age");
 

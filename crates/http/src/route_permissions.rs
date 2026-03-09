@@ -68,6 +68,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // =====================================================================
         "/api/v0/collections" => match *method {
             Method::GET => RoutePermission::Required(NodePermission::CollectionGet),
+            Method::POST => RoutePermission::Required(NodePermission::CollectionPatch),
             Method::PATCH => RoutePermission::Required(NodePermission::CollectionPatch),
             _ => RoutePermission::Required(NodePermission::CollectionGet),
         },

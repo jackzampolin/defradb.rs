@@ -8,9 +8,9 @@ async fn lens_migration_test(cluster: TestCluster) {
         .expect("add Article schema");
 
     // Create articles
-    node.query(r#"mutation { create_Article(input: {title: "First"}) { _docID } }"#)
+    node.query(r#"mutation { add_Article(input: {title: "First"}) { _docID } }"#)
         .expect("create article 1");
-    node.query(r#"mutation { create_Article(input: {title: "Second"}) { _docID } }"#)
+    node.query(r#"mutation { add_Article(input: {title: "Second"}) { _docID } }"#)
         .expect("create article 2");
 
     // Verify schema describe works

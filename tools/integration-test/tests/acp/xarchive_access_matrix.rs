@@ -59,7 +59,7 @@ async fn xarchive_access_matrix_test(cluster: TestCluster) {
         let result = node
             .query_with_identity(&mutation, &jack.private_key_hex)
             .unwrap_or_else(|e| panic!("create {} doc failed: {}", type_name, e));
-        let key = format!("create_{}", type_name);
+        let key = format!("add_{}", type_name);
         let doc_id = result[&key][0]["_docID"]
             .as_str()
             .unwrap_or_else(|| panic!("missing _docID for {}", type_name))

@@ -82,7 +82,7 @@ async fn iroh_batch_replication() {
     for (name, age) in &users {
         node0
             .query(&format!(
-                r#"mutation {{ create_User(input: {{name: "{}", age: {}}}) {{ _docID }} }}"#,
+                r#"mutation {{ add_User(input: {{name: "{}", age: {}}}) {{ _docID }} }}"#,
                 name, age
             ))
             .unwrap();
@@ -144,11 +144,11 @@ async fn iroh_update_replication() {
     for (name, age) in &[("Alice", 30), ("Bob", 25), ("Carol", 35)] {
         let result = node0
             .query(&format!(
-                r#"mutation {{ create_User(input: {{name: "{}", age: {}}}) {{ _docID }} }}"#,
+                r#"mutation {{ add_User(input: {{name: "{}", age: {}}}) {{ _docID }} }}"#,
                 name, age
             ))
             .unwrap();
-        let doc_id = result["create_User"][0]["_docID"]
+        let doc_id = result["add_User"][0]["_docID"]
             .as_str()
             .expect("missing _docID")
             .to_string();
@@ -253,11 +253,11 @@ async fn iroh_delete_replication() {
     for (name, age) in &[("Alice", 30), ("Bob", 25), ("Carol", 35)] {
         let result = node0
             .query(&format!(
-                r#"mutation {{ create_User(input: {{name: "{}", age: {}}}) {{ _docID }} }}"#,
+                r#"mutation {{ add_User(input: {{name: "{}", age: {}}}) {{ _docID }} }}"#,
                 name, age
             ))
             .unwrap();
-        let doc_id = result["create_User"][0]["_docID"]
+        let doc_id = result["add_User"][0]["_docID"]
             .as_str()
             .expect("missing _docID")
             .to_string();
@@ -350,7 +350,7 @@ async fn iroh_replicated_filter_query() {
     for (name, age) in &[("Alice", 30), ("Bob", 25), ("Carol", 35), ("Dave", 40)] {
         node0
             .query(&format!(
-                r#"mutation {{ create_User(input: {{name: "{}", age: {}}}) {{ _docID }} }}"#,
+                r#"mutation {{ add_User(input: {{name: "{}", age: {}}}) {{ _docID }} }}"#,
                 name, age
             ))
             .unwrap();

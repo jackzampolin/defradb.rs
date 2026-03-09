@@ -47,17 +47,17 @@ async fn docs_on_single_node() {
 
     // Create 2 docs on node0
     let r1 = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 30}) { _docID } }"#)
         .expect("create John");
-    let doc1 = r1["create_Users"][0]["_docID"]
+    let doc1 = r1["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
 
     let r2 = node0
-        .query(r#"mutation { create_Users(input: {name: "Islam", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Islam", age: 25}) { _docID } }"#)
         .expect("create Islam");
-    let doc2 = r2["create_Users"][0]["_docID"]
+    let doc2 = r2["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -129,18 +129,18 @@ async fn docs_on_multiple_nodes() {
 
     // Doc on node0
     let r1 = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 30}) { _docID } }"#)
         .expect("create John");
-    let doc1 = r1["create_Users"][0]["_docID"]
+    let doc1 = r1["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
 
     // Doc on node1
     let r2 = node1
-        .query(r#"mutation { create_Users(input: {name: "Islam", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Islam", age: 25}) { _docID } }"#)
         .expect("create Islam");
-    let doc2 = r2["create_Users"][0]["_docID"]
+    let doc2 = r2["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -221,9 +221,9 @@ async fn single_doc_on_multiple_nodes() {
 
     // Create doc on node0
     let r1 = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 30}) { _docID } }"#)
         .expect("create John");
-    let doc_id = r1["create_Users"][0]["_docID"]
+    let doc_id = r1["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -295,9 +295,9 @@ async fn different_versions_sync_latest() {
 
     // Create doc on node0
     let r1 = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 20}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 20}) { _docID } }"#)
         .expect("create John");
-    let doc_id = r1["create_Users"][0]["_docID"]
+    let doc_id = r1["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -396,9 +396,9 @@ async fn after_sync_no_auto_subscribe() {
 
     // Create doc on node0
     let r1 = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create John");
-    let doc_id = r1["create_Users"][0]["_docID"]
+    let doc_id = r1["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();

@@ -53,9 +53,9 @@ async fn setup_with_replicated_doc() -> (TestCluster, String, String) {
 
     // Create initial doc on node0
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create user");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -167,9 +167,9 @@ async fn single_update_from_parent() {
 
     // Create doc on node0
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create user");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -262,9 +262,9 @@ async fn update_per_node() {
         .expect("rep 1→0");
 
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -376,9 +376,9 @@ async fn update_does_not_sync_to_non_peer() {
     // Create doc on node0
     let result = cluster
         .client(0)
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -486,7 +486,7 @@ async fn update_does_not_sync_from_unmapped_node() {
     // Create doc on isolated node2
     cluster
         .client(2)
-        .query(r#"mutation { create_Users(input: {name: "John", age: 60}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 60}) { _docID } }"#)
         .expect("create on node2");
 
     // Wait and verify nodes 0 and 1 do NOT have the doc
@@ -561,9 +561,9 @@ async fn multiple_updates_per_node() {
         .expect("rep 1→0");
 
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -643,9 +643,9 @@ async fn single_update_from_child_with_p2p_collection() {
 
     // Create a second doc and update it
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "Fred", age: 31}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Fred", age: 31}) { _docID } }"#)
         .expect("create Fred");
-    let fred_id = result["create_Users"][0]["_docID"]
+    let fred_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -694,9 +694,9 @@ async fn multiple_updates_per_node_with_p2p_collection() {
 
     // Create Fred on node0
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "Fred", age: 31}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Fred", age: 31}) { _docID } }"#)
         .expect("create Fred");
-    let fred_id = result["create_Users"][0]["_docID"]
+    let fred_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -791,9 +791,9 @@ async fn single_update_from_child_and_restart() {
 
     // Create initial doc on node0
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create user");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();

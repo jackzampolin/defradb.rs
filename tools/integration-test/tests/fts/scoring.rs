@@ -14,15 +14,15 @@ async fn bm25_score_ordering() {
 
     // Doc with "rust" appearing once
     client
-        .query(r#"mutation { create_Article(input: {title: "Learning Rust", body: "A guide to getting started", category: "tech"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Learning Rust", body: "A guide to getting started", category: "tech"}) { _docID } }"#)
         .unwrap();
     // Doc with "rust" appearing multiple times
     client
-        .query(r#"mutation { create_Article(input: {title: "Rust Rust Rust", body: "Rust everywhere in this rust article about rust", category: "tech"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Rust Rust Rust", body: "Rust everywhere in this rust article about rust", category: "tech"}) { _docID } }"#)
         .unwrap();
     // Doc without "rust"
     client
-        .query(r#"mutation { create_Article(input: {title: "Python Guide", body: "Learn Python scripting", category: "tech"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Python Guide", body: "Learn Python scripting", category: "tech"}) { _docID } }"#)
         .unwrap();
 
     let data = client
@@ -61,14 +61,14 @@ async fn bm25_idf_rare_term_scores_higher() {
     for i in 0..5 {
         client
             .query(&format!(
-                r#"mutation {{ create_Article(input: {{title: "Common topic {}", body: "This is about common things", category: "misc"}}) {{ _docID }} }}"#,
+                r#"mutation {{ add_Article(input: {{title: "Common topic {}", body: "This is about common things", category: "misc"}}) {{ _docID }} }}"#,
                 i
             ))
             .unwrap();
     }
     // One doc with both "common" and "rare"
     client
-        .query(r#"mutation { create_Article(input: {title: "Rare and common", body: "This article has both rare and common terms", category: "misc"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Rare and common", body: "This article has both rare and common terms", category: "misc"}) { _docID } }"#)
         .unwrap();
 
     // Search for "rare" — IDF should be high since it appears in few docs
@@ -120,15 +120,15 @@ async fn bm25_multi_field_combination() {
 
     // Doc with "database" in title only
     client
-        .query(r#"mutation { create_Article(input: {title: "Database Systems", body: "An introduction to storage engines", category: "tech"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Database Systems", body: "An introduction to storage engines", category: "tech"}) { _docID } }"#)
         .unwrap();
     // Doc with "database" in both title and body
     client
-        .query(r#"mutation { create_Article(input: {title: "Database Design", body: "How to design a good database schema", category: "tech"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Database Design", body: "How to design a good database schema", category: "tech"}) { _docID } }"#)
         .unwrap();
     // Doc with "database" in body only
     client
-        .query(r#"mutation { create_Article(input: {title: "Storage Guide", body: "This guide covers database internals", category: "tech"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Storage Guide", body: "This guide covers database internals", category: "tech"}) { _docID } }"#)
         .unwrap();
 
     let data = client

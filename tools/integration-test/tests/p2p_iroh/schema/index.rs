@@ -54,7 +54,7 @@ async fn peer_created_doc_listener_indexes() {
 
     // Create doc on source peer
     node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create John");
 
     // Wait for replication
@@ -99,9 +99,9 @@ async fn peer_updated_doc_listener_updates_index() {
 
     // Create and wait for replication
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create John");
-    let doc_id = extract_doc_id(&result, "create_Users");
+    let doc_id = extract_doc_id(&result, "add_Users");
 
     let node1_ref = &node1;
     poll_until(
@@ -178,9 +178,9 @@ async fn peer_deleted_doc_listener_deletes_index() {
 
     // Create and wait for replication
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create John");
-    let doc_id = extract_doc_id(&result, "create_Users");
+    let doc_id = extract_doc_id(&result, "add_Users");
 
     let node1_ref = &node1;
     poll_until(

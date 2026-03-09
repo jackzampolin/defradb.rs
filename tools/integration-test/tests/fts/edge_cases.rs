@@ -27,7 +27,7 @@ async fn bm25_large_document() {
     let escaped_body = large_body.replace('"', r#"\""#);
     client
         .query(&format!(
-            r#"mutation {{ create_Article(input: {{title: "Large Document", body: "{}", category: "test"}}) {{ _docID }} }}"#,
+            r#"mutation {{ add_Article(input: {{title: "Large Document", body: "{}", category: "test"}}) {{ _docID }} }}"#,
             escaped_body
         ))
         .unwrap();
@@ -51,10 +51,10 @@ async fn bm25_unicode_and_special_characters() {
     client.schema_add(SCHEMA).unwrap();
 
     client
-        .query(r#"mutation { create_Article(input: {title: "Caf\u00e9 Guide", body: "Visit the caf\u00e9 for cr\u00e8me br\u00fbl\u00e9e", category: "food"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Caf\u00e9 Guide", body: "Visit the caf\u00e9 for cr\u00e8me br\u00fbl\u00e9e", category: "food"}) { _docID } }"#)
         .unwrap();
     client
-        .query(r#"mutation { create_Article(input: {title: "Normal Article", body: "Just a normal article here", category: "misc"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Normal Article", body: "Just a normal article here", category: "misc"}) { _docID } }"#)
         .unwrap();
 
     // Search should not crash on unicode content
@@ -82,11 +82,11 @@ async fn bm25_empty_field_does_not_crash() {
 
     // Doc with empty body
     client
-        .query(r#"mutation { create_Article(input: {title: "Empty Body", body: "", category: "test"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Empty Body", body: "", category: "test"}) { _docID } }"#)
         .unwrap();
     // Doc with content
     client
-        .query(r#"mutation { create_Article(input: {title: "Has Content", body: "searchable content here", category: "test"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Has Content", body: "searchable content here", category: "test"}) { _docID } }"#)
         .unwrap();
 
     let data = client

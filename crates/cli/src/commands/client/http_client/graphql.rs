@@ -40,7 +40,7 @@ impl HttpClient {
 
     /// Add a schema definition (SDL text)
     pub async fn schema_add(&self, sdl: &str) -> Result<JsonValue> {
-        let url = format!("{}/api/v0/schema", self.base_url);
+        let url = format!("{}/api/v0/collections", self.base_url);
         let response = self.post_text(&url, sdl).await?;
 
         if !response.status().is_success() {

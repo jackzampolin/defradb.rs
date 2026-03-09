@@ -28,12 +28,12 @@ async fn acp_basic_test(cluster: TestCluster) {
     // Create a protected document as Alice
     let data = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Secret", age: 42}) { _docID name age } }"#,
+            r#"mutation { add_User(input: {name: "Secret", age: 42}) { _docID name age } }"#,
             &alice.private_key_hex,
         )
         .expect("failed to create protected document");
 
-    let doc_id = data["create_User"][0]["_docID"]
+    let doc_id = data["add_User"][0]["_docID"]
         .as_str()
         .expect("missing _docID");
 

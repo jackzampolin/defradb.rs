@@ -22,7 +22,7 @@ async fn nac_relation_admin_test(cluster: TestCluster) {
     node.schema_add_with_identity(PRODUCT_SCHEMA, &admin_key)
         .expect("deploy schema");
     node.query_with_identity(
-        r#"mutation { create_Product(input: {name: "Widget", sku: "W001", price: 100}) { _docID } }"#,
+        r#"mutation { add_Product(input: {name: "Widget", sku: "W001", price: 100}) { _docID } }"#,
         &admin_key,
     )
     .expect("create product");

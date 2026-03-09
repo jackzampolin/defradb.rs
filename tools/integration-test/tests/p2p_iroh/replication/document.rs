@@ -58,16 +58,12 @@ async fn iroh_document_subscription() {
 
     // Create a document to get a valid doc ID
     let result = node
-        .query(r#"mutation { create_Note(input: {text: "hello world"}) { _docID } }"#)
+        .query(r#"mutation { add_Note(input: {text: "hello world"}) { _docID } }"#)
         .expect("create note");
-    let doc_id = result["create_Note"]
+    let doc_id = result["add_Note"]
         .as_array()
         .and_then(|arr| arr.first())
-        .or_else(|| {
-            result["create_Note"]
-                .as_object()
-                .map(|_| &result["create_Note"])
-        })
+        .or_else(|| result["add_Note"].as_object().map(|_| &result["add_Note"]))
         .and_then(|v| v.get("_docID"))
         .and_then(|v| v.as_str())
         .expect("could not extract _docID");
@@ -128,18 +124,14 @@ async fn iroh_multi_document_subscription() {
     for title in &["alpha", "beta", "gamma"] {
         let result = node
             .query(&format!(
-                r#"mutation {{ create_Task(input: {{title: "{}"}}) {{ _docID }} }}"#,
+                r#"mutation {{ add_Task(input: {{title: "{}"}}) {{ _docID }} }}"#,
                 title
             ))
             .expect("create task");
-        let doc_id = result["create_Task"]
+        let doc_id = result["add_Task"]
             .as_array()
             .and_then(|arr| arr.first())
-            .or_else(|| {
-                result["create_Task"]
-                    .as_object()
-                    .map(|_| &result["create_Task"])
-            })
+            .or_else(|| result["add_Task"].as_object().map(|_| &result["add_Task"]))
             .and_then(|v| v.get("_docID"))
             .and_then(|v| v.as_str())
             .expect("could not extract _docID")

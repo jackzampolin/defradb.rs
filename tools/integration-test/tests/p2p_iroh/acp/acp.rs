@@ -81,13 +81,13 @@ async fn iroh_acp_replication() {
 
     // Create a public document (no identity) on node0
     node0
-        .query(r#"mutation { create_User(input: {name: "Public", age: 99}) { _docID } }"#)
+        .query(r#"mutation { add_User(input: {name: "Public", age: 99}) { _docID } }"#)
         .expect("create public document");
 
     // Create a protected document (as Alice) on node0
     node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Protected", age: 42}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Protected", age: 42}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("create protected document");
@@ -265,7 +265,7 @@ async fn iroh_acp_multi_identity() {
     // Alice creates a protected doc
     node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Alice Secret", age: 30}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Alice Secret", age: 30}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("create Alice's doc");
@@ -273,14 +273,14 @@ async fn iroh_acp_multi_identity() {
     // Bob creates a protected doc
     node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Bob Secret", age: 25}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Bob Secret", age: 25}) { _docID } }"#,
             &bob.private_key_hex,
         )
         .expect("create Bob's doc");
 
     // Create a public doc
     node0
-        .query(r#"mutation { create_User(input: {name: "Public", age: 99}) { _docID } }"#)
+        .query(r#"mutation { add_User(input: {name: "Public", age: 99}) { _docID } }"#)
         .expect("create public doc");
 
     // On node0: Alice sees her doc + public (2), Bob sees his doc + public (2), anon sees 1

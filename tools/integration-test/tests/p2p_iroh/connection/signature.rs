@@ -96,7 +96,7 @@ async fn peers_secp256k1_sync() {
         .expect("replicator");
 
     node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create signed John");
 
     let node1_ref = &node1;
@@ -162,7 +162,7 @@ async fn peers_ed25519_sync() {
         .expect("replicator");
 
     node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create ed25519-signed John");
 
     let node1_ref = &node1;
@@ -230,7 +230,7 @@ async fn peers_different_key_types_sync() {
 
     // Node0 creates a doc (secp256k1-signed)
     node0
-        .query(r#"mutation { create_Users(input: {name: "Alice", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Alice", age: 30}) { _docID } }"#)
         .expect("create Alice on node0");
 
     // Wait for replication to node1
@@ -323,9 +323,9 @@ async fn peers_different_key_types_same_doc_sync() {
 
     // Node0 creates a doc (secp256k1)
     let data = node0
-        .query(r#"mutation { create_Users(input: {name: "Bob", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Bob", age: 25}) { _docID } }"#)
         .expect("create Bob on node0");
-    let doc_id = extract_doc_id(&data, "create_Users");
+    let doc_id = extract_doc_id(&data, "add_Users");
 
     // Wait for replication to node1
     let node1_ref = &node1;
@@ -447,7 +447,7 @@ async fn branchable_collection_signed() {
     node.schema_add("type Users @branchable { name: String }")
         .expect("add branchable schema");
 
-    node.query(r#"mutation { create_Users(input: {name: "John"}) { _docID } }"#)
+    node.query(r#"mutation { add_Users(input: {name: "John"}) { _docID } }"#)
         .expect("create doc in branchable collection");
 
     // Query all commits — branchable collections produce collection, composite, and field blocks
@@ -522,10 +522,10 @@ async fn verify_valid_data() {
     node.schema_add(SCHEMA).expect("add schema");
 
     let data = node
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create signed doc");
 
-    let doc_id = extract_doc_id(&data, "create_Users");
+    let doc_id = extract_doc_id(&data, "add_Users");
     let cid = first_commit_cid(&node, &doc_id);
     let pk = require_public_key(&identity);
 
@@ -559,10 +559,10 @@ async fn verify_different_key_type() {
     node.schema_add(SCHEMA).expect("add schema");
 
     let data = node
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create ed25519-signed doc");
 
-    let doc_id = extract_doc_id(&data, "create_Users");
+    let doc_id = extract_doc_id(&data, "add_Users");
     let cid = first_commit_cid(&node, &doc_id);
     let pk = require_public_key(&identity);
 
@@ -596,10 +596,10 @@ async fn verify_wrong_identity_error() {
     node.schema_add(SCHEMA).expect("add schema");
 
     let data = node
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create signed doc");
 
-    let doc_id = extract_doc_id(&data, "create_Users");
+    let doc_id = extract_doc_id(&data, "add_Users");
     let cid = first_commit_cid(&node, &doc_id);
 
     let wrong = generate_identity(node.binary_path()).expect("generate wrong identity");
@@ -637,7 +637,7 @@ async fn verify_wrong_cid_error() {
 
     let pk = require_public_key(&identity);
 
-    node.query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+    node.query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create signed doc");
 
     let bogus_cid = "bafyreihymej6gbxq7qauy4tgt37di25uap2ahzq7z5d3ln3og5syo7rwxx";

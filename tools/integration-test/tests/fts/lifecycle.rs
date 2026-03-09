@@ -14,9 +14,9 @@ async fn bm25_document_update_reflects_new_content() {
 
     // Create a doc about "rust"
     let data = client
-        .query(r#"mutation { create_Article(input: {title: "Learning Rust", body: "Rust is great", category: "tech"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Learning Rust", body: "Rust is great", category: "tech"}) { _docID } }"#)
         .unwrap();
-    let doc_id = data["create_Article"][0]["_docID"]
+    let doc_id = data["add_Article"][0]["_docID"]
         .as_str()
         .unwrap()
         .to_string();
@@ -68,15 +68,15 @@ async fn bm25_document_deletion_removes_from_results() {
 
     // Create two docs
     let data = client
-        .query(r#"mutation { create_Article(input: {title: "Rust Guide", body: "A rust tutorial", category: "tech"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Rust Guide", body: "A rust tutorial", category: "tech"}) { _docID } }"#)
         .unwrap();
-    let doc_id = data["create_Article"][0]["_docID"]
+    let doc_id = data["add_Article"][0]["_docID"]
         .as_str()
         .unwrap()
         .to_string();
 
     client
-        .query(r#"mutation { create_Article(input: {title: "Rust Reference", body: "Rust language reference", category: "tech"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Rust Reference", body: "Rust language reference", category: "tech"}) { _docID } }"#)
         .unwrap();
 
     // Both should score for "rust"

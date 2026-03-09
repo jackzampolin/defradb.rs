@@ -25,15 +25,15 @@ async fn encrypted_index_test(cluster: TestCluster) {
 
     // Create 3 products
     node.query(
-        r#"mutation { create_Product(input: {name: "Widget", sku: "W001", price: 100}) { _docID } }"#,
+        r#"mutation { add_Product(input: {name: "Widget", sku: "W001", price: 100}) { _docID } }"#,
     )
     .expect("create product 1");
     node.query(
-        r#"mutation { create_Product(input: {name: "Gadget", sku: "G002", price: 200}) { _docID } }"#,
+        r#"mutation { add_Product(input: {name: "Gadget", sku: "G002", price: 200}) { _docID } }"#,
     )
     .expect("create product 2");
     node.query(
-        r#"mutation { create_Product(input: {name: "Doohickey", sku: "D003", price: 50}) { _docID } }"#,
+        r#"mutation { add_Product(input: {name: "Doohickey", sku: "D003", price: 50}) { _docID } }"#,
     )
     .expect("create product 3");
 

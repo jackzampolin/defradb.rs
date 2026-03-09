@@ -198,7 +198,7 @@ mod tests {
     fn test_build_create_mutation() {
         let data = serde_json::json!({"name": "Bob"});
         let mutation = build_create_mutation("User", &data);
-        assert!(mutation.contains("create_User"));
+        assert!(mutation.contains("add_User"));
         assert!(mutation.contains("input:"));
         assert!(mutation.contains("_docID"));
     }
@@ -210,7 +210,7 @@ mod tests {
             serde_json::json!({"name": "Bob"}),
         ];
         let mutation = build_create_many_mutation("User", &docs);
-        assert!(mutation.contains("create_User"));
+        assert!(mutation.contains("add_User"));
         assert!(mutation.contains("input: ["));
         assert!(mutation.contains("_docID"));
     }

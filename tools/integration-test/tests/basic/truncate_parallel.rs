@@ -17,14 +17,14 @@ async fn parallel_truncate_test(cluster: TestCluster) {
     for i in 0..5 {
         client
             .query(&format!(
-                r#"mutation {{ create_ItemA(input: {{name: "a{}", value: {}}}) {{ _docID }} }}"#,
+                r#"mutation {{ add_ItemA(input: {{name: "a{}", value: {}}}) {{ _docID }} }}"#,
                 i, i
             ))
             .unwrap_or_else(|e| panic!("failed to create ItemA doc {}: {}", i, e));
 
         client
             .query(&format!(
-                r#"mutation {{ create_ItemB(input: {{label: "b{}", count: {}}}) {{ _docID }} }}"#,
+                r#"mutation {{ add_ItemB(input: {{label: "b{}", count: {}}}) {{ _docID }} }}"#,
                 i,
                 i * 10
             ))
@@ -72,7 +72,7 @@ async fn parallel_truncate_test(cluster: TestCluster) {
 
     // Verify we can still insert after truncate
     client
-        .query(r#"mutation { create_ItemA(input: {name: "new", value: 99}) { _docID } }"#)
+        .query(r#"mutation { add_ItemA(input: {name: "new", value: 99}) { _docID } }"#)
         .expect("create after truncate failed");
 
     let data = client

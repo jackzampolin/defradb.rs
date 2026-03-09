@@ -258,7 +258,7 @@ mod tests {
 
         // Create a person
         let mutation = CString::new(
-            r#"mutation { create_Person(input: {name: "Bob", age: 30}) { _docID name age } }"#,
+            r#"mutation { add_Person(input: {name: "Bob", age: 30}) { _docID name age } }"#,
         )
         .unwrap();
         let result = unsafe {

@@ -68,11 +68,11 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
     // Alice grants Bob reader on node0
     let data = node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Protected", age: 42}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Protected", age: 42}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("create protected doc on node0");
-    let doc_id = data["create_User"][0]["_docID"]
+    let doc_id = data["add_User"][0]["_docID"]
         .as_str()
         .expect("_docID")
         .to_string();
@@ -202,11 +202,11 @@ async fn policy_transition_guard_test(cluster: TestCluster) {
 
     let data = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Guarded", age: 5}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Guarded", age: 5}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("create doc");
-    let doc_id = data["create_User"][0]["_docID"]
+    let doc_id = data["add_User"][0]["_docID"]
         .as_str()
         .expect("_docID")
         .to_string();

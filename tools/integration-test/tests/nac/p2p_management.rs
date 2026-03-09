@@ -24,11 +24,11 @@ async fn nac_p2p_management_gate_test(cluster: TestCluster) {
 
     let data = node
         .query_with_identity(
-            r#"mutation { create_Product(input: {name: "Widget", sku: "W001", price: 100}) { _docID } }"#,
+            r#"mutation { add_Product(input: {name: "Widget", sku: "W001", price: 100}) { _docID } }"#,
             &admin_key,
         )
         .expect("create product");
-    let doc_id = data["create_Product"][0]["_docID"]
+    let doc_id = data["add_Product"][0]["_docID"]
         .as_str()
         .expect("_docID")
         .to_string();

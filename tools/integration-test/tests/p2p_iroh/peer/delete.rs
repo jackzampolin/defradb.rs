@@ -48,17 +48,17 @@ async fn setup_with_two_docs() -> (TestCluster, String, String) {
 
     // Create two docs on node0
     let john = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 43}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 43}) { _docID } }"#)
         .expect("create John");
-    let john_id = john["create_Users"][0]["_docID"]
+    let john_id = john["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing John _docID")
         .to_string();
 
     let andy = node0
-        .query(r#"mutation { create_Users(input: {name: "Andy", age: 74}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Andy", age: 74}) { _docID } }"#)
         .expect("create Andy");
-    let andy_id = andy["create_Users"][0]["_docID"]
+    let andy_id = andy["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing Andy _docID")
         .to_string();
@@ -210,15 +210,15 @@ async fn update_before_connect_then_delete_show_deleted() {
 
     // Create docs on node0 BEFORE connection
     let john = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 43}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 43}) { _docID } }"#)
         .expect("create John");
-    let john_id = john["create_Users"][0]["_docID"]
+    let john_id = john["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
 
     node0
-        .query(r#"mutation { create_Users(input: {name: "Andy", age: 74}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Andy", age: 74}) { _docID } }"#)
         .expect("create Andy");
 
     // Update John's age before connection
@@ -310,15 +310,15 @@ async fn multiple_updates_before_connect_then_delete_show_deleted() {
 
     // Create docs before connection
     let john = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 43}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 43}) { _docID } }"#)
         .expect("create John");
-    let john_id = john["create_Users"][0]["_docID"]
+    let john_id = john["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
 
     node0
-        .query(r#"mutation { create_Users(input: {name: "Andy", age: 74}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Andy", age: 74}) { _docID } }"#)
         .expect("create Andy");
 
     // Multiple updates: 43→60→62
@@ -420,15 +420,15 @@ async fn update_and_delete_before_connect_show_deleted() {
 
     // Create 2 docs on node0 BEFORE connection
     let john = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 43}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 43}) { _docID } }"#)
         .expect("create John");
-    let john_id = john["create_Users"][0]["_docID"]
+    let john_id = john["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing John _docID")
         .to_string();
 
     node0
-        .query(r#"mutation { create_Users(input: {name: "Andy", age: 74}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Andy", age: 74}) { _docID } }"#)
         .expect("create Andy");
 
     // Update John twice: 43→60→62

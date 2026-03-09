@@ -32,14 +32,14 @@ async fn policy_evolution_test(cluster: TestCluster) {
     let mut doc_ids = Vec::new();
     for i in 0..5 {
         let mutation = format!(
-            r#"mutation {{ create_User(input: {{name: "Doc{}", age: {}}}) {{ _docID }} }}"#,
+            r#"mutation {{ add_User(input: {{name: "Doc{}", age: {}}}) {{ _docID }} }}"#,
             i,
             i * 10
         );
         let result = node
             .query_with_identity(&mutation, &jack.private_key_hex)
             .expect("create doc");
-        let doc_id = result["create_User"][0]["_docID"]
+        let doc_id = result["add_User"][0]["_docID"]
             .as_str()
             .expect("_docID")
             .to_string();
@@ -165,13 +165,11 @@ async fn policy_evolution_test(cluster: TestCluster) {
     // --- Phase 4: New docs inherit NO existing grants ---
     let new_doc = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "NewDoc", age: 100}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "NewDoc", age: 100}) { _docID } }"#,
             &jack.private_key_hex,
         )
         .expect("create new doc");
-    let new_doc_id = new_doc["create_User"][0]["_docID"]
-        .as_str()
-        .expect("_docID");
+    let new_doc_id = new_doc["add_User"][0]["_docID"].as_str().expect("_docID");
 
     let jack_count4 = node
         .query_with_identity(query, &jack.private_key_hex)

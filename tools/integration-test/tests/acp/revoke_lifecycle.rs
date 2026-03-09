@@ -33,11 +33,11 @@ async fn acp_revoke_lifecycle_test(cluster: TestCluster) {
     // Alice creates 1 document
     let d = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "TestDoc", age: 1}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "TestDoc", age: 1}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("create doc");
-    let doc_id = d["create_User"][0]["_docID"]
+    let doc_id = d["add_User"][0]["_docID"]
         .as_str()
         .expect("doc_id")
         .to_string();
@@ -98,7 +98,7 @@ async fn acp_revoke_lifecycle_test(cluster: TestCluster) {
 
     // Step 9: Alice creates new doc → Alice=1, Carol=0 (old grant doesn't apply)
     node.query_with_identity(
-        r#"mutation { create_User(input: {name: "NewDoc", age: 2}) { _docID } }"#,
+        r#"mutation { add_User(input: {name: "NewDoc", age: 2}) { _docID } }"#,
         &alice.private_key_hex,
     )
     .expect("create new doc");

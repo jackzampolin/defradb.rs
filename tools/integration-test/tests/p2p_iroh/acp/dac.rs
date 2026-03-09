@@ -185,7 +185,7 @@ async fn subscribe_add_get_permissioned_local() {
             // Create doc with identity
             node0
                 .query_with_identity(
-                    r#"mutation { create_Users(input: {name: "Fred", age: 30}) { _docID } }"#,
+                    r#"mutation { add_Users(input: {name: "Fred", age: 30}) { _docID } }"#,
                     id_key,
                 )
                 .expect("create Fred");
@@ -268,7 +268,7 @@ async fn replicator_permissioned_local() {
     // Create doc as owner
     node0
         .query_with_identity(
-            r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#,
+            r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#,
             id_key,
         )
         .expect("create John");
@@ -334,7 +334,7 @@ async fn subscribe_add_get_permissioned_sourcehub() {
     // Create doc as owner on node0
     node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Fred", age: 30}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Fred", age: 30}) { _docID } }"#,
             &owner_key,
         )
         .expect("create Fred on node0");
@@ -380,14 +380,14 @@ async fn create_private_docs_different_nodes() {
     // Create separate docs on each node
     node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Alice", age: 25}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Alice", age: 25}) { _docID } }"#,
             &owner_key,
         )
         .expect("create Alice on node0");
 
     node1
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Bob", age: 30}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Bob", age: 30}) { _docID } }"#,
             &owner_key,
         )
         .expect("create Bob on node1");
@@ -444,11 +444,11 @@ async fn create_private_sync_after_relationship() {
     // Create private doc as owner
     let data = node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Secret", age: 99}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Secret", age: 99}) { _docID } }"#,
             &owner_key,
         )
         .expect("create Secret");
-    let doc_id = extract_doc_id(&data, "create_User");
+    let doc_id = extract_doc_id(&data, "add_User");
 
     // Wait for replication
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -501,11 +501,11 @@ async fn update_private_docs_different_nodes() {
     // Create doc on node0
     let data = node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Eve", age: 20}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Eve", age: 20}) { _docID } }"#,
             &owner_key,
         )
         .expect("create Eve");
-    let doc_id = extract_doc_id(&data, "create_User");
+    let doc_id = extract_doc_id(&data, "add_User");
 
     // Wait for replication
     let node1_ref = &node1;
@@ -578,11 +578,11 @@ async fn delete_private_docs_different_nodes() {
     // Create and replicate doc
     let data = node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "ToDelete", age: 50}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "ToDelete", age: 50}) { _docID } }"#,
             &owner_key,
         )
         .expect("create ToDelete");
-    let doc_id = extract_doc_id(&data, "create_User");
+    let doc_id = extract_doc_id(&data, "add_User");
 
     let node1_ref = &node1;
     let key = owner_key.clone();
@@ -654,7 +654,7 @@ async fn replicator_permissioned_sourcehub() {
     // Create doc as owner
     node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "John", age: 21}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "John", age: 21}) { _docID } }"#,
             &owner_key,
         )
         .expect("create John");
@@ -720,11 +720,11 @@ async fn subscribe_add_get_with_doc_actor_relationship() {
     // Create doc as owner
     let data = node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Carol", age: 28}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Carol", age: 28}) { _docID } }"#,
             &owner_key,
         )
         .expect("create Carol");
-    let doc_id = extract_doc_id(&data, "create_User");
+    let doc_id = extract_doc_id(&data, "add_User");
 
     // Wait for replication
     let node1_ref = &node1;
@@ -790,11 +790,11 @@ async fn replicator_with_doc_actor_relationship() {
     // Create doc
     let data = node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Dan", age: 35}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Dan", age: 35}) { _docID } }"#,
             &owner_key,
         )
         .expect("create Dan");
-    let doc_id = extract_doc_id(&data, "create_User");
+    let doc_id = extract_doc_id(&data, "add_User");
 
     // Wait for replication
     let node1_ref = &node1;

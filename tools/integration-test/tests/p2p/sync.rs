@@ -67,16 +67,12 @@ async fn document_sync_test(cluster: TestCluster) {
 
     // Create doc on node0
     let result = node0
-        .query(r#"mutation { create_Task(input: {title: "sync me"}) { _docID } }"#)
+        .query(r#"mutation { add_Task(input: {title: "sync me"}) { _docID } }"#)
         .expect("create task");
-    let doc_id = result["create_Task"]
+    let doc_id = result["add_Task"]
         .as_array()
         .and_then(|arr| arr.first())
-        .or_else(|| {
-            result["create_Task"]
-                .as_object()
-                .map(|_| &result["create_Task"])
-        })
+        .or_else(|| result["add_Task"].as_object().map(|_| &result["add_Task"]))
         .and_then(|v| v.get("_docID"))
         .and_then(|v| v.as_str())
         .expect("could not extract _docID");

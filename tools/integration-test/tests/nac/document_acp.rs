@@ -35,11 +35,11 @@ async fn nac_document_acp_test(cluster: TestCluster) {
 
     let data = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "NAC Test Doc", age: 42}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "NAC Test Doc", age: 42}) { _docID } }"#,
             &jack_key,
         )
         .expect("create doc");
-    let doc_id = data["create_User"][0]["_docID"]
+    let doc_id = data["add_User"][0]["_docID"]
         .as_str()
         .expect("_docID")
         .to_string();

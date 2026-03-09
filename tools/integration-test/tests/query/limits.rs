@@ -126,7 +126,7 @@ async fn query_timeout_under_load(cluster: TestCluster) {
     for i in 0..100 {
         client
             .query(&format!(
-                r#"mutation {{ create_Record(input: {{label: "record-{i}", seq: {i}}}) {{ _docID }} }}"#,
+                r#"mutation {{ add_Record(input: {{label: "record-{i}", seq: {i}}}) {{ _docID }} }}"#,
             ))
             .unwrap_or_else(|_| panic!("create record {}", i));
     }

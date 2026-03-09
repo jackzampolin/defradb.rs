@@ -73,9 +73,9 @@ async fn create_update_link_synced_to_unsynced() {
 
     // Create an Author on node0
     let author_result = node0
-        .query(r#"mutation { create_Author(input: {name: "John", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Author(input: {name: "John", age: 30}) { _docID } }"#)
         .expect("create Author");
-    let author_id = extract_doc_id(&author_result, "create_Author");
+    let author_id = extract_doc_id(&author_result, "add_Author");
 
     // Wait for Author to replicate to node1
     let node1_ref = &node1;
@@ -97,7 +97,7 @@ async fn create_update_link_synced_to_unsynced() {
 
     // Create a Book linked to the Author on node0
     let book_mutation = format!(
-        r#"mutation {{ create_Book(input: {{name: "Painted House", rating: 4.5, author_id: "{}"}}) {{ _docID }} }}"#,
+        r#"mutation {{ add_Book(input: {{name: "Painted House", rating: 4.5, author_id: "{}"}}) {{ _docID }} }}"#,
         author_id
     );
     let book_result = node0.query(&book_mutation);
@@ -183,13 +183,13 @@ async fn one_to_many_replicator() {
 
     // Create Author
     let author_result = node0
-        .query(r#"mutation { create_Author(input: {name: "John", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Author(input: {name: "John", age: 30}) { _docID } }"#)
         .expect("create Author");
-    let author_id = extract_doc_id(&author_result, "create_Author");
+    let author_id = extract_doc_id(&author_result, "add_Author");
 
     // Create Book linked to Author
     let book_mutation = format!(
-        r#"mutation {{ create_Book(input: {{name: "Painted House", rating: 4.5, author_id: "{}"}}) {{ _docID }} }}"#,
+        r#"mutation {{ add_Book(input: {{name: "Painted House", rating: 4.5, author_id: "{}"}}) {{ _docID }} }}"#,
         author_id
     );
     let book_result = node0.query(&book_mutation);

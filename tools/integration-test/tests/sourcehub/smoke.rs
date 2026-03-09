@@ -47,12 +47,12 @@ async fn rust_sourcehub_smoke() {
     // Create a protected document as Jack
     let data = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Jack", age: 30}) { _docID name age } }"#,
+            r#"mutation { add_User(input: {name: "Jack", age: 30}) { _docID name age } }"#,
             &jack.private_key_hex,
         )
         .expect("failed to create document");
 
-    let _doc_id = data["create_User"][0]["_docID"]
+    let _doc_id = data["add_User"][0]["_docID"]
         .as_str()
         .expect("missing _docID in create result");
 

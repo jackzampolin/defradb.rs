@@ -79,7 +79,7 @@ fn connect_peers(cluster: &TestCluster) -> String {
 
 /// Helper: extract a docID from a create mutation result.
 fn extract_doc_id_from_create(result: &serde_json::Value, collection: &str) -> String {
-    let key = format!("create_{}", collection);
+    let key = format!("add_{}", collection);
     result[&key][0]["_docID"]
         .as_str()
         .unwrap_or_else(|| panic!("expected _docID in create result: {:?}", result))
@@ -458,7 +458,7 @@ async fn subscribe_document_join_event() {
     // Create a document to get a docID
     let result = cluster
         .client(0)
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create user");
     let doc_id = extract_doc_id_from_create(&result, "Users");
 
@@ -497,13 +497,13 @@ async fn subscribe_multiple_documents_join_events() {
 
     let result1 = cluster
         .client(0)
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create user1");
     let doc_id1 = extract_doc_id_from_create(&result1, "Users");
 
     let result2 = cluster
         .client(0)
-        .query(r#"mutation { create_Users(input: {name: "Jane", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Jane", age: 25}) { _docID } }"#)
         .expect("create user2");
     let doc_id2 = extract_doc_id_from_create(&result2, "Users");
 
@@ -543,7 +543,7 @@ async fn unsubscribe_document_left_event() {
 
     let result = cluster
         .client(0)
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create user");
     let doc_id = extract_doc_id_from_create(&result, "Users");
 
@@ -589,13 +589,13 @@ async fn unsubscribe_multiple_documents_left_events() {
 
     let result1 = cluster
         .client(0)
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create user1");
     let doc_id1 = extract_doc_id_from_create(&result1, "Users");
 
     let result2 = cluster
         .client(0)
-        .query(r#"mutation { create_Users(input: {name: "Jane", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Jane", age: 25}) { _docID } }"#)
         .expect("create user2");
     let doc_id2 = extract_doc_id_from_create(&result2, "Users");
 
@@ -644,7 +644,7 @@ async fn document_and_doc_sync_topics_join_events() {
 
     let result = cluster
         .client(0)
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create user");
     let doc_id = extract_doc_id_from_create(&result, "Users");
 
@@ -696,7 +696,7 @@ async fn all_topic_types_join_events() {
 
     let result = cluster
         .client(0)
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create user");
     let doc_id = extract_doc_id_from_create(&result, "Users");
 

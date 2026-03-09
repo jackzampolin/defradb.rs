@@ -28,13 +28,13 @@ impl MutationType {
     /// # Examples
     ///
     /// ```ignore
-    /// MutationType::from_prefix("create") // Some(Create)
+    /// MutationType::from_prefix("add") // Some(Create)
     /// MutationType::from_prefix("update") // Some(Update)
     /// MutationType::from_prefix("delete") // Some(Delete)
     /// ```
     pub fn from_prefix(prefix: &str) -> Option<Self> {
         match prefix.to_lowercase().as_str() {
-            "create" => Some(Self::Create),
+            "add" | "create" => Some(Self::Create),
             "update" => Some(Self::Update),
             "delete" => Some(Self::Delete),
             "upsert" => Some(Self::Upsert),
@@ -45,7 +45,7 @@ impl MutationType {
     /// Get the operation prefix string.
     pub fn as_prefix(&self) -> &'static str {
         match self {
-            Self::Create => "create",
+            Self::Create => "add",
             Self::Update => "update",
             Self::Delete => "delete",
             Self::Upsert => "upsert",
@@ -55,7 +55,7 @@ impl MutationType {
 
 /// A GraphQL mutation operation.
 ///
-/// Represents a single mutation like `create_Users(input: [...]) { ... }`.
+/// Represents a single mutation like `add_Users(input: [...]) { ... }`.
 #[derive(Debug, Clone)]
 pub struct Mutation {
     /// Type of mutation (create, update, delete)
@@ -223,7 +223,7 @@ impl Mutation {
 /// # Examples
 ///
 /// ```ignore
-/// parse_mutation_name("create_Users") // Ok((Create, "Users"))
+/// parse_mutation_name("add_Users") // Ok((Create, "Users"))
 /// parse_mutation_name("update_my_collection") // Ok((Update, "my_collection"))
 /// parse_mutation_name("delete_Posts") // Ok((Delete, "Posts"))
 /// parse_mutation_name("Users") // Err("...")
@@ -232,7 +232,7 @@ pub fn parse_mutation_name(name: &str) -> Result<(MutationType, String), String>
     // Find the first underscore
     let underscore_pos = name.find('_').ok_or_else(|| {
         format!(
-            "Invalid mutation name '{}': expected format 'operation_collection' (e.g., 'create_Users')",
+            "Invalid mutation name '{}': expected format 'operation_collection' (e.g., 'add_Users')",
             name
         )
     })?;
@@ -249,7 +249,7 @@ pub fn parse_mutation_name(name: &str) -> Result<(MutationType, String), String>
 
     let mutation_type = MutationType::from_prefix(prefix).ok_or_else(|| {
         format!(
-            "Invalid mutation prefix '{}': expected 'create', 'update', 'delete', or 'upsert'",
+            "Invalid mutation prefix '{}': expected 'add', 'update', 'delete', or 'upsert'",
             prefix
         )
     })?;
@@ -292,6 +292,11 @@ mod tests {
 
     #[test]
     fn test_parse_mutation_name() {
+        let (typ, name) = parse_mutation_name("add_Users").unwrap();
+        assert_eq!(typ, MutationType::Create);
+        assert_eq!(name, "Users");
+
+        // "create_" still accepted as backward-compatible alias
         let (typ, name) = parse_mutation_name("create_Users").unwrap();
         assert_eq!(typ, MutationType::Create);
         assert_eq!(name, "Users");

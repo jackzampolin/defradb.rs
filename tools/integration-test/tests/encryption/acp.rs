@@ -25,11 +25,11 @@ async fn encrypted_acp_test(cluster: TestCluster) {
     // Jack creates an encrypted, ACP-protected document
     let data = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Secret Tweet", age: 42}) { _docID name age } }"#,
+            r#"mutation { add_User(input: {name: "Secret Tweet", age: 42}) { _docID name age } }"#,
             &jack.private_key_hex,
         )
         .expect("create encrypted doc");
-    let doc_id = data["create_User"][0]["_docID"]
+    let doc_id = data["add_User"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();

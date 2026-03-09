@@ -10,7 +10,7 @@ async fn collection_patch_test(cluster: TestCluster) {
 
     // 2. Create a document
     client
-        .query(r#"mutation { create_Book(input: {title: "Rust Programming"}) { _docID } }"#)
+        .query(r#"mutation { add_Book(input: {title: "Rust Programming"}) { _docID } }"#)
         .expect("create doc failed");
 
     // 3. Patch schema to add summary field
@@ -69,7 +69,7 @@ async fn collection_versioning_test(cluster: TestCluster) {
 
     // 4. Verify collection still works
     client
-        .query(r#"mutation { create_Item(input: {name: "widget"}) { _docID } }"#)
+        .query(r#"mutation { add_Item(input: {name: "widget"}) { _docID } }"#)
         .expect("create after set-active failed");
 
     let data = client

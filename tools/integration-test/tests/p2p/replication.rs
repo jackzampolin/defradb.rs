@@ -44,9 +44,9 @@ async fn replication_test(cluster: TestCluster) {
 
     // Create doc on node 0
     let data = node0
-        .query(r#"mutation { create_User(input: {name: "Alice", age: 30}) { _docID name age } }"#)
+        .query(r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID name age } }"#)
         .unwrap();
-    let doc_id = data["create_User"][0]["_docID"]
+    let doc_id = data["add_User"][0]["_docID"]
         .as_str()
         .expect("missing _docID");
 

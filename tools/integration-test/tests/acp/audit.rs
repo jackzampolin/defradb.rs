@@ -29,11 +29,11 @@ async fn cid_time_travel_acp_bypass_test(cluster: TestCluster) {
     // Alice creates a protected document
     let create_result = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Historical", age: 10}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Historical", age: 10}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("create doc");
-    let doc_id = create_result["create_User"][0]["_docID"]
+    let doc_id = create_result["add_User"][0]["_docID"]
         .as_str()
         .expect("_docID")
         .to_string();
@@ -280,11 +280,11 @@ async fn policy_transition_boundary_test(cluster: TestCluster) {
     // Alice creates a document
     let create_result = node
         .query_with_identity(
-            r#"mutation { create_Item(input: {label: "Sensitive", value: 42}) { _docID label value } }"#,
+            r#"mutation { add_Item(input: {label: "Sensitive", value: 42}) { _docID label value } }"#,
             &alice.private_key_hex,
         )
         .expect("Alice creates document");
-    let doc_id = create_result["create_Item"][0]["_docID"]
+    let doc_id = create_result["add_Item"][0]["_docID"]
         .as_str()
         .expect("_docID")
         .to_string();

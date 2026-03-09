@@ -58,8 +58,12 @@ pub fn create_router_with_state(state: AppState) -> Router {
     // Collection routes (REST API)
     // Static routes must come before parametric `:name` routes
     let collection_routes = Router::new()
-        .route("/", get(handlers::list_collections))
-        .route("/", patch(handlers::patch_collection))
+        .route(
+            "/",
+            get(handlers::list_collections)
+                .post(handlers::schema::add_schema)
+                .patch(handlers::patch_collection),
+        )
         .route("/default", post(handlers::set_active))
         .route(
             "/versions",

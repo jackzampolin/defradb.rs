@@ -63,11 +63,9 @@ async fn update_with_pcounter() {
 
     // Create doc with initial points=10 on node0
     let result = node0
-        .query(
-            r#"mutation { create_Users(input: {name: "Shahzad", points: 10}) { _docID points } }"#,
-        )
+        .query(r#"mutation { add_Users(input: {name: "Shahzad", points: 10}) { _docID points } }"#)
         .expect("create user");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -178,9 +176,9 @@ async fn update_with_pcounter_simultaneous() {
 
     // Create doc with age=0 on node0
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 0}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 0}) { _docID } }"#)
         .expect("create user");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -261,11 +259,9 @@ async fn update_with_pncounter() {
 
     // Create doc with initial points=10
     let result = node0
-        .query(
-            r#"mutation { create_Users(input: {name: "Shahzad", points: 10}) { _docID points } }"#,
-        )
+        .query(r#"mutation { add_Users(input: {name: "Shahzad", points: 10}) { _docID points } }"#)
         .expect("create user");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -378,9 +374,9 @@ async fn update_with_pncounter_simultaneous() {
 
     // Create doc with age=0
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 0}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 0}) { _docID } }"#)
         .expect("create user");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();

@@ -15,10 +15,10 @@ pub(super) fn build_mutation_type(collections: &[CollectionVersion]) -> Object {
         let coll_name = collection.name.clone();
         let input_type = format!("{}MutationInputArg", coll_name);
 
-        // create_<Collection>
+        // add_<Collection>
         mutation = mutation.field(
             Field::new(
-                format!("create_{}", coll_name),
+                format!("add_{}", coll_name),
                 TypeRef::named_nn(&coll_name),
                 |_| FieldFuture::new(async { Ok(Some(GqlValue::Null)) }),
             )

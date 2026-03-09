@@ -85,17 +85,17 @@ async fn subscription_docid_filter_test(cluster: TestCluster) {
         .expect("schema deploy");
 
     let alice = client
-        .query(r#"mutation { create_User(input: {name: "Alice", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID } }"#)
         .expect("create Alice");
-    let alice_id = alice["create_User"][0]["_docID"]
+    let alice_id = alice["add_User"][0]["_docID"]
         .as_str()
         .expect("Alice _docID")
         .to_string();
 
     let bob = client
-        .query(r#"mutation { create_User(input: {name: "Bob", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_User(input: {name: "Bob", age: 25}) { _docID } }"#)
         .expect("create Bob");
-    let bob_id = bob["create_User"][0]["_docID"]
+    let bob_id = bob["add_User"][0]["_docID"]
         .as_str()
         .expect("Bob _docID")
         .to_string();
@@ -158,17 +158,17 @@ async fn commit_subscription_docid_filter_test(cluster: TestCluster) {
         .expect("schema deploy");
 
     let target = client
-        .query(r#"mutation { create_User(input: {name: "Target", age: 40}) { _docID } }"#)
+        .query(r#"mutation { add_User(input: {name: "Target", age: 40}) { _docID } }"#)
         .expect("create target");
-    let target_id = target["create_User"][0]["_docID"]
+    let target_id = target["add_User"][0]["_docID"]
         .as_str()
         .expect("target _docID")
         .to_string();
 
     let other = client
-        .query(r#"mutation { create_User(input: {name: "Other", age: 50}) { _docID } }"#)
+        .query(r#"mutation { add_User(input: {name: "Other", age: 50}) { _docID } }"#)
         .expect("create other");
-    let other_id = other["create_User"][0]["_docID"]
+    let other_id = other["add_User"][0]["_docID"]
         .as_str()
         .expect("other _docID")
         .to_string();
@@ -239,17 +239,17 @@ async fn subscription_no_filter_test(cluster: TestCluster) {
         .expect("schema deploy");
 
     let alice = client
-        .query(r#"mutation { create_User(input: {name: "Alice", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID } }"#)
         .expect("create Alice");
-    let alice_id = alice["create_User"][0]["_docID"]
+    let alice_id = alice["add_User"][0]["_docID"]
         .as_str()
         .expect("Alice _docID")
         .to_string();
 
     let bob = client
-        .query(r#"mutation { create_User(input: {name: "Bob", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_User(input: {name: "Bob", age: 25}) { _docID } }"#)
         .expect("create Bob");
-    let bob_id = bob["create_User"][0]["_docID"]
+    let bob_id = bob["add_User"][0]["_docID"]
         .as_str()
         .expect("Bob _docID")
         .to_string();

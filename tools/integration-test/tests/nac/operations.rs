@@ -32,7 +32,7 @@ async fn nac_operations_gate_test(cluster: TestCluster) {
 
     // Create a document so the collection is non-empty
     node.query_with_identity(
-        r#"mutation { create_Product(input: {name: "Widget", sku: "W001", price: 100}) { _docID } }"#,
+        r#"mutation { add_Product(input: {name: "Widget", sku: "W001", price: 100}) { _docID } }"#,
         &admin_key,
     )
     .expect("create product");

@@ -130,9 +130,9 @@ async fn initial_col_version_activated_and_queried() {
 
     // Create a doc on node0
     let r1 = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 4}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 4}) { _docID } }"#)
         .expect("create John");
-    let doc_id = r1["create_Users"][0]["_docID"]
+    let doc_id = r1["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -521,7 +521,7 @@ async fn with_view_activated_and_queried() {
 
     // Create a doc on node1 (in the Users collection)
     node1
-        .query(r#"mutation { create_Users(input: {name: "John"}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John"}) { _docID } }"#)
         .expect("create John on node1");
 
     // Query the view — the lens should copy name→fullName

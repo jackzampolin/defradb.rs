@@ -124,7 +124,7 @@ async fn p2p_management_test(cluster: TestCluster) {
 
     // 12. Create doc on node0, verify replication to node1
     node0
-        .query(r#"mutation { create_Message(input: {text: "hello", sender: "Alice"}) { _docID } }"#)
+        .query(r#"mutation { add_Message(input: {text: "hello", sender: "Alice"}) { _docID } }"#)
         .expect("create message on node0");
 
     let node1_ref = &node1;

@@ -10,9 +10,9 @@ async fn transactions_test(cluster: TestCluster) {
 
     // 2. Create baseline doc outside any transaction
     let data = client
-        .query(r#"mutation { create_Account(input: {name: "Alice", balance: 100}) { _docID name balance } }"#)
+        .query(r#"mutation { add_Account(input: {name: "Alice", balance: 100}) { _docID name balance } }"#)
         .expect("create Alice");
-    let alice_id = data["create_Account"][0]["_docID"]
+    let alice_id = data["add_Account"][0]["_docID"]
         .as_str()
         .expect("missing Alice _docID")
         .to_string();
@@ -26,7 +26,7 @@ async fn transactions_test(cluster: TestCluster) {
     // 3b. Create Bob inside the transaction
     client
         .query_with_tx(
-            r#"mutation { create_Account(input: {name: "Bob", balance: 200}) { _docID name balance } }"#,
+            r#"mutation { add_Account(input: {name: "Bob", balance: 200}) { _docID name balance } }"#,
             &tx_id,
         )
         .expect("create Bob in tx");

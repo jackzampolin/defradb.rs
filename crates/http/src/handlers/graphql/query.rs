@@ -15,6 +15,14 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
 use query::executor::{QueryRequest, QueryResponse};
+
+fn empty_string_as_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.filter(|s| !s.is_empty()))
+}
 use query::subscription::{
     extract_doc_id_from_query, is_commits_subscription, response_has_data,
     subscription_to_commits_query_with_cid, subscription_to_query_with_doc_id,
@@ -196,7 +204,11 @@ pub async fn graphql_get(
 #[derive(Debug, Clone, Deserialize)]
 pub struct TransactionalQueryRequest {
     pub query: String,
-    #[serde(rename = "operationName")]
+    #[serde(
+        rename = "operationName",
+        default,
+        deserialize_with = "empty_string_as_none"
+    )]
     pub operation_name: Option<String>,
     pub variables: Option<JsonValue>,
     pub txn_id: Option<String>,

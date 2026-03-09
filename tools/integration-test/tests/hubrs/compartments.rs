@@ -85,11 +85,11 @@ async fn rust_hubrs_compartments() {
     // --- Scenario 1: Owner creates and owns ---
     let tweet_data = node
         .query_with_identity(
-            r#"mutation { create_Tweet(input: {text: "Hello world", likes: 42, archived: false}) { _docID text } }"#,
+            r#"mutation { add_Tweet(input: {text: "Hello world", likes: 42, archived: false}) { _docID text } }"#,
             &jack.private_key_hex,
         )
         .expect("Jack create Tweet");
-    let tweet_id = tweet_data["create_Tweet"][0]["_docID"]
+    let tweet_id = tweet_data["add_Tweet"][0]["_docID"]
         .as_str()
         .expect("tweet _docID");
 
@@ -130,11 +130,11 @@ async fn rust_hubrs_compartments() {
     // --- Scenario 3: Cross-compartment isolation ---
     let workout_data = node
         .query_with_identity(
-            r#"mutation { create_Workout(input: {activity: "Trail Run", duration_min: 45}) { _docID } }"#,
+            r#"mutation { add_Workout(input: {activity: "Trail Run", duration_min: 45}) { _docID } }"#,
             &jack.private_key_hex,
         )
         .expect("Jack create Workout");
-    let workout_id = workout_data["create_Workout"][0]["_docID"]
+    let workout_id = workout_data["add_Workout"][0]["_docID"]
         .as_str()
         .expect("workout _docID");
 
@@ -175,11 +175,11 @@ async fn rust_hubrs_compartments() {
     // --- Scenario 5: Owner-only secrets ---
     let secret_data = node
         .query_with_identity(
-            r#"mutation { create_Secret(input: {content: "Top Secret", classification: "eyes-only"}) { _docID } }"#,
+            r#"mutation { add_Secret(input: {content: "Top Secret", classification: "eyes-only"}) { _docID } }"#,
             &jack.private_key_hex,
         )
         .expect("Jack create Secret");
-    let _secret_id = secret_data["create_Secret"][0]["_docID"]
+    let _secret_id = secret_data["add_Secret"][0]["_docID"]
         .as_str()
         .expect("secret _docID");
 

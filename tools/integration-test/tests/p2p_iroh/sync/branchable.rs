@@ -75,10 +75,10 @@ async fn one_node_empty_another_with_docs() {
 
     // Create docs on node0
     node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 30}) { _docID } }"#)
         .expect("create John");
     node0
-        .query(r#"mutation { create_Users(input: {name: "Islam", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Islam", age: 25}) { _docID } }"#)
         .expect("create Islam");
 
     // Node1 pulls via branchable sync
@@ -122,18 +122,18 @@ async fn different_docs_on_both_nodes() {
 
     // Node0 creates John, Andy
     node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 30}) { _docID } }"#)
         .expect("create John");
     node0
-        .query(r#"mutation { create_Users(input: {name: "Andy", age: 35}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Andy", age: 35}) { _docID } }"#)
         .expect("create Andy");
 
     // Node1 creates Islam, Fred
     node1
-        .query(r#"mutation { create_Users(input: {name: "Islam", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Islam", age: 25}) { _docID } }"#)
         .expect("create Islam");
     node1
-        .query(r#"mutation { create_Users(input: {name: "Fred", age: 40}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Fred", age: 40}) { _docID } }"#)
         .expect("create Fred");
 
     // Both sync branchable
@@ -184,7 +184,7 @@ async fn documents_from_peers_identical_dag() {
 
     // Create doc on node0
     node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 30}) { _docID } }"#)
         .expect("create John");
 
     // Node1 syncs via branchable
@@ -228,9 +228,9 @@ async fn documents_from_peers_new_head_after_sync_identical_dag() {
 
     // Create doc on node0
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 30}) { _docID } }"#)
         .expect("create John");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID");
 
@@ -297,13 +297,13 @@ async fn multiple_docs_complex_linked_network() {
 
     // Create multiple docs on node0
     node0
-        .query(r#"mutation { create_Users(input: {name: "Alice", age: 20}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Alice", age: 20}) { _docID } }"#)
         .expect("create Alice");
     node0
-        .query(r#"mutation { create_Users(input: {name: "Bob", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Bob", age: 25}) { _docID } }"#)
         .expect("create Bob");
     node0
-        .query(r#"mutation { create_Users(input: {name: "Carol", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Carol", age: 30}) { _docID } }"#)
         .expect("create Carol");
 
     // Sync all
@@ -339,9 +339,9 @@ async fn multiple_heads_from_peers() {
 
     // Create doc and update it multiple times to create multiple heads
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 20}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 20}) { _docID } }"#)
         .expect("create John");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID");
 
@@ -392,10 +392,10 @@ async fn branched_versions_and_docs() {
 
     // Create docs on both nodes
     node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 30}) { _docID } }"#)
         .expect("create John on node0");
     node1
-        .query(r#"mutation { create_Users(input: {name: "Islam", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Islam", age: 25}) { _docID } }"#)
         .expect("create Islam on node1");
 
     // Patch schema on node0 to add email field
@@ -493,7 +493,7 @@ async fn should_not_subscribe() {
 
     // Create doc on node0
     node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 30}) { _docID } }"#)
         .expect("create John");
 
     // Node1 syncs — should get doc
@@ -518,10 +518,10 @@ async fn should_not_subscribe() {
 
     // Create MORE docs on node0 (these should NOT auto-sync)
     node0
-        .query(r#"mutation { create_Users(input: {name: "Islam", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Islam", age: 25}) { _docID } }"#)
         .expect("create Islam");
     node0
-        .query(r#"mutation { create_Users(input: {name: "Andy", age: 35}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Andy", age: 35}) { _docID } }"#)
         .expect("create Andy");
 
     // Wait a bit — node1 should NOT receive the new docs

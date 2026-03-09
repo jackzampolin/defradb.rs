@@ -76,9 +76,9 @@ async fn car_bomb_protection_test(cluster: TestCluster) {
 
     // Baseline: one doc replicates correctly before the burst
     let first = node0
-        .query(r#"mutation { create_Packet(input: {payload: "baseline", seq: 0}) { _docID } }"#)
+        .query(r#"mutation { add_Packet(input: {payload: "baseline", seq: 0}) { _docID } }"#)
         .expect("create baseline");
-    let baseline_id = first["create_Packet"][0]["_docID"]
+    let baseline_id = first["add_Packet"][0]["_docID"]
         .as_str()
         .expect("baseline _docID")
         .to_string();
@@ -108,7 +108,7 @@ async fn car_bomb_protection_test(cluster: TestCluster) {
     for i in 0..BURST_SIZE {
         node0
             .query(&format!(
-                r#"mutation {{ create_Packet(input: {{payload: "burst-{i}", seq: {i}}}) {{ _docID }} }}"#,
+                r#"mutation {{ add_Packet(input: {{payload: "burst-{i}", seq: {i}}}) {{ _docID }} }}"#,
             ))
             .unwrap_or_else(|_| panic!("burst create {}", i));
     }
@@ -142,11 +142,9 @@ async fn car_bomb_protection_test(cluster: TestCluster) {
 
     // Post-burst: a fresh document replicates normally
     let after = node0
-        .query(
-            r#"mutation { create_Packet(input: {payload: "after-burst", seq: 9999}) { _docID } }"#,
-        )
+        .query(r#"mutation { add_Packet(input: {payload: "after-burst", seq: 9999}) { _docID } }"#)
         .expect("post-burst create");
-    let after_id = after["create_Packet"][0]["_docID"]
+    let after_id = after["add_Packet"][0]["_docID"]
         .as_str()
         .expect("post-burst _docID")
         .to_string();
@@ -197,7 +195,7 @@ async fn rate_limiter_saturation_test(cluster: TestCluster) {
 
     // Baseline: one doc from node1 lands on node0
     node1
-        .query(r#"mutation { create_Event(input: {label: "baseline", src: 1}) { _docID } }"#)
+        .query(r#"mutation { add_Event(input: {label: "baseline", src: 1}) { _docID } }"#)
         .expect("baseline from node1");
 
     poll_until(
@@ -213,16 +211,16 @@ async fn rate_limiter_saturation_test(cluster: TestCluster) {
     for i in 0..SPAM_COUNT {
         node1
             .query(&format!(
-                r#"mutation {{ create_Event(input: {{label: "spam-{i}", src: 1}}) {{ _docID }} }}"#,
+                r#"mutation {{ add_Event(input: {{label: "spam-{i}", src: 1}}) {{ _docID }} }}"#,
             ))
             .unwrap_or_else(|_| panic!("spam create {}", i));
     }
 
     // Immediately create node2's doc (the bystander)
     let bystander = node2
-        .query(r#"mutation { create_Event(input: {label: "from-node2", src: 2}) { _docID } }"#)
+        .query(r#"mutation { add_Event(input: {label: "from-node2", src: 2}) { _docID } }"#)
         .expect("bystander doc");
-    let bystander_id = bystander["create_Event"][0]["_docID"]
+    let bystander_id = bystander["add_Event"][0]["_docID"]
         .as_str()
         .expect("bystander _docID")
         .to_string();
@@ -305,16 +303,16 @@ async fn dag_semaphore_exhaustion_test(cluster: TestCluster) {
     for i in 0..FLOOD_COUNT {
         node1
             .query(&format!(
-                r#"mutation {{ create_Block(input: {{data: "flood-{i}", idx: {i}}}) {{ _docID }} }}"#,
+                r#"mutation {{ add_Block(input: {{data: "flood-{i}", idx: {i}}}) {{ _docID }} }}"#,
             ))
             .unwrap_or_else(|_| panic!("flood create {}", i));
     }
 
     // Immediately create node2's legitimate document
     let legit = node2
-        .query(r#"mutation { create_Block(input: {data: "legit", idx: 9999}) { _docID } }"#)
+        .query(r#"mutation { add_Block(input: {data: "legit", idx: 9999}) { _docID } }"#)
         .expect("legit doc");
-    let legit_id = legit["create_Block"][0]["_docID"]
+    let legit_id = legit["add_Block"][0]["_docID"]
         .as_str()
         .expect("legit _docID")
         .to_string();

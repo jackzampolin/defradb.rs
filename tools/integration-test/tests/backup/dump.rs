@@ -8,7 +8,7 @@ async fn dump_test(cluster: TestCluster) {
         .schema_add("type User { name: String  age: Int }")
         .unwrap();
     client
-        .query(r#"mutation { create_User(input: {name: "Alice", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID } }"#)
         .unwrap();
 
     // Dump should return data

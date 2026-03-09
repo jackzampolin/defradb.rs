@@ -186,7 +186,7 @@ async fn unauthenticated_acp_query_filtered_test(cluster: TestCluster) {
         .expect("add schema");
 
     node.query_with_identity(
-        r#"mutation { create_User(input: {name: "Private", age: 30}) { _docID } }"#,
+        r#"mutation { add_User(input: {name: "Private", age: 30}) { _docID } }"#,
         &alice.private_key_hex,
     )
     .expect("create document as Alice");
@@ -236,11 +236,11 @@ async fn identity_isolation_test(cluster: TestCluster) {
 
     let create_result = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "AliceDoc", age: 42}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "AliceDoc", age: 42}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("create Alice document");
-    let doc_id = create_result["create_User"][0]["_docID"]
+    let doc_id = create_result["add_User"][0]["_docID"]
         .as_str()
         .expect("doc_id");
 

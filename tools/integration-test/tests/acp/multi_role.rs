@@ -27,17 +27,17 @@ async fn acp_multi_role_test(cluster: TestCluster) {
     // Alice creates 2 documents
     let d1 = node
         .query_with_identity(
-            r#"mutation { create_Document(input: {title: "Doc1", content: "Content1", classification: "internal"}) { _docID } }"#,
+            r#"mutation { add_Document(input: {title: "Doc1", content: "Content1", classification: "internal"}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("create Doc1");
-    let id1 = d1["create_Document"][0]["_docID"]
+    let id1 = d1["add_Document"][0]["_docID"]
         .as_str()
         .expect("id1")
         .to_string();
 
     node.query_with_identity(
-        r#"mutation { create_Document(input: {title: "Doc2", content: "Content2", classification: "public"}) { _docID } }"#,
+        r#"mutation { add_Document(input: {title: "Doc2", content: "Content2", classification: "public"}) { _docID } }"#,
         &alice.private_key_hex,
     )
     .expect("create Doc2");

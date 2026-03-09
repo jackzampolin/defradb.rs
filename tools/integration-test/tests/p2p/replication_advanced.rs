@@ -60,11 +60,11 @@ async fn replication_crud_test(cluster: TestCluster) {
     for (name, age) in &users {
         let result = node0
             .query(&format!(
-                r#"mutation {{ create_User(input: {{name: "{}", age: {}}}) {{ _docID name age }} }}"#,
+                r#"mutation {{ add_User(input: {{name: "{}", age: {}}}) {{ _docID name age }} }}"#,
                 name, age
             ))
             .unwrap();
-        let doc_id = result["create_User"][0]["_docID"]
+        let doc_id = result["add_User"][0]["_docID"]
             .as_str()
             .unwrap_or_else(|| panic!("missing _docID for {}", name))
             .to_string();

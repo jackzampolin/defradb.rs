@@ -29,17 +29,17 @@ async fn setup_with_docs() -> (TestCluster, String, String) {
     node.schema_add(SCHEMA).expect("schema");
 
     let r1 = node
-        .query(r#"mutation { create_Users(input: {name: "Alice", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Alice", age: 30}) { _docID } }"#)
         .expect("create Alice");
-    let doc1 = r1["create_Users"][0]["_docID"]
+    let doc1 = r1["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
 
     let r2 = node
-        .query(r#"mutation { create_Users(input: {name: "Bob", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Bob", age: 25}) { _docID } }"#)
         .expect("create Bob");
-    let doc2 = r2["create_Users"][0]["_docID"]
+    let doc2 = r2["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -179,9 +179,9 @@ async fn document_add_single_should_sync() {
 
     // Create doc on node0
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "Alice", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Alice", age: 30}) { _docID } }"#)
         .expect("create");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();

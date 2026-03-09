@@ -79,15 +79,15 @@ async fn update_new_field_syncs_to_older_version_multistep() {
 
     // Create doc with new field on node0
     let create_result = node0.query(
-        r#"mutation { create_Users(input: {name: "John", age: 21, email: "john@example.com"}) { _docID } }"#,
+        r#"mutation { add_Users(input: {name: "John", age: 21, email: "john@example.com"}) { _docID } }"#,
     );
 
     match create_result {
         Ok(r) => {
-            let doc_id = r["create_Users"]
+            let doc_id = r["add_Users"]
                 .as_array()
                 .and_then(|a| a.first())
-                .or(r["create_Users"].as_object().map(|_| &r["create_Users"]))
+                .or(r["add_Users"].as_object().map(|_| &r["add_Users"]))
                 .and_then(|v| v["_docID"].as_str())
                 .expect("missing _docID")
                 .to_string();
@@ -152,7 +152,7 @@ async fn update_new_field_syncs_to_older_version() {
 
     // Create doc on node0 with base fields only
     node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create John");
 
     // Wait for replication
@@ -198,7 +198,7 @@ async fn create_new_field_syncs_to_older_version() {
 
     // Create doc WITH the new email field on node0
     let result = node0.query(
-        r#"mutation { create_Users(input: {name: "Alice", age: 25, email: "alice@example.com"}) { _docID } }"#,
+        r#"mutation { add_Users(input: {name: "Alice", age: 25, email: "alice@example.com"}) { _docID } }"#,
     );
 
     match result {
@@ -281,7 +281,7 @@ async fn create_new_field_syncs_to_newer_version() {
 
     // Create doc on node1 (base schema — no email)
     node1
-        .query(r#"mutation { create_Users(input: {name: "Bob", age: 40}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Bob", age: 40}) { _docID } }"#)
         .expect("create Bob");
 
     // Wait for replication to node0
@@ -364,7 +364,7 @@ async fn create_new_field_syncs_to_updated_version() {
 
     // Create doc with email on node0
     let result = node0.query(
-        r#"mutation { create_Users(input: {name: "Eve", age: 28, email: "eve@example.com"}) { _docID } }"#,
+        r#"mutation { add_Users(input: {name: "Eve", age: 28, email: "eve@example.com"}) { _docID } }"#,
     );
 
     match result {
@@ -421,7 +421,7 @@ async fn create_synced_before_schema_update_no_new_field() {
 
     // Create doc with email on node0
     let result = node0.query(
-        r#"mutation { create_Users(input: {name: "Dave", age: 35, email: "dave@example.com"}) { _docID } }"#,
+        r#"mutation { add_Users(input: {name: "Dave", age: 35, email: "dave@example.com"}) { _docID } }"#,
     );
 
     match result {

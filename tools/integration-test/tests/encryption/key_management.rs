@@ -29,24 +29,24 @@ async fn se_key_rotation_test(cluster: TestCluster) {
 
     // Create two documents
     let data1 = node
-        .query(r#"mutation { create_Entry(input: {value: "hello"}) { _docID } }"#)
+        .query(r#"mutation { add_Entry(input: {value: "hello"}) { _docID } }"#)
         .expect("create entry 1");
-    let doc1_id = data1["create_Entry"]
+    let doc1_id = data1["add_Entry"]
         .as_array()
         .and_then(|arr| arr.first())
         .and_then(|v| v["_docID"].as_str())
-        .or_else(|| data1["create_Entry"]["_docID"].as_str())
+        .or_else(|| data1["add_Entry"]["_docID"].as_str())
         .expect("missing _docID for entry 1")
         .to_string();
 
     let data2 = node
-        .query(r#"mutation { create_Entry(input: {value: "world"}) { _docID } }"#)
+        .query(r#"mutation { add_Entry(input: {value: "world"}) { _docID } }"#)
         .expect("create entry 2");
-    let doc2_id = data2["create_Entry"]
+    let doc2_id = data2["add_Entry"]
         .as_array()
         .and_then(|arr| arr.first())
         .and_then(|v| v["_docID"].as_str())
-        .or_else(|| data2["create_Entry"]["_docID"].as_str())
+        .or_else(|| data2["add_Entry"]["_docID"].as_str())
         .expect("missing _docID for entry 2")
         .to_string();
 
@@ -95,13 +95,13 @@ async fn se_key_rotation_test(cluster: TestCluster) {
     // Create a third document with a distinct value (must differ from doc1/doc2
     // because DefraDB is content-addressed — same content = same docID)
     let data3 = node
-        .query(r#"mutation { create_Entry(input: {value: "rotated"}) { _docID } }"#)
+        .query(r#"mutation { add_Entry(input: {value: "rotated"}) { _docID } }"#)
         .expect("create entry 3 after rotation");
-    let doc3_id = data3["create_Entry"]
+    let doc3_id = data3["add_Entry"]
         .as_array()
         .and_then(|arr| arr.first())
         .and_then(|v| v["_docID"].as_str())
-        .or_else(|| data3["create_Entry"]["_docID"].as_str())
+        .or_else(|| data3["add_Entry"]["_docID"].as_str())
         .expect("missing _docID for entry 3")
         .to_string();
     assert!(!doc3_id.is_empty(), "doc3 should have a valid docID");
@@ -149,15 +149,15 @@ async fn field_level_key_isolation_test(cluster: TestCluster) {
     // Create document with field-level encryption on secret and pin; notes is plaintext
     let data1 = node
         .query(
-            r#"mutation { create_Vault(input: {secret: "mysecret", pin: "1234", notes: "public note"}, encryptFields: [secret, pin]) { _docID secret pin notes } }"#,
+            r#"mutation { add_Vault(input: {secret: "mysecret", pin: "1234", notes: "public note"}, encryptFields: [secret, pin]) { _docID secret pin notes } }"#,
         )
         .expect("create vault doc with field-level encryption");
 
-    let doc_id = data1["create_Vault"]
+    let doc_id = data1["add_Vault"]
         .as_array()
         .and_then(|arr| arr.first())
         .and_then(|v| v["_docID"].as_str())
-        .or_else(|| data1["create_Vault"]["_docID"].as_str())
+        .or_else(|| data1["add_Vault"]["_docID"].as_str())
         .expect("missing _docID for vault doc")
         .to_string();
 
@@ -229,15 +229,15 @@ async fn field_level_key_isolation_test(cluster: TestCluster) {
     // This verifies each document uses independent encryption
     let data2 = node
         .query(
-            r#"mutation { create_Vault(input: {secret: "othersecret", pin: "5678", notes: "another note"}, encryptFields: [secret, pin]) { _docID secret pin notes } }"#,
+            r#"mutation { add_Vault(input: {secret: "othersecret", pin: "5678", notes: "another note"}, encryptFields: [secret, pin]) { _docID secret pin notes } }"#,
         )
         .expect("create second vault doc with field-level encryption");
 
-    let doc2_id = data2["create_Vault"]
+    let doc2_id = data2["add_Vault"]
         .as_array()
         .and_then(|arr| arr.first())
         .and_then(|v| v["_docID"].as_str())
-        .or_else(|| data2["create_Vault"]["_docID"].as_str())
+        .or_else(|| data2["add_Vault"]["_docID"].as_str())
         .expect("missing _docID for second vault doc")
         .to_string();
 

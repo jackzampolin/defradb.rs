@@ -418,7 +418,7 @@ mod tests {
             .await
             .unwrap();
         let result = client
-            .mutate(r#"mutation { create_User(input: {name: "Alice"}) { _docID } }"#)
+            .mutate(r#"mutation { add_User(input: {name: "Alice"}) { _docID } }"#)
             .await;
         assert!(result.is_err());
     }
@@ -439,7 +439,7 @@ mod tests {
             .unwrap();
         client.close().await.unwrap();
         let result = client
-            .mutate(r#"mutation { create_User(input: {name: "Alice"}) { _docID } }"#)
+            .mutate(r#"mutation { add_User(input: {name: "Alice"}) { _docID } }"#)
             .await;
         assert!(result.is_err());
     }
@@ -581,9 +581,7 @@ mod tests {
             .unwrap();
 
         let result = client
-            .mutate(
-                r#"mutation { create_User(input: {name: "Alice", age: 30}) { _docID name age } }"#,
-            )
+            .mutate(r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID name age } }"#)
             .await
             .unwrap();
         let response: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
@@ -618,11 +616,11 @@ mod tests {
             .unwrap();
 
         client
-            .mutate(r#"mutation { create_Person(input: {name: "Bob"}) { _docID } }"#)
+            .mutate(r#"mutation { add_Person(input: {name: "Bob"}) { _docID } }"#)
             .await
             .unwrap();
         client
-            .mutate(r#"mutation { create_Person(input: {name: "Carol"}) { _docID } }"#)
+            .mutate(r#"mutation { add_Person(input: {name: "Carol"}) { _docID } }"#)
             .await
             .unwrap();
 
@@ -652,7 +650,7 @@ mod tests {
             .unwrap();
 
         let result = client
-            .mutate(r#"mutation { create_Widget(input: {label: "test"}) { _docID } }"#)
+            .mutate(r#"mutation { add_Widget(input: {label: "test"}) { _docID } }"#)
             .await
             .unwrap();
         let response: serde_json::Value = serde_wasm_bindgen::from_value(result).unwrap();
@@ -676,7 +674,7 @@ mod tests {
                 .await
                 .unwrap();
             client
-                .mutate(r#"mutation { create_Task(input: {title: "Survive"}) { _docID } }"#)
+                .mutate(r#"mutation { add_Task(input: {title: "Survive"}) { _docID } }"#)
                 .await
                 .unwrap();
             // mutate_impl auto-persists, but explicit persist for clarity

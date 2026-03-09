@@ -30,73 +30,73 @@ async fn many_collections_field_ids_test(cluster: TestCluster) {
     let collections = [
         (
             "Alpha",
-            r#"mutation { create_Alpha(input: {name: "a", value: 1}) { _docID name value } }"#,
+            r#"mutation { add_Alpha(input: {name: "a", value: 1}) { _docID name value } }"#,
             "name",
             "a",
         ),
         (
             "Bravo",
-            r#"mutation { create_Bravo(input: {title: "b", count: 2}) { _docID title count } }"#,
+            r#"mutation { add_Bravo(input: {title: "b", count: 2}) { _docID title count } }"#,
             "title",
             "b",
         ),
         (
             "Charlie",
-            r#"mutation { create_Charlie(input: {label: "c", score: 3.0}) { _docID label } }"#,
+            r#"mutation { add_Charlie(input: {label: "c", score: 3.0}) { _docID label } }"#,
             "label",
             "c",
         ),
         (
             "Delta",
-            r#"mutation { create_Delta(input: {tag: "d", amount: 4}) { _docID tag amount } }"#,
+            r#"mutation { add_Delta(input: {tag: "d", amount: 4}) { _docID tag amount } }"#,
             "tag",
             "d",
         ),
         (
             "Echo",
-            r#"mutation { create_Echo(input: {desc: "e", priority: 5}) { _docID desc priority } }"#,
+            r#"mutation { add_Echo(input: {desc: "e", priority: 5}) { _docID desc priority } }"#,
             "desc",
             "e",
         ),
         (
             "Foxtrot",
-            r#"mutation { create_Foxtrot(input: {code: "f", level: 6}) { _docID code level } }"#,
+            r#"mutation { add_Foxtrot(input: {code: "f", level: 6}) { _docID code level } }"#,
             "code",
             "f",
         ),
         (
             "Golf",
-            r#"mutation { create_Golf(input: {memo: "g", rank: 7}) { _docID memo rank } }"#,
+            r#"mutation { add_Golf(input: {memo: "g", rank: 7}) { _docID memo rank } }"#,
             "memo",
             "g",
         ),
         (
             "Hotel",
-            r#"mutation { create_Hotel(input: {note: "h", weight: 8.0}) { _docID note } }"#,
+            r#"mutation { add_Hotel(input: {note: "h", weight: 8.0}) { _docID note } }"#,
             "note",
             "h",
         ),
         (
             "India",
-            r#"mutation { create_India(input: {body: "i", height: 9}) { _docID body height } }"#,
+            r#"mutation { add_India(input: {body: "i", height: 9}) { _docID body height } }"#,
             "body",
             "i",
         ),
         (
             "Juliet",
-            r#"mutation { create_Juliet(input: {text: "j", width: 10}) { _docID text width } }"#,
+            r#"mutation { add_Juliet(input: {text: "j", width: 10}) { _docID text width } }"#,
             "text",
             "j",
         ),
         (
             "Kilo",
-            r#"mutation { create_Kilo(input: {summary: "k", depth: 11}) { _docID summary depth } }"#,
+            r#"mutation { add_Kilo(input: {summary: "k", depth: 11}) { _docID summary depth } }"#,
             "summary",
             "k",
         ),
         (
             "Lima",
-            r#"mutation { create_Lima(input: {content: "l", length: 12}) { _docID content length } }"#,
+            r#"mutation { add_Lima(input: {content: "l", length: 12}) { _docID content length } }"#,
             "content",
             "l",
         ),
@@ -107,7 +107,7 @@ async fn many_collections_field_ids_test(cluster: TestCluster) {
             .query(mutation)
             .unwrap_or_else(|e| panic!("failed to create doc in {}: {}", col_name, e));
 
-        let create_key = format!("create_{}", col_name);
+        let create_key = format!("add_{}", col_name);
         assert!(
             data[&create_key][0]["_docID"].is_string(),
             "missing _docID for {}",

@@ -10,10 +10,10 @@ async fn view_test(cluster: TestCluster) {
 
     // Create some documents
     client
-        .query(r#"mutation { create_User(input: {name: "Alice", age: 30}) { _docID } }"#)
+        .query(r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID } }"#)
         .unwrap();
     client
-        .query(r#"mutation { create_User(input: {name: "Bob", age: 25}) { _docID } }"#)
+        .query(r#"mutation { add_User(input: {name: "Bob", age: 25}) { _docID } }"#)
         .unwrap();
 
     // Add a view — uses --query and --sdl flags (Go-compatible).

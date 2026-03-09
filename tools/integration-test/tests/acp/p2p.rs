@@ -67,13 +67,13 @@ async fn acp_p2p_test(cluster: TestCluster) {
 
     // Create a public document (no identity) on node 0
     node0
-        .query(r#"mutation { create_User(input: {name: "Public", age: 99}) { _docID } }"#)
+        .query(r#"mutation { add_User(input: {name: "Public", age: 99}) { _docID } }"#)
         .expect("failed to create public document");
 
     // Create a protected document (as Alice) on node 0
     node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Protected", age: 42}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Protected", age: 42}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("failed to create protected document");

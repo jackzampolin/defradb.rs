@@ -137,7 +137,7 @@ mod tests {
 
         // Execute in transaction
         let mutation =
-            CString::new(r#"mutation { create_TxnTest(input: {value: 42}) { _docID value } }"#)
+            CString::new(r#"mutation { add_TxnTest(input: {value: 42}) { _docID value } }"#)
                 .unwrap();
         let txn_id_cstr = CString::new(txn_id.as_ref()).unwrap();
         let result = unsafe {
@@ -182,7 +182,7 @@ mod tests {
 
         // Execute in transaction
         let mutation =
-            CString::new(r#"mutation { create_RollbackTest(input: {value: 99}) { _docID } }"#)
+            CString::new(r#"mutation { add_RollbackTest(input: {value: 99}) { _docID } }"#)
                 .unwrap();
         let result = unsafe {
             exec_request_in_txn(

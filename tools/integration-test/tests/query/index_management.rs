@@ -36,7 +36,7 @@ async fn index_management_test(cluster: TestCluster) {
 
     // Insert sample data so queries have something to exercise
     node.query(
-        r#"mutation { create_Product(input: {name: "Widget", sku: "W001", price: 100}) { _docID } }"#,
+        r#"mutation { add_Product(input: {name: "Widget", sku: "W001", price: 100}) { _docID } }"#,
     )
     .expect("create product");
 

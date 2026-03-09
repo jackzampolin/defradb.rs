@@ -115,7 +115,7 @@ async fn replicator_create_new_field_older_version() {
     // Create doc with new field on node 0
     node0
         .query(
-            r#"mutation { create_Users(input: {Name: "John", Email: "imnotyourbuddyguy@source.ca"}) { _docID } }"#,
+            r#"mutation { add_Users(input: {Name: "John", Email: "imnotyourbuddyguy@source.ca"}) { _docID } }"#,
         )
         .expect("create doc");
 
@@ -163,7 +163,7 @@ async fn replicator_create_new_field_newer_version() {
 
     // Create doc on node 0 (no Email field in this schema version)
     node0
-        .query(r#"mutation { create_Users(input: {Name: "John"}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {Name: "John"}) { _docID } }"#)
         .expect("create doc");
 
     // Wait for merge on node 1
@@ -213,7 +213,7 @@ async fn replicator_create_new_field_updated_version() {
     // Create doc with Email on node 0
     node0
         .query(
-            r#"mutation { create_Users(input: {Name: "John", Email: "imnotyourbuddyguy@source.ca"}) { _docID } }"#,
+            r#"mutation { add_Users(input: {Name: "John", Email: "imnotyourbuddyguy@source.ca"}) { _docID } }"#,
         )
         .expect("create doc");
 
@@ -254,9 +254,9 @@ async fn replicator_update_new_field_older_version() {
 
     // Create doc on node 0
     let result = node0
-        .query(r#"mutation { create_Users(input: {Name: "John"}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {Name: "John"}) { _docID } }"#)
         .expect("create doc");
-    let doc_id = integration_test::extract_doc_id(&result, "create_Users");
+    let doc_id = integration_test::extract_doc_id(&result, "add_Users");
 
     // Set up replication
     node0.p2p_collection_add(&["Users"]).expect("col add n0");
@@ -316,9 +316,9 @@ async fn replicator_update_new_field_older_version_multistep() {
 
     // Create doc on node 0
     let result = node0
-        .query(r#"mutation { create_Users(input: {Name: "John"}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {Name: "John"}) { _docID } }"#)
         .expect("create doc");
-    let doc_id = integration_test::extract_doc_id(&result, "create_Users");
+    let doc_id = integration_test::extract_doc_id(&result, "add_Users");
 
     // Set up replication
     node0.p2p_collection_add(&["Users"]).expect("col add n0");
@@ -440,7 +440,7 @@ async fn replicated_doc_older_schema_version() {
 
     // Create doc at v1 on node 0
     node0
-        .query(r#"mutation { create_Users(input: {name: "John"}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John"}) { _docID } }"#)
         .expect("create doc");
 
     // Wait for merge on node 1
@@ -504,7 +504,7 @@ async fn replicated_doc_much_older_schema_version() {
 
     // Create doc at v1 on node 0
     node0
-        .query(r#"mutation { create_Users(input: {name: "John"}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John"}) { _docID } }"#)
         .expect("create doc");
 
     // Wait for merge on node 1
@@ -564,7 +564,7 @@ async fn replicated_doc_newer_schema_version() {
 
     // Create doc at v2 on node 0 (with verified=true)
     node0
-        .query(r#"mutation { create_Users(input: {name: "John", verified: true}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", verified: true}) { _docID } }"#)
         .expect("create doc");
 
     // Wait for merge on node 1
@@ -634,7 +634,7 @@ async fn replicated_doc_much_newer_with_history_gap() {
 
     // Create doc at v1 on node 0 (before patches)
     node0
-        .query(r#"mutation { create_Users(input: {name: "John"}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John"}) { _docID } }"#)
         .expect("create doc");
 
     // Wait for merge on node 1
@@ -696,7 +696,7 @@ async fn replicated_doc_other_schema_branch() {
 
     // Create doc at v2 on node 0
     node0
-        .query(r#"mutation { create_Users(input: {name: "John", verified: true}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", verified: true}) { _docID } }"#)
         .expect("create doc");
 
     // Wait for merge on node 1

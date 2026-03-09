@@ -26,11 +26,11 @@ async fn commits_acp_denied_test(cluster: TestCluster) {
 
     let data = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Secret", age: 42}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Secret", age: 42}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("create doc");
-    let doc_id = data["create_User"][0]["_docID"]
+    let doc_id = data["add_User"][0]["_docID"]
         .as_str()
         .expect("_docID")
         .to_string();
@@ -120,7 +120,7 @@ async fn dump_requires_auth_test(cluster: TestCluster) {
         .expect("add schema");
 
     node.query_with_identity(
-        r#"mutation { create_User(input: {name: "Confidential", age: 1}) { _docID } }"#,
+        r#"mutation { add_User(input: {name: "Confidential", age: 1}) { _docID } }"#,
         &alice.private_key_hex,
     )
     .expect("create doc");
@@ -159,11 +159,11 @@ async fn mutation_denial_precise_test(cluster: TestCluster) {
 
     let data = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Original", age: 10}) { _docID name age } }"#,
+            r#"mutation { add_User(input: {name: "Original", age: 10}) { _docID name age } }"#,
             &alice.private_key_hex,
         )
         .expect("create doc");
-    let doc_id = data["create_User"][0]["_docID"]
+    let doc_id = data["add_User"][0]["_docID"]
         .as_str()
         .expect("_docID")
         .to_string();
@@ -264,9 +264,9 @@ async fn anonymous_create_is_public_test(cluster: TestCluster) {
 
     // Anonymous create succeeds — the document is created but unregistered with ACP
     let anon_create = node
-        .query(r#"mutation { create_User(input: {name: "Ghost", age: 0}) { _docID } }"#)
+        .query(r#"mutation { add_User(input: {name: "Ghost", age: 0}) { _docID } }"#)
         .expect("anonymous create should succeed in DAC-only mode");
-    let created = anon_create["create_User"]
+    let created = anon_create["add_User"]
         .as_array()
         .map(|a| a.len())
         .unwrap_or(0);
@@ -285,11 +285,11 @@ async fn anonymous_create_is_public_test(cluster: TestCluster) {
     // Alice can also create normally — her doc IS registered with ACP
     let alice_create = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Legit", age: 1}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Legit", age: 1}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("authorized create must succeed");
-    let alice_count = alice_create["create_User"]
+    let alice_count = alice_create["add_User"]
         .as_array()
         .map(|a| a.len())
         .unwrap_or(0);
@@ -323,7 +323,7 @@ async fn nac_graphql_enforcement_test(cluster: TestCluster) {
         .expect("add schema");
 
     node.query_with_identity(
-        r#"mutation { create_User(input: {name: "NACProtected", age: 7}) { _docID } }"#,
+        r#"mutation { add_User(input: {name: "NACProtected", age: 7}) { _docID } }"#,
         &jack_key,
     )
     .expect("create doc");

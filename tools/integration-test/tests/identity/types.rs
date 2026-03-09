@@ -79,11 +79,11 @@ async fn identity_types_test(cluster: TestCluster) {
     // secp256k1 identity creates a protected document
     let d = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "CrossKey", age: 42}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "CrossKey", age: 42}) { _docID } }"#,
             &secp.private_key_hex,
         )
         .expect("create doc");
-    let doc_id = d["create_User"][0]["_docID"].as_str().expect("doc_id");
+    let doc_id = d["add_User"][0]["_docID"].as_str().expect("doc_id");
 
     let query = "query { User { _docID name age } }";
 

@@ -12,17 +12,17 @@ async fn block_verify_test(cluster: TestCluster) {
     // Create a document (creates signed blocks since signing is enabled)
     let data = node
         .query_with_identity(
-            r#"mutation { create_Note(input: {text: "signed content"}) { _docID } }"#,
+            r#"mutation { add_Note(input: {text: "signed content"}) { _docID } }"#,
             &identity.private_key_hex,
         )
         .expect("create signed document");
 
     // Extract _docID from response — handle both array and object formats
-    let doc_id = data["create_Note"]
+    let doc_id = data["add_Note"]
         .as_array()
         .and_then(|arr| arr.first())
         .and_then(|v| v["_docID"].as_str())
-        .or_else(|| data["create_Note"]["_docID"].as_str());
+        .or_else(|| data["add_Note"]["_docID"].as_str());
 
     let doc_id = match doc_id {
         Some(id) => id.to_string(),

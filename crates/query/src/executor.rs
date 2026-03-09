@@ -12,6 +12,18 @@ use storage::corekv::MaybeSendSync;
 use crate::error::{Result, TransactionError};
 use crate::txn::TransactionHandle;
 
+/// Deserialize a string that may be empty as None.
+/// Go sends `"operationName": ""` for anonymous operations.
+fn deserialize_empty_string_as_none<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.filter(|s| !s.is_empty()))
+}
+
 /// A GraphQL query request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryRequest {
@@ -19,7 +31,11 @@ pub struct QueryRequest {
     pub query: String,
 
     /// Optional operation name (for multi-operation documents).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "deserialize_empty_string_as_none"
+    )]
     pub operation_name: Option<String>,
 
     /// Optional variables for the query.

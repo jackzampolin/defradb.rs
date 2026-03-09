@@ -78,7 +78,7 @@ async fn rust_sourcehub_p2p_acp() {
     // Create document as Jack on node 0
     node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Jack", age: 30}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Jack", age: 30}) { _docID } }"#,
             &jack.private_key_hex,
         )
         .expect("create user on node0");

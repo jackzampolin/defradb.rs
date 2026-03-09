@@ -43,7 +43,7 @@ async fn rust_circuit_breaker_trip_recovery() {
         .expect("add schema");
 
     node.query_with_identity(
-        r#"mutation { create_User(input: {name: "Jack", age: 30}) { _docID } }"#,
+        r#"mutation { add_User(input: {name: "Jack", age: 30}) { _docID } }"#,
         &jack.private_key_hex,
     )
     .expect("create doc");
@@ -129,11 +129,11 @@ async fn rust_policy_cache_ttl_expiry() {
     // Create a doc — registers on-chain, caches locally
     let data = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Alice", age: 25}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Alice", age: 25}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("create doc");
-    let doc_id = data["create_User"][0]["_docID"].as_str().expect("_docID");
+    let doc_id = data["add_User"][0]["_docID"].as_str().expect("_docID");
 
     // Multiple rapid ACP operations — all should use cached policy
     for i in 0..5 {
@@ -207,7 +207,7 @@ async fn go_circuit_breaker_trip_recovery() {
         .expect("add schema");
 
     node.query_with_identity(
-        r#"mutation { create_User(input: {name: "Jack", age: 30}) { _docID } }"#,
+        r#"mutation { add_User(input: {name: "Jack", age: 30}) { _docID } }"#,
         &jack.private_key_hex,
     )
     .expect("create doc");
@@ -249,7 +249,7 @@ async fn go_policy_cache_ttl_expiry() {
         .expect("add schema");
 
     node.query_with_identity(
-        r#"mutation { create_User(input: {name: "Alice", age: 25}) { _docID } }"#,
+        r#"mutation { add_User(input: {name: "Alice", age: 25}) { _docID } }"#,
         &alice.private_key_hex,
     )
     .expect("create doc");

@@ -148,7 +148,7 @@ async fn iroh_management_lifecycle() {
 
     // Create doc on node0, verify replication
     node0
-        .query(r#"mutation { create_Message(input: {text: "hello", sender: "Alice"}) { _docID } }"#)
+        .query(r#"mutation { add_Message(input: {text: "hello", sender: "Alice"}) { _docID } }"#)
         .expect("create message");
 
     let node1_ref = &node1;

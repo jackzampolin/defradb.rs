@@ -13,13 +13,13 @@ async fn bm25_basic_search() {
     client.schema_add(SCHEMA).unwrap();
 
     client
-        .query(r#"mutation { create_Article(input: {title: "Introduction to Rust", body: "Rust is a systems programming language", category: "tech"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Introduction to Rust", body: "Rust is a systems programming language", category: "tech"}) { _docID } }"#)
         .unwrap();
     client
-        .query(r#"mutation { create_Article(input: {title: "Cooking with Python", body: "Python is a great scripting language", category: "food"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Cooking with Python", body: "Python is a great scripting language", category: "food"}) { _docID } }"#)
         .unwrap();
     client
-        .query(r#"mutation { create_Article(input: {title: "Advanced Rust Patterns", body: "Rust ownership and borrowing patterns", category: "tech"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Advanced Rust Patterns", body: "Rust ownership and borrowing patterns", category: "tech"}) { _docID } }"#)
         .unwrap();
 
     let data = client
@@ -69,10 +69,10 @@ async fn bm25_multi_field_search() {
     client.schema_add(SCHEMA).unwrap();
 
     client
-        .query(r#"mutation { create_Article(input: {title: "Hello World", body: "This article discusses databases", category: "tech"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Hello World", body: "This article discusses databases", category: "tech"}) { _docID } }"#)
         .unwrap();
     client
-        .query(r#"mutation { create_Article(input: {title: "Database Design", body: "Principles of good design", category: "tech"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Database Design", body: "Principles of good design", category: "tech"}) { _docID } }"#)
         .unwrap();
 
     // Search across both title and body fields
@@ -100,7 +100,7 @@ async fn bm25_no_results_returns_zero_scores() {
     client.schema_add(SCHEMA).unwrap();
 
     client
-        .query(r#"mutation { create_Article(input: {title: "Hello World", body: "A simple greeting", category: "misc"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Hello World", body: "A simple greeting", category: "misc"}) { _docID } }"#)
         .unwrap();
 
     let data = client
@@ -122,7 +122,7 @@ async fn bm25_with_alias() {
     client.schema_add(SCHEMA).unwrap();
 
     client
-        .query(r#"mutation { create_Article(input: {title: "Rust Programming", body: "Learn Rust", category: "tech"}) { _docID } }"#)
+        .query(r#"mutation { add_Article(input: {title: "Rust Programming", body: "Learn Rust", category: "tech"}) { _docID } }"#)
         .unwrap();
 
     let data = client

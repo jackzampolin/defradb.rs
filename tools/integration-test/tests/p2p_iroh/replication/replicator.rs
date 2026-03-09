@@ -59,9 +59,9 @@ async fn replicator_with_create() {
 
     // Create doc on node0
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID name age } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID name age } }"#)
         .expect("create user");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID");
 
@@ -100,9 +100,9 @@ async fn replicator_with_update() {
     let node1 = cluster.client(1);
 
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -163,9 +163,9 @@ async fn replicator_with_delete_show_deleted() {
     let node1 = cluster.client(1);
 
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -254,7 +254,7 @@ async fn replicator_create_pcounter() {
 
     // Create with PCounter initial value
     node0
-        .query(r#"mutation { create_Users(input: {name: "Shahzad", points: 10}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Shahzad", points: 10}) { _docID } }"#)
         .expect("create");
 
     // Verify replication preserves PCounter value
@@ -313,9 +313,9 @@ async fn replicator_update_pcounter() {
     node0.p2p_replicator_set(&["Users"], &addr1).expect("rep");
 
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "Shahzad", points: 10}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Shahzad", points: 10}) { _docID } }"#)
         .expect("create");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -402,7 +402,7 @@ async fn replicator_create_pncounter() {
     node0.p2p_replicator_set(&["Users"], &addr1).expect("rep");
 
     node0
-        .query(r#"mutation { create_Users(input: {name: "Shahzad", points: 10}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Shahzad", points: 10}) { _docID } }"#)
         .expect("create");
 
     let node1_ref = &node1;
@@ -460,9 +460,9 @@ async fn replicator_update_pncounter() {
     node0.p2p_replicator_set(&["Users"], &addr1).expect("rep");
 
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "Shahzad", points: 10}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Shahzad", points: 10}) { _docID } }"#)
         .expect("create");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();
@@ -550,9 +550,9 @@ async fn replicator_with_update_and_restart() {
 
     // Create doc and verify initial replication
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();

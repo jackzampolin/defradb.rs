@@ -68,7 +68,7 @@ fn test_subscription_receives_mutation_event() {
 
     // Perform a mutation
     let mutation =
-        CString::new(r#"mutation { create_Book(input: {title: "Test"}) { _docID } }"#).unwrap();
+        CString::new(r#"mutation { add_Book(input: {title: "Test"}) { _docID } }"#).unwrap();
     let result = unsafe {
         exec_request(
             node,
@@ -202,7 +202,7 @@ fn test_subscription_collection_filter() {
 
     // Create an Article (should NOT trigger filtered subscription)
     let mutation =
-        CString::new(r#"mutation { create_Article(input: {title: "Test"}) { _docID } }"#).unwrap();
+        CString::new(r#"mutation { add_Article(input: {title: "Test"}) { _docID } }"#).unwrap();
     let result = unsafe {
         exec_request(
             node,
@@ -227,7 +227,7 @@ fn test_subscription_collection_filter() {
 
     // Create an Author (should trigger subscription)
     let mutation =
-        CString::new(r#"mutation { create_Author(input: {name: "Bob"}) { _docID } }"#).unwrap();
+        CString::new(r#"mutation { add_Author(input: {name: "Bob"}) { _docID } }"#).unwrap();
     let result = unsafe {
         exec_request(
             node,

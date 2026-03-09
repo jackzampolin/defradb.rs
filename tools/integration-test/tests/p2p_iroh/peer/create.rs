@@ -51,7 +51,7 @@ async fn create_does_not_sync() {
 
     // Create doc on node0 only
     node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create user on node0");
 
     // Wait a reasonable time, then verify node1 does NOT have the doc
@@ -122,15 +122,15 @@ async fn create_with_p2p_collection() {
 
     // Create docs on node0
     node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create John on node0");
     node0
-        .query(r#"mutation { create_Users(input: {name: "Addo", age: 28}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Addo", age: 28}) { _docID } }"#)
         .expect("create Addo on node0");
 
     // Create doc on node1 (should NOT flow back to node0)
     node1
-        .query(r#"mutation { create_Users(input: {name: "Fred", age: 31}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "Fred", age: 31}) { _docID } }"#)
         .expect("create Fred on node1");
 
     // Verify node1 receives node0's docs
@@ -200,7 +200,7 @@ async fn create_with_node_chain() {
     // Create doc on node0
     cluster
         .client(0)
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create user on node0");
 
     // Verify doc reaches node1 (direct replicator target)
@@ -299,7 +299,7 @@ async fn create_propagates_to_last_node_in_chain() {
     // Create doc on node0
     cluster
         .client(0)
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create user on node0");
 
     // Verify doc reaches node1 (first hop — always works)
@@ -446,9 +446,9 @@ async fn create_with_collection_and_subscription() {
 
     // Create doc on node0
     let result = node0
-        .query(r#"mutation { create_Users(input: {name: "John", age: 21}) { _docID } }"#)
+        .query(r#"mutation { add_Users(input: {name: "John", age: 21}) { _docID } }"#)
         .expect("create user on node0");
-    let doc_id = result["create_Users"][0]["_docID"]
+    let doc_id = result["add_Users"][0]["_docID"]
         .as_str()
         .expect("missing _docID")
         .to_string();

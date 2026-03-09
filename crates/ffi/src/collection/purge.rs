@@ -118,7 +118,7 @@ mod tests {
 
         // Create a document
         let mutation =
-            CString::new(r#"mutation { create_PurgeData(input: {name: "test"}) { _docID } }"#)
+            CString::new(r#"mutation { add_PurgeData(input: {name: "test"}) { _docID } }"#)
                 .unwrap();
         let result = unsafe {
             exec_request(
@@ -135,7 +135,7 @@ mod tests {
 
         // Extract docID from response
         let parsed: serde_json::Value = serde_json::from_str(&resp).unwrap();
-        let doc_id = parsed["data"]["create_PurgeData"][0]["_docID"]
+        let doc_id = parsed["data"]["add_PurgeData"][0]["_docID"]
             .as_str()
             .unwrap()
             .to_string();

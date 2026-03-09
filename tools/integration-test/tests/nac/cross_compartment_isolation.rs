@@ -62,40 +62,40 @@ async fn cross_compartment_isolation_test(cluster: TestCluster) {
     // --- Jack creates documents in both compartments ---
     let tweet_data = node
         .query_with_identity(
-            r#"mutation { create_Tweet(input: {title: "My tweet", body: "tweet body", score: 1}) { _docID } }"#,
+            r#"mutation { add_Tweet(input: {title: "My tweet", body: "tweet body", score: 1}) { _docID } }"#,
             &jack.private_key_hex,
         )
         .expect("create tweet");
-    let tweet_id = tweet_data["create_Tweet"][0]["_docID"]
+    let tweet_id = tweet_data["add_Tweet"][0]["_docID"]
         .as_str()
         .expect("tweet _docID")
         .to_string();
 
     node.query_with_identity(
-        r#"mutation { create_Interaction(input: {title: "Like", body: "liked a tweet", score: 1}) { _docID } }"#,
+        r#"mutation { add_Interaction(input: {title: "Like", body: "liked a tweet", score: 1}) { _docID } }"#,
         &jack.private_key_hex,
     )
     .expect("create interaction");
 
     let trail_data = node
         .query_with_identity(
-            r#"mutation { create_Trail(input: {title: "Eagle Peak", body: "mountain trail", score: 8}) { _docID } }"#,
+            r#"mutation { add_Trail(input: {title: "Eagle Peak", body: "mountain trail", score: 8}) { _docID } }"#,
             &jack.private_key_hex,
         )
         .expect("create trail");
-    let trail_id = trail_data["create_Trail"][0]["_docID"]
+    let trail_id = trail_data["add_Trail"][0]["_docID"]
         .as_str()
         .expect("trail _docID")
         .to_string();
 
     node.query_with_identity(
-        r#"mutation { create_Workout(input: {title: "Morning run", body: "5k", score: 7}) { _docID } }"#,
+        r#"mutation { add_Workout(input: {title: "Morning run", body: "5k", score: 7}) { _docID } }"#,
         &jack.private_key_hex,
     )
     .expect("create workout");
 
     node.query_with_identity(
-        r#"mutation { create_Weather(input: {title: "Sunny", body: "clear skies", score: 9}) { _docID } }"#,
+        r#"mutation { add_Weather(input: {title: "Sunny", body: "clear skies", score: 9}) { _docID } }"#,
         &jack.private_key_hex,
     )
     .expect("create weather");
