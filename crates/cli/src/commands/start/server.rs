@@ -205,22 +205,11 @@ impl Node {
                         iroh_net::SecretKey::generate(&mut rand::rng())
                     };
 
-                    let iroh_bind_port = config
-                        .net
-                        .p2p_addresses
-                        .first()
-                        .and_then(|addr| {
-                            // Extract port from multiaddr-style "/ip4/x.x.x.x/tcp/PORT"
-                            // or bare "HOST:PORT" strings.
-                            addr.rsplit('/').next().and_then(|s| s.parse::<u16>().ok())
-                        })
-                        .filter(|p| *p != 0);
-
                     let iroh_config = p2p::iroh::IrohEndpointConfig {
                         secret_key: iroh_secret_key.clone(),
                         relay_url: config.net.iroh_relay_url.clone(),
                         discovery: config.net.iroh_discovery,
-                        bind_port: iroh_bind_port,
+                        bind_port: config.net.iroh_bind_port,
                     };
                     let (command_tx, mut iroh_events, iroh_task) =
                         p2p::iroh::spawn_endpoint(iroh_config)

@@ -204,6 +204,9 @@ pub struct NetConfig {
     /// Enable DNS-based peer discovery for iroh transport (default: true).
     #[serde(default = "default_true")]
     pub iroh_discovery: bool,
+    /// Fixed UDP bind port for iroh transport. None = ephemeral (OS-assigned).
+    #[serde(default)]
+    pub iroh_bind_port: Option<u16>,
 }
 
 fn default_max_msg_size() -> u64 {
@@ -249,6 +252,7 @@ impl Default for NetConfig {
             transport: TransportType::default(),
             iroh_relay_url: None,
             iroh_discovery: true,
+            iroh_bind_port: None,
         }
     }
 }

@@ -142,7 +142,7 @@ jobs:
           --test basic --test query --test acp --test nac
           --test p2p --test encryption --test identity
           --test backup --test fts
-          -- rust_
+          -- ::rust_
 
       - name: Run go-compat integration tests
         if: matrix.suite == 'go-compat'
