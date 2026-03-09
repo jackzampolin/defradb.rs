@@ -76,10 +76,10 @@ fn insert_single_row() {
         } => {
             assert_eq!(kind, MutationKind::Insert);
             assert_eq!(table_name, "User");
-            assert_eq!(mutation_name, "create_User");
+            assert_eq!(mutation_name, "add_User");
             assert_eq!(
                 graphql,
-                "mutation { create_User(input: {name: \"Alice\", age: 30}) { _docID } }"
+                "mutation { add_User(input: {name: \"Alice\", age: 30}) { _docID } }"
             );
         }
         _ => panic!("expected Mutation"),

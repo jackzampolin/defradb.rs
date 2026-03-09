@@ -26,7 +26,7 @@ impl DocumentCreateArgs {
 
         let input_str = json_to_graphql_input(&parsed);
         let query = format!(
-            r#"mutation {{ create_{collection}(input: {input}) {{ _docID }} }}"#,
+            r#"mutation {{ add_{collection}(input: {input}) {{ _docID }} }}"#,
             collection = collection,
             input = input_str
         );
@@ -44,7 +44,7 @@ impl DocumentCreateArgs {
             .data
             .ok_or_else(|| Error::Server("Server returned success but with no data".to_string()))?;
 
-        let key = format!("create_{}", collection);
+        let key = format!("add_{}", collection);
         let result = data.get(&key).ok_or_else(|| {
             Error::Server(format!(
                 "Server response missing expected key '{}'. Response: {}",

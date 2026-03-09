@@ -53,7 +53,7 @@ async fn xarchive_access_matrix_test(cluster: TestCluster) {
     let mut doc_ids: Vec<(&str, String)> = Vec::new();
     for (type_name, _) in RESOURCES {
         let mutation = format!(
-            r#"mutation {{ create_{}(input: {{title: "{} doc", body: "test body", score: 1}}) {{ _docID }} }}"#,
+            r#"mutation {{ add_{}(input: {{title: "{} doc", body: "test body", score: 1}}) {{ _docID }} }}"#,
             type_name, type_name
         );
         let result = node

@@ -129,7 +129,7 @@ pub async fn import_database<S: Store>(
 
             let input = json_to_graphql_input(&JsonValue::Object(doc_map));
             let mutation = format!(
-                "mutation {{ create_{}(input: {}) {{ _docID }} }}",
+                "mutation {{ add_{}(input: {}) {{ _docID }} }}",
                 collection_name, input
             );
 
@@ -155,7 +155,7 @@ pub async fn import_database<S: Store>(
                 let response_json = serde_json::to_value(&response.data)
                     .map_err(|e| format!("failed to serialize response: {}", e))?;
 
-                let create_key = format!("create_{}", collection_name);
+                let create_key = format!("add_{}", collection_name);
                 let new_doc_id = response_json
                     .get(&create_key)
                     .and_then(|v| v.as_array())

@@ -45,7 +45,7 @@ pub(crate) fn json_to_graphql_input(value: &JsonValue) -> String {
 fn build_create_mutation(collection: &str, data: &JsonValue) -> String {
     let input = json_to_graphql_input(data);
     format!(
-        "mutation {{ create_{}(input: {}) {{ _docID }} }}",
+        "mutation {{ add_{}(input: {}) {{ _docID }} }}",
         collection, input
     )
 }
@@ -54,7 +54,7 @@ fn build_create_mutation(collection: &str, data: &JsonValue) -> String {
 fn build_create_many_mutation(collection: &str, docs: &[JsonValue]) -> String {
     let inputs: Vec<String> = docs.iter().map(json_to_graphql_input).collect();
     format!(
-        "mutation {{ create_{}(input: [{}]) {{ _docID }} }}",
+        "mutation {{ add_{}(input: [{}]) {{ _docID }} }}",
         collection,
         inputs.join(", ")
     )

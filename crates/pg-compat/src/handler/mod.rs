@@ -670,9 +670,9 @@ mod tests {
     fn extract_table_from_mutation() {
         assert_eq!(
             extract_table_name_from_graphql(
-                "mutation { create_User(input: {name: \"Alice\"}) { _docID } }"
+                "mutation { add_User(input: {name: \"Alice\"}) { _docID } }"
             ),
-            "create_User"
+            "add_User"
         );
     }
 
@@ -686,7 +686,7 @@ mod tests {
     #[test]
     fn extract_fields_from_mutation() {
         let fields = extract_fields_from_graphql(
-            "mutation { create_User(input: {name: \"Alice\"}) { _docID name } }",
+            "mutation { add_User(input: {name: \"Alice\"}) { _docID name } }",
         );
         assert_eq!(fields, "_docID name");
     }

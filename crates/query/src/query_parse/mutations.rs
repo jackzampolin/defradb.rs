@@ -150,7 +150,7 @@ pub(super) fn parse_field_to_mutation(
         MutationType::Create => {
             if mutation.create_input.is_empty() && !has_input_arg {
                 return Err(QueryError::parse(format!(
-                    "create_{} mutation requires 'input' argument with array of documents",
+                    "add_{} mutation requires 'input' argument with array of documents",
                     collection_name
                 )));
             }

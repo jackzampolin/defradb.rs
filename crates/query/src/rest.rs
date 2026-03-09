@@ -282,7 +282,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
     fn build_create_mutation(&self, collection: &str, data: &JsonValue) -> String {
         let graphql_data = Self::json_to_graphql_input(data);
         format!(
-            r#"mutation {{ create_{collection}(input: [{graphql_data}]) {{ _docID }} }}"#,
+            r#"mutation {{ add_{collection}(input: [{graphql_data}]) {{ _docID }} }}"#,
             collection = collection,
             graphql_data = graphql_data
         )
@@ -292,7 +292,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
     fn build_create_many_mutation(&self, collection: &str, docs: &[JsonValue]) -> String {
         let inputs: Vec<String> = docs.iter().map(Self::json_to_graphql_input).collect();
         format!(
-            r#"mutation {{ create_{collection}(input: [{inputs}]) {{ _docID }} }}"#,
+            r#"mutation {{ add_{collection}(input: [{inputs}]) {{ _docID }} }}"#,
             collection = collection,
             inputs = inputs.join(", ")
         )
@@ -480,7 +480,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
 
         // Return the mutation result directly (the caller discards the body)
         let doc = result
-            .get(format!("create_{}", collection))
+            .get(format!("add_{}", collection))
             .or_else(|| result.get(collection))
             .and_then(|v| v.as_array())
             .and_then(|arr| arr.first())
@@ -513,7 +513,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperations for RestOpe
 
         // Return the mutation results directly (the caller discards the body)
         let docs = result
-            .get(format!("create_{}", collection))
+            .get(format!("add_{}", collection))
             .or_else(|| result.get(collection))
             .and_then(|v| v.as_array())
             .cloned()

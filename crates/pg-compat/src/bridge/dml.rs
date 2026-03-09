@@ -171,7 +171,7 @@ pub(super) fn translate_insert(
     };
 
     let return_fields = translate_returning(&insert.returning);
-    let mutation_name = format!("create_{}", table_name);
+    let mutation_name = format!("add_{}", table_name);
 
     let graphql = format!(
         "mutation {{ {}(input: {}) {{ {} }} }}",
@@ -214,7 +214,7 @@ fn translate_upsert(
     let input_str = format!("{{{}}}", fields?.join(", "));
 
     let return_fields = translate_returning(&insert.returning);
-    let mutation_name = format!("create_{}", table_name);
+    let mutation_name = format!("add_{}", table_name);
 
     let insert_graphql = format!(
         "mutation {{ {}(input: {}) {{ {} }} }}",
