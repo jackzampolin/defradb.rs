@@ -8,8 +8,12 @@ license.workspace = true
 repository.workspace = true
 description = "FUSE filesystem overlay for DefraDB"
 
+[features]
+default = []
+fuse = ["dep:fuser"]
+
 [dependencies]
-fuser = "0.15"
+fuser = { version = "0.15", optional = true }
 libc = "0.2"
 db = { path = "../db" }
 document = { path = "../document" }

@@ -45,6 +45,9 @@ pub struct Node {
     /// Stored for future use in request context injection.
     #[allow(dead_code)]
     user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
+    /// FUSE mount handle (kept alive; dropped on shutdown to unmount).
+    #[allow(dead_code)]
+    pub(super) mount_handle: Option<Box<dyn std::any::Any + Send>>,
 }
 
 impl Node {
@@ -53,6 +56,7 @@ impl Node {
     pub async fn new(
         config: Config,
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
+        mount_path: Option<std::path::PathBuf>,
     ) -> Result<Self> {
         info!("Initializing DefraDB node");
         info!("Root directory: {}", config.rootdir.display());
@@ -71,117 +75,121 @@ impl Node {
             };
 
         // Initialize storage, database, and set up P2P and HTTP server
-        let (p2p_handle, p2p_tasks, http_server, pg_server) = match config.datastore.store {
-            DatastoreType::Memory => {
-                info!("Using in-memory datastore");
-                let store = Arc::new(storage::MemoryStore::new());
-                // Use in-memory ACP store for memory datastore
-                let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
-                let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
-                    Arc::new(acp::MemoryZanzibarStore::new());
-                info!("Using in-memory ACP store");
-                Self::init_store_and_server(
-                    store,
-                    &config,
-                    peer_keypair,
-                    user_identity.clone(),
-                    acp_store,
-                    zanzibar_store,
-                    node_identity_did.clone(),
-                )
-                .await?
-            }
-            DatastoreType::Redb => {
-                info!("Using Redb datastore at {}", config.data_path().display());
-                let opts = RedbStoreOptions::new()
-                    .with_durability(config.datastore.durability)
-                    .with_cache_size(256 * 1024 * 1024);
-                let store = Arc::new(storage::RedbStore::open_with_options(
-                    config.data_path(),
-                    opts,
-                )?);
-                // Use unified ACP store backed by main database with namespace isolation
-                info!("Using unified ACP store (namespace isolated in main database)");
-                let acp_store: Arc<dyn acp::AcpStore> =
-                    Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
-                let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
-                    Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
-                Self::init_store_and_server(
-                    store,
-                    &config,
-                    peer_keypair,
-                    user_identity.clone(),
-                    acp_store,
-                    zanzibar_store,
-                    node_identity_did.clone(),
-                )
-                .await?
-            }
-            #[cfg(feature = "fjall")]
-            DatastoreType::Fjall => {
-                info!("Using Fjall datastore at {}", config.data_path().display());
-                let opts = FjallStoreOptions::new().with_durability(config.datastore.durability);
-                let store = Arc::new(storage::FjallStore::open_with_options(
-                    config.data_path(),
-                    opts,
-                )?);
-                info!("Using unified ACP store (namespace isolated in main database)");
-                let acp_store: Arc<dyn acp::AcpStore> =
-                    Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
-                let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
-                    Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
-                Self::init_store_and_server(
-                    store,
-                    &config,
-                    peer_keypair,
-                    user_identity.clone(),
-                    acp_store,
-                    zanzibar_store,
-                    node_identity_did.clone(),
-                )
-                .await?
-            }
-            #[cfg(not(feature = "fjall"))]
-            DatastoreType::Fjall => {
-                return Err(crate::error::Error::InvalidDatastore(
-                    "fjall backend not enabled. Rebuild with --features fjall".into(),
-                ));
-            }
-            #[cfg(feature = "rocksdb")]
-            DatastoreType::RocksDb => {
-                info!(
-                    "Using RocksDB datastore at {}",
-                    config.data_path().display()
-                );
-                let opts =
-                    RocksDbStoreOptions::from_env().with_durability(config.datastore.durability);
-                let store = Arc::new(storage::RocksDbStore::open_with_options(
-                    config.data_path(),
-                    opts,
-                )?);
-                info!("Using unified ACP store (namespace isolated in main database)");
-                let acp_store: Arc<dyn acp::AcpStore> =
-                    Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
-                let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
-                    Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
-                Self::init_store_and_server(
-                    store,
-                    &config,
-                    peer_keypair,
-                    user_identity.clone(),
-                    acp_store,
-                    zanzibar_store,
-                    node_identity_did.clone(),
-                )
-                .await?
-            }
-            #[cfg(not(feature = "rocksdb"))]
-            DatastoreType::RocksDb => {
-                return Err(crate::error::Error::InvalidDatastore(
-                    "rocksdb backend not enabled. Rebuild with --features rocksdb".into(),
-                ));
-            }
-        };
+        let (p2p_handle, p2p_tasks, http_server, pg_server, mount_handle) =
+            match config.datastore.store {
+                DatastoreType::Memory => {
+                    info!("Using in-memory datastore");
+                    let store = Arc::new(storage::MemoryStore::new());
+                    let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
+                    let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
+                        Arc::new(acp::MemoryZanzibarStore::new());
+                    info!("Using in-memory ACP store");
+                    Self::init_store_and_server(
+                        store,
+                        &config,
+                        peer_keypair,
+                        user_identity.clone(),
+                        acp_store,
+                        zanzibar_store,
+                        node_identity_did.clone(),
+                        mount_path,
+                    )
+                    .await?
+                }
+                DatastoreType::Redb => {
+                    info!("Using Redb datastore at {}", config.data_path().display());
+                    let opts = RedbStoreOptions::new()
+                        .with_durability(config.datastore.durability)
+                        .with_cache_size(256 * 1024 * 1024);
+                    let store = Arc::new(storage::RedbStore::open_with_options(
+                        config.data_path(),
+                        opts,
+                    )?);
+                    info!("Using unified ACP store (namespace isolated in main database)");
+                    let acp_store: Arc<dyn acp::AcpStore> =
+                        Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
+                    let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
+                        Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
+                    Self::init_store_and_server(
+                        store,
+                        &config,
+                        peer_keypair,
+                        user_identity.clone(),
+                        acp_store,
+                        zanzibar_store,
+                        node_identity_did.clone(),
+                        mount_path,
+                    )
+                    .await?
+                }
+                #[cfg(feature = "fjall")]
+                DatastoreType::Fjall => {
+                    info!("Using Fjall datastore at {}", config.data_path().display());
+                    let opts =
+                        FjallStoreOptions::new().with_durability(config.datastore.durability);
+                    let store = Arc::new(storage::FjallStore::open_with_options(
+                        config.data_path(),
+                        opts,
+                    )?);
+                    info!("Using unified ACP store (namespace isolated in main database)");
+                    let acp_store: Arc<dyn acp::AcpStore> =
+                        Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
+                    let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
+                        Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
+                    Self::init_store_and_server(
+                        store,
+                        &config,
+                        peer_keypair,
+                        user_identity.clone(),
+                        acp_store,
+                        zanzibar_store,
+                        node_identity_did.clone(),
+                        mount_path,
+                    )
+                    .await?
+                }
+                #[cfg(not(feature = "fjall"))]
+                DatastoreType::Fjall => {
+                    return Err(crate::error::Error::InvalidDatastore(
+                        "fjall backend not enabled. Rebuild with --features fjall".into(),
+                    ));
+                }
+                #[cfg(feature = "rocksdb")]
+                DatastoreType::RocksDb => {
+                    info!(
+                        "Using RocksDB datastore at {}",
+                        config.data_path().display()
+                    );
+                    let opts = RocksDbStoreOptions::from_env()
+                        .with_durability(config.datastore.durability);
+                    let store = Arc::new(storage::RocksDbStore::open_with_options(
+                        config.data_path(),
+                        opts,
+                    )?);
+                    info!("Using unified ACP store (namespace isolated in main database)");
+                    let acp_store: Arc<dyn acp::AcpStore> =
+                        Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
+                    let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
+                        Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
+                    Self::init_store_and_server(
+                        store,
+                        &config,
+                        peer_keypair,
+                        user_identity.clone(),
+                        acp_store,
+                        zanzibar_store,
+                        node_identity_did.clone(),
+                        mount_path,
+                    )
+                    .await?
+                }
+                #[cfg(not(feature = "rocksdb"))]
+                DatastoreType::RocksDb => {
+                    return Err(crate::error::Error::InvalidDatastore(
+                        "rocksdb backend not enabled. Rebuild with --features rocksdb".into(),
+                    ));
+                }
+            };
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
@@ -194,6 +202,7 @@ impl Node {
             shutdown_tx,
             shutdown_rx,
             user_identity,
+            mount_handle,
         })
     }
 }

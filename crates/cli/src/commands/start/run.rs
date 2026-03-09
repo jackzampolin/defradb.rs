@@ -140,6 +140,13 @@ impl Node {
             }
         }
 
+        // Unmount FUSE filesystem
+        if self.mount_handle.is_some() {
+            info!("Unmounting FUSE filesystem...");
+            drop(self.mount_handle.take());
+            info!("FUSE filesystem unmounted");
+        }
+
         // Shutdown P2P tasks first, then the handle
         if let Some(tasks) = self.p2p_tasks.take() {
             info!("Stopping P2P background tasks...");

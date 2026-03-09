@@ -2247,6 +2247,7 @@ dependencies = [
  "crypto",
  "db",
  "defra-core",
+ "defra-fs",
  "defra-http",
  "defra-version",
  "dirs",
@@ -3616,6 +3617,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "defra-fs"
+version = "0.5.0"
+dependencies = [
+ "db",
+ "document",
+ "fuser",
+ "libc",
+ "parking_lot 0.12.5",
+ "schema",
+ "serde_json",
+ "storage",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "defra-harness"
 version = "0.1.0"
 source = "git+https://github.com/sourcenetwork/backbone.git?branch=main#35677ab57eec8122b184bc0a95ffae13c58fdc4f"
@@ -4583,6 +4600,22 @@ name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
+
+[[package]]
+name = "fuser"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53274f494609e77794b627b1a3cddfe45d675a6b2e9ba9c0fdc8d8eee2184369"
+dependencies = [
+ "libc",
+ "log",
+ "memchr",
+ "nix 0.29.0",
+ "page_size",
+ "pkg-config",
+ "smallvec",
+ "zerocopy",
+]
 
 [[package]]
 name = "futures"
@@ -8686,6 +8719,16 @@ dependencies = [
  "unsigned-varint 0.8.0",
  "uuid",
  "void",
+]
+
+[[package]]
+name = "page_size"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30d5b2194ed13191c1999ae0704b7839fb18384fa22e49b57eeaa97d79ce40da"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]

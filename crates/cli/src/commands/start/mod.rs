@@ -183,6 +183,10 @@ pub struct StartArgs {
     /// Address for Postgres wire protocol compatibility (e.g., "127.0.0.1:5433")
     #[arg(long)]
     pub pg_address: Option<String>,
+
+    /// Mount DefraDB as a FUSE filesystem at this path (requires --features fuse)
+    #[arg(long)]
+    pub mount: Option<std::path::PathBuf>,
 }
 
 impl StartArgs {
@@ -208,7 +212,7 @@ impl StartArgs {
         }
 
         // Start the node
-        let node = Node::new(config, user_identity).await?;
+        let node = Node::new(config, user_identity, self.mount).await?;
         node.run().await
     }
 

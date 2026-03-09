@@ -36,6 +36,7 @@ orbis = { path = "../orbis" }
 sourcehub = { path = "../sourcehub" }
 defra-version = { path = "../defra-version" }
 pg-compat = { path = "../pg-compat" }
+defra-fs = { path = "../fs", optional = true }
 
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -107,6 +108,7 @@ fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]
 vendored-openssl = ["dep:openssl-sys"]
 iroh = ["p2p/iroh-transport", "dep:iroh-net", "dep:rand"]
+fuse = ["dep:defra-fs", "defra-fs/fuse"]
 
 [dev-dependencies]
 tempfile = "3.17"

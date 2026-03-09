@@ -2,35 +2,32 @@
 ///
 /// Inode layout:
 /// - 1: root directory (mountpoint)
-/// - 2..N: collection directories (allocated on first readdir of root)
-/// - N+1..: document files (allocated on first readdir/lookup of collection)
+/// - 2..N: root virtual files, collection directories
+/// - N+1..: collection virtual files, document files
 use std::collections::HashMap;
 
-/// The root directory inode (standard FUSE convention).
 pub const ROOT_INO: u64 = 1;
 
 /// Reserved field name for filesystem display names.
-/// If a document has this field, its value is used as the filename
-/// instead of the raw docID.
 pub const NAME_FIELD: &str = "_name";
 
 /// Represents what a filesystem inode maps to in DefraDB.
 #[derive(Debug, Clone)]
 pub enum InodeTarget {
-    /// Root directory containing all collections.
     Root,
-    /// A collection directory.
-    Collection { name: String },
-    /// A document JSON file within a collection.
+    Collection {
+        name: String,
+    },
     Document {
         collection: String,
         doc_id: String,
-        /// Filesystem display name (from _name field, or doc_id if unset).
         display_name: String,
     },
-    /// A virtual read-only file within a collection directory.
     VirtualFile {
         collection: String,
+        filename: String,
+    },
+    RootVirtualFile {
         filename: String,
     },
 }
@@ -40,12 +37,10 @@ pub struct InodeTable {
     next_ino: u64,
     by_ino: HashMap<u64, InodeTarget>,
     collection_inos: HashMap<String, u64>,
-    /// Forward: (collection, doc_id) -> inode
     doc_inos: HashMap<(String, String), u64>,
-    /// Reverse: (collection, display_name) -> doc_id
     name_to_doc_id: HashMap<(String, String), String>,
-    /// Virtual file inodes: (collection, filename) -> inode
     virtual_inos: HashMap<(String, String), u64>,
+    root_virtual_inos: HashMap<String, u64>,
 }
 
 impl InodeTable {
@@ -60,21 +55,19 @@ impl InodeTable {
             doc_inos: HashMap::new(),
             name_to_doc_id: HashMap::new(),
             virtual_inos: HashMap::new(),
+            root_virtual_inos: HashMap::new(),
         }
     }
 
-    /// Get the target for an inode.
     pub fn get(&self, ino: u64) -> Option<&InodeTarget> {
         self.by_ino.get(&ino)
     }
 
-    /// Allocate or return existing inode for a collection.
     pub fn collection_ino(&mut self, name: &str) -> u64 {
         if let Some(&ino) = self.collection_inos.get(name) {
             return ino;
         }
-        let ino = self.next_ino;
-        self.next_ino += 1;
+        let ino = self.alloc();
         self.by_ino.insert(
             ino,
             InodeTarget::Collection {
@@ -85,15 +78,12 @@ impl InodeTable {
         ino
     }
 
-    /// Allocate or return existing inode for a document.
-    /// `display_name` is either the `_name` field value or the doc_id.
     pub fn doc_ino(&mut self, collection: &str, doc_id: &str, display_name: &str) -> u64 {
         let key = (collection.to_string(), doc_id.to_string());
         if let Some(&ino) = self.doc_inos.get(&key) {
             return ino;
         }
-        let ino = self.next_ino;
-        self.next_ino += 1;
+        let ino = self.alloc();
         self.by_ino.insert(
             ino,
             InodeTarget::Document {
@@ -110,14 +100,12 @@ impl InodeTable {
         ino
     }
 
-    /// Allocate or return existing inode for a virtual file.
     pub fn virtual_ino(&mut self, collection: &str, filename: &str) -> u64 {
         let key = (collection.to_string(), filename.to_string());
         if let Some(&ino) = self.virtual_inos.get(&key) {
             return ino;
         }
-        let ino = self.next_ino;
-        self.next_ino += 1;
+        let ino = self.alloc();
         self.by_ino.insert(
             ino,
             InodeTarget::VirtualFile {
@@ -129,13 +117,26 @@ impl InodeTable {
         ino
     }
 
-    /// Resolve a display name (filename without .json) to a doc_id.
+    pub fn root_virtual_ino(&mut self, filename: &str) -> u64 {
+        if let Some(&ino) = self.root_virtual_inos.get(filename) {
+            return ino;
+        }
+        let ino = self.alloc();
+        self.by_ino.insert(
+            ino,
+            InodeTarget::RootVirtualFile {
+                filename: filename.to_string(),
+            },
+        );
+        self.root_virtual_inos.insert(filename.to_string(), ino);
+        ino
+    }
+
     pub fn resolve_name(&self, collection: &str, display_name: &str) -> Option<&str> {
         let key = (collection.to_string(), display_name.to_string());
         self.name_to_doc_id.get(&key).map(|s| s.as_str())
     }
 
-    /// Remove a document inode (for unlink/delete).
     pub fn remove_doc(&mut self, collection: &str, doc_id: &str) {
         let key = (collection.to_string(), doc_id.to_string());
         if let Some(ino) = self.doc_inos.remove(&key) {
@@ -146,7 +147,6 @@ impl InodeTable {
         }
     }
 
-    /// Clear all document inodes for a collection (forces re-scan on next readdir).
     pub fn invalidate_collection(&mut self, collection: &str) {
         let doc_keys: Vec<(String, String)> = self
             .doc_inos
@@ -163,5 +163,82 @@ impl InodeTable {
                 }
             }
         }
+    }
+
+    fn alloc(&mut self) -> u64 {
+        let ino = self.next_ino;
+        self.next_ino += 1;
+        ino
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_is_inode_1() {
+        let table = InodeTable::new();
+        assert!(matches!(table.get(ROOT_INO), Some(InodeTarget::Root)));
+    }
+
+    #[test]
+    fn collection_ino_is_stable() {
+        let mut table = InodeTable::new();
+        let ino1 = table.collection_ino("Users");
+        let ino2 = table.collection_ino("Users");
+        assert_eq!(ino1, ino2);
+        assert!(ino1 > ROOT_INO);
+    }
+
+    #[test]
+    fn different_collections_get_different_inodes() {
+        let mut table = InodeTable::new();
+        let ino1 = table.collection_ino("Users");
+        let ino2 = table.collection_ino("Posts");
+        assert_ne!(ino1, ino2);
+    }
+
+    #[test]
+    fn doc_ino_with_name_resolution() {
+        let mut table = InodeTable::new();
+        let ino = table.doc_ino("Users", "bae-abc123", "alice");
+        assert!(ino > ROOT_INO);
+        assert_eq!(table.resolve_name("Users", "alice"), Some("bae-abc123"));
+    }
+
+    #[test]
+    fn remove_doc_cleans_up_name_mapping() {
+        let mut table = InodeTable::new();
+        table.doc_ino("Users", "bae-abc123", "alice");
+        table.remove_doc("Users", "bae-abc123");
+        assert!(table.resolve_name("Users", "alice").is_none());
+    }
+
+    #[test]
+    fn invalidate_collection_clears_all_docs() {
+        let mut table = InodeTable::new();
+        table.doc_ino("Users", "bae-1", "alice");
+        table.doc_ino("Users", "bae-2", "bob");
+        table.doc_ino("Posts", "bae-3", "post1");
+
+        table.invalidate_collection("Users");
+
+        assert!(table.resolve_name("Users", "alice").is_none());
+        assert!(table.resolve_name("Users", "bob").is_none());
+        // Other collections untouched
+        assert_eq!(table.resolve_name("Posts", "post1"), Some("bae-3"));
+    }
+
+    #[test]
+    fn root_virtual_ino_is_stable() {
+        let mut table = InodeTable::new();
+        let ino1 = table.root_virtual_ino("_schema.graphql");
+        let ino2 = table.root_virtual_ino("_schema.graphql");
+        assert_eq!(ino1, ino2);
+        assert!(matches!(
+            table.get(ino1),
+            Some(InodeTarget::RootVirtualFile { .. })
+        ));
     }
 }

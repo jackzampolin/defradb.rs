@@ -1,23 +1,18 @@
 /// FUSE filesystem implementation backed by DefraDB.
 ///
 /// Maps FUSE operations to DefraDB collection/document CRUD:
-/// - readdir(root) → list_collections()
-/// - readdir(collection) → collection.get_all()
+/// - readdir(root) → list_collections() + root virtual files
+/// - readdir(collection) → collection.get_all() + collection virtual files
 /// - lookup/read(doc) → collection.get()
 /// - write/create → collection.save()
 /// - unlink → collection.delete() (soft delete — data preserved in CRDT DAG)
 /// - rmdir → EPERM (collections cannot be dropped via fs)
 ///
-/// # Filename Convention
+/// # Caching
 ///
-/// Documents with a `_name` field use that value as the filename:
-///   `{_name}.json`  (e.g. `alice.json`)
-///
-/// Documents without `_name` use the raw docID:
-///   `{bae-xxx}.json`
-///
-/// When creating a file with a non-docID name (e.g. `touch notes.json`),
-/// the `_name` field is set automatically in the document.
+/// Virtual file content (`_view.json`, `_schema.graphql`) is cached for 5 seconds
+/// and invalidated on any write or delete operation. This makes `grep` across
+/// `_view.json` fast without sacrificing consistency.
 use std::ffi::OsStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,19 +25,19 @@ use parking_lot::Mutex;
 use storage::corekv::Store;
 use tokio::runtime::Handle;
 
+use crate::cache::{self, ContentCache};
 use crate::errno::db_err_to_errno;
 use crate::inode::{InodeTable, InodeTarget, NAME_FIELD, ROOT_INO};
-use crate::virtual_files::{self, SCHEMA_FILE, VIEW_FILE};
+use crate::virtual_files::{self, ROOT_COLLECTIONS_FILE, ROOT_SCHEMA_FILE, SCHEMA_FILE, VIEW_FILE};
 
 const TTL: Duration = Duration::from_secs(1);
 const EPOCH: SystemTime = UNIX_EPOCH;
 
-/// FUSE filesystem backed by a DefraDB instance.
 pub struct DefraFs<S: Store> {
     db: Arc<db::DB<S>>,
     inodes: Mutex<InodeTable>,
+    cache: Mutex<ContentCache>,
     rt: Handle,
-    /// Per-inode write buffers for accumulating write() data before flush.
     write_buffers: Mutex<std::collections::HashMap<u64, Vec<u8>>>,
 }
 
@@ -51,6 +46,7 @@ impl<S: Store> DefraFs<S> {
         Self {
             db,
             inodes: Mutex::new(InodeTable::new()),
+            cache: Mutex::new(ContentCache::new()),
             rt,
             write_buffers: Mutex::new(std::collections::HashMap::new()),
         }
@@ -116,13 +112,19 @@ impl<S: Store> DefraFs<S> {
         }
     }
 
-    /// Generate content for a virtual file (_schema.graphql or _view.json).
+    /// Fetch or generate cached content for a collection virtual file.
     fn fetch_virtual_content(&self, collection: &str, filename: &str) -> Result<Vec<u8>, i32> {
+        let cache_key = cache::col_key(collection, filename);
+
+        if let Some(cached) = self.cache.lock().get(&cache_key) {
+            return Ok(cached.to_vec());
+        }
+
         let db = self.db.clone();
         let collection = collection.to_string();
         let filename = filename.to_string();
 
-        self.rt.block_on(async move {
+        let content = self.rt.block_on(async move {
             let col = db
                 .get_collection(&collection)
                 .map_err(|e| db_err_to_errno(&e))?
@@ -135,18 +137,63 @@ impl<S: Store> DefraFs<S> {
                 let txn = db.new_txn(true).await.map_err(|e| db_err_to_errno(&e))?;
                 let docs = col.get_all(&txn).await.map_err(|e| db_err_to_errno(&e))?;
                 txn.commit().await.map_err(|e| db_err_to_errno(&e))?;
-                let maps: Vec<_> = docs
-                    .iter()
-                    .filter_map(|d| d.to_map().ok())
-                    .collect();
+                let maps: Vec<_> = docs.iter().filter_map(|d| d.to_map().ok()).collect();
                 Ok(virtual_files::generate_view_json(&maps))
             } else {
                 Err(libc::ENOENT)
             }
-        })
+        })?;
+
+        self.cache.lock().insert(cache_key, content.clone());
+        Ok(content)
     }
 
-    /// Fetch document JSON bytes by doc_id.
+    /// Fetch or generate cached content for a root virtual file.
+    fn fetch_root_virtual_content(&self, filename: &str) -> Result<Vec<u8>, i32> {
+        let cache_key = cache::root_key(filename);
+
+        if let Some(cached) = self.cache.lock().get(&cache_key) {
+            return Ok(cached.to_vec());
+        }
+
+        let db = self.db.clone();
+        let filename = filename.to_string();
+
+        let content = self.rt.block_on(async move {
+            let collection_names = db.list_collections().map_err(|e| db_err_to_errno(&e))?;
+
+            if filename == ROOT_SCHEMA_FILE {
+                let schemas: Vec<_> = collection_names
+                    .iter()
+                    .filter_map(|name| db.get_collection(name).ok()?)
+                    .map(|col| col.schema().clone())
+                    .collect();
+                let schema_refs: Vec<_> = schemas.iter().collect();
+                Ok(virtual_files::generate_root_sdl(&schema_refs).into_bytes())
+            } else if filename == ROOT_COLLECTIONS_FILE {
+                let mut collections = Vec::new();
+                for name in &collection_names {
+                    let count = match db.get_collection(name) {
+                        Ok(Some(col)) => {
+                            let txn = db.new_txn(true).await.map_err(|e| db_err_to_errno(&e))?;
+                            let docs = col.get_all(&txn).await.unwrap_or_default();
+                            let _ = txn.commit().await;
+                            docs.len()
+                        }
+                        _ => 0,
+                    };
+                    collections.push((name.clone(), count));
+                }
+                Ok(virtual_files::generate_collections_json(&collections))
+            } else {
+                Err(libc::ENOENT)
+            }
+        })?;
+
+        self.cache.lock().insert(cache_key, content.clone());
+        Ok(content)
+    }
+
     fn fetch_doc_json(&self, collection_name: &str, doc_id_str: &str) -> Result<Vec<u8>, i32> {
         let db = self.db.clone();
         let collection_name = collection_name.to_string();
@@ -170,63 +217,50 @@ impl<S: Store> DefraFs<S> {
         })
     }
 
-    /// List all documents in a collection, returning (doc_id, display_name) pairs.
-    /// display_name is the `_name` field value if present, otherwise the doc_id.
-    fn list_docs(&self, collection_name: &str) -> Vec<(String, String)> {
+    fn list_docs(&self, collection_name: &str) -> Result<Vec<(String, String)>, i32> {
         let db = self.db.clone();
         let collection_name = collection_name.to_string();
 
         self.rt.block_on(async move {
-            let col = match db.get_collection(&collection_name) {
-                Ok(Some(c)) => c,
-                _ => return vec![],
-            };
-            let txn = match db.new_txn(true).await {
-                Ok(t) => t,
-                _ => return vec![],
-            };
-            let docs = match col.get_all(&txn).await {
-                Ok(d) => d,
-                _ => return vec![],
-            };
-            let _ = txn.commit().await;
-            docs.iter()
+            let col = db
+                .get_collection(&collection_name)
+                .map_err(|e| db_err_to_errno(&e))?
+                .ok_or(libc::ENOENT)?;
+            let txn = db.new_txn(true).await.map_err(|e| db_err_to_errno(&e))?;
+            let docs = col.get_all(&txn).await.map_err(|e| db_err_to_errno(&e))?;
+            txn.commit().await.map_err(|e| db_err_to_errno(&e))?;
+            Ok(docs
+                .iter()
                 .filter_map(|d| {
                     let doc_id = d.id()?.to_string();
                     let display_name = extract_name_field(d).unwrap_or_else(|| doc_id.clone());
                     Some((doc_id, display_name))
                 })
-                .collect()
+                .collect())
         })
     }
 
-    /// Resolve a filename (without .json) to a doc_id.
-    /// First checks the inode cache, then falls back to scanning the collection.
     fn resolve_filename(
         &self,
         inodes: &mut InodeTable,
         collection: &str,
         filename: &str,
     ) -> Result<String, i32> {
-        // If it's already a valid docID, use it directly
         if filename.starts_with("bae-") {
             if document::DocID::from_string(filename).is_ok() {
                 return Ok(filename.to_string());
             }
         }
 
-        // Check inode cache
         if let Some(doc_id) = inodes.resolve_name(collection, filename) {
             return Ok(doc_id.to_string());
         }
 
-        // Cache miss — scan collection for a doc with _name matching
-        let docs = self.list_docs(collection);
+        let docs = self.list_docs(collection)?;
         for (doc_id, display_name) in &docs {
             inodes.doc_ino(collection, doc_id, display_name);
         }
 
-        // Try again after populating
         inodes
             .resolve_name(collection, filename)
             .map(|s| s.to_string())
@@ -234,7 +268,6 @@ impl<S: Store> DefraFs<S> {
     }
 }
 
-/// Extract the `_name` field from a document if present.
 fn extract_name_field(doc: &document::Document) -> Option<String> {
     let val = doc.get(NAME_FIELD)?;
     match val {
@@ -243,9 +276,26 @@ fn extract_name_field(doc: &document::Document) -> Option<String> {
     }
 }
 
-/// Strip the .json suffix from a filename.
 fn strip_json_suffix(name: &str) -> &str {
     name.strip_suffix(".json").unwrap_or(name)
+}
+
+fn is_root_virtual_file(name: &str) -> bool {
+    name == ROOT_SCHEMA_FILE || name == ROOT_COLLECTIONS_FILE
+}
+
+fn is_collection_virtual_file(name: &str) -> bool {
+    name == SCHEMA_FILE || name == VIEW_FILE
+}
+
+/// Slice content for a FUSE read with offset and size.
+fn read_slice(content: &[u8], offset: i64, size: u32) -> &[u8] {
+    let start = offset as usize;
+    if start >= content.len() {
+        return &[];
+    }
+    let end = (start + size as usize).min(content.len());
+    &content[start..end]
 }
 
 impl<S: Store + 'static> Filesystem for DefraFs<S> {
@@ -262,16 +312,34 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
         let target = inodes.get(parent).cloned();
 
         match target {
-            Some(InodeTarget::Root) => match self.db.get_collection(name_str) {
-                Ok(Some(_)) => {
-                    let ino = inodes.collection_ino(name_str);
-                    reply.entry(&TTL, &Self::dir_attr(ino), 0);
+            Some(InodeTarget::Root) => {
+                // Root virtual files
+                if is_root_virtual_file(name_str) {
+                    match self.fetch_root_virtual_content(name_str) {
+                        Ok(content) => {
+                            let ino = inodes.root_virtual_ino(name_str);
+                            reply.entry(
+                                &TTL,
+                                &Self::readonly_file_attr(ino, content.len() as u64),
+                                0,
+                            );
+                        }
+                        Err(errno) => reply.error(errno),
+                    }
+                    return;
                 }
-                _ => reply.error(libc::ENOENT),
-            },
+
+                // Collection directories
+                match self.db.get_collection(name_str) {
+                    Ok(Some(_)) => {
+                        let ino = inodes.collection_ino(name_str);
+                        reply.entry(&TTL, &Self::dir_attr(ino), 0);
+                    }
+                    _ => reply.error(libc::ENOENT),
+                }
+            }
             Some(InodeTarget::Collection { name: col_name }) => {
-                // Check for virtual files first
-                if name_str == SCHEMA_FILE || name_str == VIEW_FILE {
+                if is_collection_virtual_file(name_str) {
                     match self.fetch_virtual_content(&col_name, name_str) {
                         Ok(content) => {
                             let ino = inodes.virtual_ino(&col_name, name_str);
@@ -337,6 +405,16 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                     Err(errno) => reply.error(errno),
                 }
             }
+            Some(InodeTarget::RootVirtualFile { filename }) => {
+                let fname = filename.clone();
+                drop(inodes);
+                match self.fetch_root_virtual_content(&fname) {
+                    Ok(content) => {
+                        reply.attr(&TTL, &Self::readonly_file_attr(ino, content.len() as u64))
+                    }
+                    Err(errno) => reply.error(errno),
+                }
+            }
             None => reply.error(libc::ENOENT),
         }
     }
@@ -359,6 +437,16 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                     (ROOT_INO, FileType::Directory, ".".into()),
                     (ROOT_INO, FileType::Directory, "..".into()),
                 ];
+                // Root virtual files
+                let schema_ino = inodes.root_virtual_ino(ROOT_SCHEMA_FILE);
+                entries.push((schema_ino, FileType::RegularFile, ROOT_SCHEMA_FILE.into()));
+                let cols_ino = inodes.root_virtual_ino(ROOT_COLLECTIONS_FILE);
+                entries.push((
+                    cols_ino,
+                    FileType::RegularFile,
+                    ROOT_COLLECTIONS_FILE.into(),
+                ));
+                // Collection directories
                 for name in &collections {
                     let child_ino = inodes.collection_ino(name);
                     entries.push((child_ino, FileType::Directory, name.clone()));
@@ -372,12 +460,12 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
             }
             Some(InodeTarget::Collection { name: col_name }) => {
                 let col_ino = ino;
-                let docs = self.list_docs(&col_name);
+                let docs = self.list_docs(&col_name).unwrap_or_default();
                 let mut entries: Vec<(u64, FileType, String)> = vec![
                     (col_ino, FileType::Directory, ".".into()),
                     (ROOT_INO, FileType::Directory, "..".into()),
                 ];
-                // Virtual files
+                // Collection virtual files
                 let schema_ino = inodes.virtual_ino(&col_name, SCHEMA_FILE);
                 entries.push((schema_ino, FileType::RegularFile, SCHEMA_FILE.into()));
                 let view_ino = inodes.virtual_ino(&col_name, VIEW_FILE);
@@ -415,33 +503,29 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
     ) {
         let inodes = self.inodes.lock();
         match inodes.get(ino).cloned() {
-            Some(InodeTarget::Document { collection, doc_id, .. }) => {
+            Some(InodeTarget::Document {
+                collection, doc_id, ..
+            }) => {
                 drop(inodes);
                 match self.fetch_doc_json(&collection, &doc_id) {
-                    Ok(json) => {
-                        let start = offset as usize;
-                        let end = (start + size as usize).min(json.len());
-                        if start >= json.len() {
-                            reply.data(&[]);
-                        } else {
-                            reply.data(&json[start..end]);
-                        }
-                    }
+                    Ok(json) => reply.data(read_slice(&json, offset, size)),
                     Err(errno) => reply.error(errno),
                 }
             }
-            Some(InodeTarget::VirtualFile { collection, filename }) => {
+            Some(InodeTarget::VirtualFile {
+                collection,
+                filename,
+            }) => {
                 drop(inodes);
                 match self.fetch_virtual_content(&collection, &filename) {
-                    Ok(content) => {
-                        let start = offset as usize;
-                        let end = (start + size as usize).min(content.len());
-                        if start >= content.len() {
-                            reply.data(&[]);
-                        } else {
-                            reply.data(&content[start..end]);
-                        }
-                    }
+                    Ok(content) => reply.data(read_slice(&content, offset, size)),
+                    Err(errno) => reply.error(errno),
+                }
+            }
+            Some(InodeTarget::RootVirtualFile { filename }) => {
+                drop(inodes);
+                match self.fetch_root_virtual_content(&filename) {
+                    Ok(content) => reply.data(read_slice(&content, offset, size)),
                     Err(errno) => reply.error(errno),
                 }
             }
@@ -474,7 +558,9 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                 buf[offset as usize..end].copy_from_slice(data);
                 reply.written(data.len() as u32);
             }
-            Some(InodeTarget::VirtualFile { .. }) => reply.error(libc::EPERM),
+            Some(InodeTarget::VirtualFile { .. } | InodeTarget::RootVirtualFile { .. }) => {
+                reply.error(libc::EPERM)
+            }
             _ => reply.error(libc::EBADF),
         }
     }
@@ -513,12 +599,10 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                     let doc_id_parsed =
                         document::DocID::from_string(&doc_id).map_err(|_| libc::EINVAL)?;
 
-                    let mut doc =
-                        document::Document::from_json(&buf).map_err(|_| libc::EINVAL)?;
+                    let mut doc = document::Document::from_json(&buf).map_err(|_| libc::EINVAL)?;
                     doc.set_id(doc_id_parsed);
                     doc.set_collection(col.schema().clone());
 
-                    // Preserve _name field if the file was created with a friendly name
                     if display_name != doc_id && !doc.has_field(NAME_FIELD) {
                         doc.set(NAME_FIELD, document::NormalValue::String(display_name));
                     }
@@ -534,6 +618,7 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                 match result {
                     Ok(()) => {
                         self.inodes.lock().invalidate_collection(&col_name);
+                        self.cache.lock().invalidate_collection(&col_name);
                         reply.ok();
                     }
                     Err(errno) => reply.error(errno),
@@ -541,6 +626,20 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
             }
             _ => reply.ok(),
         }
+    }
+
+    fn release(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        self.write_buffers.lock().remove(&ino);
+        reply.ok();
     }
 
     fn create(
@@ -568,9 +667,6 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
 
         match target {
             Some(InodeTarget::Collection { name: col_name }) => {
-                // For friendly names, we need a placeholder doc_id.
-                // Generate one by creating and immediately saving an empty doc
-                // with the _name field set, so the docID is content-addressed.
                 let doc_id = if display_name.starts_with("bae-") {
                     match document::DocID::from_string(display_name) {
                         Ok(_) => display_name.to_string(),
@@ -580,7 +676,6 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                         }
                     }
                 } else {
-                    // Create a doc with _name to get a deterministic docID
                     let db = self.db.clone();
                     let col_name_clone = col_name.clone();
                     let display = display_name.to_string();
@@ -592,8 +687,7 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                         let mut doc = document::Document::new();
                         doc.set_collection(col.schema().clone());
                         doc.set(NAME_FIELD, document::NormalValue::String(display));
-                        doc.generate_and_set_doc_id()
-                            .map_err(|_| libc::EIO)?;
+                        doc.generate_and_set_doc_id().map_err(|_| libc::EIO)?;
                         Ok::<String, i32>(doc.id().unwrap().to_string())
                     });
                     match result {
@@ -625,8 +719,7 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
 
         let filename = strip_json_suffix(name_str);
 
-        // Virtual files cannot be deleted
-        if name_str == SCHEMA_FILE || name_str == VIEW_FILE {
+        if is_collection_virtual_file(name_str) {
             reply.error(libc::EPERM);
             return;
         }
@@ -674,6 +767,7 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                     Ok(()) => {
                         let mut inodes = self.inodes.lock();
                         inodes.remove_doc(&col_name, &doc_id);
+                        self.cache.lock().invalidate_collection(&col_name);
                         reply.ok();
                     }
                     Err(errno) => reply.error(errno),
@@ -683,8 +777,6 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
         }
     }
 
-    /// rmdir on a collection directory is not allowed.
-    /// Collections contain schema and data — dropping them via `rm -r` would be destructive.
     fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         let name_str = match name.to_str() {
             Some(n) => n,
@@ -722,7 +814,6 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        // Support truncate (size=0) for write-then-flush pattern.
         if let Some(new_size) = size {
             if new_size == 0 {
                 self.write_buffers.lock().remove(&ino);
@@ -754,6 +845,16 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
                     Err(errno) => reply.error(errno),
                 }
             }
+            Some(InodeTarget::RootVirtualFile { filename }) => {
+                let fname = filename.clone();
+                drop(inodes);
+                match self.fetch_root_virtual_content(&fname) {
+                    Ok(content) => {
+                        reply.attr(&TTL, &Self::readonly_file_attr(ino, content.len() as u64))
+                    }
+                    Err(errno) => reply.error(errno),
+                }
+            }
             None => reply.error(libc::ENOENT),
         }
     }
@@ -761,9 +862,11 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
     fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
         let inodes = self.inodes.lock();
         match inodes.get(ino) {
-            Some(InodeTarget::Document { .. }) | Some(InodeTarget::VirtualFile { .. }) => {
-                reply.opened(0, 0)
-            }
+            Some(
+                InodeTarget::Document { .. }
+                | InodeTarget::VirtualFile { .. }
+                | InodeTarget::RootVirtualFile { .. },
+            ) => reply.opened(0, 0),
             _ => reply.error(libc::EISDIR),
         }
     }
@@ -776,5 +879,9 @@ impl<S: Store + 'static> Filesystem for DefraFs<S> {
             }
             _ => reply.error(libc::ENOTDIR),
         }
+    }
+
+    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: fuser::ReplyStatfs) {
+        reply.statfs(0, 0, 0, 0, 0, 512, 255, 0);
     }
 }

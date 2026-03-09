@@ -23,6 +23,7 @@ impl Node {
     ///
     /// Returns a tuple of (P2PHostHandle, P2PTasks, HTTP Server) where the tasks
     /// are tracked for graceful shutdown.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn init_store_and_server<S>(
         store: Arc<S>,
         config: &Config,
@@ -31,11 +32,13 @@ impl Node {
         acp_store: Arc<dyn acp::AcpStore>,
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
         node_identity_did: Option<String>,
+        mount_path: Option<std::path::PathBuf>,
     ) -> Result<(
         Option<p2p::P2PHostHandle>,
         Option<P2PTasks>,
         defra_http::Server,
         Option<pg_compat::PgServer>,
+        Option<Box<dyn std::any::Any + Send>>,
     )>
     where
         S: storage::corekv::Store + 'static,
@@ -99,6 +102,29 @@ impl Node {
             .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?
             .len();
         info!("Loaded {} collection schema(s)", collection_count);
+
+        // Mount FUSE filesystem if configured
+        #[allow(unused_variables)]
+        let mount_handle: Option<Box<dyn std::any::Any + Send>> = if let Some(ref path) = mount_path
+        {
+            #[cfg(feature = "fuse")]
+            {
+                info!("Mounting FUSE filesystem at {}", path.display());
+                let handle =
+                    defra_fs::mount(database.clone(), path, tokio::runtime::Handle::current())
+                        .map_err(|e| Error::InvalidConfig(format!("FUSE mount failed: {}", e)))?;
+                info!("FUSE filesystem mounted at {}", path.display());
+                Some(Box::new(handle))
+            }
+            #[cfg(not(feature = "fuse"))]
+            {
+                return Err(Error::InvalidConfig(
+                    "--mount requires the 'fuse' feature. Rebuild with --features fuse".into(),
+                ));
+            }
+        } else {
+            None
+        };
 
         // Set up P2P if enabled
         // Clone store before potential move for sync coordinator blockstore
@@ -1243,6 +1269,6 @@ impl Node {
             (server, p2p_tasks, pg_server)
         };
 
-        Ok((p2p, p2p_tasks, http_server, pg_server))
+        Ok((p2p, p2p_tasks, http_server, pg_server, mount_handle))
     }
 }
