@@ -12,12 +12,9 @@ env:
 jobs:
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, studio]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
       - run: cargo fmt --all -- --check
 
   build:
@@ -46,13 +43,13 @@ jobs:
       - name: Build iroh binary
         run: cargo build -p cli --features iroh
 
-      - name: Cache binaries
+      - name: Cache iroh binary
         run: |
           HASH=$(git rev-parse HEAD)
           CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
           mkdir -p "$CACHE_DIR"
-          cp target/debug/defra "$CACHE_DIR/defra"
-          ln -sf "$CACHE_DIR/defra" "$HOME/.sourcenetwork/bin/defra"
+          cp target/debug/defra "$CACHE_DIR/defra-iroh"
+          ln -sf "$CACHE_DIR/defra-iroh" "$HOME/.sourcenetwork/bin/defra-iroh"
 
       - name: Cleanup
         if: always()
