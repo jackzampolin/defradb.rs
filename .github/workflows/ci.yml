@@ -41,15 +41,21 @@ jobs:
 
       - run: cargo clippy --all --profile test -- -D warnings
 
-      - name: Build iroh binary
-        run: cargo build -p cli --features iroh
-
-      - name: Cache iroh binary
+      - name: Cache pre-built binaries
         run: |
           HASH=$(git rev-parse HEAD)
           CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
           mkdir -p "$CACHE_DIR"
+
+          # Standard binary (already built by cargo test)
+          cargo build -p cli
+          cp target/debug/defra "$CACHE_DIR/defra"
+
+          # Iroh binary
+          cargo build -p cli --features iroh
           cp target/debug/defra "$CACHE_DIR/defra-iroh"
+
+          # Symlink for backbone CI consumption
           ln -sf "$CACHE_DIR/defra-iroh" "$HOME/.sourcenetwork/bin/defra-iroh"
 
       - name: Cleanup
@@ -74,11 +80,25 @@ jobs:
             needs_go: true
           - suite: iroh
             needs_go: false
+    env:
+      DEFRA_RUST_BINARY: ${{ github.workspace }}/target/ci/defra
+      DEFRA_IROH_BINARY: ${{ github.workspace }}/target/ci/defra-iroh
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure private repo access
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+
+      - name: Restore pre-built binaries
+        run: |
+          HASH=$(git rev-parse HEAD)
+          CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
+          mkdir -p target/ci
+          cp "$CACHE_DIR/defra" target/ci/defra
+          cp "$CACHE_DIR/defra-iroh" target/ci/defra-iroh
+          chmod +x target/ci/defra target/ci/defra-iroh
+          echo "Restored binaries from $CACHE_DIR"
+          target/ci/defra version --format json
 
       - name: Download Go DefraDB binary
         if: matrix.needs_go
