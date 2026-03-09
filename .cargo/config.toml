@@ -5,6 +5,10 @@ git-fetch-with-cli = true
 # Auto-detect available cores (M3 Ultra = 32)
 # jobs defaults to logical CPU count when omitted
 
+[target.aarch64-apple-darwin]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/bin/mold"]
+
 [profile.dev]
 # Split debug info for faster incremental builds on macOS
 split-debuginfo = "unpacked"
