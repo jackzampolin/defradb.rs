@@ -43,8 +43,6 @@ jobs:
             fi
           fi
 
-      - name: Exclude tools with private deps from workspace
-        run: sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
 
       - run: cargo clippy --all -- -D warnings
 
@@ -64,8 +62,6 @@ jobs:
       - name: Configure private repo access
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
 
-      - name: Exclude tools with private deps from workspace
-        run: sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
 
       - name: Install cargo-deny
         run: cargo install cargo-deny
@@ -98,8 +94,6 @@ jobs:
             fi
           fi
 
-      - name: Exclude tools with private deps from workspace
-        run: sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
 
       - name: Install cbindgen
         run: cargo install cbindgen
@@ -136,8 +130,6 @@ jobs:
             fi
           fi
 
-      - name: Exclude tools with private deps from workspace
-        run: sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
 
       - run: cargo test --workspace
 
