@@ -23,7 +23,6 @@ pub fn endpoint_id_to_peer_id(id: &EndpointId) -> PeerId {
 /// Connection info for a connected peer.
 #[derive(Debug, Clone)]
 pub struct ConnectionInfo {
-    pub endpoint_id: EndpointId,
     pub remote_addr: Option<SocketAddr>,
     pub active_connections: u32,
 }
@@ -56,7 +55,6 @@ impl PeerMap {
             self.connections.insert(
                 id,
                 ConnectionInfo {
-                    endpoint_id: id,
                     remote_addr,
                     active_connections: 1,
                 },

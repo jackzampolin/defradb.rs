@@ -43,6 +43,8 @@ pub struct IrohEndpointConfig {
     pub relay_url: Option<String>,
     /// Enable DNS-based peer discovery (default: true).
     pub discovery: bool,
+    /// UDP port for the QUIC listener. `None` = ephemeral (OS-assigned).
+    pub bind_port: Option<u16>,
 }
 
 impl Default for IrohEndpointConfig {
@@ -51,6 +53,7 @@ impl Default for IrohEndpointConfig {
             secret_key: SecretKey::generate(&mut rand::rng()),
             relay_url: None,
             discovery: true,
+            bind_port: None,
         }
     }
 }
@@ -87,6 +90,15 @@ pub async fn spawn_endpoint(
 
     if !config.discovery {
         builder = builder.clear_address_lookup();
+    }
+
+    if let Some(port) = config.bind_port {
+        builder = builder
+            .bind_addr(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::UNSPECIFIED,
+                port,
+            ))
+            .map_err(|e| crate::error::Error::Transport(format!("invalid bind addr: {}", e)))?;
     }
 
     let endpoint = builder.bind().await.map_err(|e| {
@@ -260,14 +272,13 @@ async fn handle_connection_streams(
     let fully_disconnected = peer_map.lock().decrement_connections(&remote_id);
     debug!(peer_id = %peer_id, fully_disconnected, "Connection closed");
 
-    if fully_disconnected {
-        if event_tx
+    if fully_disconnected
+        && event_tx
             .send(TransportEvent::PeerDisconnected(peer_id))
             .await
             .is_err()
-        {
-            debug!("Event channel closed, cannot emit PeerDisconnected");
-        }
+    {
+        debug!("Event channel closed, cannot emit PeerDisconnected");
     }
 }
 
