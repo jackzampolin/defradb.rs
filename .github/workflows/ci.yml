@@ -46,7 +46,7 @@ jobs:
         run: |
           if [ -d target ]; then
             TARGET_SIZE=$(du -sm target | cut -f1)
-            if [ "$TARGET_SIZE" -gt 20000 ]; then
+            if [ "$TARGET_SIZE" -gt 100000 ]; then
               echo "Build cache is ${TARGET_SIZE}MB, pruning..."
               cargo clean
             fi
