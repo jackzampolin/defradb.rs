@@ -36,6 +36,8 @@ pub struct CollectionArgs {
 /// Collection subcommands
 #[derive(Subcommand, Debug)]
 pub enum CollectionCommand {
+    /// Add a new collection from a schema definition (SDL)
+    Add(CollectionAddArgs),
     /// Create a new document
     Create(DocumentCreateArgs),
     /// Delete a document
@@ -57,6 +59,18 @@ pub enum CollectionCommand {
     Truncate(TruncateArgs),
     /// Update a document
     Update(DocumentUpdateArgs),
+}
+
+/// Arguments for collection add (schema definition) command
+#[derive(Args, Debug)]
+pub struct CollectionAddArgs {
+    /// The schema definition (SDL format)
+    #[arg(value_name = "SDL")]
+    pub schema: Option<String>,
+
+    /// Read schema from file(s)
+    #[arg(long, short = 'f', value_name = "FILE")]
+    pub file: Vec<PathBuf>,
 }
 
 /// Arguments for collection list command
@@ -163,10 +177,45 @@ pub struct SetActiveArgs {
 #[derive(Args, Debug)]
 pub struct TruncateArgs {}
 
+impl CollectionAddArgs {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let mut sdl_parts = Vec::new();
+
+        if let Some(ref schema) = self.schema {
+            sdl_parts.push(schema.clone());
+        }
+
+        for path in &self.file {
+            let content =
+                std::fs::read_to_string(path).map_err(|e| crate::error::Error::ReadFile {
+                    path: path.clone(),
+                    source: e,
+                })?;
+            sdl_parts.push(content);
+        }
+
+        if sdl_parts.is_empty() {
+            return Err(crate::error::Error::MissingInput(
+                "either SDL argument or --file must be provided".to_string(),
+            ));
+        }
+
+        let sdl = sdl_parts.join("\n");
+        let client = super::http_client::HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let result = client.schema_add(&sdl).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        Ok(())
+    }
+}
+
 impl CollectionArgs {
     /// Execute the collection command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
+            CollectionCommand::Add(args) => args.execute(ctx).await,
             CollectionCommand::Create(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::Delete(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::Describe(args) => args.execute(ctx, self.name.as_deref()).await,
