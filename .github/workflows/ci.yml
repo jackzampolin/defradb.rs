@@ -23,6 +23,8 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, studio]
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: false
 
       - name: Configure private repo access
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
@@ -85,6 +87,8 @@ jobs:
       DEFRA_IROH_BINARY: ${{ github.workspace }}/target/ci/defra-iroh
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: false
 
       - name: Configure private repo access
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
