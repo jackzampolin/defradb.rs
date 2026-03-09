@@ -601,7 +601,7 @@ fn import_stdin_rust() {
 #[test]
 
 fn import_rust_export_go() {
-    let go = go_binary().expect("Go defradb not in PATH");
+    let Some(go) = go_binary() else { return };
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
     let rust = defra_binary();
@@ -620,7 +620,7 @@ fn import_rust_export_go() {
 #[test]
 
 fn import_go_export_rust() {
-    let go = go_binary().expect("Go defradb not in PATH");
+    let Some(go) = go_binary() else { return };
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
     let rust = defra_binary();
@@ -637,7 +637,7 @@ fn import_go_export_rust() {
 #[test]
 
 fn generate_go_list_rust() {
-    let go = go_binary().expect("Go defradb not in PATH");
+    let Some(go) = go_binary() else { return };
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
     let rust = defra_binary();
