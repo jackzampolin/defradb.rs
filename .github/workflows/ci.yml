@@ -11,12 +11,25 @@ env:
   PROTOC: /opt/homebrew/bin/protoc
 
 jobs:
-  fmt:
-    name: Format
+  lint:
+    name: Lint
     runs-on: [self-hosted, macOS, ARM64, studio]
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Configure private repo access
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+
       - run: cargo fmt --all -- --check
+
+      - run: cargo clippy --all -- -D warnings
+
+      - name: Cleanup
+        if: always()
+        run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
 
   build:
     name: Build & Test
@@ -41,19 +54,16 @@ jobs:
 
       - run: cargo test --workspace --exclude integration-test --exclude ffi-test
 
-      - run: cargo clippy --all --profile test -- -D warnings
-
       - name: Cache pre-built binaries
         run: |
           HASH=$(git rev-parse HEAD)
           CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
           mkdir -p "$CACHE_DIR"
 
-          # Standard binary (already built by cargo test)
-          cargo build -p cli
+          # Standard binary — already compiled by cargo test, just link
           cp target/debug/defra "$CACHE_DIR/defra"
 
-          # Iroh binary
+          # Iroh binary — needs feature build
           cargo build -p cli --features iroh
           cp target/debug/defra "$CACHE_DIR/defra-iroh"
 
