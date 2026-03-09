@@ -45,6 +45,10 @@ pub struct IrohEndpointConfig {
     pub discovery: bool,
     /// UDP port for the QUIC listener. `None` = ephemeral (OS-assigned).
     pub bind_port: Option<u16>,
+    /// Bind to a specific IP address. When set, IROH only listens on this
+    /// interface — prevents advertising unreachable LAN addresses to peers
+    /// on different networks. None = 0.0.0.0 (all interfaces).
+    pub bind_addr: Option<std::net::IpAddr>,
 }
 
 impl Default for IrohEndpointConfig {
@@ -54,6 +58,7 @@ impl Default for IrohEndpointConfig {
             relay_url: None,
             discovery: true,
             bind_port: None,
+            bind_addr: None,
         }
     }
 }
@@ -93,11 +98,15 @@ pub async fn spawn_endpoint(
     }
 
     if let Some(port) = config.bind_port {
+        let ip = config
+            .bind_addr
+            .and_then(|ip| match ip {
+                std::net::IpAddr::V4(v4) => Some(v4),
+                _ => None,
+            })
+            .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
         builder = builder
-            .bind_addr(std::net::SocketAddrV4::new(
-                std::net::Ipv4Addr::UNSPECIFIED,
-                port,
-            ))
+            .bind_addr(std::net::SocketAddrV4::new(ip, port))
             .map_err(|e| crate::error::Error::Transport(format!("invalid bind addr: {}", e)))?;
     }
 

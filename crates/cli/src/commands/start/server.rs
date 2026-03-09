@@ -210,6 +210,7 @@ impl Node {
                         relay_url: config.net.iroh_relay_url.clone(),
                         discovery: config.net.iroh_discovery,
                         bind_port: config.net.iroh_bind_port,
+                        bind_addr: config.net.iroh_bind_addr,
                     };
                     let (command_tx, mut iroh_events, iroh_task) =
                         p2p::iroh::spawn_endpoint(iroh_config)

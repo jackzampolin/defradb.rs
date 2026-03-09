@@ -207,6 +207,10 @@ pub struct NetConfig {
     /// Fixed UDP bind port for iroh transport. None = ephemeral (OS-assigned).
     #[serde(default)]
     pub iroh_bind_port: Option<u16>,
+    /// Bind iroh to a specific IP address. Prevents advertising unreachable
+    /// LAN addresses to peers on different networks. None = 0.0.0.0 (all interfaces).
+    #[serde(default)]
+    pub iroh_bind_addr: Option<std::net::IpAddr>,
 }
 
 fn default_max_msg_size() -> u64 {
@@ -253,6 +257,7 @@ impl Default for NetConfig {
             iroh_relay_url: None,
             iroh_discovery: true,
             iroh_bind_port: None,
+            iroh_bind_addr: None,
         }
     }
 }
