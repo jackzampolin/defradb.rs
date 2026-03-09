@@ -137,6 +137,7 @@ impl OrbisClient {
 
         let bearer_token = self.create_bearer_token()?;
 
+        #[allow(clippy::result_large_err)]
         let mut client =
             UtilityServiceClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
                 let val: MetadataValue<_> = format!("Bearer {}", bearer_token)
