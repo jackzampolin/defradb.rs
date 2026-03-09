@@ -2,8 +2,8 @@
 git-fetch-with-cli = true
 
 [build]
-# Use all available cores
-jobs = 16
+# Auto-detect available cores (M3 Ultra = 32)
+# jobs defaults to logical CPU count when omitted
 
 [profile.dev]
 # Split debug info for faster incremental builds on macOS

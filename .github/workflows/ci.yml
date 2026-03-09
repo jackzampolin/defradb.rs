@@ -37,9 +37,9 @@ jobs:
             fi
           fi
 
-      - run: cargo clippy --all -- -D warnings
-
       - run: cargo test --workspace --exclude integration-test --exclude ffi-test
+
+      - run: cargo clippy --all --profile test -- -D warnings
 
       - name: Build iroh binary
         run: cargo build -p cli --features iroh
