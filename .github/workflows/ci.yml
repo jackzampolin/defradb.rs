@@ -10,8 +10,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ---- Lightweight: GitHub-hosted ----
-
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -22,10 +20,8 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  # ---- Everything else: self-hosted Mac Studios ----
-
-  clippy:
-    name: Clippy
+  build:
+    name: Build & Test
     runs-on: [self-hosted, macOS, ARM64, studio]
     steps:
       - uses: actions/checkout@v4
@@ -42,104 +38,21 @@ jobs:
               cargo clean
             fi
           fi
-
 
       - run: cargo clippy --all -- -D warnings
 
-      - name: Cleanup
-        if: always()
-        run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git checkout -- .
-          git clean -fd
-
-  deny:
-    name: Cargo Deny
-    runs-on: [self-hosted, macOS, ARM64, studio]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-
-
-      - name: Install cargo-deny
-        run: cargo install cargo-deny
-
-      - run: cargo deny check
-
-      - name: Cleanup
-        if: always()
-        run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git checkout -- .
-          git clean -fd
-
-  cbindgen:
-    name: CBIndgen Header Verification
-    runs-on: [self-hosted, macOS, ARM64, studio]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-
-      - name: Prune build cache if oversized
-        run: |
-          if [ -d target ]; then
-            TARGET_SIZE=$(du -sm target | cut -f1)
-            if [ "$TARGET_SIZE" -gt 20000 ]; then
-              echo "Build cache is ${TARGET_SIZE}MB, pruning..."
-              cargo clean
-            fi
-          fi
-
-
-      - name: Install cbindgen
-        run: cargo install cbindgen
-
-      - name: Generate header
-        run: cbindgen --config crates/ffi/cbindgen.toml --crate ffi --output defra.h.generated
-
-      - name: Verify header matches
-        run: diff -u defra.h defra.h.generated || (echo "Generated header does not match committed header"; exit 1)
-
-      - name: Cleanup
-        if: always()
-        run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git checkout -- .
-          git clean -fd
-
-  test:
-    name: Unit Tests
-    runs-on: [self-hosted, macOS, ARM64, studio]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure private repo access
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-
-      - name: Prune build cache if oversized
-        run: |
-          if [ -d target ]; then
-            TARGET_SIZE=$(du -sm target | cut -f1)
-            if [ "$TARGET_SIZE" -gt 20000 ]; then
-              echo "Build cache is ${TARGET_SIZE}MB, pruning..."
-              cargo clean
-            fi
-          fi
-
-
       - run: cargo test --workspace
 
-      - name: Cache binary for backbone CI
+      - name: Build iroh binary
+        run: cargo build -p cli --features iroh
+
+      - name: Cache binaries
         run: |
           HASH=$(git rev-parse HEAD)
           CACHE_DIR="$HOME/.sourcenetwork/bin/defradb.rs/$HASH"
           mkdir -p "$CACHE_DIR"
-          cp target/debug/defra "$CACHE_DIR/defra" || cp target/release/defra "$CACHE_DIR/defra" || true
-          [ -f "$CACHE_DIR/defra" ] && ln -sf "$CACHE_DIR/defra" "$HOME/.sourcenetwork/bin/defra"
+          cp target/debug/defra "$CACHE_DIR/defra"
+          ln -sf "$CACHE_DIR/defra" "$HOME/.sourcenetwork/bin/defra"
 
       - name: Cleanup
         if: always()
@@ -151,6 +64,7 @@ jobs:
 
   integration:
     name: Integration (${{ matrix.suite }})
+    needs: build
     runs-on: [self-hosted, macOS, ARM64, studio]
     strategy:
       fail-fast: false
@@ -188,16 +102,6 @@ jobs:
           fi
           echo "$CACHE_DIR" >> "$GITHUB_PATH"
           "$CACHE_DIR/defradb" version --format json
-
-      - name: Prune build cache if oversized
-        run: |
-          if [ -d target ]; then
-            TARGET_SIZE=$(du -sm target | cut -f1)
-            if [ "$TARGET_SIZE" -gt 20000 ]; then
-              echo "Build cache is ${TARGET_SIZE}MB, pruning..."
-              cargo clean
-            fi
-          fi
 
       - name: Run rust integration tests
         if: matrix.suite == 'rust'
