@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ---- Lightweight jobs: GitHub-hosted runners ----
+  # ---- Lightweight: GitHub-hosted ----
 
   fmt:
     name: Format
@@ -22,51 +22,100 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # ---- Everything else: self-hosted Mac Studios ----
+
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, studio]
     steps:
       - uses: actions/checkout@v4
+
       - name: Configure private repo access
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
+
+      - name: Prune build cache if oversized
+        run: |
+          if [ -d target ]; then
+            TARGET_SIZE=$(du -sm target | cut -f1)
+            if [ "$TARGET_SIZE" -gt 20000 ]; then
+              echo "Build cache is ${TARGET_SIZE}MB, pruning..."
+              cargo clean
+            fi
+          fi
+
       - name: Exclude tools with private deps from workspace
-        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+        run: sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+
       - run: cargo clippy --all -- -D warnings
+
+      - name: Cleanup
+        if: always()
+        run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git checkout -- .
+          git clean -fd
 
   deny:
     name: Cargo Deny
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, studio]
     steps:
       - uses: actions/checkout@v4
-      - name: Exclude crates with private deps from workspace
-        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d; /"crates\/sourcehub"/d' Cargo.toml
-      - uses: EmbarkStudios/cargo-deny-action@v2
+
+      - name: Configure private repo access
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+
+      - name: Exclude tools with private deps from workspace
+        run: sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny
+
+      - run: cargo deny check
+
+      - name: Cleanup
+        if: always()
+        run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git checkout -- .
+          git clean -fd
 
   cbindgen:
     name: CBIndgen Header Verification
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, studio]
     steps:
       - uses: actions/checkout@v4
+
       - name: Configure private repo access
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
+
+      - name: Prune build cache if oversized
+        run: |
+          if [ -d target ]; then
+            TARGET_SIZE=$(du -sm target | cut -f1)
+            if [ "$TARGET_SIZE" -gt 20000 ]; then
+              echo "Build cache is ${TARGET_SIZE}MB, pruning..."
+              cargo clean
+            fi
+          fi
+
       - name: Exclude tools with private deps from workspace
-        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+        run: sed -i '' '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+
       - name: Install cbindgen
         run: cargo install cbindgen
+
       - name: Generate header
         run: cbindgen --config crates/ffi/cbindgen.toml --crate ffi --output defra.h.generated
+
       - name: Verify header matches
         run: diff -u defra.h defra.h.generated || (echo "Generated header does not match committed header"; exit 1)
 
-  # ---- Heavy jobs: self-hosted Mac Studio runners ----
+      - name: Cleanup
+        if: always()
+        run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git checkout -- .
+          git clean -fd
 
   test:
     name: Unit Tests
