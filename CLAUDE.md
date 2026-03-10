@@ -1,12 +1,12 @@
 # Development Principles
 
-## 0. The North Star: 1.0 Feature Parity with Go
+## 0. The North Star: 1.0 Release
 
-**defradb.rs ships 1.0 simultaneously with Go DefraDB (end of February 2026).**
+**defradb.rs is at v1.0 RC1, tracking Go DefraDB v1.0.0-rc1.**
 
-Go's `develop` branch is the upstream reference. We track it continuously — pulling changes, identifying new features, and implementing them in Rust. The FFI test phase bootstrapped the implementation; now we validate with Rust-native integration tests that exercise the full CLI, HTTP API, and P2P stack.
+Go parity is achieved across CLI, HTTP API, GraphQL query engine, and P2P replication. We now validate with Rust-native integration tests that exercise the full stack, and are building Rust-specific features (Iroh transport, BM25 full-text search, Postgres wire protocol, WASM client).
 
-### What "1.0 Parity" Means
+### What "Parity" Means
 
 - Same GraphQL query → Same results (field values, ordering, errors)
 - Same document content → Same document ID (content-addressed CIDs)
@@ -35,7 +35,7 @@ This codebase is designed for **AI-human pair programming**. Every structural ch
 
 ## 3. No Documentation Files
 
-Only allowed: `ARCHITECTURE.md`, `README.md`, `CLAUDE.md`, `Cargo.toml` files.
+Only allowed: `README.md`, `CLAUDE.md`, `Cargo.toml` files.
 
 No `ROADMAP.md`, `DEVELOPMENT.md`, `docs/` directories, or planning documents.
 
@@ -55,14 +55,23 @@ crates/
 ├── datastore/       # Data persistence abstractions
 ├── db/              # Database core
 ├── defra-core/      # Core types and traits
+├── defra-version/   # Version metadata and Go compat tracking
 ├── document/        # Document handling
+├── events/          # Pub/sub event bus (subscriptions)
+├── ffi/             # C-compatible FFI bindings
 ├── http/            # HTTP API server
 ├── identity/        # Identity and JWT management
 ├── keyring/         # Key storage
-├── p2p/             # P2P networking
-├── query/           # Query engine
+├── lens/            # Schema migration via WASM transforms
+├── orbis/           # Threshold BLS signing (Orbis ring client)
+├── p2p/             # P2P networking (libp2p + optional Iroh)
+├── pg-compat/       # Postgres wire protocol compatibility
+├── query/           # Query engine (GraphQL, BM25)
 ├── schema/          # Schema validation
-└── storage/         # Storage backends (redb, fjall, rocksdb, memory)
+├── sourcehub/       # On-chain ACP client (Cosmos/EVM)
+├── storage/         # Storage backends (redb, fjall, rocksdb, memory)
+├── wasm/            # Browser client (WebAssembly)
+└── zanzibar/        # Google Zanzibar permission engine
 
 tools/
 ├── ffi-test/          # FFI compatibility testing against Go
@@ -132,10 +141,12 @@ Rust node via CLI + HTTP API. Each area is a `[[test]]` binary with submodules:
 | ACP | `--test acp` | basic, multi_identity, multi_role, revoke_lifecycle, node_access, p2p, negative, negative_p2p, xarchive_access_matrix, stubs |
 | NAC | `--test nac` | document_acp, operations, core_operations, p2p_management, relation_admin, cross_compartment_isolation, policy_evolution |
 | P2P | `--test p2p` | document, sync, management, trust_boundary, replication, replication_advanced, stubs |
+| FTS | `--test fts` | basic, edge_cases, lifecycle, scoring |
 | Encryption | `--test encryption` | index, acp, block_verify, stubs |
 | Identity | `--test identity` | lifecycle, types, negative, node_identity, keyring_lifecycle |
 | Backup | `--test backup` | restore, dump, purge |
 | SourceHub | `--test sourcehub` | smoke, compartments, p2p_acp, policy_lifecycle, resilience |
+| Hub.rs | `--test hubrs` | smoke, compartments, p2p_acp, policy_lifecycle |
 
 ### Rust Commands
 

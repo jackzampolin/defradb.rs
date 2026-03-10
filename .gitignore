@@ -12,6 +12,7 @@
 .DS_Store
 
 # Generated
+defra.h
 crates/ffi/defra.h
 
 # Test artifacts
@@ -26,4 +27,4 @@ crates/ffi/defra.h
 .env.local
 
 # Claude (user-specific)
-.claude/settings.json
+.claude/

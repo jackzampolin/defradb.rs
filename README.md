@@ -1,98 +1,68 @@
 # DefraDB.rs
 
-Rust implementation of [DefraDB](https://github.com/sourcenetwork/defradb), designed for embedded, edge, and WASM deployments with **full Go DefraDB network interoperability**.
+Rust implementation of [DefraDB](https://github.com/sourcenetwork/defradb) — a peer-to-peer document database with content-addressed CRDTs, access control, and GraphQL.
+
+Targets embedded, edge, browser (WASM), and server deployments with **full Go DefraDB network interoperability**.
 
 ## Status
 
-✅ **~85% feature complete** - Query engine (~80%), P2P sync, ACP (NAC), indexing, and identity systems working. Go/Rust nodes can connect and replicate data.
+Compatible with Go DefraDB v1.0.0-rc1. Full feature parity across CLI, HTTP API, GraphQL query engine, and P2P replication. Go and Rust nodes can connect and replicate data.
 
-See [Issue #18](https://github.com/sourcenetwork/defradb.rs/issues/18) for the full roadmap.
+## Features
 
-## The North Star: Go Interoperability
-
-**The Go implementation is the source of truth.** This Rust implementation must behave identically to Go DefraDB in all observable ways:
-
-- Same GraphQL query results
-- Same document IDs (content-addressed)
-- Same CRDT merge behavior
-- Same P2P protocol (libp2p + Bitswap)
-
-The **interop test suite** (`tests/interop/`) validates this. If the interop tests pass, the implementations are compatible.
-
-## Go/Rust Interop Tests (Critical)
-
-The interop tests prove that Rust and Go nodes can work together. **Run these before any PR that touches P2P, query, or schema code.**
-
-```bash
-cd tests/interop
-
-# Build both Rust and Go binaries
-make build-all
-
-# Run all interop tests
-make test
-
-# Run just connection tests (faster, Rust-only)
-make test-connection
-
-# Run cross-implementation tests
-make test-cross
-```
-
-**Requirements:**
-- Go DefraDB repo (set `DEFRA_GO_PATH`, e.g., `/Users/johnzampolin/go/src/github.com/sourcenetwork/defradb`)
-- Go 1.21+
-- Rust toolchain
+- **GraphQL query engine** — queries, mutations, subscriptions, aggregates, explain - full coverage of the defradb test suite
+- **P2P replication** — `libp2p` (primary, go compatable) and [`iroh`](https://github.com/n0-computer/iroh) (optional) transports
+- **Access control** — local Zanzibar engine, on-chain via [SourceHub](https://github.com/sourcenetwork/sourcehub) (Cosmos/EVM) and [`hub.rs`](https://github.com/sourcenetwork/hub.rs) (Commonware/EVM)
+- **Full-text search** — (rust only) BM25 ranking with language-aware tokenization
+- **Schema migration** — non-destructive evolution via WASM transforms (Lens)
+- **Searchable encryption** — encrypted indexes with ACP integration
+- **Multiple storage backends** — redb (default), fjall, rocksdb, in-memory
+- **Postgres compatibility** — connect with `psql` or any Postgres client/ORM (experimental!)
+- **WASM client** — full database client compiled to WebAssembly for browsers
+- **FFI bindings** — C-compatible static library for embedding in Go and other languages
+- **Docker** — multi-arch images at `ghcr.io/sourcenetwork/defradb-rs`
 
 ## Building
 
 ```bash
-# Build all crates
-cargo build
-
-# Build release binary
-cargo build --release -p cli
-
-# Run Rust unit tests
-cargo test
-
-# Lint and format
-cargo clippy --all -- -D warnings
-cargo fmt --all
+cargo build                            # Build all crates
+cargo build --release -p cli           # Release binary
+cargo test                             # Unit tests
+cargo clippy --all -- -D warnings      # Lint
+cargo fmt --all                        # Format
 ```
 
-## Structure
+## Testing
 
-```
-crates/
-├── acp/             # Access Control Policy (Zanzibar model)
-├── blockstore/      # IPLD block storage
-├── cli/             # Command-line interface
-├── crdt/            # CRDT implementations (LWW, counters)
-├── crypto/          # Cryptographic operations
-├── datastore/       # Data persistence abstractions
-├── db/              # Database core (collections, merging)
-├── defra-core/      # Core types and traits
-├── document/        # Document handling
-├── http/            # HTTP API server
-├── identity/        # Identity and key management
-├── keyring/         # Key storage
-├── p2p/             # P2P networking (libp2p, Bitswap, sync)
-├── query/           # Query engine (GraphQL, planner, execution)
-├── schema/          # Schema validation and CID generation
-└── storage/         # Storage backends (redb, memory)
+### Integration Tests
 
-tests/
-└── interop/         # Go/Rust interoperability tests (critical!)
+Rust-native tests that exercise the full node via CLI + HTTP API. Primary validation method.
+
+```bash
+cargo test -p integration-test                              # All areas
+cargo test -p integration-test --test basic                  # Specific area
+cargo test -p integration-test --test acp -- negative::      # Specific module
 ```
+
+Areas: `basic`, `query`, `acp`, `nac`, `p2p`, `fts`, `encryption`, `identity`, `backup`, `sourcehub`, `hubrs`
+
+### Go Compatibility Tests
+
+FFI-based tests that build the Rust implementation as a C library and run Go's integration test suite against it. Validates behavioral compatibility between implementations.
+
+```bash
+cargo install --path tools/ffi-test
+ffi-test run query/simple              # Run specific package
+ffi-test status                        # Show pass rates
+```
+
+See `tools/ffi-test/README.md` for full usage.
 
 ## Documentation
 
-For DefraDB concepts, architecture, and specifications:
-- [DefraDB (Go)](https://github.com/sourcenetwork/defradb)
-- [DefraDB Docs](https://docs.source.network/defradb)
-
-For development workflow: See `CLAUDE.md`
+- [DefraDB (Go)](https://github.com/sourcenetwork/defradb) — concepts, architecture, specifications
+- [DefraDB Docs](https://docs.source.network/defradb) — user documentation
+- `CLAUDE.md` — development workflow and conventions
 
 ## License
 
