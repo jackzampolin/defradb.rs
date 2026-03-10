@@ -13,7 +13,7 @@ use identity::Did;
 use acp::{DocumentACP, DocumentPermission, Identity, Result};
 
 use crate::access_cache::AccessCache;
-use crate::provider::{ProviderError, SourceHubProvider, SubjectRef};
+use crate::provider::{AcpLightClientStatus, ProviderError, SourceHubProvider, SubjectRef};
 
 /// DocumentACP backed by SourceHub's on-chain x/acp module.
 ///
@@ -46,6 +46,12 @@ impl SourceHubDocumentACP {
             .create_bearer_token(did)
             .await
             .map_err(provider_err)
+    }
+
+    pub fn acp_light_client_status(
+        &self,
+    ) -> std::result::Result<AcpLightClientStatus, ProviderError> {
+        self.provider.acp_light_client_status()
     }
 }
 

@@ -151,6 +151,8 @@ pub(crate) fn message_to_json(message: &events::Message) -> String {
         events::EventName::ReplicatorCompleted => "replicator_completed",
         events::EventName::TopicPeerEvent => "topic_peer_event",
         events::EventName::SEArtifactReceived => "se_artifact_received",
+        events::EventName::AcpHeightAdvanced => "acp_height_advanced",
+        events::EventName::AcpCacheInvalidated => "acp_cache_invalidated",
         events::EventName::WildCard => "wildcard",
     };
     serde_json::json!({

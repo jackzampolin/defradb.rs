@@ -19,6 +19,10 @@ pub enum EventName {
     TopicPeerEvent,
     /// SE artifact received after merge (encrypted index document).
     SEArtifactReceived,
+    /// ACP light client advanced to a new finalized header.
+    AcpHeightAdvanced,
+    /// ACP light client invalidated cached entries after a root change.
+    AcpCacheInvalidated,
 }
 
 impl EventName {
@@ -41,6 +45,8 @@ impl std::fmt::Display for EventName {
             EventName::ReplicatorCompleted => write!(f, "replicator-completed"),
             EventName::TopicPeerEvent => write!(f, "topic-peer-event"),
             EventName::SEArtifactReceived => write!(f, "se-artifact-received"),
+            EventName::AcpHeightAdvanced => write!(f, "acp-height-advanced"),
+            EventName::AcpCacheInvalidated => write!(f, "acp-cache-invalidated"),
         }
     }
 }
@@ -74,6 +80,28 @@ pub struct TopicPeerEventData {
 pub struct SEArtifactReceivedData {
     /// Document ID the artifact is for.
     pub doc_id: String,
+}
+
+/// ACP light client height advancement event data.
+#[derive(Debug, Clone)]
+pub struct AcpHeightAdvancedData {
+    /// Latest finalized height observed by the ACP light client.
+    pub height: u64,
+    /// Latest finalized ACP module state root.
+    pub module_state_root: String,
+}
+
+/// ACP light client cache invalidation event data.
+#[derive(Debug, Clone)]
+pub struct AcpCacheInvalidatedData {
+    /// Height at which the new module state root was observed.
+    pub height: u64,
+    /// New ACP module state root.
+    pub module_state_root: String,
+    /// Previous ACP module state root.
+    pub previous_root: String,
+    /// Number of cache entries invalidated for the old root.
+    pub entries_invalidated: usize,
 }
 
 /// Document update event data.
@@ -138,6 +166,10 @@ pub enum MessageData {
     TopicPeerEvent(TopicPeerEventData),
     /// SE artifact received after merge.
     SEArtifactReceived(SEArtifactReceivedData),
+    /// ACP light client finalized height advanced.
+    AcpHeightAdvanced(AcpHeightAdvancedData),
+    /// ACP light client cache invalidated after a root change.
+    AcpCacheInvalidated(AcpCacheInvalidatedData),
 }
 
 impl Message {
@@ -189,6 +221,22 @@ impl Message {
         }
     }
 
+    /// Create a new ACP height advanced message.
+    pub fn acp_height_advanced(data: AcpHeightAdvancedData) -> Self {
+        Self {
+            name: EventName::AcpHeightAdvanced,
+            data: MessageData::AcpHeightAdvanced(data),
+        }
+    }
+
+    /// Create a new ACP cache invalidated message.
+    pub fn acp_cache_invalidated(data: AcpCacheInvalidatedData) -> Self {
+        Self {
+            name: EventName::AcpCacheInvalidated,
+            data: MessageData::AcpCacheInvalidated(data),
+        }
+    }
+
     /// Get the SEArtifactReceivedData if this is an SEArtifactReceived message.
     pub fn as_se_artifact_received(&self) -> Option<&SEArtifactReceivedData> {
         match &self.data {
@@ -217,6 +265,22 @@ impl Message {
     pub fn as_merge_complete(&self) -> Option<&MergeCompleteData> {
         match &self.data {
             MessageData::MergeComplete(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Get the AcpHeightAdvancedData if this is an ACP height advanced message.
+    pub fn as_acp_height_advanced(&self) -> Option<&AcpHeightAdvancedData> {
+        match &self.data {
+            MessageData::AcpHeightAdvanced(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Get the AcpCacheInvalidatedData if this is an ACP cache invalidated message.
+    pub fn as_acp_cache_invalidated(&self) -> Option<&AcpCacheInvalidatedData> {
+        match &self.data {
+            MessageData::AcpCacheInvalidated(d) => Some(d),
             _ => None,
         }
     }

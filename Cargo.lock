@@ -11585,6 +11585,7 @@ dependencies = [
  "cosmrs",
  "crypto",
  "defra-core",
+ "events",
  "hex",
  "identity",
  "k256",

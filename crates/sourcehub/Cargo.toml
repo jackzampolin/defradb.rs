@@ -36,6 +36,7 @@ zanzibar = { path = "../zanzibar" }
 identity = { path = "../identity" }
 defra-core = { path = "../defra-core" }
 crypto = { path = "../crypto" }
+events = { path = "../events" }
 
 # Logging
 tracing.workspace = true

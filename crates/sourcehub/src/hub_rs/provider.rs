@@ -1,12 +1,15 @@
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use crate::provider::{ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef};
+use crate::provider::{
+    AcpLightClientStatus, ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef,
+};
 use crate::tuning::AcpTuning;
 use acp_light_client::AcpLightClient;
 use alloy_primitives::{Bytes, FixedBytes};
 use alloy_sol_types::SolCall;
 use async_trait::async_trait;
+use events::{AcpCacheInvalidatedData, AcpHeightAdvancedData, Bus, Message};
 use k256::ecdsa::SigningKey;
 
 use super::abi::{IAcp, ACP_ADDRESS};
@@ -15,11 +18,18 @@ use super::client::{ClientError, HubRsClient};
 use super::signer::EvmSigner;
 
 pub struct HubRsProvider {
-    light_client: AcpLightClient,
+    light_client: Arc<AcpLightClient>,
     client: HubRsClient,
     signer: EvmSigner,
     signing_key: SigningKey,
     nonce: Mutex<u64>,
+    light_client_observability: Arc<Mutex<HubRsLightClientObservability>>,
+    light_client_observer_handle: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Debug, Default)]
+struct HubRsLightClientObservability {
+    last_invalidation_height: Option<u64>,
 }
 
 fn derive_ws_url(rpc_url: &str) -> String {
@@ -33,11 +43,16 @@ impl HubRsProvider {
         rpc_url: String,
         private_key: &[u8],
         tuning: &AcpTuning,
+        event_bus: Option<Arc<dyn Bus>>,
     ) -> Result<Self, ProviderError> {
         let ws_url = derive_ws_url(&rpc_url);
-        let light_client = AcpLightClient::new(&rpc_url, &ws_url, 10)
-            .await
-            .map_err(|e| ProviderError::Config(format!("light client: {}", e)))?;
+        let light_client = Arc::new(
+            AcpLightClient::new(&rpc_url, &ws_url, 10)
+                .await
+                .map_err(|e| ProviderError::Config(format!("light client: {}", e)))?,
+        );
+        let light_client_observability =
+            Arc::new(Mutex::new(HubRsLightClientObservability::default()));
 
         let client = HubRsClient::new(rpc_url, tuning.request_timeout, tuning.receipt_timeout)
             .map_err(|e| ProviderError::Config(format!("HTTP client: {}", e)))?;
@@ -53,12 +68,21 @@ impl HubRsProvider {
             .get_nonce(signer.address())
             .await
             .map_err(|e| ProviderError::Config(format!("nonce: {}", e)))?;
+
+        let light_client_observer_handle = tokio::spawn(run_light_client_observer(
+            light_client.clone(),
+            light_client_observability.clone(),
+            event_bus,
+        ));
+
         Ok(Self {
             light_client,
             client,
             signer,
             signing_key,
             nonce: Mutex::new(nonce),
+            light_client_observability,
+            light_client_observer_handle,
         })
     }
 
@@ -110,14 +134,72 @@ impl HubRsProvider {
         arr[start..].copy_from_slice(&bytes[..bytes.len().min(32)]);
         FixedBytes::from(arr)
     }
+}
 
-    async fn wait_for_state_update(&self) {
-        if let Some(root) = self.light_client.header_chain().latest_module_state_root() {
-            let _ = self
-                .light_client
-                .wait_for_root_change(root, Duration::from_secs(5))
-                .await;
+impl Drop for HubRsProvider {
+    fn drop(&mut self) {
+        self.light_client_observer_handle.abort();
+    }
+}
+
+fn format_root(root: alloy_primitives::B256) -> String {
+    format!("0x{}", hex::encode(root))
+}
+
+async fn run_light_client_observer(
+    light_client: Arc<AcpLightClient>,
+    observability: Arc<Mutex<HubRsLightClientObservability>>,
+    event_bus: Option<Arc<dyn Bus>>,
+) {
+    let mut next_height = 1u64;
+    let mut previous_root = None;
+
+    loop {
+        let sync = match light_client
+            .wait_for_height(next_height, Duration::from_secs(24 * 60 * 60))
+            .await
+        {
+            Ok(sync) => sync,
+            Err(error) => {
+                tracing::debug!(error = %error, "ACP light client observer wait_for_height failed");
+                next_height = light_client
+                    .header_chain()
+                    .latest_height()
+                    .saturating_add(1);
+                continue;
+            }
+        };
+
+        let module_state_root = format_root(sync.module_state_root);
+        if let Some(ref bus) = event_bus {
+            bus.publish(Message::acp_height_advanced(AcpHeightAdvancedData {
+                height: sync.height,
+                module_state_root: module_state_root.clone(),
+            }));
         }
+
+        if let Some(previous_root_value) = previous_root {
+            if previous_root_value != sync.module_state_root {
+                let entries_invalidated = light_client
+                    .cache()
+                    .invalidate_stale(sync.module_state_root);
+                if let Ok(mut state) = observability.lock() {
+                    state.last_invalidation_height = Some(sync.height);
+                }
+
+                if let Some(ref bus) = event_bus {
+                    bus.publish(Message::acp_cache_invalidated(AcpCacheInvalidatedData {
+                        height: sync.height,
+                        module_state_root: module_state_root.clone(),
+                        previous_root: format_root(previous_root_value),
+                        entries_invalidated,
+                    }));
+                }
+            }
+        }
+
+        previous_root = Some(sync.module_state_root);
+        next_height = sync.height.saturating_add(1);
     }
 }
 
@@ -267,9 +349,13 @@ impl SourceHubProvider for HubRsProvider {
             cmd: Bytes::from(cmd),
         };
         let calldata = Bytes::from(call.abi_encode());
+        let send_tx_start = Instant::now();
         self.send_tx(calldata).await?;
-
-        let _ = tokio::time::timeout(Duration::from_secs(5), self.wait_for_state_update()).await;
+        tracing::info!(
+            doc_id = %object_id,
+            elapsed = ?send_tx_start.elapsed(),
+            "hub.rs register_object send_tx completed"
+        );
 
         Ok(())
     }
@@ -290,8 +376,6 @@ impl SourceHubProvider for HubRsProvider {
         };
         let calldata = Bytes::from(call.abi_encode());
         self.send_tx(calldata).await?;
-
-        let _ = tokio::time::timeout(Duration::from_secs(5), self.wait_for_state_update()).await;
 
         Ok(())
     }
@@ -315,8 +399,6 @@ impl SourceHubProvider for HubRsProvider {
         let calldata = Bytes::from(call.abi_encode());
         self.send_tx(calldata).await?;
 
-        let _ = tokio::time::timeout(Duration::from_secs(5), self.wait_for_state_update()).await;
-
         Ok(true)
     }
 
@@ -338,8 +420,6 @@ impl SourceHubProvider for HubRsProvider {
         };
         let calldata = Bytes::from(call.abi_encode());
         self.send_tx(calldata).await?;
-
-        let _ = tokio::time::timeout(Duration::from_secs(5), self.wait_for_state_update()).await;
 
         Ok(true)
     }
@@ -448,5 +528,25 @@ impl SourceHubProvider for HubRsProvider {
         }
 
         Ok(false)
+    }
+
+    fn acp_light_client_status(&self) -> Result<AcpLightClientStatus, ProviderError> {
+        let sync = self.light_client.header_chain().state();
+        let last_invalidation_height = self
+            .light_client_observability
+            .lock()
+            .map_err(|_| ProviderError::Query("light client observability lock poisoned".into()))?
+            .last_invalidation_height
+            .unwrap_or_default();
+
+        Ok(AcpLightClientStatus {
+            height: sync.as_ref().map_or(0, |state| state.height),
+            module_state_root: sync
+                .as_ref()
+                .map_or_else(String::new, |state| format_root(state.module_state_root)),
+            cache_entries: self.light_client.cache().len(),
+            last_invalidation_height,
+            connected: sync.is_some(),
+        })
     }
 }

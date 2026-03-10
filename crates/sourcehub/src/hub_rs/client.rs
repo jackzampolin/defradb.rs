@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use alloy_primitives::{Address, Bytes, B256};
 
@@ -135,7 +136,9 @@ impl HubRsClient {
     }
 
     pub async fn wait_for_receipt(&self, tx_hash: B256) -> Result<serde_json::Value, ClientError> {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
+        let tx_hash_hex = format!("0x{}", hex::encode(tx_hash));
+        let mut polls = 0u64;
         loop {
             if start.elapsed() > self.receipt_timeout {
                 return Err(ClientError::Timeout(format!(
@@ -143,11 +146,12 @@ impl HubRsClient {
                     tx_hash
                 )));
             }
+            polls += 1;
             let body = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": self.next_id(),
                 "method": "eth_getTransactionReceipt",
-                "params": [format!("0x{}", hex::encode(tx_hash))]
+                "params": [tx_hash_hex.clone()]
             });
             let resp: serde_json::Value = self
                 .http
@@ -166,6 +170,12 @@ impl HubRsClient {
                         tx_hash, status
                     )));
                 }
+                tracing::info!(
+                    tx_hash = %tx_hash_hex,
+                    polls,
+                    elapsed = ?start.elapsed(),
+                    "hub.rs transaction receipt found"
+                );
                 return Ok(resp["result"].clone());
             }
             tokio::time::sleep(RECEIPT_POLL_INTERVAL).await;

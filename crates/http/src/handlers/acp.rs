@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
-use crate::router::{AppState, NodePermission, PolicyInfo};
+use crate::router::{AcpLightClientStatus, AppState, NodePermission, PolicyInfo};
 
 /// Response for adding a policy.
 #[derive(Debug, Clone, Serialize)]
@@ -97,6 +97,26 @@ pub async fn get_policy(
         .ok_or_else(|| HttpError::NotFound(format!("Policy '{}' not found", id)))?;
 
     Ok(Json(policy))
+}
+
+/// Get ACP light client status.
+///
+/// GET /api/v0/acp/status
+///
+/// Requires `DacStatus` permission when NAC is enabled.
+pub async fn get_status(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+) -> Result<Json<AcpLightClientStatus>, HttpError> {
+    require_permission(&state, &identity, NodePermission::DacStatus).await?;
+
+    let acp = state.require_acp()?;
+    let status = acp
+        .get_light_client_status()
+        .await
+        .map_err(HttpError::ServiceUnavailable)?;
+
+    Ok(Json(status))
 }
 
 /// Request body for document ACP relationship operations (Go-compatible).
