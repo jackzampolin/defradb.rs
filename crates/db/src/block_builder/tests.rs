@@ -1,5 +1,6 @@
 use super::*;
 use blockstore::{Blockstore, DefraBlockstore};
+use crypto::keys::PublicKey;
 use std::sync::Arc;
 use storage::backends::MemoryStore;
 
@@ -110,4 +111,61 @@ async fn test_composite_block_has_field_links() {
     for field_cid in &result.field_cids {
         assert!(link_cids.contains(field_cid));
     }
+}
+
+struct TestRemoteSecp256r1Signer {
+    private_key: crypto::Secp256r1PrivateKey,
+}
+
+impl defra_core::signing::RemoteSigner for TestRemoteSecp256r1Signer {
+    fn sign_sync(&self, data: &[u8]) -> Result<Vec<u8>, String> {
+        self.private_key
+            .sign(data)
+            .map_err(|error| format!("remote sign failed: {}", error))
+    }
+}
+
+#[test]
+fn test_compute_signature_supports_remote_secp256r1() {
+    let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
+    let public_key = private_key.public_key();
+
+    let block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            doc_id: b"doc-1".to_vec(),
+            schema_version_id: "schema-v1".to_string(),
+            status: 1,
+            priority: 1,
+        }),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    let signer = defra_core::signing::SigningConfig {
+        key_type: "secp256r1".to_string(),
+        private_key_bytes: Vec::new(),
+        public_key_bytes: public_key.raw(),
+        public_key_hex: hex::encode(public_key.raw()),
+        remote_signer: Some(Arc::new(TestRemoteSecp256r1Signer { private_key })),
+    };
+
+    let (sig_cid, sig_cbor) = compute_signature(&block, &signer)
+        .expect("signature should succeed")
+        .expect("composite block should be signed");
+    assert!(!sig_cid.to_bytes().is_empty());
+
+    let signature = Signature::from_dag_cbor(&sig_cbor).expect("signature block should decode");
+    assert_eq!(signature.header.sig_type, SignatureType::ES256);
+    assert_eq!(
+        signature.header.identity,
+        signer.public_key_hex.as_bytes().to_vec()
+    );
+
+    let public_key = crypto::Secp256r1PublicKey::from_bytes(&signer.public_key_bytes)
+        .expect("public key should decode");
+    let signed_bytes = block.to_dag_cbor().expect("block should encode");
+    let valid = public_key
+        .verify(&signed_bytes, &signature.value)
+        .expect("verification should succeed");
+    assert!(valid, "remote secp256r1 signature should verify");
 }

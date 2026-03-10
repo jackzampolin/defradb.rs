@@ -43,6 +43,7 @@ pub mod encrypted_index;
 pub mod helpers;
 pub mod index;
 pub mod lens;
+pub mod mobile;
 pub mod nac_check;
 pub mod node;
 pub mod p2p;
@@ -136,10 +137,11 @@ macro_rules! ffi_async_ok {
 
 // Re-export FFI functions at crate root
 pub use acp::{
-    add_dac_actor_relationship, add_dac_policy, add_nac_actor_relationship, create_identity,
-    delete_dac_actor_relationship, delete_nac_actor_relationship, disable_nac, enable_nac,
-    get_dac_policy, get_nac_status, get_node_identity, list_dac_policies, re_enable_nac,
-    RegisterIdentity,
+    add_dac_actor_relationship, add_dac_policy, add_nac_actor_relationship,
+    bind_identity_bearer_token, create_identity, delete_dac_actor_relationship,
+    delete_nac_actor_relationship, disable_nac, enable_nac, get_dac_policy, get_nac_status,
+    get_node_identity, list_dac_policies, node_set_default_identity, re_enable_nac,
+    register_remote_identity, RegisterIdentity,
 };
 pub use backup::{basic_export, basic_import};
 pub use batch::{batch_sign, batch_start};
@@ -156,6 +158,11 @@ pub use encrypted_index::{
 };
 pub use index::{create_index, delete_index, get_indexes, list_all_indexes};
 pub use lens::{lens_add, lens_list};
+pub use mobile::{
+    defra_mobile_close_node, defra_mobile_connect, defra_mobile_ensure_schema,
+    defra_mobile_execute, defra_mobile_init, defra_mobile_open_node, defra_mobile_peer_info,
+    defra_mobile_sync_collection,
+};
 pub use node::{new_node, node_close};
 pub use p2p::{
     new_node_with_p2p, p2p_active_peers, p2p_add_collections, p2p_add_documents,

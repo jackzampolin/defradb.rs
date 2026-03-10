@@ -3,6 +3,22 @@
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
 
+/// Host callback used for non-exportable signing keys.
+///
+/// The callback must write the raw signature bytes into `out_signature_ptr`,
+/// set `out_signature_len`, and return `0` on success. For ECDSA keys the
+/// expected signature format is DER, matching DefraDB's local crypto library.
+pub type DefraRemoteSignCallback = unsafe extern "C" fn(
+    signer_handle: usize,
+    did: *const c_char,
+    key_type: *const c_char,
+    payload_ptr: *const u8,
+    payload_len: usize,
+    out_signature_ptr: *mut u8,
+    out_signature_capacity: usize,
+    out_signature_len: *mut usize,
+) -> c_int;
+
 /// FFI result type matching Go's Result struct.
 ///
 /// Status codes:
@@ -147,7 +163,7 @@ pub struct NodeInitOptions {
     /// If signing_private_key is provided, that key is used.
     /// Otherwise, a random secp256k1 key pair is generated.
     pub enable_signing: c_int,
-    /// Optional: signing key type string (e.g. "secp256k1", "ed25519").
+    /// Optional: signing key type string (e.g. "secp256k1", "secp256r1", "ed25519").
     /// Null to auto-generate secp256k1.
     pub signing_key_type: *const c_char,
     /// Optional: raw private key bytes for signing.

@@ -185,7 +185,7 @@ pub unsafe extern "C" fn get_collections_in_txn(
 }
 
 /// Validate that a collection's policy references a valid, well-formed policy.
-fn validate_collection_policy(
+pub(crate) fn validate_collection_policy(
     policy: &schema::PolicyDescription,
     store: &Arc<PolicyStore>,
 ) -> Result<(), String> {

@@ -31,7 +31,7 @@ use datastore::NamespaceView;
 use defra_core::block::{
     generate_cid_from_bytes, Block, CollectionDeltaPayload, CompositeDeltaPayload,
     CounterDeltaPayload, CrdtDelta, DAGLink, Encryption, LwwDeltaPayload, Signature,
-    SignatureHeader, SignatureType,
+    SignatureHeader,
 };
 use defra_core::encryption::EncryptionConfig;
 use defra_core::signing::SigningConfig;
@@ -66,41 +66,41 @@ pub(super) fn compute_signature(
         .to_dag_cbor()
         .map_err(|e| format!("Failed to encode block for signing: {}", e))?;
 
-    // Determine signature type and sign
-    let (sig_type, sig_bytes) = match signer.key_type.as_str() {
-        "ed25519" => {
-            let private_key = crypto::Ed25519PrivateKey::from_bytes(&signer.private_key_bytes)
-                .map_err(|e| format!("Failed to load Ed25519 private key: {}", e))?;
-            let sig = private_key
-                .sign(&block_bytes)
-                .map_err(|e| format!("Failed to sign block: {}", e))?;
-            (SignatureType::EdDSA, sig)
+    // Determine signature type and sign. Remote signers can back any supported
+    // key type so mobile/TEE and Orbis-backed identities use the same path.
+    let sig_type = signer.signature_type()?;
+    let sig_bytes = if let Some(remote) = signer.remote_signer.as_ref() {
+        remote.sign_sync(&block_bytes)?
+    } else {
+        match signer.key_type.as_str() {
+            "ed25519" => {
+                let private_key = crypto::Ed25519PrivateKey::from_bytes(&signer.private_key_bytes)
+                    .map_err(|e| format!("Failed to load Ed25519 private key: {}", e))?;
+                private_key
+                    .sign(&block_bytes)
+                    .map_err(|e| format!("Failed to sign block: {}", e))?
+            }
+            "secp256k1" => {
+                let private_key =
+                    crypto::Secp256k1PrivateKey::from_bytes(&signer.private_key_bytes)
+                        .map_err(|e| format!("Failed to load secp256k1 private key: {}", e))?;
+                private_key
+                    .sign(&block_bytes)
+                    .map_err(|e| format!("Failed to sign block: {}", e))?
+            }
+            "secp256r1" => {
+                let private_key =
+                    crypto::Secp256r1PrivateKey::from_bytes(&signer.private_key_bytes)
+                        .map_err(|e| format!("Failed to load secp256r1 private key: {}", e))?;
+                private_key
+                    .sign(&block_bytes)
+                    .map_err(|e| format!("Failed to sign block: {}", e))?
+            }
+            "bls" => {
+                return Err("BLS signing requires a remote signer".to_string());
+            }
+            other => return Err(format!("Unsupported key type for signing: {}", other)),
         }
-        "secp256k1" => {
-            let private_key = crypto::Secp256k1PrivateKey::from_bytes(&signer.private_key_bytes)
-                .map_err(|e| format!("Failed to load secp256k1 private key: {}", e))?;
-            let sig = private_key
-                .sign(&block_bytes)
-                .map_err(|e| format!("Failed to sign block: {}", e))?;
-            (SignatureType::ES256K, sig)
-        }
-        "secp256r1" => {
-            let private_key = crypto::Secp256r1PrivateKey::from_bytes(&signer.private_key_bytes)
-                .map_err(|e| format!("Failed to load secp256r1 private key: {}", e))?;
-            let sig = private_key
-                .sign(&block_bytes)
-                .map_err(|e| format!("Failed to sign block: {}", e))?;
-            (SignatureType::ES256, sig)
-        }
-        "bls" => {
-            let remote = signer
-                .remote_signer
-                .as_ref()
-                .ok_or("BLS signing requires a remote signer (Orbis)")?;
-            let sig = remote.sign_sync(&block_bytes)?;
-            (SignatureType::BLS, sig)
-        }
-        other => return Err(format!("Unsupported key type for signing: {}", other)),
     };
 
     // Create signature block.
