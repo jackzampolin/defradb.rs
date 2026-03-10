@@ -51,27 +51,16 @@ async fn document_lifecycle_test(cluster: TestCluster) {
         .query(r#"mutation { add_Article(input: {title: "P2P Networking", author: "Alice", views: 5}) { _docID } }"#)
         .expect("create article 3");
 
-    // 4. Collection doc-ids — verify 3 documents exist
-    //    Try CLI doc-ids first; fall back to GraphQL query if CLI returns empty
-    //    (Go's streaming docIDs output may not be captured by process stdout).
-    let doc_ids = client.collection_doc_ids("Article").unwrap_or_default();
-    if doc_ids.is_empty() {
-        let count_result = client
-            .query("query { Article { _docID } }")
-            .expect("doc count query failed");
-        let count = count_result["Article"]
-            .as_array()
-            .map(|a| a.len())
-            .unwrap_or(0);
-        assert_eq!(count, 3, "expected 3 articles, got {}", count);
-    } else {
-        assert_eq!(
-            doc_ids.len(),
-            3,
-            "expected 3 doc IDs, got {}",
-            doc_ids.len()
-        );
-    }
+    // 4. Verify 3 documents exist
+    let doc_ids = client
+        .collection_doc_ids("Article")
+        .expect("collection_doc_ids failed");
+    assert_eq!(
+        doc_ids.len(),
+        3,
+        "expected 3 doc IDs, got {}",
+        doc_ids.len()
+    );
 
     // 5. Collection describe — verify field info present
     let desc = client

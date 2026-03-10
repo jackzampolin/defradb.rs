@@ -44,9 +44,6 @@ pub enum CollectionCommand {
     Delete(DocumentDeleteArgs),
     /// Describe a collection's schema
     Describe(CollectionDescribeArgs),
-    /// Get document IDs
-    #[command(name = "docIDs")]
-    DocIds(DocIdsArgs),
     /// Get a document by ID
     Get(DocumentGetArgs),
     /// List all collections
@@ -141,10 +138,6 @@ pub struct DocumentDeleteArgs {
     pub filter: Option<String>,
 }
 
-/// Arguments for doc-ids command
-#[derive(Args, Debug)]
-pub struct DocIdsArgs {}
-
 /// Arguments for collection patch command
 #[derive(Args, Debug)]
 pub struct CollectionPatchArgs {
@@ -219,7 +212,6 @@ impl CollectionArgs {
             CollectionCommand::Create(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::Delete(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::Describe(args) => args.execute(ctx, self.name.as_deref()).await,
-            CollectionCommand::DocIds(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::Get(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::List(args) => args.execute(ctx).await,
             CollectionCommand::Patch(args) => args.execute(ctx).await,

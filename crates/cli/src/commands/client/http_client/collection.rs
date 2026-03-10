@@ -1,17 +1,11 @@
 //! Collection HTTP client methods
 
-use serde_json::Value as JsonValue;
 use urlencoding::encode;
 
 use super::HttpClient;
 use crate::error::Result;
 
 impl HttpClient {
-    pub async fn collection_doc_ids(&self, name: &str) -> Result<JsonValue> {
-        let url = format!("{}/api/v0/collections/{}", self.base_url, encode(name));
-        self.request_json("GET", &url, None).await
-    }
-
     pub async fn collection_update_doc(&self, name: &str, doc_id: &str, patch: &str) -> Result<()> {
         let url = format!(
             "{}/api/v0/collections/{}/{}",

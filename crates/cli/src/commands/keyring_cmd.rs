@@ -18,16 +18,16 @@ pub struct KeyringArgs {
 #[derive(Subcommand, Debug)]
 pub enum KeyringCommand {
     /// Generate a new key and store it in the keyring
-    Generate(GenerateArgs),
+    #[command(alias = "generate")]
+    New(GenerateArgs),
 
-    /// Export a key from the keyring
-    Export(ExportArgs),
+    /// Get (export) a key from the keyring
+    #[command(alias = "export")]
+    Get(ExportArgs),
 
-    /// Import a key into the keyring
-    Import(ImportArgs),
-
-    /// Delete a key from the keyring
-    Delete(DeleteArgs),
+    /// Add (import) a key into the keyring
+    #[command(alias = "import")]
+    Add(ImportArgs),
 
     /// List all keys in the keyring
     List(ListArgs),
@@ -36,10 +36,9 @@ pub enum KeyringCommand {
 impl KeyringArgs {
     pub fn execute(self, config: Config) -> Result<()> {
         match self.command {
-            KeyringCommand::Generate(args) => args.execute(config),
-            KeyringCommand::Export(args) => args.execute(config),
-            KeyringCommand::Import(args) => args.execute(config),
-            KeyringCommand::Delete(args) => args.execute(config),
+            KeyringCommand::New(args) => args.execute(config),
+            KeyringCommand::Get(args) => args.execute(config),
+            KeyringCommand::Add(args) => args.execute(config),
             KeyringCommand::List(args) => args.execute(config),
         }
     }
@@ -224,26 +223,6 @@ impl ImportArgs {
             .set(&self.name, &key)
             .map_err(|e| Error::Keyring(e.to_string()))?;
 
-        Ok(())
-    }
-}
-
-/// Delete a key from the keyring
-#[derive(Args, Debug)]
-pub struct DeleteArgs {
-    /// Name of the key to delete
-    pub name: String,
-}
-
-impl DeleteArgs {
-    pub fn execute(self, config: Config) -> Result<()> {
-        let keyring = super::open_keyring(&config)?;
-
-        keyring
-            .delete(&self.name)
-            .map_err(|e| Error::Keyring(e.to_string()))?;
-
-        println!("Deleted key: {}", self.name);
         Ok(())
     }
 }

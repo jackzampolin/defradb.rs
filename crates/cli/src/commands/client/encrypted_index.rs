@@ -17,7 +17,8 @@ pub struct EncryptedIndexArgs {
 #[derive(Subcommand, Debug)]
 pub enum EncryptedIndexCommand {
     /// Add an encrypted index on a collection field
-    Add(EncryptedIndexAddArgs),
+    #[command(alias = "add")]
+    New(EncryptedIndexAddArgs),
     /// Delete an encrypted index from a collection field
     Delete(EncryptedIndexDeleteArgs),
     /// List encrypted indexes for a collection
@@ -59,7 +60,7 @@ pub struct EncryptedIndexListArgs {
 impl EncryptedIndexArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            EncryptedIndexCommand::Add(args) => args.execute(ctx).await,
+            EncryptedIndexCommand::New(args) => args.execute(ctx).await,
             EncryptedIndexCommand::Delete(args) => args.execute(ctx).await,
             EncryptedIndexCommand::List(args) => args.execute(ctx).await,
         }
