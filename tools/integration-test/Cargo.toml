@@ -55,8 +55,8 @@ name = "p2p_iroh"
 path = "tests/p2p_iroh/main.rs"
 
 [dependencies]
-hub-harness = { git = "https://github.com/sourcenetwork/backbone.git", branch = "feat/acp-tuning-harness" }
-defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", branch = "feat/acp-tuning-harness" }
+hub-harness = { git = "https://github.com/sourcenetwork/backbone.git", branch = "main" }
+defra-harness = { git = "https://github.com/sourcenetwork/backbone.git", branch = "main" }
 tokio = { version = "1.35", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 serde_json = "1.0"
