@@ -8,7 +8,7 @@ use crate::error::Result;
 impl HttpClient {
     pub async fn collection_update_doc(&self, name: &str, doc_id: &str, patch: &str) -> Result<()> {
         let url = format!(
-            "{}/api/v0/collections/{}/{}",
+            "{}/api/v0/collections/{}/document/{}",
             self.base_url,
             encode(name),
             encode(doc_id)
@@ -18,7 +18,7 @@ impl HttpClient {
 
     pub async fn collection_delete_doc(&self, name: &str, doc_id: &str) -> Result<()> {
         let url = format!(
-            "{}/api/v0/collections/{}/{}",
+            "{}/api/v0/collections/{}/document/{}",
             self.base_url,
             encode(name),
             encode(doc_id)

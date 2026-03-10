@@ -75,13 +75,13 @@ pub enum NodePermission {
     // =========================================================================
     // Document Operations
     // =========================================================================
-    /// Read documents (used by GET /api/v0/collections/:name/:doc_id, GET /api/v0/graphql, GET /api/v0/backup/export)
+    /// Read documents (used by GET /api/v0/collections/:name/document/:doc_id, GET /api/v0/graphql, GET /api/v0/backup/export)
     DocumentRead,
 
     /// Update documents (used by POST/PATCH document endpoints, POST /api/v0/graphql, transaction endpoints)
     DocumentUpdate,
 
-    /// Delete documents (used by DELETE /api/v0/collections/:name/:doc_id)
+    /// Delete documents (used by DELETE /api/v0/collections/:name/document/:doc_id)
     DocumentDelete,
 
     // =========================================================================

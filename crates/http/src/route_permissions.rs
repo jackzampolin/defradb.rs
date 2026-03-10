@@ -99,7 +99,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         "/api/v0/collections/:name/truncate" => {
             RoutePermission::Required(NodePermission::CollectionTruncate)
         }
-        "/api/v0/collections/:name/:docID" => match *method {
+        "/api/v0/collections/:name/document/:docID" => match *method {
             Method::GET => RoutePermission::Required(NodePermission::DocumentRead),
             Method::PATCH => RoutePermission::Required(NodePermission::DocumentUpdate),
             Method::DELETE => RoutePermission::Required(NodePermission::DocumentDelete),
@@ -376,15 +376,15 @@ mod tests {
     #[test]
     fn document_routes() {
         assert_eq!(
-            route_permission("/api/v0/collections/:name/:docID", &Method::GET),
+            route_permission("/api/v0/collections/:name/document/:docID", &Method::GET),
             RoutePermission::Required(NodePermission::DocumentRead)
         );
         assert_eq!(
-            route_permission("/api/v0/collections/:name/:docID", &Method::PATCH),
+            route_permission("/api/v0/collections/:name/document/:docID", &Method::PATCH),
             RoutePermission::Required(NodePermission::DocumentUpdate)
         );
         assert_eq!(
-            route_permission("/api/v0/collections/:name/:docID", &Method::DELETE),
+            route_permission("/api/v0/collections/:name/document/:docID", &Method::DELETE),
             RoutePermission::Required(NodePermission::DocumentDelete)
         );
     }
@@ -549,17 +549,17 @@ mod tests {
                 RoutePermission::Required(NodePermission::CollectionTruncate),
             ),
             (
-                "/api/v0/collections/:name/:docID",
+                "/api/v0/collections/:name/document/:docID",
                 Method::GET,
                 RoutePermission::Required(NodePermission::DocumentRead),
             ),
             (
-                "/api/v0/collections/:name/:docID",
+                "/api/v0/collections/:name/document/:docID",
                 Method::PATCH,
                 RoutePermission::Required(NodePermission::DocumentUpdate),
             ),
             (
-                "/api/v0/collections/:name/:docID",
+                "/api/v0/collections/:name/document/:docID",
                 Method::DELETE,
                 RoutePermission::Required(NodePermission::DocumentDelete),
             ),

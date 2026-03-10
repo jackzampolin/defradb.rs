@@ -4,6 +4,7 @@ mod acp;
 mod backup;
 mod block;
 mod collection;
+mod document;
 mod dump;
 mod encrypted_index;
 pub mod http_client;
@@ -26,6 +27,7 @@ pub use acp::AcpArgs;
 pub use backup::BackupArgs;
 pub use block::BlockArgs;
 pub use collection::CollectionArgs;
+pub use document::DocumentArgs;
 pub use dump::DumpArgs;
 pub use encrypted_index::EncryptedIndexArgs;
 pub use index::IndexArgs;
@@ -106,8 +108,10 @@ pub enum ClientCommand {
     Backup(BackupArgs),
     /// Interact with blocks
     Block(BlockArgs),
-    /// Interact with collections and documents
+    /// Interact with collections
     Collection(CollectionArgs),
+    /// Interact with documents
+    Document(DocumentArgs),
     /// Dump the database contents
     Dump(DumpArgs),
     /// Manage encrypted indexes
@@ -158,6 +162,7 @@ impl ClientArgs {
             ClientCommand::Backup(args) => args.execute(&ctx).await,
             ClientCommand::Block(args) => args.execute(&ctx).await,
             ClientCommand::Collection(args) => args.execute(&ctx).await,
+            ClientCommand::Document(args) => args.execute(&ctx).await,
             ClientCommand::Dump(args) => args.execute(&ctx).await,
             ClientCommand::EncryptedIndex(args) => args.execute(&ctx).await,
             ClientCommand::Index(args) => args.execute(&ctx).await,

@@ -22,7 +22,7 @@ use crate::router::{AppState, NodePermission};
 
 /// Get a single document by ID.
 ///
-/// GET /api/v0/collections/{name}/{docID}
+/// GET /api/v0/collections/{name}/document/{docID}
 ///
 /// Identity is extracted from the Authorization header and used for ACP checks.
 /// Protected documents require read permission.
@@ -119,7 +119,7 @@ pub async fn create_document(
 
 /// Update a single document.
 ///
-/// PATCH /api/v0/collections/{name}/{docID}
+/// PATCH /api/v0/collections/{name}/document/{docID}
 ///
 /// Identity is extracted from the Authorization header and used to check
 /// update permission on protected documents.
@@ -167,7 +167,7 @@ pub async fn update_document(
 
 /// Delete a single document.
 ///
-/// DELETE /api/v0/collections/{name}/{docID}
+/// DELETE /api/v0/collections/{name}/document/{docID}
 ///
 /// Identity is extracted from the Authorization header and used to check
 /// delete permission on protected documents.

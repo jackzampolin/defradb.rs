@@ -1,7 +1,7 @@
 //! Collection command implementation
 
 mod document;
-mod introspection;
+pub(crate) mod introspection;
 
 use std::path::PathBuf;
 
@@ -10,7 +10,7 @@ use clap::{Args, Subcommand};
 use super::ClientContext;
 use crate::error::Result;
 
-/// Interact with collections and documents
+/// Interact with collections
 #[derive(Args, Debug)]
 pub struct CollectionArgs {
     /// Collection name
@@ -38,14 +38,8 @@ pub struct CollectionArgs {
 pub enum CollectionCommand {
     /// Add a new collection from a schema definition (SDL)
     Add(CollectionAddArgs),
-    /// Create a new document
-    Create(DocumentCreateArgs),
-    /// Delete a document
-    Delete(DocumentDeleteArgs),
     /// Describe a collection's schema
     Describe(CollectionDescribeArgs),
-    /// Get a document by ID
-    Get(DocumentGetArgs),
     /// List all collections
     List(CollectionListArgs),
     /// Patch a collection schema
@@ -54,8 +48,6 @@ pub enum CollectionCommand {
     SetActive(SetActiveArgs),
     /// Truncate a collection
     Truncate(TruncateArgs),
-    /// Update a document
-    Update(DocumentUpdateArgs),
 }
 
 /// Arguments for collection add (schema definition) command
@@ -77,66 +69,6 @@ pub struct CollectionListArgs {}
 /// Arguments for collection describe command
 #[derive(Args, Debug)]
 pub struct CollectionDescribeArgs {}
-
-/// Arguments for document create command
-#[derive(Args, Debug)]
-pub struct DocumentCreateArgs {
-    /// The document data (JSON)
-    #[arg(value_name = "DOCUMENT")]
-    pub document: Option<String>,
-
-    /// File containing document(s)
-    #[arg(long, short = 'f')]
-    pub file: Option<PathBuf>,
-
-    /// Flag to enable encryption of the document
-    #[arg(long, short = 'e')]
-    pub encrypt: bool,
-
-    /// Comma-separated list of fields to encrypt
-    #[arg(long, value_delimiter = ',')]
-    pub encrypt_fields: Vec<String>,
-}
-
-/// Arguments for document get command
-#[derive(Args, Debug)]
-pub struct DocumentGetArgs {
-    /// The document ID
-    #[arg(value_name = "DOC_ID")]
-    pub doc_id: String,
-
-    /// Show deleted documents
-    #[arg(long)]
-    pub show_deleted: bool,
-}
-
-/// Arguments for document update command
-#[derive(Args, Debug)]
-pub struct DocumentUpdateArgs {
-    /// Document ID
-    #[arg(long = "docID")]
-    pub doc_id: Option<String>,
-
-    /// Document filter
-    #[arg(long)]
-    pub filter: Option<String>,
-
-    /// Document updater
-    #[arg(long)]
-    pub updater: Option<String>,
-}
-
-/// Arguments for document delete command
-#[derive(Args, Debug)]
-pub struct DocumentDeleteArgs {
-    /// Document ID
-    #[arg(long = "docID")]
-    pub doc_id: Option<String>,
-
-    /// Document filter
-    #[arg(long)]
-    pub filter: Option<String>,
-}
 
 /// Arguments for collection patch command
 #[derive(Args, Debug)]
@@ -209,15 +141,11 @@ impl CollectionArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
             CollectionCommand::Add(args) => args.execute(ctx).await,
-            CollectionCommand::Create(args) => args.execute(ctx, self.name.as_deref()).await,
-            CollectionCommand::Delete(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::Describe(args) => args.execute(ctx, self.name.as_deref()).await,
-            CollectionCommand::Get(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::List(args) => args.execute(ctx).await,
             CollectionCommand::Patch(args) => args.execute(ctx).await,
             CollectionCommand::SetActive(args) => args.execute(ctx).await,
             CollectionCommand::Truncate(args) => args.execute(ctx, self.name.as_deref()).await,
-            CollectionCommand::Update(args) => args.execute(ctx, self.name.as_deref()).await,
         }
     }
 }

@@ -148,7 +148,7 @@ fn extract_collections(data: &Option<JsonValue>) -> Result<Vec<String>> {
 }
 
 /// Get the field names for a collection (excluding relations for simplicity)
-pub(super) async fn get_collection_fields(
+pub(crate) async fn get_collection_fields(
     ctx: &ClientContext,
     collection: &str,
 ) -> Result<Vec<String>> {
