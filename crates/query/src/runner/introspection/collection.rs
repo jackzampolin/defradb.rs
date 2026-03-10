@@ -252,7 +252,7 @@ pub(super) fn build_commit_type() -> Object {
     fn with_commit_link_args(field: Field) -> Field {
         field
             .argument(InputValue::new("cid", TypeRef::named("ID")))
-            .argument(InputValue::new("docID", TypeRef::named("ID")))
+            .argument(InputValue::new("docID", TypeRef::named_nn_list("ID")))
             .argument(InputValue::new(
                 "filter",
                 TypeRef::named("CommitsFilterArg"),

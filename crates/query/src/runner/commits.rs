@@ -401,6 +401,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         use crate::fetcher::CommitsQueryOptions;
         use crate::mapper::{AggregateType, OrderDirection};
 
+        // Validate docIDs: Go v1.0.0-rc1 accepts a list but only supports one element.
+        if let Some(ref ids) = select.doc_ids {
+            if ids.is_empty() {
+                return Ok(JsonValue::Array(vec![]));
+            }
+            if ids.len() > 1 {
+                return Err(crate::error::QueryError::parse(
+                    "querying by multiple docIDs is not yet supported",
+                ));
+            }
+        }
+
         // Build options from the select
         let options = CommitsQueryOptions {
             doc_id: select.doc_ids.as_ref().and_then(|ids| ids.first().cloned()),

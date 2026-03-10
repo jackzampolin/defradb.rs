@@ -158,7 +158,7 @@ pub fn build_introspection_schema(
         })
         .argument(InputValue::new("cid", TypeRef::named("ID")))
         .argument(InputValue::new("depth", TypeRef::named("Int")))
-        .argument(InputValue::new("docID", TypeRef::named("ID")))
+        .argument(InputValue::new("docID", TypeRef::named_nn_list("ID")))
         .argument(InputValue::new(
             "filter",
             TypeRef::named("CommitsFilterArg"),
