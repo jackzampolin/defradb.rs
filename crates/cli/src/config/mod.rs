@@ -97,6 +97,7 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         self.api.validate()?;
         self.net.validate()?;
+        self.acp.validate()?;
         Ok(())
     }
 

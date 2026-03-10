@@ -494,12 +494,19 @@ pub unsafe extern "C" fn new_node_with_p2p(
             } else {
                 return Err("sourcehub_signer_key is required when SourceHub is configured".to_string());
             };
+            let tuning = sourcehub::AcpTuning::default();
             let provider = Arc::new(
-                sourcehub::CosmosProvider::new(grpc_addr, comet_addr, signer_key, &chain_id)
-                    .map_err(|e| format!("failed to create SourceHub provider: {}", e))?,
+                sourcehub::CosmosProvider::new(
+                    grpc_addr,
+                    comet_addr,
+                    signer_key,
+                    &chain_id,
+                    &tuning,
+                )
+                .map_err(|e| format!("failed to create SourceHub provider: {}", e))?,
             );
             tracing::debug!(validator = %provider.authorized_account(), "SourceHub ACP configured");
-            let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider));
+            let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider, tuning.cache_ttl));
             (sh_acp.clone() as Arc<dyn acp::DocumentACP>, Some(sh_acp))
         } else if db_path_opt.is_some() {
             // File-based storage: use persistent ACP store (namespace isolated in main DB)

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use crate::circuit_breaker::CircuitBreaker;
 use crate::policy_cache::PolicyCache;
 use crate::provider::{ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef};
+use crate::tuning::AcpTuning;
 
 use super::client::{ClientError, SourceHubClient};
 use super::tx::TxSigner;
@@ -27,15 +28,20 @@ impl CosmosProvider {
         comet_address: String,
         signer_key: &[u8],
         chain_id: &str,
+        tuning: &AcpTuning,
     ) -> Result<Self, ProviderError> {
-        let client = SourceHubClient::new(grpc_address, comet_address);
+        let client = SourceHubClient::new(grpc_address, comet_address, tuning.request_timeout)
+            .map_err(|e| ProviderError::Config(format!("HTTP client: {}", e)))?;
         let signer = TxSigner::from_secp256k1_bytes(signer_key, chain_id)
             .map_err(|e| ProviderError::Config(e.to_string()))?;
         Ok(Self {
             client,
             signer,
-            circuit_breaker: CircuitBreaker::new(),
-            policy_cache: PolicyCache::new(),
+            circuit_breaker: CircuitBreaker::new(
+                tuning.circuit_breaker_threshold,
+                tuning.circuit_breaker_reset_timeout,
+            ),
+            policy_cache: PolicyCache::new(tuning.cache_ttl),
         })
     }
 

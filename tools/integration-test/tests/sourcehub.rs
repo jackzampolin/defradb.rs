@@ -1,3 +1,5 @@
+#[path = "sourcehub/acp_tuning.rs"]
+mod acp_tuning;
 #[path = "sourcehub/compartments.rs"]
 mod compartments;
 #[path = "sourcehub/p2p_acp.rs"]

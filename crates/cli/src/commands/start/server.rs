@@ -913,17 +913,40 @@ impl Node {
                     )
                 })?;
 
+                let tuning = sourcehub::AcpTuning {
+                    request_timeout: std::time::Duration::from_secs(config.acp.request_timeout),
+                    circuit_breaker_threshold: config.acp.circuit_breaker_threshold,
+                    circuit_breaker_reset_timeout: std::time::Duration::from_secs(
+                        config.acp.circuit_breaker_reset_timeout,
+                    ),
+                    cache_ttl: std::time::Duration::from_secs(config.acp.cache_ttl),
+                    receipt_timeout: std::time::Duration::from_secs(config.acp.receipt_timeout),
+                };
+
+                info!(
+                    request_timeout_s = config.acp.request_timeout,
+                    circuit_breaker_threshold = config.acp.circuit_breaker_threshold,
+                    circuit_breaker_reset_timeout_s = config.acp.circuit_breaker_reset_timeout,
+                    cache_ttl_s = config.acp.cache_ttl,
+                    receipt_timeout_s = config.acp.receipt_timeout,
+                    "Resolved ACP tuning (SourceHub)"
+                );
+
                 let provider = Arc::new(
                     sourcehub::CosmosProvider::new(
                         config.acp.sourcehub_address.clone(),
                         config.acp.sourcehub_comet_address.clone(),
                         signer_key_bytes,
                         &config.acp.sourcehub_chain_id,
+                        &tuning,
                     )
                     .map_err(|e| Error::InvalidConfig(format!("SourceHub provider: {}", e)))?,
                 );
 
-                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider));
+                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(
+                    provider,
+                    tuning.cache_ttl,
+                ));
                 let sh_adapter = crate::sourcehub_acp_adapter::SourceHubAcpAdapter::new_arc(
                     sh_acp.clone(),
                     zanzibar_store.clone(),
@@ -944,16 +967,39 @@ impl Node {
                     )
                 })?;
 
+                let tuning = sourcehub::AcpTuning {
+                    request_timeout: std::time::Duration::from_secs(config.acp.request_timeout),
+                    circuit_breaker_threshold: config.acp.circuit_breaker_threshold,
+                    circuit_breaker_reset_timeout: std::time::Duration::from_secs(
+                        config.acp.circuit_breaker_reset_timeout,
+                    ),
+                    cache_ttl: std::time::Duration::from_secs(config.acp.cache_ttl),
+                    receipt_timeout: std::time::Duration::from_secs(config.acp.receipt_timeout),
+                };
+
+                info!(
+                    request_timeout_s = config.acp.request_timeout,
+                    circuit_breaker_threshold = config.acp.circuit_breaker_threshold,
+                    circuit_breaker_reset_timeout_s = config.acp.circuit_breaker_reset_timeout,
+                    cache_ttl_s = config.acp.cache_ttl,
+                    receipt_timeout_s = config.acp.receipt_timeout,
+                    "Resolved ACP tuning (hub.rs)"
+                );
+
                 let provider = Arc::new(
                     sourcehub::HubRsProvider::new(
                         config.acp.hub_rs_address.clone(),
                         signer_key_bytes,
+                        &tuning,
                     )
                     .await
                     .map_err(|e| Error::InvalidConfig(format!("hub.rs provider: {}", e)))?,
                 );
 
-                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider));
+                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(
+                    provider,
+                    tuning.cache_ttl,
+                ));
                 let sh_adapter = crate::sourcehub_acp_adapter::SourceHubAcpAdapter::new_arc(
                     sh_acp.clone(),
                     zanzibar_store.clone(),
