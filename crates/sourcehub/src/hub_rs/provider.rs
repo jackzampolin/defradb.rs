@@ -2,6 +2,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::provider::{ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef};
+use crate::tuning::AcpTuning;
 use acp_light_client::AcpLightClient;
 use alloy_primitives::{Bytes, FixedBytes};
 use alloy_sol_types::SolCall;
@@ -31,15 +32,15 @@ impl HubRsProvider {
     pub async fn new(
         rpc_url: String,
         private_key: &[u8],
-        request_timeout: Duration,
-        receipt_timeout: Duration,
+        tuning: &AcpTuning,
     ) -> Result<Self, ProviderError> {
         let ws_url = derive_ws_url(&rpc_url);
         let light_client = AcpLightClient::new(&rpc_url, &ws_url, 10)
             .await
             .map_err(|e| ProviderError::Config(format!("light client: {}", e)))?;
 
-        let client = HubRsClient::new(rpc_url, request_timeout, receipt_timeout);
+        let client = HubRsClient::new(rpc_url, tuning.request_timeout, tuning.receipt_timeout)
+            .map_err(|e| ProviderError::Config(format!("HTTP client: {}", e)))?;
         let chain_id = client
             .chain_id()
             .await

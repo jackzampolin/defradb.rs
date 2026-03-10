@@ -185,23 +185,23 @@ pub struct StartArgs {
     pub pg_address: Option<String>,
 
     /// ACP circuit breaker failure threshold (default: 3)
-    #[arg(long)]
+    #[arg(long, env = "DEFRA_ACP_CIRCUIT_BREAKER_THRESHOLD")]
     pub acp_circuit_breaker_threshold: Option<u32>,
 
     /// ACP circuit breaker reset timeout in seconds (default: 30)
-    #[arg(long)]
+    #[arg(long, env = "DEFRA_ACP_CIRCUIT_BREAKER_RESET_TIMEOUT")]
     pub acp_circuit_breaker_reset_timeout: Option<u64>,
 
     /// ACP request timeout in seconds for SourceHub/hub.rs calls (default: 5)
-    #[arg(long)]
+    #[arg(long, env = "DEFRA_ACP_REQUEST_TIMEOUT")]
     pub acp_request_timeout: Option<u64>,
 
     /// ACP policy cache TTL in seconds (default: 300)
-    #[arg(long)]
+    #[arg(long, env = "DEFRA_ACP_CACHE_TTL")]
     pub acp_cache_ttl: Option<u64>,
 
     /// ACP receipt polling timeout in seconds for hub.rs transactions (default: 30)
-    #[arg(long)]
+    #[arg(long, env = "DEFRA_ACP_RECEIPT_TIMEOUT")]
     pub acp_receipt_timeout: Option<u64>,
 }
 

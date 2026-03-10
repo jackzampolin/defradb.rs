@@ -243,16 +243,14 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
                         "sourcehub_signer_key is required when SourceHub is configured".to_string(),
                     );
                 };
+                let tuning = sourcehub::AcpTuning::default();
                 let provider = Arc::new(
                     sourcehub::CosmosProvider::new(
                         grpc_addr,
                         comet_addr,
                         signer_key,
                         &chain_id,
-                        std::time::Duration::from_secs(5),
-                        3,
-                        std::time::Duration::from_secs(30),
-                        std::time::Duration::from_secs(300),
+                        &tuning,
                     )
                     .map_err(|e| format!("failed to create SourceHub provider: {}", e))?,
                 );

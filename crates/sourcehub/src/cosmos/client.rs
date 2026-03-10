@@ -16,16 +16,16 @@ impl SourceHubClient {
         grpc_address: String,
         comet_rpc_address: String,
         request_timeout: std::time::Duration,
-    ) -> Self {
+    ) -> Result<Self, ClientError> {
         let http = reqwest::Client::builder()
             .timeout(request_timeout)
             .build()
-            .unwrap_or_default();
-        Self {
+            .map_err(ClientError::Http)?;
+        Ok(Self {
             grpc_address,
             comet_rpc_address,
             http,
-        }
+        })
     }
 
     /// Query a policy by ID.

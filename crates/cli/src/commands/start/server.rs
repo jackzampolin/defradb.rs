@@ -913,16 +913,32 @@ impl Node {
                     )
                 })?;
 
+                let tuning = sourcehub::AcpTuning {
+                    request_timeout: std::time::Duration::from_secs(config.acp.request_timeout),
+                    circuit_breaker_threshold: config.acp.circuit_breaker_threshold,
+                    circuit_breaker_reset_timeout: std::time::Duration::from_secs(
+                        config.acp.circuit_breaker_reset_timeout,
+                    ),
+                    cache_ttl: std::time::Duration::from_secs(config.acp.cache_ttl),
+                    receipt_timeout: std::time::Duration::from_secs(config.acp.receipt_timeout),
+                };
+
+                info!(
+                    request_timeout_s = config.acp.request_timeout,
+                    circuit_breaker_threshold = config.acp.circuit_breaker_threshold,
+                    circuit_breaker_reset_timeout_s = config.acp.circuit_breaker_reset_timeout,
+                    cache_ttl_s = config.acp.cache_ttl,
+                    receipt_timeout_s = config.acp.receipt_timeout,
+                    "Resolved ACP tuning (SourceHub)"
+                );
+
                 let provider = Arc::new(
                     sourcehub::CosmosProvider::new(
                         config.acp.sourcehub_address.clone(),
                         config.acp.sourcehub_comet_address.clone(),
                         signer_key_bytes,
                         &config.acp.sourcehub_chain_id,
-                        std::time::Duration::from_secs(config.acp.request_timeout),
-                        config.acp.circuit_breaker_threshold,
-                        std::time::Duration::from_secs(config.acp.circuit_breaker_reset_timeout),
-                        std::time::Duration::from_secs(config.acp.cache_ttl),
+                        &tuning,
                     )
                     .map_err(|e| Error::InvalidConfig(format!("SourceHub provider: {}", e)))?,
                 );
@@ -948,12 +964,30 @@ impl Node {
                     )
                 })?;
 
+                let tuning = sourcehub::AcpTuning {
+                    request_timeout: std::time::Duration::from_secs(config.acp.request_timeout),
+                    circuit_breaker_threshold: config.acp.circuit_breaker_threshold,
+                    circuit_breaker_reset_timeout: std::time::Duration::from_secs(
+                        config.acp.circuit_breaker_reset_timeout,
+                    ),
+                    cache_ttl: std::time::Duration::from_secs(config.acp.cache_ttl),
+                    receipt_timeout: std::time::Duration::from_secs(config.acp.receipt_timeout),
+                };
+
+                info!(
+                    request_timeout_s = config.acp.request_timeout,
+                    circuit_breaker_threshold = config.acp.circuit_breaker_threshold,
+                    circuit_breaker_reset_timeout_s = config.acp.circuit_breaker_reset_timeout,
+                    cache_ttl_s = config.acp.cache_ttl,
+                    receipt_timeout_s = config.acp.receipt_timeout,
+                    "Resolved ACP tuning (hub.rs)"
+                );
+
                 let provider = Arc::new(
                     sourcehub::HubRsProvider::new(
                         config.acp.hub_rs_address.clone(),
                         signer_key_bytes,
-                        std::time::Duration::from_secs(config.acp.request_timeout),
-                        std::time::Duration::from_secs(config.acp.receipt_timeout),
+                        &tuning,
                     )
                     .await
                     .map_err(|e| Error::InvalidConfig(format!("hub.rs provider: {}", e)))?,

@@ -7,13 +7,6 @@ pub(crate) struct CachedPolicy {
     pub id: String,
     pub name: String,
     pub cached_at: Instant,
-    ttl: Duration,
-}
-
-impl CachedPolicy {
-    pub(crate) fn is_expired(&self) -> bool {
-        self.cached_at.elapsed() > self.ttl
-    }
 }
 
 /// In-memory cache for SourceHub policy metadata.
@@ -42,7 +35,7 @@ impl PolicyCache {
     pub(crate) fn get(&self, policy_id: &str) -> Option<CachedPolicy> {
         let entries = self.entries.lock().ok()?;
         let entry = entries.get(policy_id)?;
-        if entry.is_expired() {
+        if entry.cached_at.elapsed() > self.ttl {
             None
         } else {
             Some(entry.clone())
@@ -58,7 +51,6 @@ impl PolicyCache {
                     id: policy_id.to_string(),
                     name,
                     cached_at: Instant::now(),
-                    ttl: self.ttl,
                 },
             );
         }

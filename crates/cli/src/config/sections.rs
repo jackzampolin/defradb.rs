@@ -392,3 +392,45 @@ impl Default for AcpConfig {
         }
     }
 }
+
+impl AcpConfig {
+    /// Validate ACP tuning parameters.
+    pub fn validate(&self) -> Result<()> {
+        if self.circuit_breaker_threshold == 0 {
+            return Err(Error::InvalidConfig(
+                "acp_circuit_breaker_threshold must be > 0: \
+                 a zero threshold means the circuit breaker trips immediately"
+                    .into(),
+            ));
+        }
+        if self.circuit_breaker_reset_timeout == 0 {
+            return Err(Error::InvalidConfig(
+                "acp_circuit_breaker_reset_timeout must be > 0: \
+                 a zero reset timeout means the circuit breaker never recovers"
+                    .into(),
+            ));
+        }
+        if self.request_timeout == 0 {
+            return Err(Error::InvalidConfig(
+                "acp_request_timeout must be > 0: \
+                 a zero timeout disables the deadline and requests may hang indefinitely"
+                    .into(),
+            ));
+        }
+        if self.cache_ttl == 0 {
+            return Err(Error::InvalidConfig(
+                "acp_cache_ttl must be > 0: \
+                 a zero TTL means every policy lookup bypasses the cache entirely"
+                    .into(),
+            ));
+        }
+        if self.receipt_timeout == 0 {
+            return Err(Error::InvalidConfig(
+                "acp_receipt_timeout must be > 0: \
+                 a zero timeout means hub.rs transaction receipts are never awaited"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+}

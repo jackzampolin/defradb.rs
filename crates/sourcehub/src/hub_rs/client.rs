@@ -16,17 +16,17 @@ impl HubRsClient {
         url: String,
         request_timeout: std::time::Duration,
         receipt_timeout: std::time::Duration,
-    ) -> Self {
+    ) -> Result<Self, ClientError> {
         let http = reqwest::Client::builder()
             .timeout(request_timeout)
             .build()
-            .unwrap_or_default();
-        Self {
+            .map_err(ClientError::Http)?;
+        Ok(Self {
             url,
             http,
             receipt_timeout,
             next_id: AtomicU64::new(1),
-        }
+        })
     }
 
     fn next_id(&self) -> u64 {

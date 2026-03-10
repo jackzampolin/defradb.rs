@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use crate::circuit_breaker::CircuitBreaker;
 use crate::policy_cache::PolicyCache;
 use crate::provider::{ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef};
+use crate::tuning::AcpTuning;
 
 use super::client::{ClientError, SourceHubClient};
 use super::tx::TxSigner;
@@ -22,28 +23,25 @@ pub struct CosmosProvider {
 }
 
 impl CosmosProvider {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         grpc_address: String,
         comet_address: String,
         signer_key: &[u8],
         chain_id: &str,
-        request_timeout: Duration,
-        circuit_breaker_threshold: u32,
-        circuit_breaker_reset_timeout: Duration,
-        cache_ttl: Duration,
+        tuning: &AcpTuning,
     ) -> Result<Self, ProviderError> {
-        let client = SourceHubClient::new(grpc_address, comet_address, request_timeout);
+        let client = SourceHubClient::new(grpc_address, comet_address, tuning.request_timeout)
+            .map_err(|e| ProviderError::Config(format!("HTTP client: {}", e)))?;
         let signer = TxSigner::from_secp256k1_bytes(signer_key, chain_id)
             .map_err(|e| ProviderError::Config(e.to_string()))?;
         Ok(Self {
             client,
             signer,
             circuit_breaker: CircuitBreaker::new(
-                circuit_breaker_threshold,
-                circuit_breaker_reset_timeout,
+                tuning.circuit_breaker_threshold,
+                tuning.circuit_breaker_reset_timeout,
             ),
-            policy_cache: PolicyCache::new(cache_ttl),
+            policy_cache: PolicyCache::new(tuning.cache_ttl),
         })
     }
 
