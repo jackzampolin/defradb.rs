@@ -9,16 +9,7 @@ use crate::state::NODES;
 use crate::types::FfiResult;
 use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
-use super::parse_multiaddr_with_peer_id;
-
-/// Get P2P peer info (local peer ID and listening addresses).
-///
-/// Returns a JSON array of full multiaddrs with peer ID embedded:
-/// `["/ip4/127.0.0.1/tcp/9171/p2p/12D3KooW..."]`
-///
-/// # Safety
-///
-/// The caller must free the returned string with `defra_free_string`.
+/// Get local P2P peer info.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
     ffi_entry! {
@@ -39,40 +30,51 @@ pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_c
 
                 rt.block_on(async {
                     let peer_id = p2p
-                        .handle
+                        .system
+                        .ops()
                         .local_peer_id()
-                        .await
-                        .map_err(|e| format!("failed to get peer ID: {}", e))?;
+                        .await?;
                     let addresses = p2p
-                        .handle
+                        .system
+                        .ops()
                         .listen_addresses()
-                        .await
-                        .map_err(|e| format!("failed to get addresses: {}", e))?;
-                    let full_addrs: Vec<String> = addresses
-                        .into_iter()
-                        .map(|addr| format!("{}/p2p/{}", addr, peer_id))
-                        .collect();
+                        .await?;
+
+                    let full_addrs = match p2p.system.kind() {
+                        embedded::TransportKind::Libp2p => addresses
+                            .into_iter()
+                            .map(|addr| format!("{}/p2p/{}", addr, peer_id))
+                            .collect::<Vec<_>>(),
+                        #[cfg(feature = "iroh")]
+                        embedded::TransportKind::Iroh => {
+                            let mut result = vec![peer_id.clone()];
+                            for addr in addresses {
+                                if addr == format!("iroh://{}", peer_id) {
+                                    continue;
+                                }
+                                result.push(format!("{}@{}", peer_id, addr));
+                            }
+                            result.sort();
+                            result.dedup();
+                            result
+                        }
+                    };
+
                     serde_json::to_string(&full_addrs)
-                        .map_err(|e| format!("failed to serialize peer info: {}", e))
+                        .map_err(|error| format!("failed to serialize peer info: {}", error))
                 })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
-            .and_then(|r| r);
+            .and_then(|result| result);
 
         match result {
             Ok(json) => FfiResult::success(json),
-            Err(e) => FfiResult::error(e),
+            Err(error) => FfiResult::error(error),
         }
     }
 }
 
-/// Get list of connected peers with full multiaddrs.
-///
-/// Returns a JSON array of multiaddr strings (Go-compatible format).
-///
-/// # Safety
-///
-/// The caller must free the returned string with `defra_free_string`.
+/// Get connected peers.
 #[no_mangle]
 pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
     ffi_entry! {
@@ -86,62 +88,22 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
                 };
 
                 rt.block_on(async {
-                    let local_pid = p2p
-                        .handle
-                        .local_peer_id()
-                        .await
-                        .map(|p| p.to_string())
-                        .unwrap_or_else(|_| "unknown".to_string());
-                    let connected = p2p
-                        .handle
-                        .connected_peers()
-                        .await
-                        .map_err(|e| format!("failed to get connected peers: {}", e))?;
-                    tracing::debug!(
-                        node = &local_pid[local_pid.len().saturating_sub(8)..],
-                        node_ptr,
-                        connected = connected.len(),
-                        "active peers query"
-                    );
-
-                    let all_addrs = p2p
-                        .handle
-                        .resolve_peer_addresses(&connected, |pid| {
-                            p2p.get_peer_address(pid).map(|s| s.to_string())
-                        })
-                        .await
-                        .map_err(|e| format!("{}", e))?;
-
-                    tracing::debug!(
-                        connected = connected.len(),
-                        all_addrs = all_addrs.len(),
-                        "active peers resolved"
-                    );
-
-                    serde_json::to_string(&all_addrs)
-                        .map_err(|e| format!("failed to serialize peer list: {}", e))
+                    let peers = p2p.system.ops().connected_peers().await?;
+                    serde_json::to_string(&peers)
+                        .map_err(|error| format!("failed to serialize peer list: {}", error))
                 })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
-            .and_then(|r| r);
+            .and_then(|result| result);
 
         match result {
             Ok(json) => FfiResult::success(json),
-            Err(e) => FfiResult::error(e),
+            Err(error) => FfiResult::error(error),
         }
     }
 }
 
-/// Connect to a peer at the given multiaddr.
-///
-/// # Arguments
-///
-/// * `node_ptr` - Handle to the node
-/// * `addr` - Full multiaddr including peer ID (e.g., "/ip4/127.0.0.1/tcp/9171/p2p/12D3KooW...")
-///
-/// # Safety
-///
-/// `addr` must be a valid null-terminated UTF-8 string.
+/// Connect to a peer address.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_connect(
     node_ptr: usize,
@@ -166,28 +128,14 @@ pub unsafe extern "C" fn p2p_connect(
                     None => return Err("no p2p system configured".to_string()),
                 };
 
-                rt.block_on(async {
-                    let parsed = parse_multiaddr_with_peer_id(&addr_str)?;
-                    p2p.handle
-                        .dial(parsed.peer_id, vec![parsed.transport_addr])
-                        .await
-                        .map_err(|e| format!("failed to connect: {}", e))?;
-
-                    p2p.handle
-                        .poll_until_connected(parsed.peer_id, std::time::Duration::from_secs(10))
-                        .await
-                        .map_err(|e| e.to_string())?;
-
-                    p2p.set_peer_address(&parsed.peer_id.to_string(), &addr_str);
-                    Ok(())
-                })
+                rt.block_on(async { p2p.system.ops().connect_peer(&addr_str).await })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
-            .and_then(|r| r);
+            .and_then(|result| result);
 
         match result {
             Ok(()) => FfiResult::ok(),
-            Err(e) => FfiResult::error(e),
+            Err(error) => FfiResult::error(error),
         }
     }
 }

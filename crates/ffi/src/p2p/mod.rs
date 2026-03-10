@@ -23,10 +23,6 @@ pub use replicator::{p2p_add_replicator, p2p_delete_replicator, p2p_list_replica
 pub use sync::{p2p_sync_branchable_collection, p2p_sync_documents};
 pub use version_sync::p2p_sync_collection_versions;
 
-use storage::stores::Peerstore;
-
-pub(crate) use p2p::address::parse_multiaddr_with_peer_id;
-
 /// Parse a JSON array of collection names.
 ///
 /// Expects format like: `["collection1", "collection2"]`
@@ -41,23 +37,4 @@ pub(crate) fn parse_doc_ids_json(json_str: &str) -> Result<Vec<String>, String> 
     let opt: Option<Vec<String>> =
         serde_json::from_str(json_str).map_err(|e| format!("invalid doc_ids JSON: {}", e))?;
     Ok(opt.unwrap_or_default())
-}
-
-/// Persist the current P2P collection subscription list to the Peerstore.
-pub(crate) async fn persist_p2p_collections(
-    db: &crate::state::FfiDatabase,
-    collections: &[String],
-) {
-    let peerstore = Peerstore::new(db.store().clone());
-    if let Err(e) = peerstore.persist_collections(collections).await {
-        tracing::warn!(error = %e, "failed to persist P2P collections");
-    }
-}
-
-/// Persist the current P2P document subscription list to the Peerstore.
-pub(crate) async fn persist_p2p_documents(db: &crate::state::FfiDatabase, documents: &[String]) {
-    let peerstore = Peerstore::new(db.store().clone());
-    if let Err(e) = peerstore.persist_documents(documents).await {
-        tracing::warn!(error = %e, "failed to persist P2P documents");
-    }
 }
