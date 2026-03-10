@@ -17,7 +17,8 @@ pub struct IndexArgs {
 #[derive(Subcommand, Debug)]
 pub enum IndexCommand {
     /// Create a new index on a collection
-    Create(IndexCreateArgs),
+    #[command(alias = "create")]
+    New(IndexCreateArgs),
     /// List indexes (optionally filtered by collection)
     List(IndexListArgs),
     /// Delete an index by name
@@ -68,7 +69,7 @@ impl IndexArgs {
     /// Execute the index command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            IndexCommand::Create(args) => args.execute(ctx).await,
+            IndexCommand::New(args) => args.execute(ctx).await,
             IndexCommand::List(args) => args.execute(ctx).await,
             IndexCommand::Delete(args) => args.execute(ctx).await,
         }

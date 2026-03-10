@@ -17,7 +17,8 @@ pub struct TxArgs {
 #[derive(Subcommand, Debug)]
 pub enum TxCommand {
     /// Create a new transaction
-    Create(TxCreateArgs),
+    #[command(alias = "create")]
+    New(TxCreateArgs),
     /// Commit a transaction
     Commit(TxCommitArgs),
     /// Discard (rollback) a transaction
@@ -56,7 +57,7 @@ impl TxArgs {
     /// Execute the transaction command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
-            TxCommand::Create(args) => args.execute(ctx).await,
+            TxCommand::New(args) => args.execute(ctx).await,
             TxCommand::Commit(args) => args.execute(ctx).await,
             TxCommand::Discard(args) => args.execute(ctx).await,
         }
