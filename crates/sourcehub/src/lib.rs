@@ -1,3 +1,4 @@
+mod access_cache;
 mod circuit_breaker;
 pub mod cosmos;
 pub mod hub_rs;

@@ -943,7 +943,10 @@ impl Node {
                     .map_err(|e| Error::InvalidConfig(format!("SourceHub provider: {}", e)))?,
                 );
 
-                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider));
+                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(
+                    provider,
+                    tuning.cache_ttl,
+                ));
                 let sh_adapter = crate::sourcehub_acp_adapter::SourceHubAcpAdapter::new_arc(
                     sh_acp.clone(),
                     zanzibar_store.clone(),
@@ -993,7 +996,10 @@ impl Node {
                     .map_err(|e| Error::InvalidConfig(format!("hub.rs provider: {}", e)))?,
                 );
 
-                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider));
+                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(
+                    provider,
+                    tuning.cache_ttl,
+                ));
                 let sh_adapter = crate::sourcehub_acp_adapter::SourceHubAcpAdapter::new_arc(
                     sh_acp.clone(),
                     zanzibar_store.clone(),
