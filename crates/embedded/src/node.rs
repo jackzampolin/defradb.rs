@@ -365,7 +365,10 @@ where
                 )
                 .map_err(|error| anyhow!("failed to create SourceHub provider: {error}"))?,
             );
-            let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider, tuning.cache_ttl));
+            let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(
+                provider,
+                tuning.cache_ttl,
+            ));
             Ok((sh_acp.clone(), Some(sh_acp)))
         }
         DocumentAcpConfig::Local => match persistence {
