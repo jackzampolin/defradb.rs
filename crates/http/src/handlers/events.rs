@@ -29,6 +29,8 @@ pub async fn events_sse(
         .ok_or_else(|| HttpError::ServiceUnavailable("event bus is not available".to_string()))?;
 
     let filter = match params.event.as_deref() {
+        Some("acp-cache-invalidated") => vec![events::EventName::AcpCacheInvalidated],
+        Some("acp-height-advanced") => vec![events::EventName::AcpHeightAdvanced],
         Some("topic-peer-event") => vec![events::EventName::TopicPeerEvent],
         Some("update") => vec![events::EventName::Update],
         Some("merge-complete") => vec![events::EventName::MergeComplete],
@@ -65,6 +67,24 @@ pub async fn events_sse(
                         "cid": data.cid.to_string(),
                         "collection_id": data.collection_id,
                         "by_peer": data.by_peer,
+                    }
+                })
+            } else if let Some(data) = message.as_acp_height_advanced() {
+                serde_json::json!({
+                    "name": "acp-height-advanced",
+                    "data": {
+                        "height": data.height,
+                        "module_state_root": data.module_state_root,
+                    }
+                })
+            } else if let Some(data) = message.as_acp_cache_invalidated() {
+                serde_json::json!({
+                    "name": "acp-cache-invalidated",
+                    "data": {
+                        "height": data.height,
+                        "module_state_root": data.module_state_root,
+                        "previous_root": data.previous_root,
+                        "entries_invalidated": data.entries_invalidated,
                     }
                 })
             } else if message.name == events::EventName::ReplicatorCompleted {

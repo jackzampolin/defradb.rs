@@ -11,6 +11,15 @@ pub struct ProviderPolicyInfo {
     pub name: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct AcpLightClientStatus {
+    pub height: u64,
+    pub module_state_root: String,
+    pub cache_entries: usize,
+    pub last_invalidation_height: u64,
+    pub connected: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     #[error("query error: {0}")]
@@ -95,4 +104,10 @@ pub trait SourceHubProvider: MaybeSendSync {
         permission: &str,
         actor_did: &str,
     ) -> Result<bool, ProviderError>;
+
+    fn acp_light_client_status(&self) -> Result<AcpLightClientStatus, ProviderError> {
+        Err(ProviderError::Unavailable(
+            "ACP light client status is not available for this provider".into(),
+        ))
+    }
 }

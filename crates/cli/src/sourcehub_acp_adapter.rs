@@ -9,7 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use acp::{Policy, StorePolicyOptions, ZanzibarStore};
-use defra_http::router::{AcpOperations, PolicyInfo};
+use defra_http::router::{AcpLightClientStatus, AcpOperations, PolicyInfo};
 
 /// Adapter that implements AcpOperations with SourceHub for writes and local store for reads.
 pub struct SourceHubAcpAdapter {
@@ -118,5 +118,20 @@ impl AcpOperations for SourceHubAcpAdapter {
             .map_err(|e| format!("failed to get policy: {}", e))?;
 
         Ok(policy.as_ref().map(policy_to_info))
+    }
+
+    async fn get_light_client_status(&self) -> Result<AcpLightClientStatus, String> {
+        let status = self
+            .sourcehub_acp
+            .acp_light_client_status()
+            .map_err(|e| format!("failed to get ACP light client status: {}", e))?;
+
+        Ok(AcpLightClientStatus {
+            height: status.height,
+            module_state_root: status.module_state_root,
+            cache_entries: status.cache_entries,
+            last_invalidation_height: status.last_invalidation_height,
+            connected: status.connected,
+        })
     }
 }

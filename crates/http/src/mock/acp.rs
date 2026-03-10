@@ -3,13 +3,14 @@
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock};
 
-use crate::router::{AcpOperations, PolicyInfo};
+use crate::router::{AcpLightClientStatus, AcpOperations, PolicyInfo};
 
 /// Mock ACP operations for testing ACP handlers.
 #[derive(Debug)]
 pub struct MockAcpOperations {
     policies: Arc<RwLock<Vec<PolicyInfo>>>,
     next_id: Arc<RwLock<u64>>,
+    light_client_status: Arc<RwLock<Option<AcpLightClientStatus>>>,
 }
 
 impl Clone for MockAcpOperations {
@@ -17,6 +18,7 @@ impl Clone for MockAcpOperations {
         Self {
             policies: Arc::clone(&self.policies),
             next_id: Arc::clone(&self.next_id),
+            light_client_status: Arc::clone(&self.light_client_status),
         }
     }
 }
@@ -33,6 +35,7 @@ impl MockAcpOperations {
         Self {
             policies: Arc::new(RwLock::new(vec![])),
             next_id: Arc::new(RwLock::new(1)),
+            light_client_status: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -46,6 +49,12 @@ impl MockAcpOperations {
             actor: None,
             creation_time: Some("2024-01-01T00:00:00Z".to_string()),
         });
+        self
+    }
+
+    /// Create with a pre-existing ACP light client status.
+    pub fn with_light_client_status(self, status: AcpLightClientStatus) -> Self {
+        *self.light_client_status.write().unwrap() = Some(status);
         self
     }
 }
@@ -77,6 +86,14 @@ impl AcpOperations for MockAcpOperations {
         let policies = self.policies.read().unwrap();
         Ok(policies.iter().find(|p| p.id == id).cloned())
     }
+
+    async fn get_light_client_status(&self) -> Result<AcpLightClientStatus, String> {
+        self.light_client_status
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "ACP light client status is not configured in this mock".to_string())
+    }
 }
 
 /// Mock ACP operations that always fails with a configurable error.
@@ -105,6 +122,10 @@ impl AcpOperations for FailingMockAcpOperations {
     }
 
     async fn get_policy(&self, _id: &str) -> Result<Option<PolicyInfo>, String> {
+        Err(self.error.clone())
+    }
+
+    async fn get_light_client_status(&self) -> Result<AcpLightClientStatus, String> {
         Err(self.error.clone())
     }
 }

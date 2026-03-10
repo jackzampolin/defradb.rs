@@ -991,6 +991,7 @@ impl Node {
                         config.acp.hub_rs_address.clone(),
                         signer_key_bytes,
                         &tuning,
+                        Some(event_bus.clone()),
                     )
                     .await
                     .map_err(|e| Error::InvalidConfig(format!("hub.rs provider: {}", e)))?,

@@ -4,7 +4,7 @@ use acp::DocumentPermission;
 use chrono::{DateTime, FixedOffset, Utc};
 use identity::Did;
 use serde_json::{Map, Value as JsonValue};
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use crate::document::{document_to_plan_doc, DocumentMapping};
 use crate::error::{QueryError, Result};
@@ -428,13 +428,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             e
         };
 
+        let plan_execution_start = Instant::now();
         plan.init().await.map_err(&map_doc_not_found)?;
         plan.start().await.map_err(&map_doc_not_found)?;
 
         let mut results = Vec::new();
+        let mut result_doc_ids = Vec::new();
 
         while plan.next().await.map_err(&map_doc_not_found)? {
             let doc = plan.value();
+            if let Some(doc_id) = doc.doc_id() {
+                result_doc_ids.push(doc_id.to_string());
+            }
             let json = self.doc_to_json(doc, &mapping)?;
             results.push(json);
         }
@@ -443,6 +448,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         defra_core::encryption::set_encryption_config(None);
 
         plan.close().await.map_err(&map_doc_not_found)?;
+
+        let plan_execution_elapsed = plan_execution_start.elapsed();
+        for doc_id in &result_doc_ids {
+            tracing::info!(
+                doc_id = %doc_id,
+                elapsed = ?plan_execution_elapsed,
+                "Mutation plan execution completed"
+            );
+        }
 
         // Clear broadcast identity after plan execution (but keep request bearer
         // token alive — ACP registration below needs it for hub.rs auth).
@@ -474,6 +488,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
                         // Only register if not already registered (new document)
                         if !is_registered {
+                            let acp_registration_start = Instant::now();
                             acp.register_doc_object(
                                 identity_did,
                                 &policy.id,
@@ -489,6 +504,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 );
                                 QueryError::acp_registration_failed(doc_id, e)
                             })?;
+                            tracing::info!(
+                                doc_id = %doc_id,
+                                elapsed = ?acp_registration_start.elapsed(),
+                                "ACP document registration completed"
+                            );
                         }
                     }
                 }

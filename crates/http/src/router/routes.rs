@@ -139,6 +139,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
 
     // ACP routes
     let acp_routes = Router::new()
+        .route("/status", get(handlers::acp::get_status))
         .route("/policy", post(handlers::acp::add_policy))
         .route("/policy", get(handlers::acp::list_policies))
         .route("/policy/:id", get(handlers::acp::get_policy))

@@ -148,6 +148,11 @@ pub trait AcpOperations: Send + Sync {
     /// Returns `Ok(None)` if the policy doesn't exist, `Ok(Some(info))` if found,
     /// or `Err(message)` on internal errors.
     async fn get_policy(&self, id: &str) -> Result<Option<PolicyInfo>, String>;
+
+    /// Get ACP light client status when this ACP backend exposes one.
+    async fn get_light_client_status(&self) -> Result<AcpLightClientStatus, String> {
+        Err("ACP light client status is not available for this ACP backend".to_string())
+    }
 }
 
 /// Policy information for HTTP responses.
@@ -164,6 +169,16 @@ pub struct PolicyInfo {
     pub actor: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub creation_time: Option<String>,
+}
+
+/// ACP light client status for observability/debugging.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AcpLightClientStatus {
+    pub height: u64,
+    pub module_state_root: String,
+    pub cache_entries: usize,
+    pub last_invalidation_height: u64,
+    pub connected: bool,
 }
 
 /// Trait for index operations.

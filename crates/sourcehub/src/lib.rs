@@ -8,5 +8,7 @@ mod tuning;
 
 pub use cosmos::{CosmosProvider, SourceHubDocumentACP};
 pub use hub_rs::HubRsProvider;
-pub use provider::{ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef};
+pub use provider::{
+    AcpLightClientStatus, ProviderError, ProviderPolicyInfo, SourceHubProvider, SubjectRef,
+};
 pub use tuning::AcpTuning;

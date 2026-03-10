@@ -6,7 +6,7 @@
 //! (which runs inside `spawn_blocking` → `Handle::block_on`).
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
@@ -129,11 +129,17 @@ impl OrbisClient {
 
     /// Sign data via the Orbis ring (async).
     async fn sign_async(&self, data: &[u8]) -> Result<Vec<u8>, String> {
+        let connect_start = Instant::now();
         let channel = Channel::from_shared(self.endpoint.clone())
             .map_err(|e| format!("invalid Orbis endpoint: {}", e))?
             .connect()
             .await
             .map_err(|e| format!("failed to connect to Orbis: {}", e))?;
+        info!(
+            ring_id = %self.ring_id,
+            elapsed = ?connect_start.elapsed(),
+            "Orbis gRPC channel connected"
+        );
 
         let bearer_token = self.create_bearer_token()?;
 
@@ -147,6 +153,7 @@ impl OrbisClient {
                 Ok(req)
             });
 
+        let sign_rpc_start = Instant::now();
         let resp = client
             .sign(SignRequest {
                 ring_id: self.ring_id.clone(),
@@ -157,6 +164,11 @@ impl OrbisClient {
             })
             .await
             .map_err(|e| format!("Orbis Sign RPC failed: {}", e))?;
+        info!(
+            ring_id = %self.ring_id,
+            elapsed = ?sign_rpc_start.elapsed(),
+            "Orbis Sign RPC completed"
+        );
 
         let signature = resp.into_inner().signature;
         if signature.is_empty() {
