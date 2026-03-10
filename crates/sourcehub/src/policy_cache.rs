@@ -2,35 +2,35 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// How long a cached policy entry remains valid before requiring an on-chain refresh.
-const CACHE_TTL: Duration = Duration::from_secs(300);
-
 #[derive(Clone)]
 pub(crate) struct CachedPolicy {
     pub id: String,
     pub name: String,
     pub cached_at: Instant,
+    ttl: Duration,
 }
 
 impl CachedPolicy {
     pub(crate) fn is_expired(&self) -> bool {
-        self.cached_at.elapsed() > CACHE_TTL
+        self.cached_at.elapsed() > self.ttl
     }
 }
 
 /// In-memory cache for SourceHub policy metadata.
 ///
-/// Entries expire after `CACHE_TTL`. A cache miss (absent or expired entry)
-/// must always fall back to an on-chain query rather than treating the miss
-/// as "no policy exists". This ensures stale or absent cache state never
-/// silently denies or allows access incorrectly.
+/// Entries expire after the configured TTL. A cache miss (absent or expired
+/// entry) must always fall back to an on-chain query rather than treating
+/// the miss as "no policy exists". This ensures stale or absent cache state
+/// never silently denies or allows access incorrectly.
 pub(crate) struct PolicyCache {
+    ttl: Duration,
     entries: Mutex<HashMap<String, CachedPolicy>>,
 }
 
 impl PolicyCache {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(ttl: Duration) -> Self {
         Self {
+            ttl,
             entries: Mutex::new(HashMap::new()),
         }
     }
@@ -58,6 +58,7 @@ impl PolicyCache {
                     id: policy_id.to_string(),
                     name,
                     cached_at: Instant::now(),
+                    ttl: self.ttl,
                 },
             );
         }

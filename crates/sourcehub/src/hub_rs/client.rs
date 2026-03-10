@@ -2,25 +2,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use alloy_primitives::{Address, Bytes, B256};
 
-const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const RECEIPT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
-const RECEIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct HubRsClient {
     url: String,
     http: reqwest::Client,
+    receipt_timeout: std::time::Duration,
     next_id: AtomicU64,
 }
 
 impl HubRsClient {
-    pub fn new(url: String) -> Self {
+    pub fn new(
+        url: String,
+        request_timeout: std::time::Duration,
+        receipt_timeout: std::time::Duration,
+    ) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(request_timeout)
             .build()
             .unwrap_or_default();
         Self {
             url,
             http,
+            receipt_timeout,
             next_id: AtomicU64::new(1),
         }
     }
@@ -133,7 +137,7 @@ impl HubRsClient {
     pub async fn wait_for_receipt(&self, tx_hash: B256) -> Result<serde_json::Value, ClientError> {
         let start = std::time::Instant::now();
         loop {
-            if start.elapsed() > RECEIPT_TIMEOUT {
+            if start.elapsed() > self.receipt_timeout {
                 return Err(ClientError::Timeout(format!(
                     "receipt timeout for {:?}",
                     tx_hash

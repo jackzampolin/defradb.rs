@@ -22,20 +22,28 @@ pub struct CosmosProvider {
 }
 
 impl CosmosProvider {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         grpc_address: String,
         comet_address: String,
         signer_key: &[u8],
         chain_id: &str,
+        request_timeout: Duration,
+        circuit_breaker_threshold: u32,
+        circuit_breaker_reset_timeout: Duration,
+        cache_ttl: Duration,
     ) -> Result<Self, ProviderError> {
-        let client = SourceHubClient::new(grpc_address, comet_address);
+        let client = SourceHubClient::new(grpc_address, comet_address, request_timeout);
         let signer = TxSigner::from_secp256k1_bytes(signer_key, chain_id)
             .map_err(|e| ProviderError::Config(e.to_string()))?;
         Ok(Self {
             client,
             signer,
-            circuit_breaker: CircuitBreaker::new(),
-            policy_cache: PolicyCache::new(),
+            circuit_breaker: CircuitBreaker::new(
+                circuit_breaker_threshold,
+                circuit_breaker_reset_timeout,
+            ),
+            policy_cache: PolicyCache::new(cache_ttl),
         })
     }
 

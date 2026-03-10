@@ -337,6 +337,42 @@ pub struct AcpConfig {
     /// hub.rs JSON-RPC endpoint (e.g., "http://localhost:8545")
     #[serde(default)]
     pub hub_rs_address: String,
+
+    /// Circuit breaker failure threshold before tripping. Default: 3.
+    #[serde(default = "default_acp_cb_threshold")]
+    pub circuit_breaker_threshold: u32,
+
+    /// Circuit breaker reset timeout in seconds. Default: 30.
+    #[serde(default = "default_acp_cb_reset_timeout")]
+    pub circuit_breaker_reset_timeout: u64,
+
+    /// Request timeout in seconds for SourceHub/hub.rs network calls. Default: 5.
+    #[serde(default = "default_acp_request_timeout")]
+    pub request_timeout: u64,
+
+    /// Policy cache TTL in seconds. Default: 300.
+    #[serde(default = "default_acp_cache_ttl")]
+    pub cache_ttl: u64,
+
+    /// Receipt polling timeout in seconds for hub.rs transactions. Default: 30.
+    #[serde(default = "default_acp_receipt_timeout")]
+    pub receipt_timeout: u64,
+}
+
+fn default_acp_cb_threshold() -> u32 {
+    3
+}
+fn default_acp_cb_reset_timeout() -> u64 {
+    30
+}
+fn default_acp_request_timeout() -> u64 {
+    5
+}
+fn default_acp_cache_ttl() -> u64 {
+    300
+}
+fn default_acp_receipt_timeout() -> u64 {
+    30
 }
 
 impl Default for AcpConfig {
@@ -348,6 +384,11 @@ impl Default for AcpConfig {
             sourcehub_comet_address: String::new(),
             sourcehub_chain_id: String::new(),
             hub_rs_address: String::new(),
+            circuit_breaker_threshold: default_acp_cb_threshold(),
+            circuit_breaker_reset_timeout: default_acp_cb_reset_timeout(),
+            request_timeout: default_acp_request_timeout(),
+            cache_ttl: default_acp_cache_ttl(),
+            receipt_timeout: default_acp_receipt_timeout(),
         }
     }
 }

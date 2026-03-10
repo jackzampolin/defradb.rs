@@ -28,13 +28,18 @@ fn derive_ws_url(rpc_url: &str) -> String {
 }
 
 impl HubRsProvider {
-    pub async fn new(rpc_url: String, private_key: &[u8]) -> Result<Self, ProviderError> {
+    pub async fn new(
+        rpc_url: String,
+        private_key: &[u8],
+        request_timeout: Duration,
+        receipt_timeout: Duration,
+    ) -> Result<Self, ProviderError> {
         let ws_url = derive_ws_url(&rpc_url);
         let light_client = AcpLightClient::new(&rpc_url, &ws_url, 10)
             .await
             .map_err(|e| ProviderError::Config(format!("light client: {}", e)))?;
 
-        let client = HubRsClient::new(rpc_url);
+        let client = HubRsClient::new(rpc_url, request_timeout, receipt_timeout);
         let chain_id = client
             .chain_id()
             .await

@@ -919,6 +919,10 @@ impl Node {
                         config.acp.sourcehub_comet_address.clone(),
                         signer_key_bytes,
                         &config.acp.sourcehub_chain_id,
+                        std::time::Duration::from_secs(config.acp.request_timeout),
+                        config.acp.circuit_breaker_threshold,
+                        std::time::Duration::from_secs(config.acp.circuit_breaker_reset_timeout),
+                        std::time::Duration::from_secs(config.acp.cache_ttl),
                     )
                     .map_err(|e| Error::InvalidConfig(format!("SourceHub provider: {}", e)))?,
                 );
@@ -948,6 +952,8 @@ impl Node {
                     sourcehub::HubRsProvider::new(
                         config.acp.hub_rs_address.clone(),
                         signer_key_bytes,
+                        std::time::Duration::from_secs(config.acp.request_timeout),
+                        std::time::Duration::from_secs(config.acp.receipt_timeout),
                     )
                     .await
                     .map_err(|e| Error::InvalidConfig(format!("hub.rs provider: {}", e)))?,

@@ -204,6 +204,23 @@ impl Config {
             self.acp.hub_rs_address = addr.clone();
         }
 
+        // ACP tuning
+        if let Some(threshold) = cli.acp_circuit_breaker_threshold {
+            self.acp.circuit_breaker_threshold = threshold;
+        }
+        if let Some(timeout) = cli.acp_circuit_breaker_reset_timeout {
+            self.acp.circuit_breaker_reset_timeout = timeout;
+        }
+        if let Some(timeout) = cli.acp_request_timeout {
+            self.acp.request_timeout = timeout;
+        }
+        if let Some(ttl) = cli.acp_cache_ttl {
+            self.acp.cache_ttl = ttl;
+        }
+        if let Some(timeout) = cli.acp_receipt_timeout {
+            self.acp.receipt_timeout = timeout;
+        }
+
         Ok(())
     }
 

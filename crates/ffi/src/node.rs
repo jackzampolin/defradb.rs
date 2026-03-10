@@ -244,8 +244,17 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
                     );
                 };
                 let provider = Arc::new(
-                    sourcehub::CosmosProvider::new(grpc_addr, comet_addr, signer_key, &chain_id)
-                        .map_err(|e| format!("failed to create SourceHub provider: {}", e))?,
+                    sourcehub::CosmosProvider::new(
+                        grpc_addr,
+                        comet_addr,
+                        signer_key,
+                        &chain_id,
+                        std::time::Duration::from_secs(5),
+                        3,
+                        std::time::Duration::from_secs(30),
+                        std::time::Duration::from_secs(300),
+                    )
+                    .map_err(|e| format!("failed to create SourceHub provider: {}", e))?,
                 );
                 tracing::debug!(validator = %provider.authorized_account(), "SourceHub ACP configured");
                 let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider));

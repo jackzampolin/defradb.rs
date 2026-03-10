@@ -1,7 +1,3 @@
-/// Aggressive timeout for SourceHub network calls to ensure fail-closed behaviour
-/// when SourceHub is slow or unreachable.
-const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// Client for SourceHub ACP gRPC/REST queries and CometBFT tx broadcast.
 ///
 /// Uses the Cosmos LCD REST API for queries (avoids proto compilation)
@@ -16,9 +12,13 @@ pub(crate) struct SourceHubClient {
 }
 
 impl SourceHubClient {
-    pub(crate) fn new(grpc_address: String, comet_rpc_address: String) -> Self {
+    pub(crate) fn new(
+        grpc_address: String,
+        comet_rpc_address: String,
+        request_timeout: std::time::Duration,
+    ) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(request_timeout)
             .build()
             .unwrap_or_default();
         Self {
