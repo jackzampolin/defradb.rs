@@ -146,12 +146,16 @@ pub enum SigningConfig {
     Enabled {
         key: Option<SigningKey>,
     },
+    RegisteredIdentity {
+        did: String,
+    },
 }
 
 /// Explicit node signing key material.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SigningKey {
     Secp256k1(Vec<u8>),
+    Secp256r1(Vec<u8>),
     Ed25519(Vec<u8>),
 }
 

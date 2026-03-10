@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Remote signing delegate (e.g. Orbis ring threshold signing).
+/// Remote signing delegate (e.g. Orbis, Secure Enclave host callbacks).
 ///
 /// Implementations call an external service to produce signatures.
 /// `sign_sync` must be callable from synchronous contexts (the block builder
@@ -39,6 +39,29 @@ impl Clone for SigningConfig {
             public_key_bytes: self.public_key_bytes.clone(),
             public_key_hex: self.public_key_hex.clone(),
             remote_signer: self.remote_signer.clone(),
+        }
+    }
+}
+
+impl SigningConfig {
+    /// Returns true if this identity has locally exportable private key bytes.
+    pub fn has_local_private_key(&self) -> bool {
+        !self.private_key_bytes.is_empty()
+    }
+
+    /// Returns true if this identity can sign by delegating to a remote signer.
+    pub fn has_remote_signer(&self) -> bool {
+        self.remote_signer.is_some()
+    }
+
+    /// Map the identity key type to a block signature type.
+    pub fn signature_type(&self) -> Result<crate::block::SignatureType, String> {
+        match self.key_type.as_str() {
+            "ed25519" => Ok(crate::block::SignatureType::EdDSA),
+            "secp256k1" => Ok(crate::block::SignatureType::ES256K),
+            "secp256r1" => Ok(crate::block::SignatureType::ES256),
+            "bls" => Ok(crate::block::SignatureType::BLS),
+            other => Err(format!("unsupported signing key type: {}", other)),
         }
     }
 }

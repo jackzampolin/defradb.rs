@@ -180,6 +180,25 @@ fn encode_delete_relationship_cmd(
     .unwrap_or_default()
 }
 
+fn resolve_registered_or_passthrough_bearer_token(
+    did: &str,
+) -> Result<Option<String>, ProviderError> {
+    if let Some(signing_config) = defra_core::signing::get_identity(did) {
+        if signing_config.has_local_private_key() && signing_config.key_type == "secp256k1" {
+            let key = SigningKey::from_slice(&signing_config.private_key_bytes)
+                .map_err(|e| ProviderError::Config(format!("invalid signing key: {}", e)))?;
+
+            return bearer::create_bearer_token(&key, did, 300)
+                .map(Some)
+                .map_err(|e| {
+                    ProviderError::Config(format!("bearer token creation failed: {}", e))
+                });
+        }
+    }
+
+    Ok(defra_core::signing::get_request_bearer_token(did))
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl SourceHubProvider for HubRsProvider {
@@ -194,20 +213,7 @@ impl SourceHubProvider for HubRsProvider {
             });
         }
 
-        // Try locally stored signing config (e.g. from create_identity)
-        if let Some(signing_config) = defra_core::signing::get_identity(did) {
-            let key = SigningKey::from_slice(&signing_config.private_key_bytes)
-                .map_err(|e| ProviderError::Config(format!("invalid signing key: {}", e)))?;
-
-            return bearer::create_bearer_token(&key, did, 300).map_err(|e| {
-                ProviderError::Config(format!("bearer token creation failed: {}", e))
-            });
-        }
-
-        // Fall back to the original JWT from the HTTP request.
-        // Go DefraDB's BearerToken() pattern: the user's JWT is already signed
-        // by their private key, so we can forward it to hub.rs as-is.
-        if let Some(token) = defra_core::signing::get_request_bearer_token(did) {
+        if let Some(token) = resolve_registered_or_passthrough_bearer_token(did)? {
             return Ok(token);
         }
 
@@ -448,5 +454,74 @@ impl SourceHubProvider for HubRsProvider {
         }
 
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crypto::PrivateKey;
+    use identity::Identity;
+
+    fn store_remote_secp256r1_identity(did: &str) {
+        let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
+        let public_key = private_key.public_key();
+        defra_core::signing::store_identity(
+            did,
+            defra_core::signing::SigningConfig {
+                key_type: "secp256r1".to_string(),
+                private_key_bytes: Vec::new(),
+                public_key_bytes: public_key.raw(),
+                public_key_hex: hex::encode(public_key.raw()),
+                remote_signer: None,
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_registered_or_passthrough_bearer_token_uses_request_token_for_remote_identity() {
+        let did = "did:key:zRemoteHubRsToken";
+        let token = "device.jwt.token".to_string();
+        defra_core::signing::clear_identity_store();
+        defra_core::signing::clear_request_bearer_token(did);
+
+        store_remote_secp256r1_identity(did);
+        defra_core::signing::set_request_bearer_token(did, token.clone());
+
+        let resolved = resolve_registered_or_passthrough_bearer_token(did)
+            .expect("resolution should succeed")
+            .expect("token should resolve");
+        assert_eq!(resolved, token);
+
+        defra_core::signing::clear_request_bearer_token(did);
+        defra_core::signing::clear_identity_store();
+    }
+
+    #[test]
+    fn resolve_registered_or_passthrough_bearer_token_builds_local_secp256k1_token() {
+        let private_key = crypto::generate_secp256k1().expect("should generate secp256k1 key");
+        let raw_identity =
+            identity::RawIdentity::from_secp256k1(private_key).expect("identity should build");
+        let did = raw_identity.did().expect("did should derive").to_string();
+
+        defra_core::signing::clear_identity_store();
+        defra_core::signing::store_identity(
+            &did,
+            defra_core::signing::SigningConfig {
+                key_type: "secp256k1".to_string(),
+                private_key_bytes: raw_identity.private_key_bytes().to_vec(),
+                public_key_bytes: raw_identity.public_key_bytes().to_vec(),
+                public_key_hex: hex::encode(raw_identity.public_key_bytes()),
+                remote_signer: None,
+            },
+        );
+
+        let resolved = resolve_registered_or_passthrough_bearer_token(&did)
+            .expect("resolution should succeed")
+            .expect("token should resolve");
+        assert_eq!(resolved.matches('.').count(), 2);
+
+        defra_core::signing::clear_request_bearer_token(&did);
+        defra_core::signing::clear_identity_store();
     }
 }

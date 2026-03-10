@@ -141,6 +141,7 @@ fn resolve_embedded_config(
 
             Some(match key_type.as_str() {
                 "secp256k1" => embedded::SigningKey::Secp256k1(key_bytes),
+                "secp256r1" => embedded::SigningKey::Secp256r1(key_bytes),
                 "ed25519" => embedded::SigningKey::Ed25519(key_bytes),
                 other => return Err(format!("unsupported signing key type: {}", other)),
             })

@@ -86,6 +86,47 @@ fn subject_to_json(subject: &SubjectRef) -> serde_json::Value {
     }
 }
 
+fn resolve_cosmos_bearer_token(
+    did: &str,
+    authorized_account: &str,
+) -> Result<Option<String>, ProviderError> {
+    let Some(signing_config) = defra_core::signing::get_identity(did) else {
+        return Ok(defra_core::signing::get_request_bearer_token(did));
+    };
+
+    if !signing_config.has_local_private_key() {
+        return Ok(defra_core::signing::get_request_bearer_token(did));
+    }
+
+    let key_type: crypto::KeyType = match signing_config.key_type.as_str() {
+        "ed25519" => crypto::KeyType::Ed25519,
+        "secp256k1" => crypto::KeyType::Secp256k1,
+        "secp256r1" => crypto::KeyType::Secp256r1,
+        other => {
+            return Err(ProviderError::Config(format!(
+                "unsupported key type: {}",
+                other
+            )))
+        }
+    };
+
+    let raw_identity =
+        identity::RawIdentity::from_bytes(key_type, &signing_config.private_key_bytes)
+            .map_err(|e| ProviderError::Config(format!("failed to create identity: {}", e)))?;
+
+    let token_bytes = identity::new_token(
+        &raw_identity,
+        Duration::from_secs(300),
+        None,
+        Some(authorized_account.to_string()),
+    )
+    .map_err(|e| ProviderError::Config(format!("failed to create bearer token: {}", e)))?;
+
+    String::from_utf8(token_bytes)
+        .map(Some)
+        .map_err(|e| ProviderError::Config(format!("bearer token is not valid UTF-8: {}", e)))
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl SourceHubProvider for CosmosProvider {
@@ -94,52 +135,18 @@ impl SourceHubProvider for CosmosProvider {
     }
 
     async fn create_bearer_token(&self, did: &str) -> Result<String, ProviderError> {
-        let signing_config = match defra_core::signing::get_identity(did) {
-            Some(config) => config,
-            None => {
-                // Fall back to the original JWT from the HTTP request.
-                // Go DefraDB's BearerToken() pattern: the user's JWT is already signed
-                // by their private key, so we can forward it to SourceHub as-is.
-                if let Some(token) = defra_core::signing::get_request_bearer_token(did) {
-                    return Ok(token);
-                }
-                tracing::warn!(
-                    did,
-                    "SourceHub bearer token creation failed: no signing config for DID \
-                     and no request token. The identity may have been unregistered."
-                );
-                return Err(ProviderError::Config(format!(
-                    "no signing config found for DID: {}",
-                    did
-                )));
-            }
-        };
+        if let Some(token) = resolve_cosmos_bearer_token(did, &self.signer.address())? {
+            return Ok(token);
+        }
 
-        let key_type: crypto::KeyType = match signing_config.key_type.as_str() {
-            "ed25519" => crypto::KeyType::Ed25519,
-            "secp256k1" => crypto::KeyType::Secp256k1,
-            other => {
-                return Err(ProviderError::Config(format!(
-                    "unsupported key type: {}",
-                    other
-                )))
-            }
-        };
-
-        let raw_identity =
-            identity::RawIdentity::from_bytes(key_type, &signing_config.private_key_bytes)
-                .map_err(|e| ProviderError::Config(format!("failed to create identity: {}", e)))?;
-
-        let token_bytes = identity::new_token(
-            &raw_identity,
-            Duration::from_secs(300),
-            None,
-            Some(self.signer.address()),
-        )
-        .map_err(|e| ProviderError::Config(format!("failed to create bearer token: {}", e)))?;
-
-        String::from_utf8(token_bytes)
-            .map_err(|e| ProviderError::Config(format!("bearer token is not valid UTF-8: {}", e)))
+        tracing::warn!(
+            did,
+            "SourceHub bearer token creation failed: no signing config and no request token"
+        );
+        Err(ProviderError::Config(format!(
+            "no signing config found for DID: {}",
+            did
+        )))
     }
 
     fn self_did(&self) -> Option<String> {
@@ -310,5 +317,76 @@ impl SourceHubProvider for CosmosProvider {
                 .verify_access(policy_id, resource, object_id, permission, actor_did)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crypto::PrivateKey;
+    use identity::Identity;
+
+    fn store_remote_secp256r1_identity(did: &str) {
+        let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
+        let public_key = private_key.public_key();
+        defra_core::signing::store_identity(
+            did,
+            defra_core::signing::SigningConfig {
+                key_type: "secp256r1".to_string(),
+                private_key_bytes: Vec::new(),
+                public_key_bytes: public_key.raw(),
+                public_key_hex: hex::encode(public_key.raw()),
+                remote_signer: None,
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_cosmos_bearer_token_uses_request_token_for_remote_identity() {
+        let did = "did:key:zRemoteCosmosToken";
+        let token = "delegated.jwt.token".to_string();
+        defra_core::signing::clear_identity_store();
+        defra_core::signing::clear_request_bearer_token(did);
+
+        store_remote_secp256r1_identity(did);
+        defra_core::signing::set_request_bearer_token(did, token.clone());
+
+        let resolved = resolve_cosmos_bearer_token(did, "cosmos1delegated")
+            .expect("resolution should succeed")
+            .expect("token should resolve");
+        assert_eq!(resolved, token);
+
+        defra_core::signing::clear_request_bearer_token(did);
+        defra_core::signing::clear_identity_store();
+    }
+
+    #[test]
+    fn resolve_cosmos_bearer_token_builds_local_secp256r1_token() {
+        let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
+        let raw_identity =
+            identity::RawIdentity::from_secp256r1(private_key).expect("identity should build");
+        let did = raw_identity.did().expect("did should derive").to_string();
+
+        defra_core::signing::clear_identity_store();
+        defra_core::signing::store_identity(
+            &did,
+            defra_core::signing::SigningConfig {
+                key_type: "secp256r1".to_string(),
+                private_key_bytes: raw_identity.private_key_bytes().to_vec(),
+                public_key_bytes: raw_identity.public_key_bytes().to_vec(),
+                public_key_hex: hex::encode(raw_identity.public_key_bytes()),
+                remote_signer: None,
+            },
+        );
+
+        let token = resolve_cosmos_bearer_token(&did, "cosmos1device")
+            .expect("resolution should succeed")
+            .expect("token should resolve");
+        let parsed = identity::from_token(token.as_bytes()).expect("token should parse");
+        assert_eq!(parsed.did().expect("did should parse").as_str(), did);
+        assert_eq!(parsed.authorized_account(), Some("cosmos1device"));
+
+        defra_core::signing::clear_request_bearer_token(&did);
+        defra_core::signing::clear_identity_store();
     }
 }
