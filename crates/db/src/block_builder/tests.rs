@@ -1,6 +1,7 @@
 use super::*;
 use blockstore::{Blockstore, DefraBlockstore};
 use crypto::keys::PublicKey;
+use defra_core::SignatureType;
 use std::sync::Arc;
 use storage::backends::MemoryStore;
 

@@ -195,7 +195,7 @@ pub extern "C" fn defra_mobile_open_node(config_json: *const c_char) -> NewNodeR
             .signing
             .as_ref()
             .and_then(|signing| signing.enable)
-            .unwrap_or_else(|| !signing_key_bytes.is_empty());
+            .unwrap_or(!signing_key_bytes.is_empty());
 
         let (sourcehub_grpc_address, sourcehub_comet_rpc_address, sourcehub_chain_id, sourcehub_signer_key) =
             if let Some(sourcehub) = config.sourcehub.as_ref() {
