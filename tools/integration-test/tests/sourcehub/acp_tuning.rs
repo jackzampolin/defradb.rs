@@ -230,3 +230,121 @@ async fn rust_short_request_timeout_fail_closed() {
         elapsed
     );
 }
+
+/// Access decision cache: repeated queries by the same identity for the
+/// same documents are served from cache. Grant/revoke eagerly invalidates
+/// the cache so permission changes take effect immediately.
+#[tokio::test]
+async fn rust_access_cache_grant_revoke_invalidation() {
+    let binary = RustNode::from_workspace().binary_path().to_path_buf();
+    RustNode::build().expect("build rust binary");
+    let alice = generate_identity(&binary).expect("Alice identity");
+    let bob = generate_identity(&binary).expect("Bob identity");
+
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .skip_build()
+        .with_source_hub()
+        .with_identity(&alice.private_key_hex)
+        .with_acp_cache_ttl(300)
+        .build()
+        .await
+        .expect("build cluster");
+
+    let node = cluster.client(0);
+
+    // Create policy + doc
+    let policy_result = node
+        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
+        .expect("add policy");
+    let policy_id = policy_result["PolicyID"]
+        .as_str()
+        .or_else(|| policy_result["policyID"].as_str())
+        .expect("PolicyID");
+
+    let schema = users_schema_with_policy(policy_id);
+    node.schema_add_with_identity(&schema, &alice.private_key_hex)
+        .expect("add schema");
+
+    let data = node
+        .query_with_identity(
+            r#"mutation { add_User(input: {name: "Alice", age: 25}) { _docID } }"#,
+            &alice.private_key_hex,
+        )
+        .expect("create doc");
+    let doc_id = data["add_User"][0]["_docID"].as_str().expect("_docID");
+
+    // Bob cannot read (no grant yet)
+    let bob_denied = node
+        .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
+        .expect("Bob read denied");
+    assert_eq!(
+        bob_denied["User"].as_array().unwrap().len(),
+        0,
+        "Bob should see 0 docs before grant"
+    );
+
+    // Rapid repeat queries — these should hit the access cache (denial cached)
+    for i in 0..5 {
+        let result = node
+            .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
+            .expect(&format!("Bob cached denial iteration {}", i));
+        assert_eq!(
+            result["User"].as_array().unwrap().len(),
+            0,
+            "Bob should still be denied on cached iteration {}",
+            i
+        );
+    }
+
+    // Grant Bob reader — this must invalidate the cached denial
+    node.acp_relationship_add("User", doc_id, "reader", &bob.did, &alice.private_key_hex)
+        .expect("grant Bob reader");
+
+    // Bob can now read — cache was invalidated by the grant
+    let bob_allowed = node
+        .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
+        .expect("Bob read after grant");
+    assert_eq!(
+        bob_allowed["User"].as_array().unwrap().len(),
+        1,
+        "Bob should see 1 doc after grant (cache invalidated)"
+    );
+
+    // Rapid repeat queries — grant result is now cached
+    for i in 0..5 {
+        let result = node
+            .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
+            .expect(&format!("Bob cached grant iteration {}", i));
+        assert_eq!(
+            result["User"].as_array().unwrap().len(),
+            1,
+            "Bob should see 1 doc on cached grant iteration {}",
+            i
+        );
+    }
+
+    // Revoke Bob — must invalidate the cached grant
+    node.acp_relationship_delete("User", doc_id, "reader", &bob.did, &alice.private_key_hex)
+        .expect("revoke Bob");
+
+    // Bob denied again — cache was invalidated by the revoke
+    let bob_revoked = node
+        .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
+        .expect("Bob read after revoke");
+    assert_eq!(
+        bob_revoked["User"].as_array().unwrap().len(),
+        0,
+        "Bob should see 0 docs after revoke (cache invalidated)"
+    );
+
+    // Alice always has access throughout (owner)
+    let alice_read = node
+        .query_with_identity("query { User { _docID name } }", &alice.private_key_hex)
+        .expect("Alice final read");
+    assert_eq!(
+        alice_read["User"].as_array().unwrap().len(),
+        1,
+        "Alice (owner) should always see 1 doc"
+    );
+}
