@@ -5,24 +5,31 @@
 //! between Cosmos SDK and EVM backends.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use identity::Did;
 
 use acp::{DocumentACP, DocumentPermission, Identity, Result};
 
+use crate::access_cache::AccessCache;
 use crate::provider::{ProviderError, SourceHubProvider, SubjectRef};
 
 /// DocumentACP backed by SourceHub's on-chain x/acp module.
 ///
 /// Delegates write and read operations to a `SourceHubProvider` implementation.
+/// Caches `verify_access` results to avoid redundant network roundtrips.
 pub struct SourceHubDocumentACP {
     provider: Arc<dyn SourceHubProvider>,
+    access_cache: AccessCache,
 }
 
 impl SourceHubDocumentACP {
-    pub fn new(provider: Arc<dyn SourceHubProvider>) -> Self {
-        Self { provider }
+    pub fn new(provider: Arc<dyn SourceHubProvider>, cache_ttl: Duration) -> Self {
+        Self {
+            provider,
+            access_cache: AccessCache::new(cache_ttl),
+        }
     }
 
     /// Create a policy on SourceHub. Returns the policy ID.
@@ -106,14 +113,22 @@ impl DocumentACP for SourceHubDocumentACP {
 
         let actor_did = match identity.did() {
             Some(did) => did.as_str().to_string(),
-            None => {
-                // Anonymous user: use a synthetic DID to check if all_actors grants access.
-                // If all_actors was set, SourceHub returns true for any valid DID.
-                "did:key:anonymous".to_string()
-            }
+            None => "did:key:anonymous".to_string(),
         };
 
-        self.provider
+        // Check access cache before hitting the network
+        if let Some(cached) = self.access_cache.get(
+            &actor_did,
+            policy_id,
+            resource_name,
+            doc_id,
+            permission.as_str(),
+        ) {
+            return Ok(cached);
+        }
+
+        let result = self
+            .provider
             .verify_access(
                 policy_id,
                 resource_name,
@@ -122,7 +137,18 @@ impl DocumentACP for SourceHubDocumentACP {
                 &actor_did,
             )
             .await
-            .map_err(provider_err)
+            .map_err(provider_err)?;
+
+        self.access_cache.set(
+            &actor_did,
+            policy_id,
+            resource_name,
+            doc_id,
+            permission.as_str(),
+            result,
+        );
+
+        Ok(result)
     }
 
     async fn add_actor_relationship(
@@ -137,7 +163,8 @@ impl DocumentACP for SourceHubDocumentACP {
     ) -> Result<bool> {
         let bearer_token = self.create_bearer_token(requestor.as_str()).await?;
         let subject = did_to_subject(target);
-        self.provider
+        let result = self
+            .provider
             .set_relationship(
                 &bearer_token,
                 policy_id,
@@ -147,7 +174,12 @@ impl DocumentACP for SourceHubDocumentACP {
                 &subject,
             )
             .await
-            .map_err(provider_err)
+            .map_err(provider_err)?;
+
+        self.access_cache
+            .invalidate_object(policy_id, resource_name, doc_id);
+
+        Ok(result)
     }
 
     async fn delete_actor_relationship(
@@ -162,7 +194,8 @@ impl DocumentACP for SourceHubDocumentACP {
     ) -> Result<bool> {
         let bearer_token = self.create_bearer_token(requestor.as_str()).await?;
         let subject = did_to_subject(target);
-        self.provider
+        let result = self
+            .provider
             .delete_relationship(
                 &bearer_token,
                 policy_id,
@@ -172,7 +205,12 @@ impl DocumentACP for SourceHubDocumentACP {
                 &subject,
             )
             .await
-            .map_err(provider_err)
+            .map_err(provider_err)?;
+
+        self.access_cache
+            .invalidate_object(policy_id, resource_name, doc_id);
+
+        Ok(result)
     }
 
     async fn unregister_doc_object(
@@ -200,6 +238,11 @@ impl DocumentACP for SourceHubDocumentACP {
         self.provider
             .archive_object(&bearer_token, policy_id, resource_name, doc_id)
             .await
-            .map_err(provider_err)
+            .map_err(provider_err)?;
+
+        self.access_cache
+            .invalidate_object(policy_id, resource_name, doc_id);
+
+        Ok(())
     }
 }

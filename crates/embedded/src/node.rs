@@ -354,16 +354,18 @@ where
 {
     match config {
         DocumentAcpConfig::SourceHub(sourcehub_config) => {
+            let tuning = sourcehub::AcpTuning::default();
             let provider = Arc::new(
                 sourcehub::CosmosProvider::new(
                     sourcehub_config.grpc_address.clone(),
                     sourcehub_config.comet_rpc_address.clone(),
                     &sourcehub_config.signer_key,
                     &sourcehub_config.chain_id,
+                    &tuning,
                 )
                 .map_err(|error| anyhow!("failed to create SourceHub provider: {error}"))?,
             );
-            let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider));
+            let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(provider, tuning.cache_ttl));
             Ok((sh_acp.clone(), Some(sh_acp)))
         }
         DocumentAcpConfig::Local => match persistence {

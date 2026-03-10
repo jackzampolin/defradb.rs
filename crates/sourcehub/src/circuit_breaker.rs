@@ -2,12 +2,6 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Number of consecutive failures before the circuit trips.
-const FAILURE_THRESHOLD: u32 = 3;
-
-/// How long the circuit stays open (denying all requests) before allowing a probe.
-const RESET_TIMEOUT: Duration = Duration::from_secs(30);
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum State {
     Closed,
@@ -22,8 +16,8 @@ enum State {
 /// - Open: SourceHub unreachable; all requests fail-closed immediately.
 /// - HalfOpen: cooldown elapsed; one probe request is allowed through.
 ///
-/// The breaker trips to Open after `FAILURE_THRESHOLD` consecutive failures.
-/// After `RESET_TIMEOUT` it moves to HalfOpen and allows one probe. A
+/// The breaker trips to Open after `failure_threshold` consecutive failures.
+/// After `reset_timeout` it moves to HalfOpen and allows one probe. A
 /// successful probe closes the circuit; a failed probe reopens it.
 #[derive(Clone)]
 pub(crate) struct CircuitBreaker {
@@ -31,6 +25,8 @@ pub(crate) struct CircuitBreaker {
 }
 
 struct CircuitBreakerInner {
+    failure_threshold: u32,
+    reset_timeout: Duration,
     /// Number of consecutive failures (reset to 0 on any success).
     consecutive_failures: AtomicU32,
     /// Unix timestamp (seconds) when the circuit was tripped. 0 = not tripped.
@@ -40,9 +36,11 @@ struct CircuitBreakerInner {
 }
 
 impl CircuitBreaker {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(failure_threshold: u32, reset_timeout: Duration) -> Self {
         Self {
             inner: Arc::new(CircuitBreakerInner {
+                failure_threshold,
+                reset_timeout,
                 consecutive_failures: AtomicU32::new(0),
                 tripped_at_secs: AtomicU64::new(0),
                 state: AtomicU32::new(0),
@@ -54,11 +52,9 @@ impl CircuitBreaker {
         match self.inner.state.load(Ordering::Acquire) {
             0 => State::Closed,
             1 => {
-                // Check if reset timeout has elapsed.
                 let tripped_at = self.inner.tripped_at_secs.load(Ordering::Acquire);
                 let now = now_secs();
-                if now.saturating_sub(tripped_at) >= RESET_TIMEOUT.as_secs() {
-                    // Transition to HalfOpen to allow a probe.
+                if now.saturating_sub(tripped_at) >= self.inner.reset_timeout.as_secs() {
                     let _ = self.inner.state.compare_exchange(
                         1,
                         2,
@@ -94,7 +90,7 @@ impl CircuitBreaker {
         self.inner.state.store(0, Ordering::Release);
     }
 
-    /// Record a failed call. Trips the circuit after `FAILURE_THRESHOLD` failures.
+    /// Record a failed call. Trips the circuit after the configured threshold.
     pub(crate) fn record_failure(&self) {
         let failures = self
             .inner
@@ -102,7 +98,7 @@ impl CircuitBreaker {
             .fetch_add(1, Ordering::AcqRel)
             + 1;
 
-        if failures >= FAILURE_THRESHOLD {
+        if failures >= self.inner.failure_threshold {
             let was_closed = self
                 .inner
                 .state
@@ -140,12 +136,15 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
 
+    const TEST_THRESHOLD: u32 = 3;
+    const TEST_RESET: Duration = Duration::from_secs(30);
+
     #[test]
     fn trips_after_threshold_failures() {
-        let cb = CircuitBreaker::new();
+        let cb = CircuitBreaker::new(TEST_THRESHOLD, TEST_RESET);
         assert!(cb.allow_request());
 
-        for _ in 0..FAILURE_THRESHOLD {
+        for _ in 0..TEST_THRESHOLD {
             cb.record_failure();
         }
 
@@ -154,8 +153,8 @@ mod tests {
 
     #[test]
     fn resets_on_success() {
-        let cb = CircuitBreaker::new();
-        for _ in 0..FAILURE_THRESHOLD {
+        let cb = CircuitBreaker::new(TEST_THRESHOLD, TEST_RESET);
+        for _ in 0..TEST_THRESHOLD {
             cb.record_failure();
         }
         assert!(!cb.allow_request());
@@ -166,8 +165,8 @@ mod tests {
 
     #[test]
     fn does_not_trip_below_threshold() {
-        let cb = CircuitBreaker::new();
-        for _ in 0..FAILURE_THRESHOLD - 1 {
+        let cb = CircuitBreaker::new(TEST_THRESHOLD, TEST_RESET);
+        for _ in 0..TEST_THRESHOLD - 1 {
             cb.record_failure();
         }
         assert!(cb.allow_request());

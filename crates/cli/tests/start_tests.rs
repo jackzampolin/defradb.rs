@@ -44,6 +44,11 @@ fn default_start_args() -> StartArgs {
         query_timeout: None,
         p2p_transport: None,
         pg_address: None,
+        acp_cache_ttl: None,
+        acp_circuit_breaker_threshold: None,
+        acp_circuit_breaker_reset_timeout: None,
+        acp_request_timeout: None,
+        acp_receipt_timeout: None,
     }
 }
 
@@ -122,6 +127,11 @@ fn test_apply_to_config_all_flags() {
         query_timeout: Some(45),
         p2p_transport: None,
         pg_address: None,
+        acp_cache_ttl: None,
+        acp_circuit_breaker_threshold: None,
+        acp_circuit_breaker_reset_timeout: None,
+        acp_request_timeout: None,
+        acp_receipt_timeout: None,
     };
 
     let result = args.apply_to_config(&mut config);
