@@ -10,6 +10,11 @@ use crate::types::FfiResult;
 use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
 /// Get local P2P peer info.
+///
+/// # Safety
+///
+/// `identity_did` must be a valid null-terminated UTF-8 string when non-null. `node_ptr` must
+/// reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
     ffi_entry! {
@@ -104,6 +109,11 @@ pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
 }
 
 /// Connect to a peer address.
+///
+/// # Safety
+///
+/// `identity_did` and `addr` must be valid null-terminated UTF-8 strings when non-null.
+/// `node_ptr` must reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_connect(
     node_ptr: usize,

@@ -161,9 +161,8 @@ pub struct ShutdownHandle {
 }
 
 enum ShutdownKind {
-    None,
     Libp2p {
-        handle: p2p::P2PHostHandle,
+        handle: Box<p2p::P2PHostHandle>,
         aborts: Vec<tokio::task::AbortHandle>,
     },
     #[cfg(feature = "iroh")]
@@ -173,15 +172,12 @@ enum ShutdownKind {
 }
 
 impl ShutdownHandle {
-    fn none() -> Self {
-        Self {
-            inner: ShutdownKind::None,
-        }
-    }
-
     fn libp2p(handle: p2p::P2PHostHandle, aborts: Vec<tokio::task::AbortHandle>) -> Self {
         Self {
-            inner: ShutdownKind::Libp2p { handle, aborts },
+            inner: ShutdownKind::Libp2p {
+                handle: Box::new(handle),
+                aborts,
+            },
         }
     }
 
@@ -194,7 +190,6 @@ impl ShutdownHandle {
 
     pub async fn shutdown(&self) {
         match &self.inner {
-            ShutdownKind::None => {}
             ShutdownKind::Libp2p { handle, aborts } => {
                 for abort in aborts {
                     abort.abort();

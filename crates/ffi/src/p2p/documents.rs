@@ -11,6 +11,12 @@ use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
 use super::parse_doc_ids_json;
 
+/// Add tracked P2P documents to the node.
+///
+/// # Safety
+///
+/// `identity_did` and `doc_ids_json` must be valid null-terminated UTF-8 strings when non-null.
+/// `node_ptr` must reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_add_documents(
     node_ptr: usize,
@@ -59,6 +65,12 @@ pub unsafe extern "C" fn p2p_add_documents(
     }
 }
 
+/// Remove tracked P2P documents from the node.
+///
+/// # Safety
+///
+/// `identity_did` and `doc_ids_json` must be valid null-terminated UTF-8 strings when non-null.
+/// `node_ptr` must reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_delete_documents(
     node_ptr: usize,
@@ -107,6 +119,12 @@ pub unsafe extern "C" fn p2p_delete_documents(
     }
 }
 
+/// List tracked P2P documents for the node.
+///
+/// # Safety
+///
+/// `identity_did` must be a valid null-terminated UTF-8 string when non-null. `node_ptr` must
+/// reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_list_documents(
     node_ptr: usize,

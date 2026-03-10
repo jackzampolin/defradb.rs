@@ -8,6 +8,11 @@ use crate::state::NODES;
 use crate::types::{c_str_to_string, NewNodeResult, NodeInitOptions};
 
 /// Create a new DefraDB node with P2P enabled.
+///
+/// # Safety
+///
+/// Any non-null C string pointers inside `options` and `listen_addr` must be valid
+/// null-terminated UTF-8 strings for the duration of the call.
 #[no_mangle]
 pub unsafe extern "C" fn new_node_with_p2p(
     options: NodeInitOptions,

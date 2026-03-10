@@ -91,31 +91,21 @@ pub struct P2pDocumentRequest {
 }
 
 /// Storage persistence hints for ACP/NAC setup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Persistence {
+    #[default]
     Memory,
     Persistent,
 }
 
-impl Default for Persistence {
-    fn default() -> Self {
-        Self::Memory
-    }
-}
-
 /// Supported runtime transports for embedded nodes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum TransportConfig {
+    #[default]
     None,
     Libp2p(Libp2pConfig),
     #[cfg(feature = "iroh")]
     Iroh(IrohConfig),
-}
-
-impl Default for TransportConfig {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Libp2p transport configuration.
@@ -166,16 +156,11 @@ pub enum SigningKey {
 }
 
 /// Document ACP configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum DocumentAcpConfig {
+    #[default]
     Local,
     SourceHub(SourceHubConfig),
-}
-
-impl Default for DocumentAcpConfig {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 /// SourceHub document ACP configuration.

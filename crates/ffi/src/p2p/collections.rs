@@ -11,6 +11,12 @@ use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
 use super::parse_collections_json;
 
+/// Add P2P-enabled collections to the node.
+///
+/// # Safety
+///
+/// `identity_did` and `collections_json` must be valid null-terminated UTF-8 strings when
+/// non-null. `node_ptr` must reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_add_collections(
     node_ptr: usize,
@@ -51,6 +57,12 @@ pub unsafe extern "C" fn p2p_add_collections(
     }
 }
 
+/// Remove P2P-enabled collections from the node.
+///
+/// # Safety
+///
+/// `identity_did` and `collections_json` must be valid null-terminated UTF-8 strings when
+/// non-null. `node_ptr` must reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_delete_collections(
     node_ptr: usize,
@@ -91,6 +103,12 @@ pub unsafe extern "C" fn p2p_delete_collections(
     }
 }
 
+/// List P2P-enabled collections for the node.
+///
+/// # Safety
+///
+/// `identity_did` must be a valid null-terminated UTF-8 string when non-null. `node_ptr` must
+/// reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_list_collections(
     node_ptr: usize,
