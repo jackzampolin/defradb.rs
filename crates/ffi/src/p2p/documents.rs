@@ -2,7 +2,6 @@ use std::ffi::c_char;
 
 use crate::ffi_entry;
 use acp::nac::NodePermission;
-use p2p::topics::DefraTopic;
 
 use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
@@ -10,18 +9,14 @@ use crate::state::NODES;
 use crate::types::FfiResult;
 use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
-use super::{parse_doc_ids_json, persist_p2p_documents};
+use super::parse_doc_ids_json;
 
-/// Add documents to P2P replication by subscribing to their GossipSub topics.
-///
-/// # Arguments
-///
-/// * `node_ptr` - Handle to the node
-/// * `doc_ids_json` - JSON array of document IDs
+/// Add tracked P2P documents to the node.
 ///
 /// # Safety
 ///
-/// `doc_ids_json` must be a valid null-terminated UTF-8 string.
+/// `identity_did` and `doc_ids_json` must be valid null-terminated UTF-8 strings when non-null.
+/// `node_ptr` must reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_add_documents(
     node_ptr: usize,
@@ -38,11 +33,18 @@ pub unsafe extern "C" fn p2p_add_documents(
         ));
 
         let doc_ids_str = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
-
         let doc_ids = match parse_doc_ids_json(&doc_ids_str) {
-            Ok(d) => d,
-            Err(e) => return FfiResult::error(e),
+            Ok(doc_ids) => doc_ids,
+            Err(error) => return FfiResult::error(error),
         };
+
+        let docs = doc_ids
+            .into_iter()
+            .map(|doc_id| embedded::P2pDocumentRequest {
+                collection: String::new(),
+                doc_id,
+            })
+            .collect();
 
         let result = NODES
             .get(node_ptr, |state| {
@@ -50,48 +52,25 @@ pub unsafe extern "C" fn p2p_add_documents(
                     Some(p2p) => p2p,
                     None => return Err("no p2p system configured".to_string()),
                 };
-                let db = &state.database;
 
-                rt.block_on(async {
-                    // Validate all document IDs have valid format (atomic: all or nothing)
-                    document::validate_doc_ids(&doc_ids)
-                        .map_err(|_| "malformed document ID, missing either version or cid".to_string())?;
-
-                    for doc_id in &doc_ids {
-                        let topic = DefraTopic::document(doc_id);
-                        if let Err(e) = p2p.handle.subscribe(topic).await {
-                            tracing::warn!(doc_id = %doc_id, error = %e, "Failed to subscribe to GossipSub topic for document");
-                        }
-                        p2p.add_document(doc_id);
-                    }
-
-                    // Persist document subscriptions so they survive restarts.
-                    let all_docs = p2p.get_documents();
-                    persist_p2p_documents(db, &all_docs).await;
-
-                    Ok(())
-                })
+                rt.block_on(async { p2p.system.ops().add_documents(docs).await })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
-            .and_then(|r| r);
+            .and_then(|result| result);
 
         match result {
             Ok(()) => FfiResult::ok(),
-            Err(e) => FfiResult::error(e),
+            Err(error) => FfiResult::error(error),
         }
     }
 }
 
-/// Remove documents from P2P replication by unsubscribing from their GossipSub topics.
-///
-/// # Arguments
-///
-/// * `node_ptr` - Handle to the node
-/// * `doc_ids_json` - JSON array of document IDs
+/// Remove tracked P2P documents from the node.
 ///
 /// # Safety
 ///
-/// `doc_ids_json` must be a valid null-terminated UTF-8 string.
+/// `identity_did` and `doc_ids_json` must be valid null-terminated UTF-8 strings when non-null.
+/// `node_ptr` must reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_delete_documents(
     node_ptr: usize,
@@ -108,11 +87,18 @@ pub unsafe extern "C" fn p2p_delete_documents(
         ));
 
         let doc_ids_str = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
-
         let doc_ids = match parse_doc_ids_json(&doc_ids_str) {
-            Ok(d) => d,
-            Err(e) => return FfiResult::error(e),
+            Ok(doc_ids) => doc_ids,
+            Err(error) => return FfiResult::error(error),
         };
+
+        let docs = doc_ids
+            .into_iter()
+            .map(|doc_id| embedded::P2pDocumentRequest {
+                collection: String::new(),
+                doc_id,
+            })
+            .collect();
 
         let result = NODES
             .get(node_ptr, |state| {
@@ -121,38 +107,24 @@ pub unsafe extern "C" fn p2p_delete_documents(
                     None => return Err("no p2p system configured".to_string()),
                 };
 
-                rt.block_on(async {
-                    // Validate all document IDs have valid format (atomic: all or nothing)
-                    document::validate_doc_ids(&doc_ids)
-                        .map_err(|_| "malformed document ID, missing either version or cid".to_string())?;
-
-                    for doc_id in &doc_ids {
-                        let topic = DefraTopic::document(doc_id);
-                        if let Err(e) = p2p.handle.unsubscribe(topic).await {
-                            tracing::warn!(doc_id = %doc_id, error = %e, "Failed to unsubscribe from GossipSub topic for document");
-                        }
-                        p2p.remove_document(doc_id);
-                    }
-                    Ok(())
-                })
+                rt.block_on(async { p2p.system.ops().remove_documents(docs).await })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
-            .and_then(|r| r);
+            .and_then(|result| result);
 
         match result {
             Ok(()) => FfiResult::ok(),
-            Err(e) => FfiResult::error(e),
+            Err(error) => FfiResult::error(error),
         }
     }
 }
 
-/// Get all P2P documents.
-///
-/// Returns a JSON array of document IDs.
+/// List tracked P2P documents for the node.
 ///
 /// # Safety
 ///
-/// The caller must free the returned string with `defra_free_string`.
+/// `identity_did` must be a valid null-terminated UTF-8 string when non-null. `node_ptr` must
+/// reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_list_documents(
     node_ptr: usize,
@@ -174,17 +146,21 @@ pub unsafe extern "C" fn p2p_list_documents(
                     None => return Err("no p2p system configured".to_string()),
                 };
 
-                let mut documents = p2p.get_documents();
-                documents.sort();
-                serde_json::to_string(&documents)
-                    .map_err(|e| format!("failed to serialize documents: {}", e))
+                rt.block_on(async {
+                    let documents = p2p.system.ops().get_documents().await?;
+                    let mut doc_ids: Vec<String> =
+                        documents.into_iter().map(|doc| doc.doc_id).collect();
+                    doc_ids.sort();
+                    serde_json::to_string(&doc_ids)
+                        .map_err(|error| format!("failed to serialize documents: {}", error))
+                })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
-            .and_then(|r| r);
+            .and_then(|result| result);
 
         match result {
             Ok(json) => FfiResult::success(json),
-            Err(e) => FfiResult::error(e),
+            Err(error) => FfiResult::error(error),
         }
     }
 }

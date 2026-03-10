@@ -2,7 +2,6 @@ use std::ffi::c_char;
 
 use crate::ffi_entry;
 use acp::nac::NodePermission;
-use p2p::topics::DefraTopic;
 
 use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
@@ -10,18 +9,14 @@ use crate::state::NODES;
 use crate::types::FfiResult;
 use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
-use super::{parse_collections_json, persist_p2p_collections};
+use super::parse_collections_json;
 
-/// Add collections to P2P replication.
-///
-/// # Arguments
-///
-/// * `node_ptr` - Handle to the node
-/// * `collections_json` - JSON array of collection names
+/// Add P2P-enabled collections to the node.
 ///
 /// # Safety
 ///
-/// `collections_json` must be a valid null-terminated UTF-8 string.
+/// `identity_did` and `collections_json` must be valid null-terminated UTF-8 strings when
+/// non-null. `node_ptr` must reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_add_collections(
     node_ptr: usize,
@@ -38,10 +33,9 @@ pub unsafe extern "C" fn p2p_add_collections(
         ));
 
         let collections_str = try_ffi!(require_c_str(collections_json, "collections_json"));
-
         let collections = match parse_collections_json(&collections_str) {
-            Ok(c) => c,
-            Err(e) => return FfiResult::error(e),
+            Ok(collections) => collections,
+            Err(error) => return FfiResult::error(error),
         };
 
         let result = NODES
@@ -50,48 +44,25 @@ pub unsafe extern "C" fn p2p_add_collections(
                     Some(p2p) => p2p,
                     None => return Err("no p2p system configured".to_string()),
                 };
-                let db = &state.database;
 
-                rt.block_on(async {
-                    let name_to_id = db
-                        .resolve_collection_ids(&collections)
-                        .map_err(|e| format!("{}", e))?;
-
-                    for (name, collection_id) in &name_to_id {
-                        let topic = DefraTopic::collection(collection_id);
-                        if let Err(e) = p2p.handle.subscribe(topic).await {
-                            tracing::warn!(collection = %name, collection_id = %collection_id, error = %e, "Failed to subscribe to GossipSub topic");
-                        }
-                        p2p.add_collection(name);
-                    }
-
-                    // Persist collection subscriptions so they survive restarts.
-                    let all_cols = p2p.get_collections();
-                    persist_p2p_collections(db, &all_cols).await;
-
-                    Ok(())
-                })
+                rt.block_on(async { p2p.system.ops().add_collections(collections).await })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
-            .and_then(|r| r);
+            .and_then(|result| result);
 
         match result {
             Ok(()) => FfiResult::ok(),
-            Err(e) => FfiResult::error(e),
+            Err(error) => FfiResult::error(error),
         }
     }
 }
 
-/// Remove collections from P2P replication.
-///
-/// # Arguments
-///
-/// * `node_ptr` - Handle to the node
-/// * `collections_json` - JSON array of collection names
+/// Remove P2P-enabled collections from the node.
 ///
 /// # Safety
 ///
-/// `collections_json` must be a valid null-terminated UTF-8 string.
+/// `identity_did` and `collections_json` must be valid null-terminated UTF-8 strings when
+/// non-null. `node_ptr` must reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_delete_collections(
     node_ptr: usize,
@@ -108,10 +79,9 @@ pub unsafe extern "C" fn p2p_delete_collections(
         ));
 
         let collections_str = try_ffi!(require_c_str(collections_json, "collections_json"));
-
         let collections = match parse_collections_json(&collections_str) {
-            Ok(c) => c,
-            Err(e) => return FfiResult::error(e),
+            Ok(collections) => collections,
+            Err(error) => return FfiResult::error(error),
         };
 
         let result = NODES
@@ -120,40 +90,25 @@ pub unsafe extern "C" fn p2p_delete_collections(
                     Some(p2p) => p2p,
                     None => return Err("no p2p system configured".to_string()),
                 };
-                let db = &state.database;
 
-                rt.block_on(async {
-                    let name_to_id = db
-                        .resolve_collection_ids(&collections)
-                        .map_err(|e| format!("{}", e))?;
-
-                    for (name, collection_id) in &name_to_id {
-                        let topic = DefraTopic::collection(collection_id);
-                        if let Err(e) = p2p.handle.unsubscribe(topic).await {
-                            tracing::warn!(collection = %name, collection_id = %collection_id, error = %e, "Failed to unsubscribe from GossipSub topic");
-                        }
-                        p2p.remove_collection(name);
-                    }
-                    Ok(())
-                })
+                rt.block_on(async { p2p.system.ops().remove_collections(collections).await })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
-            .and_then(|r| r);
+            .and_then(|result| result);
 
         match result {
             Ok(()) => FfiResult::ok(),
-            Err(e) => FfiResult::error(e),
+            Err(error) => FfiResult::error(error),
         }
     }
 }
 
-/// Get all P2P collections.
-///
-/// Returns a JSON array of collection names.
+/// List P2P-enabled collections for the node.
 ///
 /// # Safety
 ///
-/// The caller must free the returned string with `defra_free_string`.
+/// `identity_did` must be a valid null-terminated UTF-8 string when non-null. `node_ptr` must
+/// reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_list_collections(
     node_ptr: usize,
@@ -175,16 +130,18 @@ pub unsafe extern "C" fn p2p_list_collections(
                     None => return Err("no p2p system configured".to_string()),
                 };
 
-                let collections = p2p.get_collections();
-                serde_json::to_string(&collections)
-                    .map_err(|e| format!("failed to serialize collections: {}", e))
+                rt.block_on(async {
+                    let collections = p2p.system.ops().get_collections().await?;
+                    serde_json::to_string(&collections)
+                        .map_err(|error| format!("failed to serialize collections: {}", error))
+                })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
-            .and_then(|r| r);
+            .and_then(|result| result);
 
         match result {
             Ok(json) => FfiResult::success(json),
-            Err(e) => FfiResult::error(e),
+            Err(error) => FfiResult::error(error),
         }
     }
 }

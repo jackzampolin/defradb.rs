@@ -15,6 +15,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 default = []
 fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]
+iroh = ["embedded/iroh", "p2p/iroh-transport"]
 
 [dependencies]
 # Async runtime
@@ -59,6 +60,7 @@ sourcehub = { path = "../sourcehub" }
 lens = { path = "../lens" }
 p2p = { path = "../p2p" }
 blockstore = { path = "../blockstore" }
+embedded = { path = "../embedded" }
 
 # IPLD
 cid.workspace = true

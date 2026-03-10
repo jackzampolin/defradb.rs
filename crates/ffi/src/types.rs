@@ -165,6 +165,18 @@ pub struct NodeInitOptions {
     pub sourcehub_signer_key: *const u8,
     /// Length of sourcehub_signer_key. 0 if null.
     pub sourcehub_signer_key_len: usize,
+    /// Optional P2P transport backend for `new_node_with_p2p`: "libp2p" (default) or "iroh".
+    pub p2p_transport: *const c_char,
+    /// Optional iroh relay URL.
+    pub iroh_relay_url: *const c_char,
+    /// Optional iroh bind address (e.g. "127.0.0.1").
+    pub iroh_bind_addr: *const c_char,
+    /// Optional iroh bind UDP port. 0 means OS-assigned/unspecified.
+    pub iroh_bind_port: u16,
+    /// Enable iroh discovery (1=true, 0=false). Default true.
+    pub iroh_discovery: c_int,
+    /// Optional path to persist the iroh secret key.
+    pub iroh_key_path: *const c_char,
 }
 
 impl Default for NodeInitOptions {
@@ -182,6 +194,12 @@ impl Default for NodeInitOptions {
             sourcehub_chain_id: ptr::null(),
             sourcehub_signer_key: ptr::null(),
             sourcehub_signer_key_len: 0,
+            p2p_transport: ptr::null(),
+            iroh_relay_url: ptr::null(),
+            iroh_bind_addr: ptr::null(),
+            iroh_bind_port: 0,
+            iroh_discovery: 1,
+            iroh_key_path: ptr::null(),
         }
     }
 }
