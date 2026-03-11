@@ -108,6 +108,68 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let utc_offset = FixedOffset::east_opt(0).unwrap();
         let request_time = Utc::now().with_timezone(&utc_offset);
 
+        // Batch implicit multi-mutation requests when the mutator supports it.
+        //
+        // Explicit `/tx` requests already provide their own shared transaction
+        // through `fetcher_override`. Requests touching policy-backed collections
+        // still use the legacy per-mutation path because ACP post-write side
+        // effects are applied outside the storage transaction.
+        let has_policy_backed_mutation = if fetcher_override.is_none() {
+            let mut has_policy = false;
+            for mutation in &mutations {
+                match self.get_collection(&mutation.collection_name).await {
+                    Ok(collection) => {
+                        if collection.policy.is_some() {
+                            has_policy = true;
+                            break;
+                        }
+                    }
+                    Err(QueryError::CollectionNotFound(_)) => {}
+                    Err(err) => return Err(err),
+                }
+            }
+            has_policy
+        } else {
+            false
+        };
+
+        if mutations.len() > 1 && fetcher_override.is_none() && !has_policy_backed_mutation {
+            if let Some(batch) = mutator.begin_batch().await? {
+                let batch_mutator = batch.mutator();
+                let batch_fetcher = batch.fetcher();
+                let mut results = Map::new();
+
+                for mutation in mutations {
+                    let result = match self
+                        .execute_single_mutation(
+                            &mutation,
+                            batch_mutator.clone(),
+                            caller_identity.clone(),
+                            request_time,
+                            Some(batch_fetcher.clone()),
+                        )
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(err) => {
+                            if let Err(rollback_err) = batch.rollback().await {
+                                tracing::warn!(
+                                    error = %rollback_err,
+                                    "Failed to rollback implicit mutation batch"
+                                );
+                            }
+                            return Err(err);
+                        }
+                    };
+
+                    results.insert(mutation.output_name(), result);
+                }
+
+                batch.commit().await?;
+                return Ok(JsonValue::Object(results));
+            }
+        }
+
         let mut results = Map::new();
 
         for mutation in mutations {

@@ -43,7 +43,10 @@ pub use error::{QueryError, Result, TransactionError};
 pub use executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
 pub use fetcher::{CollectionProvider, StaticCollectionProvider};
 pub use mapper::{Filter, Mutation, MutationType, Select};
-pub use mutator::{BroadcastStatus, CreateResult, DeleteResult, DocMutator, UpdateResult};
+pub use mutator::{
+    BroadcastStatus, CreateResult, DeleteResult, DocMutator, MutationBatch,
+    MutationBatchController, UpdateResult,
+};
 pub use plan::{
     CreateInput, CreateNode, DeleteNode, JoinDirection, JoinSide, LimitNode, ScanNode, SelectNode,
     TypeJoinMany, TypeJoinOne, UpdateInput, UpdateNode, UpsertAction, UpsertInput, UpsertNode,

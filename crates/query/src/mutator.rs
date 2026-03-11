@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use cid::Cid;
 use document::{DocID, Document};
+use std::sync::Arc;
 use storage::corekv::MaybeSendSync;
 
 use crate::error::Result;
@@ -234,6 +235,63 @@ impl DeleteResult {
     }
 }
 
+/// Controller for a request-scoped mutation batch.
+///
+/// Implementations own the shared transaction lifecycle for an implicit
+/// GraphQL mutation request and are responsible for committing or rolling
+/// back all writes performed through the paired mutator/fetcher.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait MutationBatchController: MaybeSendSync {
+    /// Commit the shared transaction backing this batch.
+    async fn commit(&self) -> Result<()>;
+
+    /// Roll back the shared transaction backing this batch.
+    async fn rollback(&self) -> Result<()>;
+}
+
+/// A request-scoped mutation batch with a shared mutator and fetcher.
+pub struct MutationBatch {
+    mutator: Arc<dyn DocMutator>,
+    fetcher: Arc<dyn crate::fetcher::DocFetcher>,
+    controller: Arc<dyn MutationBatchController>,
+}
+
+impl MutationBatch {
+    /// Create a new mutation batch wrapper.
+    pub fn new(
+        mutator: Arc<dyn DocMutator>,
+        fetcher: Arc<dyn crate::fetcher::DocFetcher>,
+        controller: Arc<dyn MutationBatchController>,
+    ) -> Self {
+        Self {
+            mutator,
+            fetcher,
+            controller,
+        }
+    }
+
+    /// Get the shared mutator for this batch.
+    pub fn mutator(&self) -> Arc<dyn DocMutator> {
+        self.mutator.clone()
+    }
+
+    /// Get the shared fetcher for this batch.
+    pub fn fetcher(&self) -> Arc<dyn crate::fetcher::DocFetcher> {
+        self.fetcher.clone()
+    }
+
+    /// Commit the batch transaction.
+    pub async fn commit(&self) -> Result<()> {
+        self.controller.commit().await
+    }
+
+    /// Roll back the batch transaction.
+    pub async fn rollback(&self) -> Result<()> {
+        self.controller.rollback().await
+    }
+}
+
 /// Storage abstraction for mutating documents.
 ///
 /// This trait provides write operations for mutations, complementing `DocFetcher`
@@ -261,6 +319,15 @@ impl DeleteResult {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait DocMutator: MaybeSendSync {
+    /// Begin a request-scoped mutation batch.
+    ///
+    /// Implementations can override this to provide a shared transaction for
+    /// multiple top-level GraphQL mutations in one request. The default
+    /// implementation disables batching.
+    async fn begin_batch(&self) -> Result<Option<MutationBatch>> {
+        Ok(None)
+    }
+
     /// Create a new document in a collection.
     ///
     /// The document should NOT have an ID set - the mutator will generate
