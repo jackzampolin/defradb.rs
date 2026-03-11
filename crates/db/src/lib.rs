@@ -59,6 +59,7 @@ pub mod collection_name;
 pub mod collection_ops;
 pub mod collection_provider;
 pub mod collection_snapshot;
+mod commit_priority_index;
 pub mod commits_fetcher;
 pub mod database;
 pub mod definition_validation;

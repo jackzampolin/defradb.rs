@@ -244,6 +244,10 @@ pub async fn write_document_blocks(
                 .set(&head_key.bytes(), &priority_bytes)
                 .await
                 .map_err(|e| format!("Failed to write field head: {}", e))?;
+            headstore
+                .set(&priority_index_key(&doc_id_str, priority, field_cid), &[])
+                .await
+                .map_err(|e| format!("Failed to write field priority index: {}", e))?;
 
             tracing::debug!(
                 field_name = %field_name,
@@ -352,6 +356,13 @@ pub async fn write_document_blocks(
         .set(&composite_head_key.bytes(), &priority_bytes)
         .await
         .map_err(|e| format!("Failed to write composite head: {}", e))?;
+    headstore
+        .set(
+            &priority_index_key(&doc_id_str, priority, composite_cid),
+            &[],
+        )
+        .await
+        .map_err(|e| format!("Failed to write composite priority index: {}", e))?;
 
     tracing::debug!(
         doc_id = %doc_id_str,
@@ -450,6 +461,10 @@ pub async fn write_delete_block(
         .set(&composite_head_key.bytes(), &priority_bytes)
         .await
         .map_err(|e| format!("Failed to write delete composite head: {}", e))?;
+    headstore
+        .set(&priority_index_key(doc_id, priority, composite_cid), &[])
+        .await
+        .map_err(|e| format!("Failed to write delete priority index: {}", e))?;
 
     tracing::debug!(
         doc_id = %doc_id,

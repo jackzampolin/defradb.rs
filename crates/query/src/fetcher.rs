@@ -321,6 +321,10 @@ pub struct CommitsQueryOptions {
     pub cid: Option<String>,
     /// Maximum depth to traverse (None = unlimited)
     pub depth: Option<u64>,
+    /// Inclusive minimum commit height for indexed range scans
+    pub height_start: Option<u64>,
+    /// Exclusive maximum commit height for indexed range scans
+    pub height_end: Option<u64>,
     /// Filter by field name
     pub field_name: Option<String>,
 }

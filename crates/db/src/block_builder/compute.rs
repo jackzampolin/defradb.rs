@@ -135,6 +135,7 @@ pub fn compute_document_blocks(
         let head_key = HeadstoreDocKey::new(&doc_id_str, field_name, field_cid);
         let priority_bytes = encode_priority_varint(priority);
         headstore_entries.push((head_key.bytes(), priority_bytes));
+        headstore_entries.push((priority_index_key(&doc_id_str, priority, field_cid), vec![]));
 
         field_links.push(DAGLink::new(field_name.clone(), field_cid));
         field_cids.push(field_cid);
@@ -196,6 +197,10 @@ pub fn compute_document_blocks(
     let composite_head_key = HeadstoreDocKey::new(&doc_id_str, "C", composite_cid);
     let priority_bytes = encode_priority_varint(priority);
     headstore_entries.push((composite_head_key.bytes(), priority_bytes));
+    headstore_entries.push((
+        priority_index_key(&doc_id_str, priority, composite_cid),
+        vec![],
+    ));
 
     Ok(ComputedBlocks {
         blockstore_entries,

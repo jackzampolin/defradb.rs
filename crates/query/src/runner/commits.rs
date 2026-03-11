@@ -10,12 +10,323 @@
 use document::Document;
 use identity::Did;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 
 use crate::error::Result;
 use crate::mapper::{Requestable, Select};
 use crate::txn::TransactionRegistry;
 
 use super::{DocFetcher, QueryRunner};
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CommitsHeightRange {
+    start: u64,
+    end: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_filter(value: JsonValue) -> crate::mapper::Filter {
+        crate::mapper::Filter::from_conditions(serde_json::from_value(value).unwrap())
+    }
+
+    #[test]
+    fn test_extract_commits_height_range_simple_window() {
+        let filter = make_filter(json!({
+            "height": {
+                "_gte": 2,
+                "_lt": 5
+            }
+        }));
+
+        assert_eq!(
+            extract_commits_height_range(&filter),
+            HeightRangeExtraction::Range(CommitsHeightRange {
+                start: 2,
+                end: Some(5),
+            })
+        );
+    }
+
+    #[test]
+    fn test_extract_commits_height_range_merges_and_conditions() {
+        let filter = make_filter(json!({
+            "_and": [
+                { "height": { "_gte": 2 } },
+                { "height": { "_lt": 4 } },
+                { "fieldName": { "_eq": "_C" } }
+            ]
+        }));
+
+        assert_eq!(
+            extract_commits_height_range(&filter),
+            HeightRangeExtraction::Range(CommitsHeightRange {
+                start: 2,
+                end: Some(4),
+            })
+        );
+    }
+
+    #[test]
+    fn test_extract_commits_height_range_ignores_non_height_or_clauses() {
+        let filter = make_filter(json!({
+            "height": { "_gte": 2 },
+            "_or": [
+                { "fieldName": { "_eq": "_C" } },
+                { "fieldName": { "_eq": "age" } }
+            ]
+        }));
+
+        assert_eq!(
+            extract_commits_height_range(&filter),
+            HeightRangeExtraction::Range(CommitsHeightRange {
+                start: 2,
+                end: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_extract_commits_height_range_rejects_disjunctive_height_filters() {
+        let filter = make_filter(json!({
+            "_or": [
+                { "height": { "_eq": 1 } },
+                { "height": { "_eq": 3 } }
+            ]
+        }));
+
+        assert_eq!(
+            extract_commits_height_range(&filter),
+            HeightRangeExtraction::Unsupported
+        );
+    }
+
+    #[test]
+    fn test_extract_commits_height_range_detects_empty_window() {
+        let filter = make_filter(json!({
+            "height": {
+                "_gt": 10,
+                "_lt": 5
+            }
+        }));
+
+        assert_eq!(
+            extract_commits_height_range(&filter),
+            HeightRangeExtraction::Empty
+        );
+    }
+}
+
+impl CommitsHeightRange {
+    fn merge(self, other: Self) -> HeightRangeExtraction {
+        let start = self.start.max(other.start);
+        let end = match (self.end, other.end) {
+            (Some(lhs), Some(rhs)) => Some(lhs.min(rhs)),
+            (Some(lhs), None) => Some(lhs),
+            (None, Some(rhs)) => Some(rhs),
+            (None, None) => None,
+        };
+
+        if end.is_some_and(|end| start >= end) {
+            HeightRangeExtraction::Empty
+        } else {
+            HeightRangeExtraction::Range(Self { start, end })
+        }
+    }
+
+    fn with_lower_bound(mut self, start: u64) -> HeightRangeExtraction {
+        self.start = self.start.max(start);
+        if self.end.is_some_and(|end| self.start >= end) {
+            HeightRangeExtraction::Empty
+        } else {
+            HeightRangeExtraction::Range(self)
+        }
+    }
+
+    fn with_upper_bound(mut self, end: Option<u64>) -> HeightRangeExtraction {
+        self.end = match (self.end, end) {
+            (Some(lhs), Some(rhs)) => Some(lhs.min(rhs)),
+            (Some(lhs), None) => Some(lhs),
+            (None, Some(rhs)) => Some(rhs),
+            (None, None) => None,
+        };
+
+        if self.end.is_some_and(|end| self.start >= end) {
+            HeightRangeExtraction::Empty
+        } else {
+            HeightRangeExtraction::Range(self)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HeightRangeExtraction {
+    None,
+    Range(CommitsHeightRange),
+    Empty,
+    Unsupported,
+}
+
+impl HeightRangeExtraction {
+    fn merge_and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unsupported, _) | (_, Self::Unsupported) => Self::Unsupported,
+            (Self::Empty, _) | (_, Self::Empty) => Self::Empty,
+            (Self::None, rhs) => rhs,
+            (lhs, Self::None) => lhs,
+            (Self::Range(lhs), Self::Range(rhs)) => lhs.merge(rhs),
+        }
+    }
+}
+
+fn extract_commits_height_range(filter: &crate::mapper::Filter) -> HeightRangeExtraction {
+    extract_commits_height_range_from_conditions(filter.conditions())
+}
+
+fn extract_commits_height_range_from_conditions(
+    conditions: &HashMap<String, JsonValue>,
+) -> HeightRangeExtraction {
+    let mut extracted = HeightRangeExtraction::None;
+
+    for (field_name, value) in conditions {
+        if field_name == "height" {
+            extracted = extracted.merge_and(parse_height_condition(value));
+            continue;
+        }
+
+        match crate::mapper::FilterOp::parse(field_name) {
+            Some(crate::mapper::FilterOp::And) => {
+                if value.is_null() {
+                    continue;
+                }
+                let Some(items) = value.as_array() else {
+                    return HeightRangeExtraction::Unsupported;
+                };
+                for item in items {
+                    let Ok(sub_conditions) =
+                        serde_json::from_value::<HashMap<String, JsonValue>>(item.clone())
+                    else {
+                        return HeightRangeExtraction::Unsupported;
+                    };
+                    extracted = extracted.merge_and(extract_commits_height_range_from_conditions(
+                        &sub_conditions,
+                    ));
+                }
+            }
+            Some(crate::mapper::FilterOp::Or | crate::mapper::FilterOp::Not) => {
+                if logical_value_contains_top_level_height(value) {
+                    return HeightRangeExtraction::Unsupported;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    extracted
+}
+
+fn logical_value_contains_top_level_height(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Array(items) => items.iter().any(logical_value_contains_top_level_height),
+        JsonValue::Object(obj) => logical_conditions_contain_top_level_height(
+            &obj.iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ),
+        _ => false,
+    }
+}
+
+fn logical_conditions_contain_top_level_height(conditions: &HashMap<String, JsonValue>) -> bool {
+    conditions.iter().any(|(field_name, value)| {
+        field_name == "height"
+            || matches!(
+                crate::mapper::FilterOp::parse(field_name),
+                Some(
+                    crate::mapper::FilterOp::And
+                        | crate::mapper::FilterOp::Or
+                        | crate::mapper::FilterOp::Not
+                )
+            ) && logical_value_contains_top_level_height(value)
+    })
+}
+
+fn parse_height_condition(value: &JsonValue) -> HeightRangeExtraction {
+    if value.is_null() {
+        return HeightRangeExtraction::Empty;
+    }
+
+    if let Some(height) = json_value_to_non_negative_u64(value) {
+        return HeightRangeExtraction::Range(CommitsHeightRange {
+            start: height,
+            end: height.checked_add(1),
+        });
+    }
+
+    let Some(ops) = value.as_object() else {
+        return HeightRangeExtraction::Unsupported;
+    };
+
+    let mut range = HeightRangeExtraction::Range(CommitsHeightRange::default());
+
+    for (op_str, expected) in ops {
+        let Some(op) = crate::mapper::FilterOp::parse(op_str) else {
+            return HeightRangeExtraction::Unsupported;
+        };
+        let Some(height) = json_value_to_non_negative_u64(expected) else {
+            return HeightRangeExtraction::Unsupported;
+        };
+
+        range = match (range, op) {
+            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Eq) => {
+                range.with_lower_bound(height).merge_and(
+                    CommitsHeightRange {
+                        start: height,
+                        end: height.checked_add(1),
+                    }
+                    .into(),
+                )
+            }
+            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Gt) => {
+                if let Some(start) = height.checked_add(1) {
+                    range.with_lower_bound(start)
+                } else {
+                    HeightRangeExtraction::Empty
+                }
+            }
+            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Gte) => {
+                range.with_lower_bound(height)
+            }
+            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Lt) => {
+                range.with_upper_bound(Some(height))
+            }
+            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Lte) => {
+                range.with_upper_bound(height.checked_add(1))
+            }
+            (_, _) => HeightRangeExtraction::Unsupported,
+        };
+
+        match range {
+            HeightRangeExtraction::Range(_) => {}
+            other => return other,
+        }
+    }
+
+    range
+}
+
+impl From<CommitsHeightRange> for HeightRangeExtraction {
+    fn from(range: CommitsHeightRange) -> Self {
+        Self::Range(range)
+    }
+}
+
+fn json_value_to_non_negative_u64(value: &JsonValue) -> Option<u64> {
+    value.as_i64().and_then(|height| u64::try_from(height).ok())
+}
 
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Render a Document's fields as a JSON object using only the fields requested by a Select.
@@ -81,6 +392,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             doc_id: Some(doc_id.to_string()),
             cid: target_cid.map(|s| s.to_string()),
             depth,
+            height_start: None,
+            height_end: None,
             field_name: None,
         };
 
@@ -413,11 +726,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        let height_range = select
+            .filter
+            .as_ref()
+            .map(extract_commits_height_range)
+            .unwrap_or(HeightRangeExtraction::None);
+
+        if matches!(height_range, HeightRangeExtraction::Empty) {
+            return Ok(JsonValue::Array(vec![]));
+        }
+
         // Build options from the select
         let options = CommitsQueryOptions {
             doc_id: select.doc_ids.as_ref().and_then(|ids| ids.first().cloned()),
             cid: select.cid.clone(),
             depth: select.depth,
+            height_start: match &height_range {
+                HeightRangeExtraction::Range(range) => Some(range.start),
+                _ => None,
+            },
+            height_end: match &height_range {
+                HeightRangeExtraction::Range(range) => range.end,
+                _ => None,
+            },
             field_name: None,
         };
 

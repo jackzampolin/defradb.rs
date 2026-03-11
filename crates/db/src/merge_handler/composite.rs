@@ -591,6 +591,22 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 {
                     tracing::warn!(error = %e, "Failed to write composite head to headstore");
                 }
+                let composite_priority_key = storage::keys::headstore::HeadstorePriorityKey::new(
+                    &doc_id_str,
+                    payload.priority,
+                    *cid,
+                );
+                if let Err(e) = headstore
+                    .set(
+                        &<storage::keys::headstore::HeadstorePriorityKey as storage::corekv::Key>::bytes(
+                            &composite_priority_key,
+                        ),
+                        &[],
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, "Failed to write composite priority index");
+                }
 
                 // Field heads: only delete heads that each field block supersedes
                 if let Some(links) = &block.links {
@@ -627,6 +643,27 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                 field = %dag_link.name,
                                 error = %e,
                                 "Failed to write field head to headstore"
+                            );
+                        }
+                        let field_priority_key =
+                            storage::keys::headstore::HeadstorePriorityKey::new(
+                                &doc_id_str,
+                                payload.priority,
+                                dag_link.link,
+                            );
+                        if let Err(e) = headstore
+                            .set(
+                                &<storage::keys::headstore::HeadstorePriorityKey as storage::corekv::Key>::bytes(
+                                    &field_priority_key,
+                                ),
+                                &[],
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                field = %dag_link.name,
+                                error = %e,
+                                "Failed to write field priority index"
                             );
                         }
                     }
@@ -1173,6 +1210,19 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         &priority_bytes,
                     )
                     .await;
+                let composite_priority_key = storage::keys::headstore::HeadstorePriorityKey::new(
+                    &doc_id_str,
+                    payload.priority,
+                    *cid,
+                );
+                let _ = headstore
+                    .set(
+                        &<storage::keys::headstore::HeadstorePriorityKey as storage::corekv::Key>::bytes(
+                            &composite_priority_key,
+                        ),
+                        &[],
+                    )
+                    .await;
 
                 if let Some(links) = &block.links {
                     for dag_link in links {
@@ -1199,6 +1249,20 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             .set(
                                 &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&field_head_key),
                                 &priority_bytes,
+                            )
+                            .await;
+                        let field_priority_key =
+                            storage::keys::headstore::HeadstorePriorityKey::new(
+                                &doc_id_str,
+                                payload.priority,
+                                dag_link.link,
+                            );
+                        let _ = headstore
+                            .set(
+                                &<storage::keys::headstore::HeadstorePriorityKey as storage::corekv::Key>::bytes(
+                                    &field_priority_key,
+                                ),
+                                &[],
                             )
                             .await;
                     }
