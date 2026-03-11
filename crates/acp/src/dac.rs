@@ -72,6 +72,25 @@ pub trait DocumentACP: MaybeSendSync {
         doc_id: &str,
     ) -> Result<bool>;
 
+    /// Create a persisted access decision for a caller/object/permission check.
+    ///
+    /// SourceHub-backed ACP can use this to mint a decision that downstream
+    /// signers verify via a light client before producing a signature.
+    ///
+    /// Returns `Ok(Some(decision_id))` when the backend created a reusable
+    /// decision, `Ok(None)` when the backend does not support this flow.
+    async fn create_access_decision(
+        &self,
+        identity: &Identity,
+        policy_id: &str,
+        resource_name: &str,
+        object_id: &str,
+        permission: &str,
+    ) -> Result<Option<String>> {
+        let _ = (identity, policy_id, resource_name, object_id, permission);
+        Ok(None)
+    }
+
     /// Add actor relationship (sharing).
     ///
     /// The requestor must be the document owner or have a managing relation

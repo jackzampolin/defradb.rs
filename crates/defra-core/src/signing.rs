@@ -141,7 +141,9 @@ pub fn resolve_signing_config(
     node_identity_did: Option<&str>,
 ) -> Option<SigningConfig> {
     match identity_did {
-        Some(did) if !did.is_empty() => get_identity(did),
+        Some(did) if !did.is_empty() => {
+            get_identity(did).or_else(|| node_identity_did.and_then(get_identity))
+        }
         _ => node_identity_did.and_then(get_identity),
     }
 }
@@ -190,6 +192,47 @@ pub fn get_request_bearer_token(did: &str) -> Option<String> {
 pub fn clear_request_bearer_token(did: &str) {
     if let Ok(mut store) = request_token_store().lock() {
         store.remove(did);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_config(label: &str) -> SigningConfig {
+        SigningConfig {
+            key_type: label.to_string(),
+            private_key_bytes: vec![],
+            public_key_bytes: vec![],
+            public_key_hex: label.to_string(),
+            remote_signer: None,
+            signing_authorization: None,
+        }
+    }
+
+    #[test]
+    fn resolve_signing_config_uses_request_identity_when_registered() {
+        clear_identity_store();
+        store_identity("did:key:request", make_config("request"));
+        store_identity("did:key:node", make_config("node"));
+
+        let resolved = resolve_signing_config(Some("did:key:request"), Some("did:key:node"))
+            .expect("request identity should resolve");
+        assert_eq!(resolved.public_key_hex, "request");
+
+        clear_identity_store();
+    }
+
+    #[test]
+    fn resolve_signing_config_falls_back_to_node_identity_when_request_identity_missing() {
+        clear_identity_store();
+        store_identity("did:key:node", make_config("node"));
+
+        let resolved = resolve_signing_config(Some("did:key:request"), Some("did:key:node"))
+            .expect("node fallback should resolve");
+        assert_eq!(resolved.public_key_hex, "node");
+
+        clear_identity_store();
     }
 }
 

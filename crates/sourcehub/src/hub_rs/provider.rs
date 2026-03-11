@@ -11,6 +11,7 @@ use alloy_sol_types::SolCall;
 use async_trait::async_trait;
 use events::{AcpCacheInvalidatedData, AcpHeightAdvancedData, Bus, Message};
 use k256::ecdsa::SigningKey;
+use sha2::{Digest, Sha256};
 
 use super::abi::{IAcp, ACP_ADDRESS};
 use super::bearer;
@@ -133,6 +134,24 @@ impl HubRsProvider {
         let start = 32usize.saturating_sub(bytes.len());
         arr[start..].copy_from_slice(&bytes[..bytes.len().min(32)]);
         FixedBytes::from(arr)
+    }
+
+    fn compute_access_decision_id(
+        policy_id: &str,
+        creator_did: &str,
+        actor_did: &str,
+        resource: &str,
+        object_id: &str,
+        permission: &str,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(policy_id.as_bytes());
+        hasher.update(creator_did.as_bytes());
+        hasher.update(actor_did.as_bytes());
+        hasher.update(resource.as_bytes());
+        hasher.update(object_id.as_bytes());
+        hasher.update(permission.as_bytes());
+        hex::encode(hasher.finalize())
     }
 }
 
@@ -534,6 +553,69 @@ impl SourceHubProvider for HubRsProvider {
         }
 
         Ok(false)
+    }
+
+    async fn create_access_decision(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        permission: &str,
+        actor_did: &str,
+    ) -> Result<Option<String>, ProviderError> {
+        let call = IAcp::checkAccessCall {
+            policyId: Self::policy_id_to_bytes32(policy_id),
+            resources: vec![resource.to_string()],
+            objectIds: vec![object_id.to_string()],
+            permissions: vec![permission.to_string()],
+            actor: actor_did.to_string(),
+        };
+        let calldata = Bytes::from(call.abi_encode());
+        let receipt = self.send_tx(calldata).await?;
+
+        let decision_id = Self::compute_access_decision_id(
+            policy_id,
+            &self.signer.did(),
+            actor_did,
+            resource,
+            object_id,
+            permission,
+        );
+
+        if let Some(block_number_hex) = receipt["blockNumber"].as_str() {
+            let block_number = u64::from_str_radix(
+                block_number_hex
+                    .strip_prefix("0x")
+                    .unwrap_or(block_number_hex),
+                16,
+            )
+            .unwrap_or_default();
+            if block_number > 0 {
+                self.light_client
+                    .wait_for_height(block_number, Duration::from_secs(5))
+                    .await
+                    .map_err(|e| {
+                        ProviderError::Unavailable(format!(
+                            "access decision sync at height {}: {}",
+                            block_number, e
+                        ))
+                    })?;
+            }
+        }
+
+        let decision = self
+            .light_client
+            .check_access_decision(&decision_id)
+            .await
+            .map_err(|e| ProviderError::Query(format!("light client decision check: {}", e)))?;
+        if !decision.allowed {
+            return Err(ProviderError::Query(format!(
+                "access decision {} not visible after confirmation",
+                decision_id
+            )));
+        }
+
+        Ok(Some(decision_id))
     }
 
     fn acp_light_client_status(&self) -> Result<AcpLightClientStatus, ProviderError> {

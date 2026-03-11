@@ -175,6 +175,30 @@ impl DocumentACP for SourceHubDocumentACP {
         Ok(result)
     }
 
+    async fn create_access_decision(
+        &self,
+        identity: &Identity,
+        policy_id: &str,
+        resource_name: &str,
+        object_id: &str,
+        permission: &str,
+    ) -> Result<Option<String>> {
+        let Some(actor_did) = identity.did() else {
+            return Ok(None);
+        };
+
+        self.provider
+            .create_access_decision(
+                policy_id,
+                resource_name,
+                object_id,
+                permission,
+                actor_did.as_str(),
+            )
+            .await
+            .map_err(provider_err)
+    }
+
     async fn add_actor_relationship(
         &self,
         requestor: &Did,
@@ -277,6 +301,7 @@ mod tests {
 
     struct MockProvider {
         decisions: Mutex<VecDeque<bool>>,
+        created_decision: Mutex<Option<String>>,
         verify_calls: Mutex<usize>,
     }
 
@@ -284,12 +309,17 @@ mod tests {
         fn new(decisions: Vec<bool>) -> Self {
             Self {
                 decisions: Mutex::new(decisions.into()),
+                created_decision: Mutex::new(None),
                 verify_calls: Mutex::new(0),
             }
         }
 
         fn verify_calls(&self) -> usize {
             *self.verify_calls.lock().unwrap()
+        }
+
+        fn created_decision(&self) -> Option<String> {
+            self.created_decision.lock().unwrap().clone()
         }
     }
 
@@ -398,6 +428,19 @@ mod tests {
                 .expect("mock verify_access decision");
             Ok(decision)
         }
+
+        async fn create_access_decision(
+            &self,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+            _permission: &str,
+            actor_did: &str,
+        ) -> std::result::Result<Option<String>, ProviderError> {
+            let decision_id = format!("decision-for-{actor_did}");
+            *self.created_decision.lock().unwrap() = Some(decision_id.clone());
+            Ok(Some(decision_id))
+        }
     }
 
     #[tokio::test]
@@ -464,5 +507,21 @@ mod tests {
             .expect("cached denial");
         assert!(!still_denied);
         assert_eq!(provider.verify_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_access_decision_delegates_to_provider() {
+        let provider = Arc::new(MockProvider::new(vec![]));
+        let acp = SourceHubDocumentACP::without_access_cache(provider.clone());
+        let did = Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
+        let identity = Identity::from(did.clone());
+
+        let decision_id = acp
+            .create_access_decision(&identity, "policy-1", "transcript", "transcript", "writer")
+            .await
+            .expect("create access decision should succeed");
+
+        assert_eq!(decision_id, Some(format!("decision-for-{}", did.as_str())));
+        assert_eq!(provider.created_decision(), decision_id);
     }
 }

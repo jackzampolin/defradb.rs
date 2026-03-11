@@ -40,6 +40,7 @@ events = { path = "../events" }
 
 # Logging
 tracing.workspace = true
+sha2.workspace = true
 
 # Base64 for bearer token
 base64.workspace = true

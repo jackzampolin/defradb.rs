@@ -105,6 +105,18 @@ pub trait SourceHubProvider: MaybeSendSync {
         actor_did: &str,
     ) -> Result<bool, ProviderError>;
 
+    async fn create_access_decision(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        permission: &str,
+        actor_did: &str,
+    ) -> Result<Option<String>, ProviderError> {
+        let _ = (policy_id, resource, object_id, permission, actor_did);
+        Ok(None)
+    }
+
     fn acp_light_client_status(&self) -> Result<AcpLightClientStatus, ProviderError> {
         Err(ProviderError::Unavailable(
             "ACP light client status is not available for this provider".into(),

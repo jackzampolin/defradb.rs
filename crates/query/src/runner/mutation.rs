@@ -379,22 +379,42 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         let _signing_config_reset = if matches!(mutation.mutation_type, MutationType::Create) {
             let current_signing_config = defra_core::signing::get_signing_config();
-            match (
-                current_signing_config.clone(),
-                caller_identity.as_ref(),
-                collection.policy.as_ref(),
-            ) {
-                (Some(mut config), Some(_), Some(policy)) => {
-                    config.signing_authorization =
-                        Some(defra_core::signing::SigningAuthorization::Policy {
-                            policy_id: policy.id.clone(),
-                            resource: policy.resource_name.clone(),
-                            // Fresh creates authorize against the collection object itself.
-                            object_id: policy.resource_name.clone(),
-                            permission: "writer".to_string(),
-                        });
-                    defra_core::signing::set_signing_config(Some(config));
-                    Some(SigningConfigReset(current_signing_config))
+            match current_signing_config.clone() {
+                Some(mut config) if config.remote_signer.is_some() => {
+                    if let (Some(acp), Some(identity_did), Some(policy)) = (
+                        self.acp.as_ref(),
+                        caller_identity.as_ref(),
+                        collection.policy.as_ref(),
+                    ) {
+                        let decision_id = acp
+                            .create_access_decision(
+                                &Identity::from(identity_did.clone()),
+                                &policy.id,
+                                &policy.resource_name,
+                                &policy.resource_name,
+                                "writer",
+                            )
+                            .await
+                            .map_err(|e| {
+                                QueryError::permission_denied(format!(
+                                    "create authorization failed: {}",
+                                    e
+                                ))
+                            })?;
+
+                        if let Some(decision_id) = decision_id {
+                            config.signing_authorization =
+                                Some(defra_core::signing::SigningAuthorization::Decision {
+                                    decision_id,
+                                });
+                            defra_core::signing::set_signing_config(Some(config));
+                            Some(SigningConfigReset(current_signing_config))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             }
