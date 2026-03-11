@@ -21,9 +21,9 @@ use crate::error::{QueryError, Result};
 use aggregates::{build_aggregate_types_for_collection, build_numeric_fields_enum};
 use collection::{build_collection_type, build_commit_type};
 use commits::{
-    build_commit_count_field_arg, build_commit_fields_enum, build_commits_field_name_filter_arg,
-    build_commits_filter_arg, build_commits_height_filter_arg, build_commits_order_arg,
-    build_signature_type,
+    build_commit_count_field_arg, build_commit_fields_enum, build_commit_numeric_field_arg,
+    build_commits_field_name_filter_arg, build_commits_filter_arg, build_commits_height_filter_arg,
+    build_commits_order_arg, build_signature_type,
 };
 use input_types::{
     build_field_enum, build_filter_input_type, build_mutation_input_type, build_order_input_type,
@@ -151,7 +151,8 @@ pub fn build_introspection_schema(
         .register(build_commits_height_filter_arg())
         .register(build_commits_order_arg())
         .register(build_commit_fields_enum())
-        .register(build_commit_count_field_arg());
+        .register(build_commit_count_field_arg())
+        .register(build_commit_numeric_field_arg());
 
     // Add _commits query field (unconditionally, like Go)
     query_type = query_type.field(

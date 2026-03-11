@@ -1,3 +1,5 @@
+#[path = "query/commits_aggregate.rs"]
+mod commits_aggregate;
 #[path = "query/commits_height_filter.rs"]
 mod commits_height_filter;
 #[path = "query/explain_nested.rs"]

@@ -88,3 +88,10 @@ pub(super) fn build_commit_count_field_arg() -> Enum {
         .item(EnumItem::new("heads"))
         .item(EnumItem::new("links"))
 }
+
+/// Build the commitNumericFieldArg enum.
+pub(super) fn build_commit_numeric_field_arg() -> Enum {
+    Enum::new("commitNumericFieldArg")
+        .item(EnumItem::new("delta"))
+        .item(EnumItem::new("height"))
+}
