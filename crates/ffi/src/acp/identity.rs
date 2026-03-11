@@ -88,7 +88,7 @@ fn validate_public_key_bytes(
 ) -> Result<(), String> {
     let crypto_key_type = parse_crypto_key_type(key_type)?;
 
-    let public_key = crypto::public_key_from_bytes(crypto_key_type, &public_key_bytes)
+    let public_key = crypto::public_key_from_bytes(crypto_key_type, public_key_bytes)
         .map_err(|error| format!("invalid public key bytes: {}", error))?;
     let derived_did = public_key
         .did()
