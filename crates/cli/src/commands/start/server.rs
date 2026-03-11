@@ -981,9 +981,8 @@ impl Node {
                     request_timeout_s = config.acp.request_timeout,
                     circuit_breaker_threshold = config.acp.circuit_breaker_threshold,
                     circuit_breaker_reset_timeout_s = config.acp.circuit_breaker_reset_timeout,
-                    cache_ttl_s = config.acp.cache_ttl,
                     receipt_timeout_s = config.acp.receipt_timeout,
-                    "Resolved ACP tuning (hub.rs)"
+                    "Resolved ACP tuning (hub.rs; access decision cache disabled)"
                 );
 
                 let provider = Arc::new(
@@ -997,9 +996,8 @@ impl Node {
                     .map_err(|e| Error::InvalidConfig(format!("hub.rs provider: {}", e)))?,
                 );
 
-                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::new(
+                let sh_acp = Arc::new(sourcehub::SourceHubDocumentACP::without_access_cache(
                     provider,
-                    tuning.cache_ttl,
                 ));
                 let sh_adapter = crate::sourcehub_acp_adapter::SourceHubAcpAdapter::new_arc(
                     sh_acp.clone(),

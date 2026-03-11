@@ -18,17 +18,32 @@ use crate::provider::{AcpLightClientStatus, ProviderError, SourceHubProvider, Su
 /// DocumentACP backed by SourceHub's on-chain x/acp module.
 ///
 /// Delegates write and read operations to a `SourceHubProvider` implementation.
-/// Caches `verify_access` results to avoid redundant network roundtrips.
+/// By default it caches `verify_access` results to avoid redundant network
+/// roundtrips. hub.rs can opt out because remote ACP state may change outside
+/// DefraDB's mutation path.
 pub struct SourceHubDocumentACP {
     provider: Arc<dyn SourceHubProvider>,
-    access_cache: AccessCache,
+    access_cache: Option<AccessCache>,
 }
 
 impl SourceHubDocumentACP {
     pub fn new(provider: Arc<dyn SourceHubProvider>, cache_ttl: Duration) -> Self {
         Self {
             provider,
-            access_cache: AccessCache::new(cache_ttl),
+            access_cache: Some(AccessCache::new(cache_ttl)),
+        }
+    }
+
+    pub fn without_access_cache(provider: Arc<dyn SourceHubProvider>) -> Self {
+        Self {
+            provider,
+            access_cache: None,
+        }
+    }
+
+    fn invalidate_cached_access(&self, policy_id: &str, resource_name: &str, doc_id: &str) {
+        if let Some(cache) = &self.access_cache {
+            cache.invalidate_object(policy_id, resource_name, doc_id);
         }
     }
 
@@ -122,15 +137,16 @@ impl DocumentACP for SourceHubDocumentACP {
             None => "did:key:anonymous".to_string(),
         };
 
-        // Check access cache before hitting the network
-        if let Some(cached) = self.access_cache.get(
-            &actor_did,
-            policy_id,
-            resource_name,
-            doc_id,
-            permission.as_str(),
-        ) {
-            return Ok(cached);
+        if let Some(cache) = &self.access_cache {
+            if let Some(cached) = cache.get(
+                &actor_did,
+                policy_id,
+                resource_name,
+                doc_id,
+                permission.as_str(),
+            ) {
+                return Ok(cached);
+            }
         }
 
         let result = self
@@ -145,14 +161,16 @@ impl DocumentACP for SourceHubDocumentACP {
             .await
             .map_err(provider_err)?;
 
-        self.access_cache.set(
-            &actor_did,
-            policy_id,
-            resource_name,
-            doc_id,
-            permission.as_str(),
-            result,
-        );
+        if let Some(cache) = &self.access_cache {
+            cache.set(
+                &actor_did,
+                policy_id,
+                resource_name,
+                doc_id,
+                permission.as_str(),
+                result,
+            );
+        }
 
         Ok(result)
     }
@@ -182,8 +200,7 @@ impl DocumentACP for SourceHubDocumentACP {
             .await
             .map_err(provider_err)?;
 
-        self.access_cache
-            .invalidate_object(policy_id, resource_name, doc_id);
+        self.invalidate_cached_access(policy_id, resource_name, doc_id);
 
         Ok(result)
     }
@@ -213,8 +230,7 @@ impl DocumentACP for SourceHubDocumentACP {
             .await
             .map_err(provider_err)?;
 
-        self.access_cache
-            .invalidate_object(policy_id, resource_name, doc_id);
+        self.invalidate_cached_access(policy_id, resource_name, doc_id);
 
         Ok(result)
     }
@@ -246,9 +262,207 @@ impl DocumentACP for SourceHubDocumentACP {
             .await
             .map_err(provider_err)?;
 
-        self.access_cache
-            .invalidate_object(policy_id, resource_name, doc_id);
+        self.invalidate_cached_access(policy_id, resource_name, doc_id);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use super::*;
+
+    struct MockProvider {
+        decisions: Mutex<VecDeque<bool>>,
+        verify_calls: Mutex<usize>,
+    }
+
+    impl MockProvider {
+        fn new(decisions: Vec<bool>) -> Self {
+            Self {
+                decisions: Mutex::new(decisions.into()),
+                verify_calls: Mutex::new(0),
+            }
+        }
+
+        fn verify_calls(&self) -> usize {
+            *self.verify_calls.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl SourceHubProvider for MockProvider {
+        fn authorized_account(&self) -> String {
+            "0x0".to_string()
+        }
+
+        async fn create_bearer_token(
+            &self,
+            _did: &str,
+        ) -> std::result::Result<String, ProviderError> {
+            unreachable!("create_bearer_token is not used in this test")
+        }
+
+        fn self_did(&self) -> Option<String> {
+            None
+        }
+
+        async fn create_policy(
+            &self,
+            _policy_yaml: &str,
+        ) -> std::result::Result<String, ProviderError> {
+            unreachable!("create_policy is not used in this test")
+        }
+
+        async fn register_object(
+            &self,
+            _bearer_token: &str,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+        ) -> std::result::Result<(), ProviderError> {
+            unreachable!("register_object is not used in this test")
+        }
+
+        async fn archive_object(
+            &self,
+            _bearer_token: &str,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+        ) -> std::result::Result<(), ProviderError> {
+            unreachable!("archive_object is not used in this test")
+        }
+
+        async fn set_relationship(
+            &self,
+            _bearer_token: &str,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+            _relation: &str,
+            _subject: &SubjectRef,
+        ) -> std::result::Result<bool, ProviderError> {
+            unreachable!("set_relationship is not used in this test")
+        }
+
+        async fn delete_relationship(
+            &self,
+            _bearer_token: &str,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+            _relation: &str,
+            _subject: &SubjectRef,
+        ) -> std::result::Result<bool, ProviderError> {
+            unreachable!("delete_relationship is not used in this test")
+        }
+
+        async fn query_policy(
+            &self,
+            _policy_id: &str,
+        ) -> std::result::Result<Option<crate::provider::ProviderPolicyInfo>, ProviderError>
+        {
+            unreachable!("query_policy is not used in this test")
+        }
+
+        async fn query_object_owner(
+            &self,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+        ) -> std::result::Result<(bool, String), ProviderError> {
+            Ok((
+                true,
+                "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".to_string(),
+            ))
+        }
+
+        async fn verify_access(
+            &self,
+            _policy_id: &str,
+            _resource: &str,
+            _object_id: &str,
+            _permission: &str,
+            _actor_did: &str,
+        ) -> std::result::Result<bool, ProviderError> {
+            *self.verify_calls.lock().unwrap() += 1;
+            let decision = self
+                .decisions
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("mock verify_access decision");
+            Ok(decision)
+        }
+    }
+
+    #[tokio::test]
+    async fn check_doc_access_does_not_cache_remote_denials() {
+        let provider = Arc::new(MockProvider::new(vec![false, true]));
+        let acp = SourceHubDocumentACP::without_access_cache(provider.clone());
+        let did = Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
+        let identity = Identity::from(did);
+
+        let denied = acp
+            .check_doc_access(
+                &identity,
+                DocumentPermission::Read,
+                "policy-1",
+                "users",
+                "doc-1",
+            )
+            .await
+            .expect("initial denial");
+        assert!(!denied);
+
+        let allowed = acp
+            .check_doc_access(
+                &identity,
+                DocumentPermission::Read,
+                "policy-1",
+                "users",
+                "doc-1",
+            )
+            .await
+            .expect("fresh remote decision");
+        assert!(allowed);
+        assert_eq!(provider.verify_calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn check_doc_access_caches_when_enabled() {
+        let provider = Arc::new(MockProvider::new(vec![false, true]));
+        let acp = SourceHubDocumentACP::new(provider.clone(), Duration::from_secs(300));
+        let did = Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
+        let identity = Identity::from(did);
+
+        let denied = acp
+            .check_doc_access(
+                &identity,
+                DocumentPermission::Read,
+                "policy-1",
+                "users",
+                "doc-1",
+            )
+            .await
+            .expect("initial denial");
+        assert!(!denied);
+
+        let still_denied = acp
+            .check_doc_access(
+                &identity,
+                DocumentPermission::Read,
+                "policy-1",
+                "users",
+                "doc-1",
+            )
+            .await
+            .expect("cached denial");
+        assert!(!still_denied);
+        assert_eq!(provider.verify_calls(), 1);
     }
 }
