@@ -279,6 +279,7 @@ impl StartArgs {
                 public_key_bytes,
                 public_key_hex,
                 remote_signer: Some(std::sync::Arc::new(client)),
+                signing_authorization: None,
             },
         );
 

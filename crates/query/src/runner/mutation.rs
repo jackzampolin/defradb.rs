@@ -137,6 +137,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         request_time: DateTime<FixedOffset>,
         fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
     ) -> Result<JsonValue> {
+        struct SigningConfigReset(Option<defra_core::signing::SigningConfig>);
+
+        impl Drop for SigningConfigReset {
+            fn drop(&mut self) {
+                defra_core::signing::set_signing_config(self.0.clone());
+            }
+        }
+
         let fetcher: Arc<dyn crate::fetcher::DocFetcher> =
             fetcher_override.unwrap_or_else(|| self.fetcher.clone());
         use acp::Identity;
@@ -306,6 +314,31 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         if let Some(ref did) = caller_identity {
             defra_core::signing::set_broadcast_creator_did(Some(did.to_string()));
         }
+
+        let _signing_config_reset = if matches!(mutation.mutation_type, MutationType::Create) {
+            let current_signing_config = defra_core::signing::get_signing_config();
+            match (
+                current_signing_config.clone(),
+                caller_identity.as_ref(),
+                collection.policy.as_ref(),
+            ) {
+                (Some(mut config), Some(_), Some(policy)) => {
+                    config.signing_authorization =
+                        Some(defra_core::signing::SigningAuthorization::Policy {
+                            policy_id: policy.id.clone(),
+                            resource: policy.resource_name.clone(),
+                            // Fresh creates authorize against the collection object itself.
+                            object_id: policy.resource_name.clone(),
+                            permission: "writer".to_string(),
+                        });
+                    defra_core::signing::set_signing_config(Some(config));
+                    Some(SigningConfigReset(current_signing_config))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         // Build and execute the appropriate mutation plan
         let mut plan: Box<dyn PlanNode> = match mutation.mutation_type {

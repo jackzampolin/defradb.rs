@@ -337,6 +337,7 @@ mod tests {
                 public_key_bytes: public_key.raw(),
                 public_key_hex: hex::encode(public_key.raw()),
                 remote_signer: None,
+                signing_authorization: None,
             },
         );
     }
@@ -376,6 +377,7 @@ mod tests {
                 public_key_bytes: raw_identity.public_key_bytes().to_vec(),
                 public_key_hex: hex::encode(raw_identity.public_key_bytes()),
                 remote_signer: None,
+                signing_authorization: None,
             },
         );
 

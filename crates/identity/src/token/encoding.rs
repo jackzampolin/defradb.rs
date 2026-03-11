@@ -1,18 +1,18 @@
 //! JWT token encoding functions.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use serde::Serialize;
 
 use crate::error::Error;
 use crate::{FullIdentity, Result};
 
-use super::claims::IdentityClaims;
 use super::der;
 
 pub(crate) const EDDSA_ALG: &str = "EdDSA";
 pub(crate) const ES256K_ALG: &str = "ES256K";
 pub(crate) const ES256_ALG: &str = "ES256";
 
-fn build_signing_input(alg: &str, claims: &IdentityClaims) -> Result<String> {
+fn build_signing_input<T: Serialize>(alg: &str, claims: &T) -> Result<String> {
     let header = serde_json::json!({
         "alg": alg,
         "typ": "JWT"
@@ -26,8 +26,8 @@ fn build_signing_input(alg: &str, claims: &IdentityClaims) -> Result<String> {
     Ok(format!("{}.{}", header_b64, claims_b64))
 }
 
-pub(crate) fn encode_ed25519<I: FullIdentity>(
-    claims: &IdentityClaims,
+pub(crate) fn encode_ed25519<I: FullIdentity, T: Serialize>(
+    claims: &T,
     identity: &I,
 ) -> Result<String> {
     let signing_input = build_signing_input(EDDSA_ALG, claims)?;
@@ -40,8 +40,8 @@ pub(crate) fn encode_ed25519<I: FullIdentity>(
     Ok(format!("{}.{}", signing_input, sig_b64))
 }
 
-pub(crate) fn encode_secp256k1<I: FullIdentity>(
-    claims: &IdentityClaims,
+pub(crate) fn encode_secp256k1<I: FullIdentity, T: Serialize>(
+    claims: &T,
     identity: &I,
 ) -> Result<String> {
     let signing_input = build_signing_input(ES256K_ALG, claims)?;
@@ -55,8 +55,8 @@ pub(crate) fn encode_secp256k1<I: FullIdentity>(
     Ok(format!("{}.{}", signing_input, sig_b64))
 }
 
-pub(crate) fn encode_secp256r1<I: FullIdentity>(
-    claims: &IdentityClaims,
+pub(crate) fn encode_secp256r1<I: FullIdentity, T: Serialize>(
+    claims: &T,
     identity: &I,
 ) -> Result<String> {
     let signing_input = build_signing_input(ES256_ALG, claims)?;

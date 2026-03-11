@@ -32,6 +32,7 @@ mod identity;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crypto::{public_key_from_bytes, KeyType};
+use serde::Serialize;
 
 use crate::did::Did;
 use crate::error::Error;
@@ -88,6 +89,62 @@ pub fn new_token<I: FullIdentity>(
         aud: audience.map(|a| vec![a]),
         authorized_account,
         key_type: identity_key_type.to_string(),
+    };
+
+    let token = match key_type {
+        KeyType::Ed25519 => encode_ed25519(&claims, identity)?,
+        KeyType::Secp256k1 => encode_secp256k1(&claims, identity)?,
+        KeyType::Secp256r1 => encode_secp256r1(&claims, identity)?,
+        KeyType::Bls12381 => return Err(Error::UnsupportedKeyType(key_type)),
+    };
+
+    Ok(token.into_bytes())
+}
+
+/// Generates a new JWT bearer token with additional flattened custom claims.
+///
+/// This preserves DefraDB's standard identity claims and signature format while
+/// allowing callers to bind request-specific authorization metadata into the JWT.
+pub fn new_token_with_custom_claims<I: FullIdentity, T: Serialize>(
+    identity: &I,
+    duration: Duration,
+    audience: Option<String>,
+    authorized_account: Option<String>,
+    custom_claims: T,
+) -> Result<Vec<u8>> {
+    #[derive(Serialize)]
+    struct CombinedClaims<T> {
+        #[serde(flatten)]
+        standard: IdentityClaims,
+        #[serde(flatten)]
+        custom: T,
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| Error::TokenEncoding(format!("system time error: {}", e)))?;
+
+    let exp = now + duration;
+    let pub_key = identity.pub_key();
+    let did = identity.did()?;
+    let key_type = pub_key.key_type();
+
+    let identity_key_type = IdentityKeyType::try_from(key_type)?;
+
+    let standard_claims = IdentityClaims {
+        sub: pub_key.to_hex_string(),
+        iss: did.to_string(),
+        exp: exp.as_secs(),
+        nbf: now.as_secs(),
+        iat: now.as_secs(),
+        aud: audience.map(|a| vec![a]),
+        authorized_account,
+        key_type: identity_key_type.to_string(),
+    };
+
+    let claims = CombinedClaims {
+        standard: standard_claims,
+        custom: custom_claims,
     };
 
     let token = match key_type {

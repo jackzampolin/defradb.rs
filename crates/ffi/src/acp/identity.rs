@@ -18,7 +18,11 @@ struct FfiRemoteSigner {
 }
 
 impl defra_core::signing::RemoteSigner for FfiRemoteSigner {
-    fn sign_sync(&self, data: &[u8]) -> Result<Vec<u8>, String> {
+    fn sign_sync(
+        &self,
+        data: &[u8],
+        _authorization: Option<&defra_core::signing::SigningAuthorization>,
+    ) -> Result<Vec<u8>, String> {
         let mut signature = vec![0u8; MAX_REMOTE_SIGNATURE_LEN];
         let mut signature_len = 0usize;
         let status = unsafe {
@@ -125,6 +129,7 @@ fn store_remote_identity(
             public_key_bytes,
             public_key_hex,
             remote_signer: Some(signer),
+            signing_authorization: None,
         },
     );
 
@@ -211,6 +216,7 @@ pub extern "C" fn RegisterIdentity(
                     public_key_bytes,
                     public_key_hex: pub_hex,
                     remote_signer: None,
+                    signing_authorization: None,
                 },
             );
 
@@ -421,6 +427,7 @@ pub extern "C" fn create_identity() -> FfiResult {
                     public_key_bytes: identity.public_key_bytes().to_vec(),
                     public_key_hex,
                     remote_signer: None,
+                    signing_authorization: None,
                 },
             );
 
@@ -591,7 +598,7 @@ mod tests {
             .remote_signer
             .as_ref()
             .unwrap()
-            .sign_sync(message)
+            .sign_sync(message, None)
             .expect("remote signing should succeed");
         let public_key = crypto::Secp256r1PublicKey::from_bytes(&config.public_key_bytes).unwrap();
         let valid = public_key.verify(message, &signature).unwrap();

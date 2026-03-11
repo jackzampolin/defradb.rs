@@ -27,7 +27,10 @@ pub use did::{Did, DID_KEY_PREFIX};
 pub use error::{Error, Result};
 pub use key_type::IdentityKeyType;
 pub use raw::RawIdentity;
-pub use token::{from_token, new_token, verify_auth_token, IdentityClaims, TokenIdentity};
+pub use token::{
+    from_token, new_token, new_token_with_custom_claims, verify_auth_token, IdentityClaims,
+    TokenIdentity,
+};
 
 use crypto::keys::{PrivateKey, PublicKey};
 use defra_core::thread_bounds::MaybeSendSync;

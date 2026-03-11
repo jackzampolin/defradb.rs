@@ -70,7 +70,7 @@ pub(super) fn compute_signature(
     // key type so mobile/TEE and Orbis-backed identities use the same path.
     let sig_type = signer.signature_type()?;
     let sig_bytes = if let Some(remote) = signer.remote_signer.as_ref() {
-        remote.sign_sync(&block_bytes)?
+        remote.sign_sync(&block_bytes, signer.signing_authorization.as_ref())?
     } else {
         match signer.key_type.as_str() {
             "ed25519" => {

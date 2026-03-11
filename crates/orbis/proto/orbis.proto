@@ -97,6 +97,18 @@ message SignRequest {
   //   "dst": domain separation tag for BLS
   //   "aux_rand": additional randomness for FROST
   map<string, bytes> options = 5;
+
+  // ACP authorization fields (optional — when non-empty, Orbis checks ACP on SourceHub).
+  // These must match the corresponding fields in the JWT claims.
+  string policy_id = 6;
+  string resource = 7;
+  string object_id = 8;
+  string permission = 9;
+
+  // AccessDecision ID (optional — when non-empty, Orbis verifies the decision
+  // exists on-chain via the ACP light client instead of performing a live ACP check).
+  // Mutually exclusive with policy_id: set one or the other, not both.
+  string decision_id = 10;
 }
 
 message SignResponse {

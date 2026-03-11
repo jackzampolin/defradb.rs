@@ -2,7 +2,7 @@ use super::*;
 use blockstore::{Blockstore, DefraBlockstore};
 use crypto::keys::PublicKey;
 use defra_core::SignatureType;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use storage::backends::MemoryStore;
 
 fn make_test_blockstore() -> Arc<DefraBlockstore<MemoryStore>> {
@@ -119,7 +119,11 @@ struct TestRemoteSecp256r1Signer {
 }
 
 impl defra_core::signing::RemoteSigner for TestRemoteSecp256r1Signer {
-    fn sign_sync(&self, data: &[u8]) -> Result<Vec<u8>, String> {
+    fn sign_sync(
+        &self,
+        data: &[u8],
+        _authorization: Option<&defra_core::signing::SigningAuthorization>,
+    ) -> Result<Vec<u8>, String> {
         self.private_key
             .sign(data)
             .map_err(|error| format!("remote sign failed: {}", error))
@@ -148,6 +152,7 @@ fn test_compute_signature_supports_remote_secp256r1() {
         public_key_bytes: public_key.raw(),
         public_key_hex: hex::encode(public_key.raw()),
         remote_signer: Some(Arc::new(TestRemoteSecp256r1Signer { private_key })),
+        signing_authorization: None,
     };
 
     let (sig_cid, sig_cbor) = compute_signature(&block, &signer)
@@ -169,4 +174,66 @@ fn test_compute_signature_supports_remote_secp256r1() {
         .verify(&signed_bytes, &signature.value)
         .expect("verification should succeed");
     assert!(valid, "remote secp256r1 signature should verify");
+}
+
+struct CapturingRemoteSigner {
+    private_key: crypto::Secp256r1PrivateKey,
+    seen_authorization: Arc<Mutex<Option<defra_core::signing::SigningAuthorization>>>,
+}
+
+impl defra_core::signing::RemoteSigner for CapturingRemoteSigner {
+    fn sign_sync(
+        &self,
+        data: &[u8],
+        authorization: Option<&defra_core::signing::SigningAuthorization>,
+    ) -> Result<Vec<u8>, String> {
+        *self.seen_authorization.lock().expect("lock") = authorization.cloned();
+        self.private_key
+            .sign(data)
+            .map_err(|error| format!("remote sign failed: {}", error))
+    }
+}
+
+#[test]
+fn test_compute_signature_passes_signing_authorization_to_remote_signer() {
+    let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
+    let public_key = private_key.public_key();
+    let seen_authorization = Arc::new(Mutex::new(None));
+
+    let block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            doc_id: b"doc-2".to_vec(),
+            schema_version_id: "schema-v1".to_string(),
+            status: 1,
+            priority: 1,
+        }),
+        Vec::new(),
+        Vec::new(),
+    );
+
+    let signer = defra_core::signing::SigningConfig {
+        key_type: "secp256r1".to_string(),
+        private_key_bytes: Vec::new(),
+        public_key_bytes: public_key.raw(),
+        public_key_hex: hex::encode(public_key.raw()),
+        remote_signer: Some(Arc::new(CapturingRemoteSigner {
+            private_key,
+            seen_authorization: seen_authorization.clone(),
+        })),
+        signing_authorization: Some(defra_core::signing::SigningAuthorization::Policy {
+            policy_id: "policy-1".to_string(),
+            resource: "transcript".to_string(),
+            object_id: "transcript".to_string(),
+            permission: "writer".to_string(),
+        }),
+    };
+
+    compute_signature(&block, &signer)
+        .expect("signature should succeed")
+        .expect("composite block should be signed");
+
+    assert_eq!(
+        *seen_authorization.lock().expect("lock"),
+        signer.signing_authorization
+    );
 }

@@ -346,6 +346,7 @@ fn create_node_identity(
                     public_key_bytes: raw_identity.public_key_bytes().to_vec(),
                     public_key_hex: hex::encode(raw_identity.public_key_bytes()),
                     remote_signer: None,
+                    signing_authorization: None,
                 },
             );
 

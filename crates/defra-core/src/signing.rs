@@ -14,7 +14,29 @@ use std::sync::{Arc, Mutex};
 /// `sign_sync` must be callable from synchronous contexts (the block builder
 /// runs inside `spawn_blocking`).
 pub trait RemoteSigner: Send + Sync {
-    fn sign_sync(&self, data: &[u8]) -> Result<Vec<u8>, String>;
+    fn sign_sync(
+        &self,
+        data: &[u8],
+        authorization: Option<&SigningAuthorization>,
+    ) -> Result<Vec<u8>, String>;
+}
+
+/// Optional authorization context passed to remote signers.
+///
+/// For Orbis-backed signing, this lets DefraDB attach ACP metadata to a sign
+/// request so Orbis can authorize the signature ceremony before producing a
+/// threshold signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SigningAuthorization {
+    Policy {
+        policy_id: String,
+        resource: String,
+        object_id: String,
+        permission: String,
+    },
+    Decision {
+        decision_id: String,
+    },
 }
 
 /// Signing configuration containing key material for block signing.
@@ -29,6 +51,8 @@ pub struct SigningConfig {
     pub public_key_hex: String,
     /// Optional remote signer for delegated signing (e.g. Orbis ring)
     pub remote_signer: Option<Arc<dyn RemoteSigner>>,
+    /// Optional per-request authorization for delegated signing.
+    pub signing_authorization: Option<SigningAuthorization>,
 }
 
 impl Clone for SigningConfig {
@@ -39,6 +63,7 @@ impl Clone for SigningConfig {
             public_key_bytes: self.public_key_bytes.clone(),
             public_key_hex: self.public_key_hex.clone(),
             remote_signer: self.remote_signer.clone(),
+            signing_authorization: self.signing_authorization.clone(),
         }
     }
 }
