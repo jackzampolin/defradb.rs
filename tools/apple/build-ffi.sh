@@ -13,6 +13,7 @@ FEATURES="${FEATURES:-iroh}"
 DEVICE_TARGET="${DEVICE_TARGET:-aarch64-apple-ios}"
 SIM_TARGETS="${SIM_TARGETS:-aarch64-apple-ios-sim x86_64-apple-ios}"
 SWIFT_PACKAGE_DIR="$OUT_DIR/swift"
+SWIFT_SMOKE_SOURCE="$ROOT_DIR/tools/apple/swift-import-smoke.swift"
 
 require_tool() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -80,6 +81,35 @@ module ${FRAMEWORK_NAME} {
 }
 EOF
     done
+}
+
+validate_swift_import() {
+    if ! xcrun --sdk iphonesimulator --find swiftc >/dev/null 2>&1; then
+        echo "swiftc not found; skipped Swift import validation" >&2
+        return
+    fi
+
+    if grep -q "Option_DefraRemoteSignCallback" "$HEADER_PATH"; then
+        echo "generated header still exposes Option_DefraRemoteSignCallback" >&2
+        exit 1
+    fi
+
+    local sdk_path
+    local swiftc_path
+    local module_cache_dir
+    sdk_path="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+    swiftc_path="$(xcrun --sdk iphonesimulator --find swiftc)"
+    module_cache_dir="$OUT_DIR/swift-module-cache"
+    rm -rf "$module_cache_dir"
+    mkdir -p "$module_cache_dir"
+
+    "$swiftc_path" \
+        -typecheck \
+        -target "arm64-apple-ios${APPLE_DEPLOYMENT_TARGET}-simulator" \
+        -sdk "$sdk_path" \
+        -I "$OUT_DIR/include" \
+        -module-cache-path "$module_cache_dir" \
+        "$SWIFT_SMOKE_SOURCE"
 }
 
 build_target() {
@@ -161,6 +191,7 @@ else
 fi
 
 write_swift_package
+validate_swift_import
 
 cat <<EOF
 Apple FFI artifacts:
@@ -172,4 +203,5 @@ Apple FFI artifacts:
   simulator: $SIM_UNIVERSAL_LIB
   xcframework: $XCFRAMEWORK_PATH
   swift_package: $SWIFT_PACKAGE_DIR
+  swift_smoke: ok
 EOF

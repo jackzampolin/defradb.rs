@@ -78,6 +78,7 @@ The mobile-oriented entry points are:
 - `defra_mobile_connect(node, addr)`
 - `defra_mobile_sync_collection(node, request_json)`
 - `register_remote_identity(...)`
+- `register_remote_identity_bytes(...)`
 - `bind_identity_bearer_token(did, bearer_token)`
 - `node_set_default_identity(node, did)`
 
@@ -109,6 +110,45 @@ The mobile-oriented entry points are:
 
 For device-bound or delegated identities:
 
-- register the logical signing identity with `register_remote_identity`
-- bind the host-issued bearer token to that DID with `bind_identity_bearer_token`
-- set that DID as the node default via `node_set_default_identity`
+- register the device signing DID with `register_remote_identity` or `register_remote_identity_bytes`
+- optionally bind a delegated bearer token to a logical DID with `bind_identity_bearer_token`
+- set the effective DID as the node default via `node_set_default_identity`
+
+## Device-Bound DID Flow
+
+For Secure Enclave-backed P-256 (`secp256r1`) identities on iOS:
+
+1. Generate or load the Secure Enclave private key in the host app.
+2. Export or derive the public key bytes, then derive the matching `did:key`.
+3. Call one of:
+   - `register_remote_identity(did, public_key_hex, "secp256r1", signer_handle, callback)`
+   - `register_remote_identity_bytes(did, public_key_ptr, public_key_len, "secp256r1", signer_handle, callback)`
+4. If the app uses a logical DID with delegated ACP authorization, call
+   `bind_identity_bearer_token(logical_did, bearer_token)`.
+5. Call `node_set_default_identity(node, did)` with either the device DID or
+   the logical DID that should back GraphQL and block-signing requests.
+
+`register_remote_identity_bytes` is the most direct Swift path when the app
+already has the public key as `Data`. For `secp256r1`, pass the uncompressed
+X9.63 / SEC1 public key bytes (`0x04 || X || Y`).
+
+## Callback Contract
+
+`DefraRemoteSignCallback` is the host signing hook for non-exportable keys.
+
+- The host app keeps the private key. Defra never receives or persists it.
+- `signer_handle` is an opaque host context value passed back on every sign.
+- `payload_ptr` / `payload_len` are the exact message bytes to sign.
+- On success, write the signature into the provided output buffer, set
+  `out_signature_len`, and return `0`.
+- For ECDSA keys (`secp256r1`, `secp256k1`), Defra expects ASN.1 DER / X9.62
+  signatures, not raw `r || s`.
+- For Secure Enclave P-256 signing, use
+  `SecKeyCreateSignature(..., .ecdsaSignatureMessageX962SHA256, ...)`.
+
+## Validation
+
+`tools/apple/build-ffi.sh` now runs a Swift import smoke test after packaging.
+It typechecks [swift-import-smoke.swift](/Users/johnzampolin/go/src/github.com/sourcenetwork/defradb.rs/tools/apple/swift-import-smoke.swift)
+against the generated `target/apple-ffi/include` module and fails if the
+header regresses to `Option_DefraRemoteSignCallback`.

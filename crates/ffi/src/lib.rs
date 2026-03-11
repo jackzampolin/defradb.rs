@@ -141,7 +141,7 @@ pub use acp::{
     bind_identity_bearer_token, create_identity, delete_dac_actor_relationship,
     delete_nac_actor_relationship, disable_nac, enable_nac, get_dac_policy, get_nac_status,
     get_node_identity, list_dac_policies, node_set_default_identity, re_enable_nac,
-    register_remote_identity, RegisterIdentity,
+    register_remote_identity, register_remote_identity_bytes, RegisterIdentity,
 };
 pub use backup::{basic_export, basic_import};
 pub use batch::{batch_sign, batch_start};
