@@ -37,6 +37,10 @@ pub(super) fn build_commits_filter_arg() -> InputObject {
             "fieldName",
             TypeRef::named("CommitsFieldNameFilterArg"),
         ))
+        .field(InputValue::new(
+            "height",
+            TypeRef::named("CommitsHeightFilterArg"),
+        ))
 }
 
 /// Build the CommitsFieldNameFilterArg input object.
@@ -46,6 +50,19 @@ pub(super) fn build_commits_field_name_filter_arg() -> InputObject {
         .field(InputValue::new("_in", TypeRef::named_list("String")))
         .field(InputValue::new("_ne", TypeRef::named("String")))
         .field(InputValue::new("_nin", TypeRef::named_list("String")))
+}
+
+/// Build the CommitsHeightFilterArg input object.
+pub(super) fn build_commits_height_filter_arg() -> InputObject {
+    InputObject::new("CommitsHeightFilterArg")
+        .field(InputValue::new("_eq", TypeRef::named("Int")))
+        .field(InputValue::new("_geq", TypeRef::named("Int")))
+        .field(InputValue::new("_gt", TypeRef::named("Int")))
+        .field(InputValue::new("_in", TypeRef::named_list("Int")))
+        .field(InputValue::new("_leq", TypeRef::named("Int")))
+        .field(InputValue::new("_lt", TypeRef::named("Int")))
+        .field(InputValue::new("_neq", TypeRef::named("Int")))
+        .field(InputValue::new("_nin", TypeRef::named_list("Int")))
 }
 
 /// Build the commitsOrderArg input object.
