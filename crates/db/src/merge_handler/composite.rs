@@ -72,7 +72,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     reason = %reason,
                     "Skipping replicated write into local-only downsample source"
                 );
-                return Ok(MergeOutcome::skipped(reason));
+                return Ok(MergeOutcome::terminal_skip(reason));
             }
         }
 
@@ -822,7 +822,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     reason = %reason,
                     "Skipping replicated write into local-only downsample source"
                 );
-                return Ok(MergeOutcome::skipped(reason));
+                return Ok(MergeOutcome::terminal_skip(reason));
             }
         }
 

@@ -24,6 +24,7 @@ use p2p::P2PTransport;
 type EmbeddedBlockstore<S> = blockstore::DefraBlockstore<S>;
 type EmbeddedMergeHandler<S> = db::AcpMergeHandler<S, EmbeddedBlockstore<S>>;
 type EmbeddedTxnRegistry<S> = db::DbTransactionRegistry<S>;
+type WireDocumentAcpCallback = Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>;
 
 /// Embedded DefraDB node assembled for native/mobile embedding.
 pub struct EmbeddedNode<S: storage::corekv::Store> {
@@ -238,7 +239,7 @@ struct P2PSetup<S: storage::corekv::Store + 'static> {
     system: Arc<ManagedP2PSystem>,
     mutator: Arc<dyn query::DocMutator>,
     merge_handler: Arc<EmbeddedMergeHandler<S>>,
-    wire_document_acp: Option<Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>>,
+    wire_document_acp: Option<WireDocumentAcpCallback>,
 }
 
 pub async fn build_with_store<S>(
