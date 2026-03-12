@@ -833,6 +833,36 @@ impl<S: Store> crate::database::DB<S> {
         let _ = self.build_downsample_plan(collection)?;
         Ok(())
     }
+
+    pub fn local_downsample_targets_for_source(
+        &self,
+        source_collection_name: &str,
+    ) -> Result<Vec<String>> {
+        let mut targets = self
+            .downsample_plans(None, Some(source_collection_name))?
+            .into_iter()
+            .map(|plan| plan.target.name)
+            .collect::<Vec<_>>();
+        targets.sort();
+        targets.dedup();
+        Ok(targets)
+    }
+
+    pub fn replicated_downsample_source_skip_reason(
+        &self,
+        source_collection: &CollectionVersion,
+    ) -> Result<Option<String>> {
+        let targets = self.local_downsample_targets_for_source(&source_collection.name)?;
+        if targets.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(format!(
+            "replicated writes into downsample source '{}' are not supported; downsample source collections are local-only (targets: {})",
+            source_collection.name,
+            targets.join(", ")
+        )))
+    }
 }
 
 impl<S: Store + 'static> crate::database::DB<S> {
