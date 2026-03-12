@@ -1,4 +1,4 @@
-use super::batch::PendingMergeEvent;
+use super::batch::{PendingMergeEvent, PendingPostCommitAction};
 use super::*;
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
@@ -66,20 +66,33 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         child_cid = %cid,
                         "Recursively merging parent collection block"
                     );
-                    let _ = Box::pin(self.process_collection_delta(
+                    match Box::pin(self.process_collection_delta(
                         head_cid,
                         &head_block,
                         head_payload,
                         metadata,
                         depth + 1,
                     ))
-                    .await;
+                    .await
+                    {
+                        Ok(MergeOutcome::Merged) => {}
+                        Ok(outcome) if outcome.is_terminal_skip() => {}
+                        Ok(outcome) => return Ok(outcome),
+                        Err(e) => {
+                            tracing::debug!(
+                                parent_cid = %head_cid,
+                                error = %e,
+                                "Parent collection merge failed"
+                            );
+                        }
+                    }
                 }
             }
         }
 
         // Process linked document composites
         let mut any_merged = false;
+        let mut retryable_skip: Option<MergeOutcome> = None;
         if let Some(links) = &block.links {
             for dag_link in links {
                 let link_cid = &dag_link.link;
@@ -163,16 +176,24 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                         doc_id: doc_id_str,
                                         cid: *link_cid,
                                         collection_id: col_id,
-                                        by_peer: String::new(),
+                                        by_peer: metadata.sender_peer.unwrap_or("").to_string(),
                                     }));
                                 }
                             }
-                            Ok(outcome) => {
+                            Ok(outcome) if outcome.is_terminal_skip() => {
                                 tracing::debug!(
                                     link_cid = %link_cid,
                                     outcome = ?outcome,
                                     "Composite skipped"
                                 );
+                            }
+                            Ok(outcome) => {
+                                tracing::debug!(
+                                    link_cid = %link_cid,
+                                    outcome = ?outcome,
+                                    "Composite skipped and will be retried"
+                                );
+                                retryable_skip.get_or_insert(outcome);
                             }
                             Err(e) => {
                                 tracing::debug!(link_cid = %link_cid, error = %e, "Composite merge failed");
@@ -188,6 +209,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     }
                 }
             }
+        }
+
+        if let Some(outcome) = retryable_skip {
+            return Ok(outcome);
         }
 
         // Update collection headstore using proper head merging.
@@ -246,7 +271,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         if any_merged {
             Ok(MergeOutcome::Merged)
         } else {
-            Ok(MergeOutcome::skipped("no linked composites needed merging"))
+            Ok(MergeOutcome::terminal_skip(
+                "no linked composites needed merging",
+            ))
         }
     }
 
@@ -265,6 +292,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         metadata: &BlockMetadata<'_>,
         batch_merged: &std::sync::Mutex<HashSet<Cid>>,
         pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
+        pending_post_commit_actions: &std::sync::Mutex<Vec<PendingPostCommitAction>>,
         depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
         if depth >= super::MAX_MERGE_DEPTH {
@@ -291,7 +319,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 };
 
                 if let CrdtDelta::Collection(head_payload) = &head_block.delta {
-                    let _ = Box::pin(self.process_collection_delta_in_txn(
+                    match Box::pin(self.process_collection_delta_in_txn(
                         datastore,
                         headstore,
                         head_cid,
@@ -300,15 +328,29 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         metadata,
                         batch_merged,
                         pending_events,
+                        pending_post_commit_actions,
                         depth + 1,
                     ))
-                    .await;
+                    .await
+                    {
+                        Ok(MergeOutcome::Merged) => {}
+                        Ok(outcome) if outcome.is_terminal_skip() => {}
+                        Ok(outcome) => return Ok(outcome),
+                        Err(e) => {
+                            tracing::debug!(
+                                parent_cid = %head_cid,
+                                error = %e,
+                                "Parent collection merge failed in batch"
+                            );
+                        }
+                    }
                 }
             }
         }
 
         // Process linked document composites
         let mut any_merged = false;
+        let mut retryable_skip: Option<MergeOutcome> = None;
         if let Some(links) = &block.links {
             for dag_link in links {
                 let link_cid = &dag_link.link;
@@ -336,6 +378,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             true,
                             batch_merged,
                             pending_events,
+                            pending_post_commit_actions,
                             depth + 1,
                         )
                         .await
@@ -353,17 +396,27 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                     doc_id: doc_id_str,
                                     cid: *link_cid,
                                     collection_id: col_id,
-                                    by_peer: String::new(),
+                                    by_peer: metadata.sender_peer.unwrap_or("").to_string(),
                                 }),
                             });
                         }
-                        Ok(_) => {}
+                        Ok(outcome) if outcome.is_terminal_skip() => {
+                            tracing::debug!(link_cid = %link_cid, outcome = ?outcome, "Composite skipped in batch");
+                        }
+                        Ok(outcome) => {
+                            tracing::debug!(link_cid = %link_cid, outcome = ?outcome, "Composite skipped in batch and will be retried");
+                            retryable_skip.get_or_insert(outcome);
+                        }
                         Err(e) => {
                             tracing::debug!(link_cid = %link_cid, error = %e, "Composite merge failed in batch");
                         }
                     }
                 }
             }
+        }
+
+        if let Some(outcome) = retryable_skip {
+            return Ok(outcome);
         }
 
         // Update collection headstore using the shared headstore view
@@ -400,7 +453,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         if any_merged {
             Ok(MergeOutcome::Merged)
         } else {
-            Ok(MergeOutcome::skipped("no linked composites needed merging"))
+            Ok(MergeOutcome::terminal_skip(
+                "no linked composites needed merging",
+            ))
         }
     }
 }

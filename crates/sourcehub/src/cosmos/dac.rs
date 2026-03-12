@@ -113,6 +113,27 @@ impl DocumentACP for SourceHubDocumentACP {
         Ok(is_registered)
     }
 
+    async fn get_doc_owner(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<Option<Did>> {
+        let (is_registered, owner) = self
+            .provider
+            .query_object_owner(policy_id, resource_name, doc_id)
+            .await
+            .map_err(provider_err)?;
+
+        if !is_registered {
+            return Ok(None);
+        }
+
+        Did::new(&owner)
+            .map(Some)
+            .map_err(|error| acp::Error::Storage(format!("invalid owner DID: {error}")))
+    }
+
     async fn check_doc_access(
         &self,
         identity: &Identity,

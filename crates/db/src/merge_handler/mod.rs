@@ -8,6 +8,7 @@ mod collection;
 mod composite;
 mod counter;
 mod definition;
+pub(crate) mod hook;
 mod lww;
 pub(crate) mod se_merge;
 
@@ -38,6 +39,7 @@ use crate::collection::collection_short_id;
 use crate::database::DB;
 use crate::error::Error;
 use crate::index_manager::IndexManager;
+use hook::CompositeMergeHook;
 
 /// Maximum DAG recursion depth for merge operations.
 ///
@@ -135,10 +137,8 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     db: Arc<DB<S>>,
     /// Reference to the blockstore for loading linked blocks.
     blockstore: Arc<B>,
-    /// Optional DocumentACP for checking access on encrypted+ACP-protected documents.
-    /// Uses OnceLock so it can be set after construction (p2p.rs creates the merge
-    /// handler before document_acp is available).
-    document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
+    /// Optional merge hook for policy-specific behavior around composite merges.
+    composite_merge_hook: std::sync::OnceLock<Arc<dyn CompositeMergeHook>>,
     /// Tracks composite CIDs that have already been merged, preventing
     /// duplicate processing from concurrent dual-broadcast paths (doc topic
     /// + collection topic). Matches Go's `loadComposites` dedup guard.
@@ -155,21 +155,19 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         Self {
             db,
             blockstore,
-            document_acp: std::sync::OnceLock::new(),
+            composite_merge_hook: std::sync::OnceLock::new(),
             merged_composites: std::sync::Mutex::new(HashSet::new()),
             se_enc_key: std::sync::OnceLock::new(),
         }
     }
 
-    /// Set the DocumentACP for access control checks during merge (builder pattern).
-    pub fn with_document_acp(self, acp: Arc<dyn acp::DocumentACP>) -> Self {
-        let _ = self.document_acp.set(acp);
-        self
+    /// Set the composite merge hook after construction.
+    pub(crate) fn set_composite_merge_hook(&self, hook: Arc<dyn CompositeMergeHook>) {
+        let _ = self.composite_merge_hook.set(hook);
     }
 
-    /// Set the DocumentACP after construction (when merge handler is already in Arc).
-    pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
-        let _ = self.document_acp.set(acp);
+    pub(crate) fn composite_merge_hook(&self) -> Option<&Arc<dyn CompositeMergeHook>> {
+        self.composite_merge_hook.get()
     }
 
     /// Set the SE encryption key for generating artifacts on replicated documents.
@@ -583,7 +581,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
             CrdtDelta::FieldDefinition(_) => {
                 // Field definitions are processed as part of CollectionDefinition
                 tracing::debug!(cid = %cid, "FieldDefinition delta - skipping (processed with collection)");
-                Ok(MergeOutcome::skipped(
+                Ok(MergeOutcome::terminal_skip(
                     "field definition processed with collection",
                 ))
             }
@@ -593,7 +591,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
             }
             CrdtDelta::CollectionSet(_) => {
                 tracing::debug!(cid = %cid, "CollectionSet delta - skipping");
-                Ok(MergeOutcome::skipped("collection set delta"))
+                Ok(MergeOutcome::terminal_skip("collection set delta"))
             }
         }
     }
@@ -612,13 +610,18 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
 
 #[cfg(test)]
 mod tests {
+    use super::hook::{CompositeMergeHook, CompositePostCommitAction};
     use super::*;
+    use async_trait::async_trait;
     use blockstore::{Blockstore as _, DefraBlockstore};
     use crypto::PrivateKey as _;
     use defra_core::block::{
         Block, CrdtDelta, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
     };
+    use events::{Bus, ChannelBus, EventName};
+    use schema::{CollectionVersion, FieldDescription, FieldKind};
     use storage::backends::MemoryStore;
+    use tokio::time::{timeout, Duration};
 
     fn make_handler() -> (
         DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
@@ -630,6 +633,88 @@ mod tests {
         let blockstore = Arc::new(DefraBlockstore::new(store_arc, false));
         let handler = DbMergeHandler::new(db, blockstore.clone());
         (handler, blockstore)
+    }
+
+    async fn make_handler_with_schema_and_bus() -> (
+        DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
+        Arc<DefraBlockstore<MemoryStore>>,
+        Arc<ChannelBus>,
+    ) {
+        let store = Arc::new(MemoryStore::new());
+        let bus = Arc::new(ChannelBus::new());
+
+        let mut db = DB::from_arc(store.clone()).unwrap();
+        db.set_event_bus(bus.clone());
+        let db = Arc::new(db);
+
+        db.create_collection(CollectionVersion::new(
+            "Users",
+            "v1",
+            "col-users",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                FieldDescription::new("3", "age", FieldKind::int()),
+            ],
+        ))
+        .await
+        .unwrap();
+
+        let blockstore = Arc::new(DefraBlockstore::new(store, false));
+        let handler = DbMergeHandler::new(db, blockstore.clone());
+        (handler, blockstore, bus)
+    }
+
+    struct FailingPostCommitAction;
+
+    #[async_trait]
+    impl CompositePostCommitAction for FailingPostCommitAction {
+        async fn run(self: Box<Self>) -> Result<(), MergeError> {
+            Err(MergeError::MergeFailed(
+                "test post-commit failure".to_string(),
+            ))
+        }
+    }
+
+    struct FailingCompositeHook;
+
+    #[async_trait]
+    impl CompositeMergeHook for FailingCompositeHook {
+        fn post_commit_action(
+            &self,
+            _doc_id: &str,
+            _collection: &CollectionVersion,
+            _metadata: &BlockMetadata<'_>,
+        ) -> Option<Box<dyn CompositePostCommitAction>> {
+            Some(Box::new(FailingPostCommitAction))
+        }
+    }
+
+    async fn build_merge_block(
+        blockstore: &Arc<DefraBlockstore<MemoryStore>>,
+        name: &str,
+        age: i64,
+    ) -> MergeBlock {
+        let mut doc = Document::new();
+        doc.generate_and_set_doc_id().unwrap();
+        doc.set("name", NormalValue::String(name.to_string()));
+        doc.set("age", NormalValue::Int(age));
+
+        let result = crate::block_builder::build_blocks_from_document(&doc, "v1", blockstore)
+            .await
+            .unwrap();
+
+        MergeBlock {
+            cid: result.cid,
+            block_data: result.block,
+            doc_id: result.doc_id,
+            collection_id: "col-users".to_string(),
+            creator: "did:key:z6MkrBatchMergeTest".to_string(),
+            sender_peer: Some("peer1".to_string()),
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+            verified_creator: None,
+        }
     }
 
     fn make_lww_block(signature_cid: Option<Cid>) -> Block {
@@ -944,7 +1029,7 @@ mod tests {
         );
 
         // effective_creator prefers verified over self-reported victim DID
-        let mut metadata = BlockMetadata::normal("doc1", "col1", victim_did);
+        let mut metadata = BlockMetadata::normal("doc1", "col1", victim_did, None, false);
         metadata.verified_creator = verified;
         assert_eq!(
             metadata.effective_creator(),
@@ -957,6 +1042,59 @@ mod tests {
                 .unwrap()
                 .starts_with("did:key:"),
             "DID format preserved for ACP registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_merge_keeps_success_and_events_when_post_commit_action_fails() {
+        let (handler, blockstore, bus) = make_handler_with_schema_and_bus().await;
+        handler.set_composite_merge_hook(Arc::new(FailingCompositeHook));
+
+        let mut subscription = bus.subscribe(&[EventName::Update]);
+        let first = build_merge_block(&blockstore, "Alice", 30).await;
+        let second = build_merge_block(&blockstore, "Bob", 31).await;
+        let expected_doc_ids = [first.doc_id.clone(), second.doc_id.clone()];
+
+        let results = handler.handle_block_batch(&[first, second]).await;
+
+        assert_eq!(results.len(), 2);
+        assert!(
+            results
+                .iter()
+                .all(|result| matches!(result, Ok(MergeOutcome::Merged))),
+            "post-commit failures after commit must not turn merged blocks into failures"
+        );
+
+        let update1 = timeout(Duration::from_secs(1), subscription.recv())
+            .await
+            .expect("expected first update event")
+            .expect("subscription closed unexpectedly");
+        let update2 = timeout(Duration::from_secs(1), subscription.recv())
+            .await
+            .expect("expected second update event")
+            .expect("subscription closed unexpectedly");
+
+        let mut seen_doc_ids = vec![
+            update1
+                .as_update()
+                .expect("expected update event")
+                .doc_id
+                .clone(),
+            update2
+                .as_update()
+                .expect("expected update event")
+                .doc_id
+                .clone(),
+        ];
+        seen_doc_ids.sort();
+
+        let mut expected = expected_doc_ids.to_vec();
+        expected.sort();
+
+        assert_eq!(seen_doc_ids, expected);
+        assert!(
+            subscription.try_recv().is_err(),
+            "batch merge should publish exactly the queued update events"
         );
     }
 }

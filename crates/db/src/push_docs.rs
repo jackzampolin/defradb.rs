@@ -1,9 +1,11 @@
 use std::str::FromStr;
 
+use acp::DocumentACP;
 use p2p::message::PushLogRequest;
 use storage::corekv::{IterOptions, Reader, Store};
 
 use crate::database::DB;
+use crate::push_docs_common::resolve_push_creator;
 
 /// Push existing documents to a replicator peer.
 ///
@@ -15,6 +17,7 @@ use crate::database::DB;
 pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
     handle: &p2p::P2PHostHandle,
     db: &DB<S>,
+    document_acp: Option<&dyn DocumentACP>,
     peer_id: libp2p::PeerId,
     collections: &[String],
     se_encryption_key: Option<&[u8]>,
@@ -40,6 +43,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
         .local_peer_id()
         .await
         .map_err(|e| format!("failed to get local peer ID: {}", e))?;
+    let local_peer_id_str = local_peer_id.to_string();
 
     let txn = db
         .new_txn(true)
@@ -103,6 +107,8 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
         // processes the composite block, otherwise it tries Bitswap which
         // doesn't work reliably cross-platform.
         for doc_id in &doc_ids {
+            let creator =
+                resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id_str).await;
             let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
             let opts = IterOptions::new().with_prefix(prefix);
             let mut iter = headstore
@@ -165,7 +171,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                         doc_id.clone(),
                         field_cid,
                         collection.collection_id().to_string(),
-                        local_peer_id.to_string(),
+                        creator.clone(),
                         field_data,
                     );
                     if let Err(e) = p2p::signing::sign_message(handle.keypair(), &mut field_req) {
@@ -179,7 +185,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                     doc_id.clone(),
                     composite_cid,
                     collection.collection_id().to_string(),
-                    local_peer_id.to_string(),
+                    creator.clone(),
                     composite_data,
                 );
                 if let Err(e) = p2p::signing::sign_message(handle.keypair(), &mut request) {
@@ -193,7 +199,26 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                 let push_h = handle.clone();
                 push_handles.push(tokio::spawn(async move {
                     for req in requests {
-                        let _ = push_h.send_two_stream_request(peer_id, req).await;
+                        let cid = req.cid.clone();
+                        match push_h.send_two_stream_request(peer_id, req).await {
+                            Ok(reply) if reply.err_message.is_some() => {
+                                tracing::warn!(
+                                    peer_id = %peer_id,
+                                    cid_len = cid.len(),
+                                    error = %reply.err_message.as_deref().unwrap_or("unknown pushlog error"),
+                                    "Existing document replay PushLog was rejected"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    peer_id = %peer_id,
+                                    cid_len = cid.len(),
+                                    error = %e,
+                                    "Existing document replay PushLog failed"
+                                );
+                            }
+                        }
                     }
                 }));
             }
@@ -336,6 +361,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
 pub async fn retry_doc<S: Store + 'static>(
     handle: &p2p::P2PHostHandle,
     db: &DB<S>,
+    document_acp: Option<&dyn DocumentACP>,
     peer_id: libp2p::PeerId,
     doc_id: &str,
     collection_id: &str,
@@ -344,6 +370,12 @@ pub async fn retry_doc<S: Store + 'static>(
         .local_peer_id()
         .await
         .map_err(|e| format!("failed to get local peer ID: {}", e))?;
+    let local_peer_id_str = local_peer_id.to_string();
+    let collection = db
+        .find_collection_by_id(collection_id)
+        .map_err(|e| format!("failed to get collection: {}", e))?
+        .ok_or_else(|| format!("collection '{}' not found", collection_id))?;
+    let creator = resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id_str).await;
 
     let headstore = storage::stores::Headstore::new(db.store().clone());
     let head_txn = headstore
@@ -394,15 +426,16 @@ pub async fn retry_doc<S: Store + 'static>(
                             doc_id.to_string(),
                             link.link.to_bytes(),
                             collection_id.to_string(),
-                            local_peer_id.to_string(),
+                            creator.clone(),
                             field_data,
                         );
-                        if p2p::signing::sign_message(handle.keypair(), &mut field_req).is_ok()
-                            && handle
-                                .send_two_stream_request(peer_id, field_req)
-                                .await
-                                .is_err()
-                        {
+                        if p2p::signing::sign_message(handle.keypair(), &mut field_req).is_ok() {
+                            match handle.send_two_stream_request(peer_id, field_req).await {
+                                Ok(reply) if reply.err_message.is_some() => any_failed = true,
+                                Ok(_) => {}
+                                Err(_) => any_failed = true,
+                            }
+                        } else {
                             any_failed = true;
                         }
                     }
@@ -415,7 +448,7 @@ pub async fn retry_doc<S: Store + 'static>(
             doc_id.to_string(),
             head_cid.to_bytes(),
             collection_id.to_string(),
-            local_peer_id.to_string(),
+            creator.clone(),
             block_data,
         );
 
@@ -424,12 +457,10 @@ pub async fn retry_doc<S: Store + 'static>(
             continue;
         }
 
-        if handle
-            .send_two_stream_request(peer_id, request)
-            .await
-            .is_err()
-        {
-            any_failed = true;
+        match handle.send_two_stream_request(peer_id, request).await {
+            Ok(reply) if reply.err_message.is_some() => any_failed = true,
+            Ok(_) => {}
+            Err(_) => any_failed = true,
         }
     }
 

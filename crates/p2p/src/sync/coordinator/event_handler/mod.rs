@@ -76,6 +76,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 peer_id,
                 request,
                 token,
+                is_explicit_replicator,
+                explicit_replay_authorization,
             } => {
                 if !self.rate_limiter.check(&peer_id) {
                     tracing::warn!(
@@ -87,8 +89,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         collection_id: "rate-limited".into(),
                     });
                 }
-                self.handle_two_stream_request(peer_id, request, token)
-                    .await?;
+                self.handle_two_stream_request(
+                    peer_id,
+                    request,
+                    token,
+                    is_explicit_replicator,
+                    explicit_replay_authorization,
+                )
+                .await?;
             }
             TransportEvent::BitswapBlockReceived {
                 query_id,

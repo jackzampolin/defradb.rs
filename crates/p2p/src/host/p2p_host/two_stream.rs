@@ -3,6 +3,7 @@
 use iroh_bitswap::Store;
 use tracing::{debug, error, info, warn};
 
+use crate::explicit_replay;
 use crate::two_stream::TwoStreamEvent;
 
 use super::P2PHost;
@@ -13,6 +14,37 @@ impl<S: Store> P2PHost<S> {
     pub(super) async fn handle_two_stream_event(&mut self, event: TwoStreamEvent) {
         match event {
             TwoStreamEvent::InboundRequest { peer_id, request } => {
+                let explicit_replay_authorization = request
+                    .explicit_replay_capability
+                    .as_deref()
+                    .and_then(|capability| {
+                        match explicit_replay::verify_capability(
+                            capability,
+                            &peer_id.to_string(),
+                            &self.swarm.local_peer_id().to_string(),
+                            &request.collection_id,
+                        ) {
+                            Ok(authorization) => {
+                                info!(
+                                    peer_id = %peer_id,
+                                    authorizer_did = %authorization.authorizer_did,
+                                    collection_id = %authorization.collection_id,
+                                    "Accepted explicit replay capability for two-stream PushLog"
+                                );
+                                Some(authorization)
+                            }
+                            Err(error) => {
+                                warn!(
+                                    peer_id = %peer_id,
+                                    creator = %request.creator,
+                                    error = %error,
+                                    "Rejected explicit replay capability for two-stream PushLog"
+                                );
+                                None
+                            }
+                        }
+                    });
+                let is_explicit_replicator = explicit_replay_authorization.is_some();
                 info!(
                     peer_id = %peer_id,
                     message_id = %request.metadata.message_id,
@@ -21,7 +53,12 @@ impl<S: Store> P2PHost<S> {
                 );
                 if self
                     .event_tx
-                    .send(HostEvent::TwoStreamRequest { peer_id, request })
+                    .send(HostEvent::TwoStreamRequest {
+                        peer_id,
+                        request,
+                        is_explicit_replicator,
+                        explicit_replay_authorization,
+                    })
                     .await
                     .is_err()
                 {

@@ -69,6 +69,8 @@ pub enum HostEvent {
     TwoStreamRequest {
         peer_id: PeerId,
         request: crate::message::PushLogRequest,
+        is_explicit_replicator: bool,
+        explicit_replay_authorization: Option<crate::ExplicitReplayAuthorization>,
     },
 
     /// Received a DocSync request via two-stream protocol.

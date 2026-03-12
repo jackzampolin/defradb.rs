@@ -21,7 +21,11 @@ pub enum ReplicationResult {
         broadcast_error: String,
     },
     /// Block was skipped (already applied or rejected)
-    Skipped { cid: Cid, reason: String },
+    Skipped {
+        cid: Cid,
+        reason: String,
+        terminal: bool,
+    },
     /// Merge failed
     Failed { cid: Cid, error: String },
     /// Merge succeeded but failed to mark as merged (will be reprocessed on restart)

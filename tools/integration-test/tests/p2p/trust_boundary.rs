@@ -66,7 +66,8 @@ async fn p2p_trust_boundary_test(cluster: TestCluster) {
     core.p2p_connect(&[near_addr]).unwrap();
     core.p2p_collection_add(&["User"]).unwrap();
     near.p2p_collection_add(&["User"]).unwrap();
-    core.p2p_replicator_set(&["User"], near_addr).unwrap();
+    core.p2p_replicator_set_with_identity(&["User"], near_addr, &jack.private_key_hex)
+        .unwrap();
 
     // Jack creates ACP-protected tweet on Core
     core.query_with_identity(

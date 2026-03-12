@@ -77,7 +77,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         field_name = %payload.field_name,
                         "LWW delta rejected by CRDT (lower priority or tie-break)"
                     );
-                    Ok(MergeOutcome::skipped(
+                    Ok(MergeOutcome::terminal_skip(
                         "rejected by CRDT conflict resolution",
                     ))
                 } else {
@@ -94,7 +94,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         field_name = %payload.field_name,
                         "LWW delta skipped (already applied)"
                     );
-                    Ok(MergeOutcome::skipped("already applied"))
+                    Ok(MergeOutcome::terminal_skip("already applied"))
                 }
             }
             Err(e) => {

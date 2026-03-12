@@ -72,7 +72,7 @@ async fn rust_sourcehub_p2p_acp() {
         .p2p_collection_add(&["User"])
         .expect("p2p collection add node1");
     node0
-        .p2p_replicator_set(&["User"], addr1)
+        .p2p_replicator_set_with_identity(&["User"], addr1, &jack.private_key_hex)
         .expect("set replicator");
 
     // Create document as Jack on node 0

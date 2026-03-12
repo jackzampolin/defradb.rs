@@ -31,15 +31,27 @@ pub use result::ReplicationResult;
 
 #[cfg(test)]
 mod tests {
+    use super::handlers::handle_block_received;
     use super::*;
+    use crate::bitswap::AccessMode;
+    use crate::error::Result as P2PResult;
+    use crate::message::{
+        BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
+        PushLogReply, PushLogRequest, PushSEArtifactsRequest,
+    };
     use crate::sync::manager::SyncEvent;
     use crate::sync::merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
+    use crate::topics::DefraTopic;
+    use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, ResponseToken};
+    use crate::QueryId;
+    use crate::ReplicatorInfo;
     use async_trait::async_trait;
     use blockstore::{Blockstore, DefraBlockstore};
     use cid::Cid;
     use std::str::FromStr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
     use storage::backends::MemoryStore;
     use tokio::sync::mpsc;
 
@@ -86,6 +98,252 @@ mod tests {
 
     impl std::error::Error for TestError {}
 
+    #[derive(Clone)]
+    struct NoopTransport {
+        peer_id: PeerId,
+        pubkey: Vec<u8>,
+    }
+
+    impl NoopTransport {
+        fn new() -> Self {
+            Self {
+                peer_id: PeerId::new("local-peer".to_string()),
+                pubkey: vec![1, 2, 3],
+            }
+        }
+    }
+
+    #[async_trait]
+    impl P2PTransport for NoopTransport {
+        fn local_peer_id(&self) -> &PeerId {
+            &self.peer_id
+        }
+
+        fn local_public_key_proto(&self) -> &[u8] {
+            &self.pubkey
+        }
+
+        fn sign(&self, _data: &[u8]) -> P2PResult<Vec<u8>> {
+            Ok(vec![0])
+        }
+
+        async fn dial(&self, _peer_id: &PeerId, _addrs: Vec<PeerAddr>) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn listen(&self, _addr: PeerAddr) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn connected_peers(&self) -> P2PResult<Vec<PeerId>> {
+            Ok(Vec::new())
+        }
+
+        async fn listen_addresses(&self) -> P2PResult<Vec<PeerAddr>> {
+            Ok(Vec::new())
+        }
+
+        async fn poll_until_connected(
+            &self,
+            _peer_id: &PeerId,
+            _timeout: Duration,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn peer_addresses(&self) -> P2PResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn subscribe(&self, _topic: DefraTopic) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn unsubscribe(&self, _topic: DefraTopic) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn publish(
+            &self,
+            _topic: DefraTopic,
+            _msg: PushLogBroadcast,
+        ) -> P2PResult<MessageId> {
+            Ok(MessageId::new("noop".to_string()))
+        }
+
+        async fn send_pushlog_response(
+            &self,
+            _token: ResponseToken,
+            _reply: PushLogReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_two_stream_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: PushLogRequest,
+        ) -> P2PResult<PushLogReply> {
+            Ok(PushLogReply::success("noop"))
+        }
+
+        async fn send_two_stream_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: PushLogReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: DocSyncRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: DocSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_request(
+            &self,
+            _peer_id: &PeerId,
+            _req: BranchableSyncRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_response(
+            &self,
+            _peer_id: &PeerId,
+            _reply: BranchableSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_car_request(&self, _peer_id: &PeerId, _root_cid: Cid) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_car_response(&self, _peer_id: &PeerId, _car_data: Vec<u8>) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_car_response_token(
+            &self,
+            _token: ResponseToken,
+            _car_data: Vec<u8>,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_doc_sync_response_token(
+            &self,
+            _token: ResponseToken,
+            _reply: DocSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_branchable_sync_response_token(
+            &self,
+            _token: ResponseToken,
+            _reply: BranchableSyncReply,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn send_se_artifacts(
+            &self,
+            _peer_id: &PeerId,
+            _req: PushSEArtifactsRequest,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn sync_blocks(
+            &self,
+            _root: Cid,
+            _providers: Vec<PeerId>,
+            _missing: Vec<Cid>,
+        ) -> P2PResult<QueryId> {
+            Ok(QueryId(0))
+        }
+
+        async fn cancel_sync(&self, _query_id: QueryId) -> P2PResult<bool> {
+            Ok(true)
+        }
+
+        async fn create_replicator(
+            &self,
+            _peer_id: &PeerId,
+            _collections: Vec<String>,
+        ) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn delete_replicator(&self, _peer_id: &PeerId) -> P2PResult<()> {
+            Ok(())
+        }
+
+        async fn list_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
+            Ok(Vec::new())
+        }
+
+        async fn get_replicator(&self, _peer_id: &PeerId) -> P2PResult<Option<ReplicatorInfo>> {
+            Ok(None)
+        }
+
+        async fn remove_replicator_collections(
+            &self,
+            _peer_id: &PeerId,
+            _collections: Vec<String>,
+        ) -> P2PResult<bool> {
+            Ok(false)
+        }
+
+        async fn shutdown(&self) -> P2PResult<()> {
+            Ok(())
+        }
+    }
+
+    struct RetryThenMergeHandler {
+        call_count: AtomicUsize,
+    }
+
+    impl RetryThenMergeHandler {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MergeHandler for RetryThenMergeHandler {
+        type Error = TestError;
+
+        async fn handle_block(
+            &self,
+            _cid: &Cid,
+            _block_data: &[u8],
+            _metadata: BlockMetadata<'_>,
+        ) -> Result<MergeOutcome, Self::Error> {
+            let attempt = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                Ok(MergeOutcome::retryable_skip("pending ACP"))
+            } else {
+                Ok(MergeOutcome::Merged)
+            }
+        }
+    }
+
     #[async_trait]
     impl MergeHandler for TestMergeHandler {
         type Error = TestError;
@@ -103,7 +361,7 @@ mod tests {
             }
 
             if self.should_skip {
-                Ok(MergeOutcome::skipped("test skip reason"))
+                Ok(MergeOutcome::terminal_skip("test skip reason"))
             } else {
                 Ok(MergeOutcome::Merged)
             }
@@ -204,6 +462,9 @@ mod tests {
             doc_id: "doc1".to_string(),
             collection_id: "col1".to_string(),
             creator: "peer1".to_string(),
+            sender_peer: None,
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
         })
         .await
         .unwrap();
@@ -215,7 +476,7 @@ mod tests {
             .handle_block(
                 &cid,
                 b"test data",
-                BlockMetadata::normal("doc1", "col1", "peer1"),
+                BlockMetadata::normal("doc1", "col1", "peer1", None, false),
             )
             .await;
         assert!(result.is_ok());
@@ -229,14 +490,19 @@ mod tests {
         let handler = TestMergeHandler::new(true, true); // succeed but skip
 
         let result = handler
-            .handle_block(&cid, b"test", BlockMetadata::normal("doc", "col", "peer"))
+            .handle_block(
+                &cid,
+                b"test",
+                BlockMetadata::normal("doc", "col", "peer", None, false),
+            )
             .await;
         assert!(result.is_ok());
         let outcome = result.unwrap();
         assert!(outcome.is_skipped());
         match outcome {
-            MergeOutcome::Skipped { reason } => {
+            MergeOutcome::Skipped { reason, terminal } => {
                 assert_eq!(reason, "test skip reason");
+                assert!(terminal);
             }
             _ => panic!("Expected Skipped outcome"),
         }
@@ -248,7 +514,11 @@ mod tests {
         let handler = TestMergeHandler::new(false, false); // fail
 
         let result = handler
-            .handle_block(&cid, b"test", BlockMetadata::normal("doc", "col", "peer"))
+            .handle_block(
+                &cid,
+                b"test",
+                BlockMetadata::normal("doc", "col", "peer", None, false),
+            )
             .await;
         assert!(result.is_err());
     }
@@ -266,6 +536,74 @@ mod tests {
 
         let result = handler.handle_block(&cid, b"test", metadata).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_retryable_skip_remains_unmerged_until_replayed() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let cid = test_cid();
+        blockstore.put(&cid, b"test data").await.unwrap();
+
+        let (coordinator, _events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                NoopTransport::new(),
+                blockstore.clone(),
+                crate::sync::SyncConfig::default(),
+                AccessMode::Open,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+            )
+            .await
+            .unwrap();
+
+        let config = ReplicationConfig {
+            continue_on_error: true,
+            rebroadcast_on_merge: false,
+            batch_size: 1,
+            max_workers: 1,
+        };
+        let handler = RetryThenMergeHandler::new();
+
+        let first = handle_block_received(
+            &coordinator,
+            &handler,
+            &config,
+            cid,
+            BlockMetadata::normal("doc1", "col1", "peer1", Some("sender1"), true),
+        )
+        .await;
+
+        match first {
+            ReplicationResult::Skipped {
+                terminal: false,
+                ref reason,
+                ..
+            } => assert_eq!(reason, "pending ACP"),
+            other => panic!("expected retryable skip, got {:?}", other),
+        }
+        assert!(
+            !blockstore.is_merged(&cid).await.unwrap(),
+            "retryable skip must leave the CID unmerged"
+        );
+
+        let second = handle_block_received(
+            &coordinator,
+            &handler,
+            &config,
+            cid,
+            BlockMetadata::normal("doc1", "col1", "peer1", Some("sender1"), true),
+        )
+        .await;
+
+        match second {
+            ReplicationResult::Merged { .. } => {}
+            other => panic!("expected replay merge, got {:?}", other),
+        }
+        assert!(
+            blockstore.is_merged(&cid).await.unwrap(),
+            "successful replay should mark the CID as merged"
+        );
     }
 
     #[tokio::test]
@@ -332,6 +670,9 @@ mod tests {
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),
+                    sender_peer: None,
+                    is_explicit_replicator: false,
+                    explicit_replay_authorization: None,
                     verified_creator: None,
                 }
             })
@@ -361,6 +702,9 @@ mod tests {
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),
+                    sender_peer: None,
+                    is_explicit_replicator: false,
+                    explicit_replay_authorization: None,
                     verified_creator: None,
                 }
             })
@@ -396,6 +740,9 @@ mod tests {
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),
+                    sender_peer: None,
+                    is_explicit_replicator: false,
+                    explicit_replay_authorization: None,
                     verified_creator: None,
                 }
             })
@@ -431,6 +778,9 @@ mod tests {
             doc_id: "doc0".to_string(),
             collection_id: "col1".to_string(),
             creator: "peer1".to_string(),
+            sender_peer: None,
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
             verified_creator: None,
         }];
 
@@ -453,6 +803,9 @@ mod tests {
             doc_id: "my-doc".to_string(),
             collection_id: "my-collection".to_string(),
             creator: "my-peer".to_string(),
+            sender_peer: None,
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
             verified_creator: None,
         }];
 
@@ -480,6 +833,9 @@ mod tests {
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),
+                    sender_peer: None,
+                    is_explicit_replicator: false,
+                    explicit_replay_authorization: None,
                     verified_creator: None,
                 }
             })
@@ -509,6 +865,9 @@ mod tests {
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),
+                    sender_peer: None,
+                    is_explicit_replicator: false,
+                    explicit_replay_authorization: None,
                     verified_creator: None,
                 }
             })

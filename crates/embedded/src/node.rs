@@ -22,7 +22,7 @@ use p2p::topics::DefraTopic;
 use p2p::P2PTransport;
 
 type EmbeddedBlockstore<S> = blockstore::DefraBlockstore<S>;
-type EmbeddedMergeHandler<S> = db::DbMergeHandler<S, EmbeddedBlockstore<S>>;
+type EmbeddedMergeHandler<S> = db::AcpMergeHandler<S, EmbeddedBlockstore<S>>;
 type EmbeddedTxnRegistry<S> = db::DbTransactionRegistry<S>;
 
 /// Embedded DefraDB node assembled for native/mobile embedding.
@@ -215,6 +215,7 @@ struct P2PSetup<S: storage::corekv::Store + 'static> {
     system: Arc<ManagedP2PSystem>,
     mutator: Arc<dyn query::DocMutator>,
     merge_handler: Arc<EmbeddedMergeHandler<S>>,
+    wire_document_acp: Option<Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>>,
 }
 
 pub async fn build_with_store<S>(
@@ -238,7 +239,7 @@ where
     database.set_event_bus(event_bus.clone());
     let database = Arc::new(database);
 
-    let p2p_setup = match &config.transport {
+    let mut p2p_setup = match &config.transport {
         TransportConfig::None => None,
         TransportConfig::Libp2p(libp2p) => {
             Some(setup_libp2p(store.clone(), database.clone(), event_bus.clone(), libp2p).await?)
@@ -253,8 +254,11 @@ where
         create_document_acp(store.clone(), config.persistence, &config.document_acp).await?;
     let nac_manager = create_nac_manager(store.clone(), config.persistence).await?;
 
-    if let Some(ref setup) = p2p_setup {
+    if let Some(ref mut setup) = p2p_setup {
         setup.merge_handler.set_document_acp(document_acp.clone());
+        if let Some(wire_document_acp) = setup.wire_document_acp.take() {
+            wire_document_acp(document_acp.clone());
+        }
     }
 
     let fetcher = db::LensedAutoCommitFetcher::new(database.clone());
@@ -568,10 +572,11 @@ where
     let (failure_tx, failure_rx) = tokio::sync::mpsc::unbounded_channel::<PushFailure>();
     coordinator.set_failure_channel(failure_tx);
     let coordinator = Arc::new(coordinator);
-    let merge_handler = Arc::new(db::DbMergeHandler::new(
+    let merge_handler_inner = Arc::new(db::DbMergeHandler::new(
         database.clone(),
         blockstore.clone(),
     ));
+    let merge_handler = Arc::new(db::AcpMergeHandler::new(merge_handler_inner.clone()));
 
     match coordinator.load_p2p_collections().await {
         Ok(count) if count > 0 => tracing::debug!(count, "loaded persisted P2P collections"),
@@ -589,10 +594,12 @@ where
     );
     let failure_recorder_task = spawn_failure_recorder(store.clone(), failure_rx);
 
-    let doc_pusher = DbDocPusher::new_arc(database.clone());
+    let doc_pusher_impl = Arc::new(DbDocPusher::new(database.clone()));
+    let doc_pusher_for_acp = doc_pusher_impl.clone();
+    let doc_pusher: Arc<dyn crate::DocPusher> = doc_pusher_impl;
     let version_syncer = Some(DbVersionSyncer::new_arc(
         blockstore.clone(),
-        merge_handler.clone(),
+        merge_handler_inner,
         database.clone(),
     ));
     let retry_loop_task =
@@ -628,6 +635,9 @@ where
         system,
         mutator: Arc::new(db::BroadcastMutator::new(database, coordinator)),
         merge_handler,
+        wire_document_acp: Some(Box::new(move |acp| {
+            doc_pusher_for_acp.set_document_acp(acp);
+        })),
     })
 }
 
@@ -677,10 +687,11 @@ where
     let (failure_tx, failure_rx) = tokio::sync::mpsc::unbounded_channel::<PushFailure>();
     coordinator.set_failure_channel(failure_tx);
     let coordinator = Arc::new(coordinator);
-    let merge_handler = Arc::new(db::DbMergeHandler::new(
+    let merge_handler_inner = Arc::new(db::DbMergeHandler::new(
         database.clone(),
         blockstore.clone(),
     ));
+    let merge_handler = Arc::new(db::AcpMergeHandler::new(merge_handler_inner.clone()));
 
     match coordinator.load_p2p_collections().await {
         Ok(count) if count > 0 => tracing::debug!(count, "loaded persisted P2P collections"),
@@ -698,10 +709,15 @@ where
     );
     let failure_recorder_task = spawn_failure_recorder(store.clone(), failure_rx);
 
-    let doc_pusher = DbTransportDocPusher::new_arc(database.clone(), transport.clone());
+    let doc_pusher_impl = Arc::new(DbTransportDocPusher::new(
+        database.clone(),
+        transport.clone(),
+    ));
+    let doc_pusher_for_acp = doc_pusher_impl.clone();
+    let doc_pusher: Arc<dyn crate::TransportDocPusher> = doc_pusher_impl;
     let version_syncer = Some(DbTransportVersionSyncer::new_arc(
         blockstore.clone(),
-        merge_handler.clone(),
+        merge_handler_inner,
         database.clone(),
         transport.clone(),
     ));
@@ -736,6 +752,9 @@ where
         system,
         mutator: Arc::new(db::BroadcastMutator::new(database, coordinator)),
         merge_handler,
+        wire_document_acp: Some(Box::new(move |acp| {
+            doc_pusher_for_acp.set_document_acp(acp);
+        })),
     })
 }
 
@@ -874,7 +893,7 @@ where
                 ReplicationResult::Failed { cid, error } => {
                     tracing::error!(cid = %cid, error = %error, "block merge failed");
                 }
-                ReplicationResult::Skipped { cid, reason } => {
+                ReplicationResult::Skipped { cid, reason, .. } => {
                     tracing::debug!(cid = %cid, reason = %reason, "replication loop skipped block");
                 }
                 _ => {}

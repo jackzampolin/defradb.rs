@@ -2,6 +2,8 @@
 
 use cid::Cid;
 
+use crate::ExplicitReplayAuthorization;
+
 /// Events emitted by the SyncManager for higher layers to process.
 #[derive(Debug, Clone)]
 pub enum SyncEvent {
@@ -20,6 +22,12 @@ pub enum SyncEvent {
         collection_id: String,
         /// Creator peer ID
         creator: String,
+        /// The actual transport peer that sent this block to us.
+        sender_peer: Option<String>,
+        /// True when this block arrived via the explicit replicator push path.
+        is_explicit_replicator: bool,
+        /// Capability-based explicit replay authorization carried by two-stream pushes.
+        explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
     },
 
     /// A block was already merged (received duplicate).
@@ -46,6 +54,12 @@ pub enum SyncEvent {
         collection_id: String,
         /// Creator of the root block
         creator: String,
+        /// The actual transport peer that sent the root block to us.
+        sender_peer: Option<String>,
+        /// True when the root block arrived via the explicit replicator push path.
+        is_explicit_replicator: bool,
+        /// Capability-based explicit replay authorization carried by two-stream pushes.
+        explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
     },
 
     /// DAG is ready for merge after Bitswap fetch completed.
@@ -59,7 +73,13 @@ pub enum SyncEvent {
         doc_id: String,
         /// Collection ID
         collection_id: String,
-        /// Schema version ID
-        schema_version_id: String,
+        /// Creator of the root block.
+        creator: String,
+        /// The actual transport peer that sent the root block to us.
+        sender_peer: Option<String>,
+        /// True when the root block arrived via the explicit replicator push path.
+        is_explicit_replicator: bool,
+        /// Capability-based explicit replay authorization carried by two-stream pushes.
+        explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
     },
 }

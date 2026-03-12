@@ -45,15 +45,24 @@ pub trait TransportDocPusher: Send + Sync {
 pub struct DbTransportDocPusher<S: storage::corekv::Store, T: P2PTransport> {
     db: Arc<db::DB<S>>,
     transport: T,
+    document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
 }
 
 impl<S: storage::corekv::Store + 'static, T: P2PTransport> DbTransportDocPusher<S, T> {
     pub fn new(db: Arc<db::DB<S>>, transport: T) -> Self {
-        Self { db, transport }
+        Self {
+            db,
+            transport,
+            document_acp: std::sync::OnceLock::new(),
+        }
     }
 
     pub fn new_arc(db: Arc<db::DB<S>>, transport: T) -> Arc<dyn TransportDocPusher> {
         Arc::new(Self::new(db, transport))
+    }
+
+    pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
+        let _ = self.document_acp.set(acp);
     }
 }
 
@@ -70,6 +79,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         db::push_existing_docs_via_transport(
             &self.transport,
             &self.db,
+            self.document_acp.get().map(|acp| acp.as_ref()),
             peer_id,
             collections,
             se_key,
@@ -83,7 +93,15 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         doc_id: &str,
         collection_id: &str,
     ) -> Result<(), String> {
-        db::retry_doc_via_transport(&self.transport, &self.db, peer_id, doc_id, collection_id).await
+        db::retry_doc_via_transport(
+            &self.transport,
+            &self.db,
+            self.document_acp.get().map(|acp| acp.as_ref()),
+            peer_id,
+            doc_id,
+            collection_id,
+        )
+        .await
     }
 
     fn get_collection_id(&self, name: &str) -> Option<String> {

@@ -12,6 +12,7 @@ use crate::message::PushLogBroadcast;
 use crate::sync::manager::events::SyncEvent;
 use crate::sync::manager::links::find_missing_links;
 use crate::sync::manager::pending::{PendingDag, MAX_PENDING_DAGS, PENDING_DAG_TTL};
+use crate::ExplicitReplayAuthorization;
 
 use super::SyncManager;
 
@@ -32,7 +33,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     ///
     /// This matches Go's `processPushlogRequest()` in `p2p.go:446-530`,
     /// except the actual CRDT merge is delegated to the database layer.
-    pub async fn process_pushlog(&self, msg: &PushLogBroadcast) -> Result<()> {
+    pub async fn process_pushlog(
+        &self,
+        msg: &PushLogBroadcast,
+        sender_peer: Option<&str>,
+        is_explicit_replicator: bool,
+        explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+    ) -> Result<()> {
         // Parse CID from message
         let cid = Cid::try_from(msg.cid.as_slice())
             .map_err(|e| Error::InvalidCid(format!("Failed to parse CID: {}", e)))?;
@@ -48,7 +55,14 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         match self.process_queue.try_acquire(&cid).await {
             Ok(_guard) => {
                 // We're the first - process the block
-                self.process_block_inner(&cid, msg).await
+                self.process_block_inner(
+                    &cid,
+                    msg,
+                    sender_peer,
+                    is_explicit_replicator,
+                    explicit_replay_authorization.clone(),
+                )
+                .await
             }
             Err(rx) => {
                 // Another task is processing - wait for it
@@ -80,7 +94,14 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     Ok(false) => {
                         // Not yet merged - we need to process it
                         // (This can happen if the first task failed)
-                        self.process_block_inner(&cid, msg).await
+                        self.process_block_inner(
+                            &cid,
+                            msg,
+                            sender_peer,
+                            is_explicit_replicator,
+                            explicit_replay_authorization.clone(),
+                        )
+                        .await
                     }
                     Err(e) => {
                         if self
@@ -111,6 +132,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         &self,
         cid: &Cid,
         msg: &PushLogBroadcast,
+        sender_peer: Option<&str>,
+        is_explicit_replicator: bool,
+        explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
     ) -> Result<()> {
         // Check if already merged
         match self.blockstore.is_merged(cid).await {
@@ -221,6 +245,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     doc_id: msg.doc_id.clone(),
                     collection_id: msg.collection_id.clone(),
                     creator: msg.creator.clone(),
+                    sender_peer: sender_peer.map(str::to_owned),
+                    is_explicit_replicator,
+                    explicit_replay_authorization,
                 })
                 .await
                 .is_err()
@@ -256,7 +283,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                                 collection_id: msg.collection_id.clone(),
                                 creator: msg.creator.clone(),
                                 missing: missing.iter().cloned().collect(),
-                                source_peer: None,
+                                source_peer: sender_peer.map(str::to_owned),
+                                is_explicit_replicator,
+                                explicit_replay_authorization: explicit_replay_authorization
+                                    .clone(),
                                 inserted_at: now,
                             },
                         );
@@ -288,6 +318,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     doc_id: msg.doc_id.clone(),
                     collection_id: msg.collection_id.clone(),
                     creator: msg.creator.clone(),
+                    sender_peer: sender_peer.map(str::to_owned),
+                    is_explicit_replicator,
+                    explicit_replay_authorization,
                 })
                 .await
                 .is_err()

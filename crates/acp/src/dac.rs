@@ -49,6 +49,20 @@ pub trait DocumentACP: MaybeSendSync {
         doc_id: &str,
     ) -> Result<bool>;
 
+    /// Get the current owner of a registered document, if available.
+    ///
+    /// This is used by replication paths that need to preserve the document's
+    /// owner identity when replaying previously-created blocks.
+    async fn get_doc_owner(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<Option<Did>> {
+        let _ = (policy_id, resource_name, doc_id);
+        Ok(None)
+    }
+
     /// Check if identity has permission on document.
     ///
     /// # Access Rules

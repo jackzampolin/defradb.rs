@@ -226,14 +226,26 @@ pub fn generate_auth_token(identity_hex: &str, audience: &str) -> Result<String>
 
 /// Generate a JWT auth token from a named key in the keyring.
 fn generate_auth_token_from_keyring(config: &Config, name: &str, audience: &str) -> Result<String> {
-    use crypto::KeyType;
-    use identity::{new_token, RawIdentity};
+    let key_bytes = load_identity_bytes_from_keyring(config, name)?;
+    generate_auth_token_from_key_bytes(name, &key_bytes, audience)
+}
 
+fn load_identity_bytes_from_keyring(config: &Config, name: &str) -> Result<Vec<u8>> {
     let keyring = super::open_keyring(config)?;
 
-    let key_bytes = keyring
+    keyring
         .get(name)
-        .map_err(|e| Error::Keyring(e.to_string()))?;
+        .map(|bytes| bytes.to_vec())
+        .map_err(|e| Error::Keyring(e.to_string()))
+}
+
+fn generate_auth_token_from_key_bytes(
+    name: &str,
+    key_bytes: &[u8],
+    audience: &str,
+) -> Result<String> {
+    use crypto::KeyType;
+    use identity::{new_token, RawIdentity};
 
     let key_type = match key_bytes.len() {
         32 => KeyType::Secp256k1,
@@ -246,7 +258,7 @@ fn generate_auth_token_from_keyring(config: &Config, name: &str, audience: &str)
         }
     };
 
-    let identity = RawIdentity::from_bytes(key_type, &key_bytes)
+    let identity = RawIdentity::from_bytes(key_type, key_bytes)
         .map_err(|e| Error::InvalidIdentity(format!("invalid key '{}': {}", name, e)))?;
 
     let audience_host = strip_url_scheme(audience);

@@ -1,47 +1,5 @@
-use super::batch::PendingMergeEvent;
+use super::batch::{PendingMergeEvent, PendingPostCommitAction};
 use super::*;
-
-/// Check whether the merge handler should skip decryption for an encrypted block.
-///
-/// Returns `true` if the block is encrypted AND the collection has an ACP policy
-/// AND the document is NOT registered in the local ACP.
-///
-/// Go stores encryption keys in a separate Encstore that is only populated via KMS
-/// (Key Management Service). Without KMS authorization, the keys never reach the
-/// remote node's Encstore, so Go's merge handler cannot decrypt and sets canRead=false.
-///
-/// Rust doesn't have KMS — encryption blocks are in the main blockstore and synced
-/// via Bitswap. This helper replicates Go's behavior: if we don't have local ACP
-/// registration for the document, we treat it as if we don't have the key.
-async fn should_skip_encrypted_merge(
-    document_acp: Option<&Arc<dyn acp::DocumentACP>>,
-    collection: Option<&CollectionVersion>,
-    doc_id: &str,
-) -> bool {
-    let acp = match document_acp {
-        Some(a) => a,
-        None => return false,
-    };
-    let col = match collection {
-        Some(c) => c,
-        None => return false,
-    };
-    let policy = match &col.policy {
-        Some(p) => p,
-        None => return false,
-    };
-
-    // If the document IS registered in our local ACP, we created it (or have explicit access).
-    // Allow decryption.
-    match acp
-        .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
-        .await
-    {
-        Ok(true) => false, // Registered → allow decryption
-        Ok(false) => true, // Not registered → skip (replicated doc, no local access)
-        Err(_) => true,    // Error checking → fail-closed, skip
-    }
-}
 
 /// Marker byte indicating a document is deleted (matches Go's DeletedObjectMarker).
 const DELETED_MARKER: u8 = 0x01;
@@ -153,7 +111,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     // Recursive call — the parent will in turn merge its own parents.
                     // Each composite opens its own transaction so ordering is safe.
                     // Box::pin is required because recursive async fns are unsized.
-                    let _ = Box::pin(self.process_composite_delta(
+                    match Box::pin(self.process_composite_delta(
                         head_cid,
                         &head_block,
                         head_payload,
@@ -161,7 +119,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         from_collection,
                         depth + 1,
                     ))
-                    .await;
+                    .await
+                    {
+                        Ok(MergeOutcome::Merged) => {}
+                        Ok(outcome) if outcome.is_terminal_skip() => {}
+                        Ok(outcome) => return Ok(outcome),
+                        Err(e) => return Err(e),
+                    }
                 }
             }
         }
@@ -169,12 +133,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Create a SINGLE transaction for all field merges AND document storage
         let txn = self.db.new_txn(false).await?;
 
-        // Pre-lookup the collection for ACP checks on encrypted blocks.
-        // Go uses a separate Encstore + KMS for encryption key distribution;
-        // without KMS authorization the remote node never gets the key, so
-        // Go's merge handler sets canRead=false and skips the field merge.
-        // We replicate that by checking local ACP registration.
-        let collection_for_acp = self
+        let collection_for_policy = self
             .db
             .find_collection_by_id(&payload.schema_version_id)
             .ok()
@@ -185,26 +144,14 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
             });
 
-        let skip_encrypted = should_skip_encrypted_merge(
-            self.document_acp.get(),
-            collection_for_acp.as_ref().map(|c| c.schema()),
-            &doc_id_str,
-        )
-        .await;
-
-        if skip_encrypted {
-            tracing::info!(
-                doc_id = %doc_id_str,
-                "Skipping encrypted field merges: doc not registered in local ACP"
-            );
-        }
-
         // Collect winning field values for document reconstruction
         // These are the values that WON conflict resolution, not just the incoming values
         let mut field_values: HashMap<String, NormalValue> = HashMap::new();
         let mut any_field_applied = false;
         let mut process_error: Option<MergeError> = None;
+        let mut skip_outcome: Option<MergeOutcome> = None;
         let mut is_branchable = false;
+        let mut encrypted_policy_checked = false;
         // Collect field block heads for proper headstore merging during concurrent updates
         let mut field_block_heads: HashMap<String, Vec<Cid>> = HashMap::new();
 
@@ -280,16 +227,19 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         field_block_heads.insert(link_name.clone(), heads.clone());
                     }
 
-                    // Skip encrypted field merge if ACP denies access (Go compat:
-                    // Go's merge handler sets canRead=false when encryption key is
-                    // unavailable via KMS for ACP-protected collections).
-                    if skip_encrypted && linked_block.encryption.is_some() {
-                        tracing::debug!(
-                            link_cid = %link_cid,
-                            link_name = %link_name,
-                            "Skipping encrypted linked block (no local ACP registration)"
-                        );
-                        continue;
+                    if linked_block.encryption.is_some() && !encrypted_policy_checked {
+                        encrypted_policy_checked = true;
+                        if let (Some(collection), Some(hook)) =
+                            (collection_for_policy.as_ref(), self.composite_merge_hook())
+                        {
+                            if let Some(outcome) = hook
+                                .on_encrypted_link(&doc_id_str, collection.schema(), metadata)
+                                .await?
+                            {
+                                skip_outcome = Some(outcome);
+                                break;
+                            }
+                        }
                     }
 
                     // Decrypt linked block data if it has encryption
@@ -596,6 +546,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         } // datastore dropped here
 
+        if let Some(outcome) = skip_outcome {
+            txn.force_discard()?;
+            return Ok(outcome);
+        }
+
         // Write headstore entries so _version / _commits queries work on
         // the receiving node.  The headstore tracks the latest CID for each
         // field and for the composite ("C"), keyed by doc_id.
@@ -603,7 +558,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // IMPORTANT: Use proper head merging — only delete heads that this block
         // explicitly supersedes (listed in block.heads / field block heads).
         // This preserves concurrent branches during concurrent P2P updates.
-        if process_error.is_none() && !skip_encrypted {
+        if process_error.is_none() {
             if let Ok(headstore) = txn.headstore() {
                 let priority_bytes = encode_priority_varint(payload.priority);
 
@@ -704,44 +659,19 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     "Composite delta processed and committed successfully"
                 );
 
-                // Register document in local ACP if creator is a DID and
-                // collection has an ACP policy. This enables merge-denial:
-                // replicated docs are registered with the original owner DID
-                // so that access checks work on the receiving node.
-                if let Some(creator) = metadata.effective_creator() {
-                    if creator.starts_with("did:key:") {
-                        if let Some(ref col) = collection_for_acp {
-                            if let Some(ref policy) = col.schema().policy {
-                                if let Some(acp) = self.document_acp.get() {
-                                    if let Ok(did) = identity::Did::new(creator) {
-                                        match acp
-                                            .register_doc_object(
-                                                &did,
-                                                &policy.id,
-                                                &policy.resource_name,
-                                                &doc_id_str,
-                                            )
-                                            .await
-                                        {
-                                            Ok(()) => {
-                                                tracing::info!(
-                                                    doc_id = %doc_id_str,
-                                                    creator = %creator,
-                                                    "Registered replicated document in local ACP"
-                                                );
-                                            }
-                                            Err(e) => {
-                                                tracing::debug!(
-                                                    doc_id = %doc_id_str,
-                                                    creator = %creator,
-                                                    error = %e,
-                                                    "ACP registration for replicated doc (may already exist)"
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                if let (Some(collection), Some(hook)) =
+                    (collection_for_policy.as_ref(), self.composite_merge_hook())
+                {
+                    if let Some(action) =
+                        hook.post_commit_action(&doc_id_str, collection.schema(), metadata)
+                    {
+                        if let Err(e) = action.run().await {
+                            tracing::warn!(
+                                cid = %cid,
+                                doc_id = %doc_id_str,
+                                error = %e,
+                                "Post-commit composite merge action failed"
+                            );
                         }
                     }
                 }
@@ -761,7 +691,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     // For branchable collections, emit a collection-level merge_complete
                     // event. Uses composite CID to match the sender's Update event CID.
                     if is_branchable {
-                        let by_peer = metadata.effective_creator().unwrap_or("").to_string();
+                        let by_peer = metadata.sender_peer.unwrap_or("").to_string();
                         let mc = MergeCompleteData {
                             doc_id: String::new(), // empty → keyed by collection_id
                             cid: *cid,
@@ -811,6 +741,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         from_collection: bool,
         batch_merged: &std::sync::Mutex<HashSet<Cid>>,
         pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
+        pending_post_commit_actions: &std::sync::Mutex<Vec<PendingPostCommitAction>>,
         depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
         if depth >= super::MAX_MERGE_DEPTH {
@@ -854,7 +785,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 };
 
                 if let CrdtDelta::Composite(head_payload) = &head_block.delta {
-                    let _ = Box::pin(self.process_composite_delta_in_txn(
+                    match Box::pin(self.process_composite_delta_in_txn(
                         datastore,
                         headstore,
                         head_cid,
@@ -864,15 +795,21 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         from_collection,
                         batch_merged,
                         pending_events,
+                        pending_post_commit_actions,
                         depth + 1,
                     ))
-                    .await;
+                    .await
+                    {
+                        Ok(MergeOutcome::Merged) => {}
+                        Ok(outcome) if outcome.is_terminal_skip() => {}
+                        Ok(outcome) => return Ok(outcome),
+                        Err(e) => return Err(e),
+                    }
                 }
             }
         }
 
-        // ACP pre-lookup
-        let collection_for_acp = self
+        let collection_for_policy = self
             .db
             .find_collection_by_id(&payload.schema_version_id)
             .ok()
@@ -883,18 +820,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
             });
 
-        let skip_encrypted = should_skip_encrypted_merge(
-            self.document_acp.get(),
-            collection_for_acp.as_ref().map(|c| c.schema()),
-            &doc_id_str,
-        )
-        .await;
-
         // Process field links within the shared transaction
         let mut field_values: HashMap<String, NormalValue> = HashMap::new();
         let mut _any_field_applied = false;
         let mut process_error: Option<MergeError> = None;
+        let mut skip_outcome: Option<MergeOutcome> = None;
         let mut is_branchable = false;
+        let mut encrypted_policy_checked = false;
         let mut field_block_heads: HashMap<String, Vec<Cid>> = HashMap::new();
 
         {
@@ -932,8 +864,19 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         field_block_heads.insert(link_name.clone(), heads.clone());
                     }
 
-                    if skip_encrypted && linked_block.encryption.is_some() {
-                        continue;
+                    if linked_block.encryption.is_some() && !encrypted_policy_checked {
+                        encrypted_policy_checked = true;
+                        if let (Some(collection), Some(hook)) =
+                            (collection_for_policy.as_ref(), self.composite_merge_hook())
+                        {
+                            if let Some(outcome) = hook
+                                .on_encrypted_link(&doc_id_str, collection.schema(), metadata)
+                                .await?
+                            {
+                                skip_outcome = Some(outcome);
+                                break;
+                            }
+                        }
                     }
 
                     // Decrypt linked block data if encrypted
@@ -1196,8 +1139,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         } // datastore dropped here
 
+        if let Some(outcome) = skip_outcome {
+            return Ok(outcome);
+        }
+
         // Write headstore entries using the shared headstore view
-        if process_error.is_none() && !skip_encrypted {
+        if process_error.is_none() {
             {
                 let priority_bytes = encode_priority_varint(payload.priority);
 
@@ -1268,32 +1215,16 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     bm.insert(*cid);
                 }
 
-                // Register document in local ACP (batch path)
-                if let Some(creator) = metadata.effective_creator() {
-                    if creator.starts_with("did:key:") {
-                        if let Some(ref col) = collection_for_acp {
-                            if let Some(ref policy) = col.schema().policy {
-                                if let Some(acp) = self.document_acp.get() {
-                                    if let Ok(did) = identity::Did::new(creator) {
-                                        if let Err(e) = acp
-                                            .register_doc_object(
-                                                &did,
-                                                &policy.id,
-                                                &policy.resource_name,
-                                                &doc_id_str,
-                                            )
-                                            .await
-                                        {
-                                            tracing::debug!(
-                                                doc_id = %doc_id_str,
-                                                error = %e,
-                                                "ACP registration for replicated doc in batch (may already exist)"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                if let (Some(collection), Some(hook)) =
+                    (collection_for_policy.as_ref(), self.composite_merge_hook())
+                {
+                    if let Some(action) =
+                        hook.post_commit_action(&doc_id_str, collection.schema(), metadata)
+                    {
+                        pending_post_commit_actions
+                            .lock()
+                            .unwrap()
+                            .push(PendingPostCommitAction { action });
                     }
                 }
 
@@ -1313,7 +1244,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     });
 
                     if is_branchable {
-                        let by_peer = metadata.effective_creator().unwrap_or("").to_string();
+                        let by_peer = metadata.sender_peer.unwrap_or("").to_string();
                         let mc = MergeCompleteData {
                             doc_id: String::new(),
                             cid: *cid,

@@ -6,6 +6,8 @@
 use async_trait::async_trait;
 use cid::Cid;
 
+use crate::ExplicitReplayAuthorization;
+
 /// Owned block data for batch processing.
 ///
 /// Unlike `BlockMetadata` which borrows strings, this struct owns all data
@@ -17,6 +19,12 @@ pub struct MergeBlock {
     pub doc_id: String,
     pub collection_id: String,
     pub creator: String,
+    /// The actual transport peer that sent this block to us.
+    pub sender_peer: Option<String>,
+    /// True when the block arrived via the explicit replicator push path.
+    pub is_explicit_replicator: bool,
+    /// Capability-based explicit replay authorization carried by two-stream pushes.
+    pub explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
     /// Creator identity verified from the block's embedded signature.
     /// When present, this MUST be preferred over self-reported `creator`.
     pub verified_creator: Option<String>,
@@ -33,14 +41,28 @@ pub enum MergeOutcome {
     Skipped {
         /// Human-readable reason for skipping.
         reason: String,
+        /// Whether the skip is terminal for this CID.
+        ///
+        /// Terminal skips can be marked as merged. Retryable skips must remain
+        /// unmerged so the block can be retried after policy/state changes.
+        terminal: bool,
     },
 }
 
 impl MergeOutcome {
-    /// Create a skipped outcome with the given reason.
-    pub fn skipped(reason: impl Into<String>) -> Self {
+    /// Create a terminal skipped outcome with the given reason.
+    pub fn terminal_skip(reason: impl Into<String>) -> Self {
         Self::Skipped {
             reason: reason.into(),
+            terminal: true,
+        }
+    }
+
+    /// Create a retryable skipped outcome with the given reason.
+    pub fn retryable_skip(reason: impl Into<String>) -> Self {
+        Self::Skipped {
+            reason: reason.into(),
+            terminal: false,
         }
     }
 
@@ -52,6 +74,11 @@ impl MergeOutcome {
     /// Returns true if this outcome indicates the block was skipped.
     pub fn is_skipped(&self) -> bool {
         matches!(self, Self::Skipped { .. })
+    }
+
+    /// Returns true if this outcome is a terminal skip.
+    pub fn is_terminal_skip(&self) -> bool {
+        matches!(self, Self::Skipped { terminal: true, .. })
     }
 }
 
@@ -68,6 +95,12 @@ pub struct BlockMetadata<'a> {
     pub collection_id: Option<&'a str>,
     /// Peer that created this block (None during recovery)
     pub creator: Option<&'a str>,
+    /// The actual transport peer that sent this block to us.
+    pub sender_peer: Option<&'a str>,
+    /// True when the block arrived via the explicit replicator push path.
+    pub is_explicit_replicator: bool,
+    /// Capability-based explicit replay authorization carried by two-stream pushes.
+    pub explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
     /// Creator identity verified from the block's embedded signature.
     /// Set by the merge handler after cryptographic verification.
     /// When present, this MUST be preferred over self-reported `creator`.
@@ -83,11 +116,20 @@ pub struct BlockMetadata<'a> {
 
 impl<'a> BlockMetadata<'a> {
     /// Create metadata for a normal (non-recovery) merge operation.
-    pub fn normal(doc_id: &'a str, collection_id: &'a str, creator: &'a str) -> Self {
+    pub fn normal(
+        doc_id: &'a str,
+        collection_id: &'a str,
+        creator: &'a str,
+        sender_peer: Option<&'a str>,
+        is_explicit_replicator: bool,
+    ) -> Self {
         Self {
             doc_id: Some(doc_id),
             collection_id: Some(collection_id),
             creator: Some(creator),
+            sender_peer,
+            is_explicit_replicator,
+            explicit_replay_authorization: None,
             verified_creator: None,
             is_recovery: false,
             is_schema_block: false,
@@ -104,6 +146,9 @@ impl<'a> BlockMetadata<'a> {
             doc_id: None,
             collection_id: None,
             creator: None,
+            sender_peer: None,
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
             verified_creator: None,
             is_recovery: false,
             is_schema_block: true,
@@ -120,16 +165,36 @@ impl<'a> BlockMetadata<'a> {
             doc_id: None,
             collection_id: None,
             creator: None,
+            sender_peer: None,
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
             verified_creator: None,
             is_recovery: true,
             is_schema_block: false,
         }
     }
 
+    pub fn with_explicit_replay_authorization(
+        mut self,
+        authorization: Option<ExplicitReplayAuthorization>,
+    ) -> Self {
+        self.explicit_replay_authorization = authorization;
+        self
+    }
+
     /// Returns the most trustworthy creator identity available.
     /// Prefers cryptographically verified identity over self-reported metadata.
     pub fn effective_creator(&self) -> Option<&str> {
         self.verified_creator.as_deref().or(self.creator)
+    }
+
+    pub fn allows_explicit_replay_for(&self, collection_id: &str) -> bool {
+        if let Some(authorization) = &self.explicit_replay_authorization {
+            return self.verified_creator.as_deref() == Some(authorization.authorizer_did.as_str())
+                && authorization.collection_id == collection_id;
+        }
+
+        self.is_explicit_replicator
     }
 
     /// Check if any metadata is missing.
@@ -198,8 +263,14 @@ pub trait MergeHandler: Send + Sync {
     ) -> Vec<Result<MergeOutcome, Self::Error>> {
         let mut results = Vec::with_capacity(blocks.len());
         for block in blocks {
-            let metadata =
-                BlockMetadata::normal(&block.doc_id, &block.collection_id, &block.creator);
+            let metadata = BlockMetadata::normal(
+                &block.doc_id,
+                &block.collection_id,
+                &block.creator,
+                block.sender_peer.as_deref(),
+                block.is_explicit_replicator,
+            )
+            .with_explicit_replay_authorization(block.explicit_replay_authorization.clone());
             results.push(
                 self.handle_block(&block.cid, &block.block_data, metadata)
                     .await,
@@ -219,21 +290,26 @@ mod tests {
         assert!(merged.is_merged());
         assert!(!merged.is_skipped());
 
-        let skipped = MergeOutcome::skipped("already applied");
+        let skipped = MergeOutcome::terminal_skip("already applied");
         assert!(!skipped.is_merged());
         assert!(skipped.is_skipped());
+        assert!(skipped.is_terminal_skip());
+
+        let retryable = MergeOutcome::retryable_skip("pending ACP");
+        assert!(retryable.is_skipped());
+        assert!(!retryable.is_terminal_skip());
     }
 
     #[test]
     fn effective_creator_prefers_verified() {
-        let mut meta = BlockMetadata::normal("doc1", "col1", "did:key:SELF_REPORTED");
+        let mut meta = BlockMetadata::normal("doc1", "col1", "did:key:SELF_REPORTED", None, false);
         meta.verified_creator = Some("did:key:VERIFIED_SIGNER".to_string());
         assert_eq!(meta.effective_creator(), Some("did:key:VERIFIED_SIGNER"));
     }
 
     #[test]
     fn effective_creator_falls_back_to_self_reported() {
-        let meta = BlockMetadata::normal("doc1", "col1", "did:key:SELF_REPORTED");
+        let meta = BlockMetadata::normal("doc1", "col1", "did:key:SELF_REPORTED", None, false);
         assert_eq!(meta.effective_creator(), Some("did:key:SELF_REPORTED"));
     }
 

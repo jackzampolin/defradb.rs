@@ -4,26 +4,31 @@
 //! in Controlled mode before processing requests.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use blockstore::DefraBlockstore;
+use cid::multihash::{Code, MultihashDigest};
+use cid::Cid;
 use storage::backends::MemoryStore;
+use tokio::time::timeout;
 
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Error;
 use crate::host::libp2p_transport::Libp2pTransport;
 use crate::host::P2PHostHandle;
-use crate::message::{BranchableSyncRequest, DocSyncRequest, MetaData};
+use crate::message::{BranchableSyncRequest, DocSyncRequest, MetaData, PushLogRequest};
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::NoOpCollectionStorage;
 use crate::sync::head_provider::NoOpHeadProvider;
-use crate::sync::manager::{SyncConfig, SyncManager};
+use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager};
 use crate::sync::peer_state::PeerStateTracker;
 use crate::sync::rate_limiter::PeerRateLimiter;
-use crate::transport::{PeerId, TransportEvent};
+use crate::transport::{PeerId, ResponseToken, TransportEvent};
 
 use super::{SyncCoordinator, MAX_CONCURRENT_DAG_FETCHES, MAX_CONCURRENT_PUSH_TASKS};
 
 type TestBlockstore = DefraBlockstore<MemoryStore>;
+const BLOCK_DATA: &[u8] = b"block data";
 
 fn create_test_coordinator(
     access_mode: AccessMode,
@@ -88,6 +93,52 @@ fn branchable_sync_event(peer_id: PeerId, collection_id: &str) -> TransportEvent
 fn random_peer_id() -> PeerId {
     let libp2p_peer = libp2p::PeerId::random();
     PeerId::from(libp2p_peer)
+}
+
+fn cid_for(data: &[u8]) -> Cid {
+    let hash = Code::Sha2_256.digest(data);
+    Cid::new_v1(0x71, hash)
+}
+
+fn pushlog_request(collection_id: &str) -> PushLogRequest {
+    PushLogRequest::new(
+        "doc1".to_string(),
+        cid_for(BLOCK_DATA).to_bytes(),
+        collection_id.to_string(),
+        "creator1".to_string(),
+        BLOCK_DATA.to_vec(),
+    )
+}
+
+fn pushlog_event(peer_id: PeerId, collection_id: &str) -> TransportEvent {
+    TransportEvent::PushLogRequest {
+        peer_id,
+        request: pushlog_request(collection_id),
+        token: ResponseToken::new(()),
+    }
+}
+
+fn two_stream_event(
+    peer_id: PeerId,
+    collection_id: &str,
+    is_explicit_replicator: bool,
+) -> TransportEvent {
+    TransportEvent::TwoStreamRequest {
+        peer_id,
+        request: pushlog_request(collection_id),
+        token: None,
+        is_explicit_replicator,
+        explicit_replay_authorization: None,
+    }
+}
+
+async fn recv_block_received(
+    events: &mut tokio::sync::mpsc::Receiver<SyncEvent>,
+) -> crate::sync::manager::SyncEvent {
+    timeout(Duration::from_secs(1), events.recv())
+        .await
+        .expect("expected sync event")
+        .expect("event channel closed")
 }
 
 // --- DocSync access check tests ---
@@ -289,4 +340,143 @@ async fn branchable_sync_open_mode_allows_any_peer() {
         "Open mode should not deny access, got {:?}",
         result
     );
+}
+
+#[tokio::test]
+async fn pushlog_connected_subscribed_peer_is_not_marked_explicit_replicator() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    peer_state.peer_connected(peer.as_str());
+
+    let (coordinator, mut events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+    coordinator
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
+    coordinator
+        .handle_transport_event(pushlog_event(peer.clone(), "collection1"))
+        .await
+        .unwrap();
+
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+            assert!(
+                !is_explicit_replicator,
+                "connected subscribed peer must not get explicit replicator trust"
+            );
+        }
+        other => panic!("expected BlockReceived, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn pushlog_registered_replicator_is_marked_explicit_replicator() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    replicators.add_replicator("collection1", peer.as_str());
+
+    let (coordinator, mut events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+
+    coordinator
+        .handle_transport_event(pushlog_event(peer.clone(), "collection1"))
+        .await
+        .unwrap();
+
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+            assert!(
+                is_explicit_replicator,
+                "registered replicator should preserve explicit replicator trust"
+            );
+        }
+        other => panic!("expected BlockReceived, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn two_stream_connected_subscribed_peer_is_not_marked_explicit_replicator() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    peer_state.peer_connected(peer.as_str());
+
+    let (coordinator, mut events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+    coordinator
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
+    coordinator
+        .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
+        .await
+        .unwrap();
+
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+            assert!(
+                !is_explicit_replicator,
+                "connected subscribed peer must not get explicit replicator trust on two-stream ingress"
+            );
+        }
+        other => panic!("expected BlockReceived, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn two_stream_authenticated_explicit_replicator_is_marked_explicit_replicator() {
+    let replicators = Arc::new(ReplicatorRegistry::new());
+    let peer_state = Arc::new(PeerStateTracker::new());
+    let peer = random_peer_id();
+    peer_state.peer_connected(peer.as_str());
+
+    let (coordinator, mut events) =
+        create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
+    coordinator
+        .subscribed_collections
+        .write()
+        .await
+        .insert("collection1".to_string());
+
+    coordinator
+        .handle_transport_event(two_stream_event(peer.clone(), "collection1", true))
+        .await
+        .unwrap();
+
+    match recv_block_received(&mut events).await {
+        SyncEvent::BlockReceived {
+            sender_peer,
+            is_explicit_replicator,
+            ..
+        } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+            assert!(
+                is_explicit_replicator,
+                "authenticated two-stream explicit replicator push should preserve explicit trust"
+            );
+        }
+        other => panic!("expected BlockReceived, got {:?}", other),
+    }
 }

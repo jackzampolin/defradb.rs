@@ -37,6 +37,14 @@ pub struct PushLogRequest {
     /// Uses serde_bytes for CBOR byte string compatibility with Go.
     #[serde(rename = "Block", with = "serde_bytes")]
     pub block: Vec<u8>,
+
+    /// Optional sender-issued explicit replay capability for encrypted replay.
+    #[serde(
+        rename = "ExplicitReplayCapability",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub explicit_replay_capability: Option<String>,
 }
 
 impl PushLogRequest {
@@ -55,6 +63,7 @@ impl PushLogRequest {
             collection_id,
             creator,
             block,
+            explicit_replay_capability: None,
         }
     }
 }

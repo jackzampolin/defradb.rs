@@ -1,186 +1,158 @@
-//! ACP-aware MergeHandler implementation.
-//!
-//! This module provides a MergeHandler that enforces document-level access control
-//! before allowing CRDT merges from P2P sync.
-//!
-//! # Security Model
-//!
-//! When receiving blocks from P2P sync, the merge handler:
-//! 1. Extracts the creator identity from the BlockMetadata
-//! 2. Converts the creator PeerId to a DID (if configured)
-//! 3. Checks if the creator has UPDATE permission on the document
-//! 4. If permission denied, skips the merge with a reason
-//! 5. If permission granted, delegates to the underlying merge logic
-//!
-//! # PeerId to DID Mapping
-//!
-//! The P2P layer identifies peers by their libp2p PeerId. To map this to
-//! an ACP identity (DID), the system can use:
-//! - Direct DID derivation from the peer's public key
-//! - A pre-configured mapping table
-//!
-//! If no mapping exists, the merge is treated as anonymous and will be
-//! rejected for protected documents.
-
 use std::sync::Arc;
 
-use acp::{DocumentACP, DocumentPermission, Identity};
+use acp::DocumentACP;
 use async_trait::async_trait;
 use cid::Cid;
-use identity::Did;
-use p2p::sync::{BlockMetadata, MergeHandler, MergeOutcome};
+use p2p::sync::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
+use schema::CollectionVersion;
+use storage::corekv::Store;
 
-use crate::collection_acp::check_doc_permission;
-use crate::CollectionCache;
+use crate::merge_handler::hook::{CompositeMergeHook, CompositePostCommitAction};
+use crate::{DbMergeHandler, MergeError};
 
-/// Type alias for peer-to-DID conversion function.
-pub type PeerToDidMapper = dyn Fn(&str) -> Option<Did> + Send + Sync;
+pub type AcpMergeError = MergeError;
 
-/// Error type for ACP merge handler operations.
-#[derive(Debug, thiserror::Error)]
-pub enum AcpMergeError {
-    /// ACP permission check failed.
-    #[error("ACP check failed: {0}")]
-    AcpError(#[from] acp::Error),
-
-    /// Collection not found.
-    #[error("collection not found: {0}")]
-    CollectionNotFound(String),
-
-    /// Missing metadata during non-recovery operation.
-    #[error("missing metadata: {0}")]
-    MissingMetadata(String),
-
-    /// Failed to decode block.
-    #[error("block decode failed: {0}")]
-    BlockDecode(String),
-
-    /// Failed to convert peer to DID.
-    #[error("peer to DID conversion failed: {0}")]
-    PeerConversion(String),
-}
-
-/// ACP-aware merge handler that enforces document-level access control.
-///
-/// This handler wraps the actual merge logic and adds permission checks
-/// using the ACP system before allowing blocks to be merged.
-pub struct AcpMergeHandler<H> {
-    /// The underlying merge handler that does the actual work.
-    inner: H,
-    /// DocumentACP for permission checks.
+struct RegisterReplicatedDocAction {
     acp: Arc<dyn DocumentACP>,
-    /// Collection cache for looking up collection metadata.
-    collections: CollectionCache,
-    /// Optional function to convert PeerId to DID.
-    /// If None, peer identity cannot be verified and merges to protected docs will fail.
-    peer_to_did: Option<Arc<PeerToDidMapper>>,
+    did: identity::Did,
+    policy_id: String,
+    resource_name: String,
+    doc_id: String,
 }
 
-impl<H> AcpMergeHandler<H> {
-    /// Create a new ACP merge handler.
-    ///
-    /// # Arguments
-    ///
-    /// * `inner` - The underlying merge handler
-    /// * `acp` - DocumentACP for permission checks
-    /// * `collections` - Collection cache for metadata lookup
-    pub fn new(inner: H, acp: Arc<dyn DocumentACP>, collections: CollectionCache) -> Self {
+#[async_trait]
+impl CompositePostCommitAction for RegisterReplicatedDocAction {
+    async fn run(self: Box<Self>) -> Result<(), MergeError> {
+        self.acp
+            .register_doc_object(
+                &self.did,
+                &self.policy_id,
+                &self.resource_name,
+                &self.doc_id,
+            )
+            .await
+            .map_err(|e| MergeError::MergeFailed(format!("ACP registration failed: {}", e)))
+    }
+}
+
+struct AcpCompositeMergeHook {
+    document_acp: std::sync::OnceLock<Arc<dyn DocumentACP>>,
+}
+
+impl AcpCompositeMergeHook {
+    fn new() -> Self {
         Self {
-            inner,
-            acp,
-            collections,
-            peer_to_did: None,
+            document_acp: std::sync::OnceLock::new(),
         }
     }
 
-    /// Set a custom peer to DID conversion function.
-    ///
-    /// This function is called to convert a PeerId string to a DID for
-    /// ACP permission checks. If not set, peer identity cannot be verified
-    /// and merges to protected documents will fail.
-    pub fn with_peer_to_did<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&str) -> Option<Did> + Send + Sync + 'static,
-    {
-        self.peer_to_did = Some(Arc::new(f));
+    fn set_document_acp(&self, acp: Arc<dyn DocumentACP>) {
+        let _ = self.document_acp.set(acp);
+    }
+
+    fn document_acp(&self) -> Option<&Arc<dyn DocumentACP>> {
+        self.document_acp.get()
+    }
+}
+
+#[async_trait]
+impl CompositeMergeHook for AcpCompositeMergeHook {
+    async fn on_encrypted_link(
+        &self,
+        doc_id: &str,
+        collection: &CollectionVersion,
+        metadata: &BlockMetadata<'_>,
+    ) -> Result<Option<MergeOutcome>, MergeError> {
+        let Some(acp) = self.document_acp() else {
+            return Ok(None);
+        };
+        let Some(policy) = &collection.policy else {
+            return Ok(None);
+        };
+
+        if metadata.allows_explicit_replay_for(&collection.collection_id) {
+            tracing::info!(
+                doc_id = %doc_id,
+                sender_peer = metadata.sender_peer.unwrap_or(""),
+                authorizer = metadata
+                    .explicit_replay_authorization
+                    .as_ref()
+                    .map(|authorization| authorization.authorizer_did.as_str())
+                    .unwrap_or(""),
+                creator = metadata.effective_creator().unwrap_or(""),
+                "Allowing encrypted merge via explicit replicator path"
+            );
+            return Ok(None);
+        }
+
+        let is_registered = acp
+            .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
+            .await
+            .map_err(|e| {
+                MergeError::MergeFailed(format!("ACP registration lookup failed: {}", e))
+            })?;
+
+        if is_registered {
+            return Ok(None);
+        }
+
+        Ok(Some(MergeOutcome::retryable_skip(
+            "encrypted replicated document is not yet registered in local ACP",
+        )))
+    }
+
+    fn post_commit_action(
+        &self,
+        doc_id: &str,
+        collection: &CollectionVersion,
+        metadata: &BlockMetadata<'_>,
+    ) -> Option<Box<dyn CompositePostCommitAction>> {
+        let acp = self.document_acp()?.clone();
+        let policy = collection.policy.as_ref()?;
+        let creator = metadata.effective_creator()?;
+        let did = identity::Did::new(creator).ok()?;
+
+        Some(Box::new(RegisterReplicatedDocAction {
+            acp,
+            did,
+            policy_id: policy.id.clone(),
+            resource_name: policy.resource_name.clone(),
+            doc_id: doc_id.to_string(),
+        }))
+    }
+}
+
+pub struct AcpMergeHandler<S: Store, B: blockstore::Blockstore> {
+    inner: Arc<DbMergeHandler<S, B>>,
+    hook: Arc<AcpCompositeMergeHook>,
+}
+
+impl<S: Store, B: blockstore::Blockstore + Send + Sync> AcpMergeHandler<S, B> {
+    pub fn new(inner: Arc<DbMergeHandler<S, B>>) -> Self {
+        let hook = Arc::new(AcpCompositeMergeHook::new());
+        inner.set_composite_merge_hook(hook.clone());
+        Self { inner, hook }
+    }
+
+    pub fn with_document_acp(self, acp: Arc<dyn DocumentACP>) -> Self {
+        self.hook.set_document_acp(acp);
         self
     }
 
-    /// Convert a peer ID to a DID if possible.
-    ///
-    /// If peer identity cannot be determined, logs a warning and returns Anonymous.
-    /// This warning helps operators detect:
-    /// - Misconfigured peer_to_did mappings
-    /// - Unknown peers attempting to sync with protected documents
-    fn peer_to_identity(&self, peer_id: &str) -> Identity {
-        match &self.peer_to_did {
-            Some(f) => match f(peer_id) {
-                Some(did) => Identity::Authenticated(did),
-                None => {
-                    tracing::warn!(
-                        peer_id = %peer_id,
-                        "No DID mapping for peer - treating as anonymous. \
-                         Protected documents will reject this peer's updates."
-                    );
-                    Identity::Anonymous
-                }
-            },
-            None => {
-                tracing::warn!(
-                    peer_id = %peer_id,
-                    "No peer_to_did function configured - treating all peers as anonymous. \
-                     Configure peer identity mapping for authenticated P2P sync."
-                );
-                Identity::Anonymous
-            }
-        }
+    pub fn set_document_acp(&self, acp: Arc<dyn DocumentACP>) {
+        self.hook.set_document_acp(acp);
     }
 
-    /// Check if a merge operation is permitted.
-    async fn check_merge_permission(
-        &self,
-        creator: &str,
-        collection_id: &str,
-        doc_id: &str,
-    ) -> Result<bool, AcpMergeError> {
-        // Get collection metadata
-        let collection = self
-            .collections
-            .get(collection_id)
-            .ok_or_else(|| AcpMergeError::CollectionNotFound(collection_id.to_string()))?;
-
-        // Convert peer to identity
-        let identity = self.peer_to_identity(creator);
-
-        // Check UPDATE permission (merges are effectively updates)
-        let permitted = check_doc_permission(
-            self.acp.as_ref(),
-            &identity,
-            DocumentPermission::Update,
-            collection.schema(),
-            doc_id,
-        )
-        .await?;
-
-        if !permitted {
-            tracing::info!(
-                creator = %creator,
-                collection = %collection_id,
-                doc_id = %doc_id,
-                "P2P merge denied: identity lacks UPDATE permission"
-            );
-        }
-
-        Ok(permitted)
+    pub fn inner(&self) -> &Arc<DbMergeHandler<S, B>> {
+        &self.inner
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<H> MergeHandler for AcpMergeHandler<H>
+#[async_trait]
+impl<S, B> MergeHandler for AcpMergeHandler<S, B>
 where
-    H: MergeHandler,
-    H::Error: Into<AcpMergeError>,
+    S: Store + 'static,
+    B: blockstore::Blockstore + Send + Sync + 'static,
 {
     type Error = AcpMergeError;
 
@@ -190,148 +162,13 @@ where
         block_data: &[u8],
         metadata: BlockMetadata<'_>,
     ) -> Result<MergeOutcome, Self::Error> {
-        // Recovery: metadata unavailable after crash - delegate to inner handler.
-        // Schema blocks: doc-level ACP does not apply (governed by NAC).
-        // In both cases, skip ACP and delegate directly.
-        if metadata.is_recovery || metadata.is_schema_block {
-            tracing::debug!(
-                cid = %cid,
-                is_recovery = metadata.is_recovery,
-                is_schema_block = metadata.is_schema_block,
-                "Skipping ACP check: delegating to inner handler"
-            );
-            return self
-                .inner
-                .handle_block(cid, block_data, metadata)
-                .await
-                .map_err(Into::into);
-        }
-
-        // For normal operations, metadata must be present.
-        // Use effective_creator() to prefer verified identity over self-reported.
-        let (creator, collection_id, doc_id) = match (
-            metadata.effective_creator(),
-            metadata.collection_id,
-            metadata.doc_id,
-        ) {
-            (Some(c), Some(col), Some(d)) => (c, col, d),
-            _ => {
-                return Err(AcpMergeError::MissingMetadata(
-                    "creator, collection_id, and doc_id required for non-recovery merge"
-                        .to_string(),
-                ));
-            }
-        };
-
-        // Check ACP permission before merging
-        let permitted = self
-            .check_merge_permission(creator, collection_id, doc_id)
-            .await?;
-
-        if !permitted {
-            return Ok(MergeOutcome::skipped(format!(
-                "ACP denied: {} lacks UPDATE permission on {}/{}",
-                creator, collection_id, doc_id
-            )));
-        }
-
-        // Permission granted, delegate to inner handler
-        self.inner
-            .handle_block(cid, block_data, metadata)
-            .await
-            .map_err(Into::into)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    /// Mock merge handler for testing.
-    struct MockMergeHandler {
-        called: AtomicBool,
+        self.inner.handle_block(cid, block_data, metadata).await
     }
 
-    impl MockMergeHandler {
-        fn new() -> Self {
-            Self {
-                called: AtomicBool::new(false),
-            }
-        }
-
-        #[allow(dead_code)]
-        fn was_called(&self) -> bool {
-            self.called.load(Ordering::SeqCst)
-        }
-    }
-
-    #[derive(Debug, thiserror::Error)]
-    #[error("mock error")]
-    struct MockError;
-
-    impl From<MockError> for AcpMergeError {
-        fn from(_: MockError) -> Self {
-            AcpMergeError::BlockDecode("mock error".to_string())
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl MergeHandler for MockMergeHandler {
-        type Error = MockError;
-
-        async fn handle_block(
-            &self,
-            _cid: &Cid,
-            _block_data: &[u8],
-            _metadata: BlockMetadata<'_>,
-        ) -> Result<MergeOutcome, Self::Error> {
-            self.called.store(true, Ordering::SeqCst);
-            Ok(MergeOutcome::Merged)
-        }
-    }
-
-    #[test]
-    fn test_peer_to_identity_no_mapping() {
-        let mock = MockMergeHandler::new();
-        let acp = Arc::new(acp::MemoryAcpStore::new());
-        let local_acp = Arc::new(acp::LocalDocumentACP::new(acp));
-        let collections = CollectionCache::new();
-
-        let handler = AcpMergeHandler::new(mock, local_acp, collections);
-
-        // Without peer_to_did function, should return anonymous
-        let identity = handler.peer_to_identity("12D3KooWTest");
-        assert!(matches!(identity, Identity::Anonymous));
-    }
-
-    #[test]
-    fn test_peer_to_identity_with_mapping() {
-        let mock = MockMergeHandler::new();
-        let acp = Arc::new(acp::MemoryAcpStore::new());
-        let local_acp = Arc::new(acp::LocalDocumentACP::new(acp));
-        let collections = CollectionCache::new();
-
-        let test_did =
-            Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
-        let did_clone = test_did.clone();
-
-        let handler =
-            AcpMergeHandler::new(mock, local_acp, collections).with_peer_to_did(move |peer_id| {
-                if peer_id == "12D3KooWTest" {
-                    Some(did_clone.clone())
-                } else {
-                    None
-                }
-            });
-
-        // Should return authenticated identity for known peer
-        let identity = handler.peer_to_identity("12D3KooWTest");
-        assert!(matches!(identity, Identity::Authenticated(did) if did == test_did));
-
-        // Should return anonymous for unknown peer
-        let identity = handler.peer_to_identity("12D3KooWUnknown");
-        assert!(matches!(identity, Identity::Anonymous));
+    async fn handle_block_batch(
+        &self,
+        blocks: &[MergeBlock],
+    ) -> Vec<Result<MergeOutcome, Self::Error>> {
+        self.inner.handle_block_batch(blocks).await
     }
 }

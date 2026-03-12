@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 use cid::Cid;
 
+use crate::ExplicitReplayAuthorization;
+
 /// Maximum number of entries in the pending DAGs map.
 ///
 /// Prevents unbounded memory growth when many DAGs arrive faster than they
@@ -33,6 +35,10 @@ pub struct PendingDag {
     /// Always included in the Bitswap provider list during retries so the
     /// blocks can be fetched even if the peer isn't in connected_peers().
     pub source_peer: Option<String>,
+    /// True when the DAG originated from an explicit replicator push.
+    pub is_explicit_replicator: bool,
+    /// Capability-based explicit replay authorization carried by two-stream pushes.
+    pub explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
     /// When this entry was inserted (for TTL eviction).
     pub inserted_at: Instant,
 }

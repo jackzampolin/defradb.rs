@@ -113,10 +113,15 @@ pub async fn add_replicator(
 
     // Use first address if provided (Go sends array, trait takes optional single)
     let addr = request.addresses.first().map(|s| s.as_str());
+    let explicit_replay_authorizer = identity.did().map(|did| did.to_string());
 
-    p2p.add_replicator(request.collections, addr)
-        .await
-        .map_err(HttpError::BadRequest)?;
+    p2p.add_replicator(
+        request.collections,
+        addr,
+        explicit_replay_authorizer.as_deref(),
+    )
+    .await
+    .map_err(HttpError::BadRequest)?;
 
     Ok(Json(()))
 }

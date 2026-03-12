@@ -8,6 +8,7 @@ use crate::error::Result;
 use crate::message::{PushLogBroadcast, PushLogReply};
 use crate::signing::sign_with_transport;
 use crate::transport::{P2PTransport, PeerId, ResponseToken};
+use crate::ExplicitReplayAuthorization;
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub(super) async fn handle_pushlog_request(
@@ -51,6 +52,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return Err(e);
         }
 
+        let is_explicit_replicator =
+            self.is_registered_replicator(peer_id.as_str(), &request.collection_id);
+
         // Parse CID - if invalid, send error response
         let cid = match Cid::try_from(request.cid.as_slice()) {
             Ok(cid) => {
@@ -80,7 +84,26 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         tracing::trace!(?cid, "Parsed valid CID from PushLog request");
 
         let broadcast = PushLogBroadcast::from_request(&request);
-        let process_result = self.manager.process_pushlog(&broadcast).await;
+        let process_result = self
+            .manager
+            .process_pushlog(
+                &broadcast,
+                Some(peer_id.as_str()),
+                is_explicit_replicator,
+                None,
+            )
+            .await;
+
+        if let Err(e) = &process_result {
+            tracing::warn!(
+                peer_id = %peer_id,
+                doc_id = %request.doc_id,
+                collection_id = %request.collection_id,
+                cid = %cid,
+                error = %e,
+                "PushLog request processing failed"
+            );
+        }
 
         let reply = match &process_result {
             Ok(()) => PushLogReply::success(&request.metadata.message_id),
@@ -110,6 +133,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         peer_id: PeerId,
         request: crate::message::PushLogRequest,
         token: Option<ResponseToken>,
+        is_explicit_replicator: bool,
+        explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
     ) -> Result<()> {
         tracing::debug!(
             peer_id = %peer_id,
@@ -170,7 +195,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         tracing::trace!(?cid, "Parsed valid CID from two-stream request");
 
         let broadcast = PushLogBroadcast::from_request(&request);
-        let process_result = self.manager.process_pushlog(&broadcast).await;
+        let process_result = self
+            .manager
+            .process_pushlog(
+                &broadcast,
+                Some(peer_id.as_str()),
+                is_explicit_replicator,
+                explicit_replay_authorization,
+            )
+            .await;
 
         let mut reply = match &process_result {
             Ok(()) => PushLogReply::success(&request.metadata.message_id),

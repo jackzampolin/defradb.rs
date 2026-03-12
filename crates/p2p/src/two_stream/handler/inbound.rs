@@ -8,12 +8,24 @@ use parking_lot::Mutex;
 use super::PendingResponses;
 use crate::error::{Error, Result};
 use crate::message::{
-    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogReply,
-    PushLogRequest,
+    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, Message,
+    PushLogReply, PushLogRequest,
 };
 use crate::two_stream::event::TwoStreamEvent;
 
 use super::TwoStreamHandler;
+
+fn ensure_transport_sender<M: Message>(peer_id: &PeerId, msg: &M) -> Result<()> {
+    if msg.sender_id() == peer_id.to_string() {
+        Ok(())
+    } else {
+        Err(Error::Transport(format!(
+            "transport peer {} did not match signed sender {}",
+            peer_id,
+            msg.sender_id()
+        )))
+    }
+}
 
 impl TwoStreamHandler {
     /// Handle an incoming stream on the request protocol.
@@ -48,6 +60,7 @@ impl TwoStreamHandler {
         // Try to deserialize as PushLogRequest first
         if let Ok(request) = serde_cbor::from_slice::<PushLogRequest>(&buf) {
             crate::verify_message(&request)?;
+            ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
                 peer_id = %peer_id,
                 message_id = %request.metadata.message_id,
@@ -60,6 +73,7 @@ impl TwoStreamHandler {
         // Try to deserialize as DocSyncRequest
         if let Ok(request) = serde_cbor::from_slice::<DocSyncRequest>(&buf) {
             crate::verify_message(&request)?;
+            ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
                 peer_id = %peer_id,
                 message_id = %request.metadata.message_id,
@@ -72,6 +86,7 @@ impl TwoStreamHandler {
         // Try to deserialize as BranchableSyncRequest
         if let Ok(request) = serde_cbor::from_slice::<BranchableSyncRequest>(&buf) {
             crate::verify_message(&request)?;
+            ensure_transport_sender(&peer_id, &request)?;
             tracing::info!(
                 peer_id = %peer_id,
                 message_id = %request.metadata.message_id,
@@ -150,39 +165,43 @@ impl TwoStreamHandler {
             }
         }
 
-        // Deserialize as DocSyncReply since it's a superset of PushLogReply.
-        // PushLogReply deserialization would also succeed on DocSyncReply data
-        // (serde_cbor ignores unknown fields), which would silently drop the
-        // Results field and misroute the message.
-        if let Ok(reply) = serde_cbor::from_slice::<DocSyncReply>(&buf) {
-            crate::verify_message(&reply)?;
-            let message_id = reply.message_id.clone();
-
-            // Check if there's a pending PushLog channel for this message_id.
-            // If yes, this is actually a PushLogReply being routed.
-            let pending_sender = {
-                let mut pending = pending.lock();
-                pending.channels.remove(&message_id)
+        // Route pending PushLog replies before trying DocSyncReply.
+        // A PushLogReply will also deserialize as DocSyncReply (with default
+        // empty Results), but verifying the signature against the DocSyncReply
+        // shape changes the serialized bytes and fails validation.
+        if let Ok(response) = serde_cbor::from_slice::<PushLogReply>(&buf) {
+            let message_id = response.message_id.clone();
+            let is_pending_pushlog = {
+                let pending = pending.lock();
+                pending.channels.contains_key(&message_id)
             };
 
-            if let Some(sender) = pending_sender {
-                // Route as PushLogReply to the pending channel
+            if is_pending_pushlog {
+                crate::verify_message(&response)?;
+
                 tracing::debug!(
                     peer_id = %peer_id,
                     message_id = %message_id,
                     "Received PushLog response on two-stream protocol"
                 );
-                let pushlog_reply = PushLogReply {
-                    version: reply.version,
-                    message_id: reply.message_id,
-                    sender_id: reply.sender_id,
-                    pubkey: reply.pubkey,
-                    signature: reply.signature,
-                    err_message: reply.err_message,
+
+                let sender = {
+                    let mut pending = pending.lock();
+                    pending.channels.remove(&message_id)
                 };
-                let _ = sender.send(pushlog_reply);
+
+                if let Some(sender) = sender {
+                    let _ = sender.send(response);
+                }
+
                 return Ok(None);
             }
+        }
+
+        // Deserialize as DocSyncReply once we've ruled out a pending PushLogReply.
+        if let Ok(reply) = serde_cbor::from_slice::<DocSyncReply>(&buf) {
+            crate::verify_message(&reply)?;
+            let message_id = reply.message_id.clone();
 
             // No pending channel - this is a DocSyncReply for the coordinator
             tracing::debug!(

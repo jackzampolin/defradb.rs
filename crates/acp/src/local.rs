@@ -126,6 +126,20 @@ impl DocumentACP for LocalDocumentACP {
         self.store.is_doc_registered(resource_name, doc_id).await
     }
 
+    async fn get_doc_owner(
+        &self,
+        _policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<Option<Did>> {
+        Ok(self
+            .store
+            .get_relation_subjects(resource_name, doc_id, OWNER_RELATION)
+            .await?
+            .into_iter()
+            .next())
+    }
+
     async fn check_doc_access(
         &self,
         identity: &Identity,

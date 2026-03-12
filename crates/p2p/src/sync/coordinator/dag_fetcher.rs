@@ -49,7 +49,10 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
                         root_cid,
                         doc_id,
                         collection_id,
-                        schema_version_id,
+                        creator: schema_version_id,
+                        sender_peer: Some(source_peer.to_string()),
+                        is_explicit_replicator: false,
+                        explicit_replay_authorization: None,
                     })
                     .await;
                 return;
@@ -125,7 +128,10 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
                 root_cid,
                 doc_id,
                 collection_id,
-                schema_version_id,
+                creator: schema_version_id,
+                sender_peer: Some(source_peer.to_string()),
+                is_explicit_replicator: false,
+                explicit_replay_authorization: None,
             })
             .await;
     } else {

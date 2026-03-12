@@ -172,18 +172,21 @@ where
                 collection_id: collection_id_for_result,
             }
         }
-        Ok(MergeOutcome::Skipped { reason }) => {
-            // Merge skipped - still mark as merged to prevent reprocessing
-            if let Err(e) = coordinator.mark_as_merged(&cid).await {
-                // For skipped blocks, marking failure is less critical since
-                // re-processing will just skip again, but still report it
-                return ReplicationResult::MergedButNotMarked {
-                    cid,
-                    error: format!("skipped but failed to mark: {}", e),
-                };
+        Ok(MergeOutcome::Skipped { reason, terminal }) => {
+            if terminal {
+                if let Err(e) = coordinator.mark_as_merged(&cid).await {
+                    return ReplicationResult::MergedButNotMarked {
+                        cid,
+                        error: format!("skipped but failed to mark: {}", e),
+                    };
+                }
             }
 
-            ReplicationResult::Skipped { cid, reason }
+            ReplicationResult::Skipped {
+                cid,
+                reason,
+                terminal,
+            }
         }
         Err(e) => ReplicationResult::Failed {
             cid,
@@ -201,24 +204,51 @@ pub(super) fn is_mergeable_event(event: &SyncEvent) -> bool {
 }
 
 /// Extract merge block metadata from a SyncEvent.
-fn event_to_merge_metadata(event: &SyncEvent) -> (Cid, String, String, String) {
+fn event_to_merge_metadata(
+    event: &SyncEvent,
+) -> (
+    Cid,
+    String,
+    String,
+    String,
+    Option<String>,
+    bool,
+    Option<crate::ExplicitReplayAuthorization>,
+) {
     match event {
         SyncEvent::BlockReceived {
             cid,
             doc_id,
             collection_id,
             creator,
-        } => (*cid, doc_id.clone(), collection_id.clone(), creator.clone()),
+            sender_peer,
+            is_explicit_replicator,
+            explicit_replay_authorization,
+        } => (
+            *cid,
+            doc_id.clone(),
+            collection_id.clone(),
+            creator.clone(),
+            sender_peer.clone(),
+            *is_explicit_replicator,
+            explicit_replay_authorization.clone(),
+        ),
         SyncEvent::DagReady {
             root_cid,
             doc_id,
             collection_id,
-            schema_version_id,
+            creator,
+            sender_peer,
+            is_explicit_replicator,
+            explicit_replay_authorization,
         } => (
             *root_cid,
             doc_id.clone(),
             collection_id.clone(),
-            schema_version_id.clone(),
+            creator.clone(),
+            sender_peer.clone(),
+            *is_explicit_replicator,
+            explicit_replay_authorization.clone(),
         ),
         _ => unreachable!("is_mergeable_event should have filtered this"),
     }
@@ -244,7 +274,15 @@ where
 
     // Load block data for each event from blockstore
     for event in &events {
-        let (cid, doc_id, collection_id, creator) = event_to_merge_metadata(event);
+        let (
+            cid,
+            doc_id,
+            collection_id,
+            creator,
+            sender_peer,
+            is_explicit_replicator,
+            explicit_replay_authorization,
+        ) = event_to_merge_metadata(event);
 
         match coordinator.blockstore().get(&cid).await {
             Ok(Some(data)) => {
@@ -254,6 +292,9 @@ where
                     doc_id,
                     collection_id,
                     creator,
+                    sender_peer,
+                    is_explicit_replicator,
+                    explicit_replay_authorization,
                     verified_creator: None,
                 });
             }
@@ -291,11 +332,14 @@ where
                     collection_id: block.collection_id.clone(),
                 });
             }
-            Ok(MergeOutcome::Skipped { reason }) => {
-                merged_cids.push(block.cid); // Still mark skipped blocks
+            Ok(MergeOutcome::Skipped { reason, terminal }) => {
+                if terminal {
+                    merged_cids.push(block.cid);
+                }
                 results.push(ReplicationResult::Skipped {
                     cid: block.cid,
                     reason,
+                    terminal,
                 });
             }
             Err(e) => {
@@ -350,19 +394,30 @@ where
             doc_id,
             collection_id,
             creator,
+            sender_peer,
+            is_explicit_replicator,
+            explicit_replay_authorization,
         } => {
             handle_block_received(
                 coordinator,
                 handler,
                 config,
                 cid,
-                BlockMetadata::normal(&doc_id, &collection_id, &creator),
+                BlockMetadata::normal(
+                    &doc_id,
+                    &collection_id,
+                    &creator,
+                    sender_peer.as_deref(),
+                    is_explicit_replicator,
+                )
+                .with_explicit_replay_authorization(explicit_replay_authorization),
             )
             .await
         }
         SyncEvent::BlockAlreadyMerged { cid } => ReplicationResult::Skipped {
             cid,
             reason: "already merged".to_string(),
+            terminal: true,
         },
         SyncEvent::SyncError { cid, error } => ReplicationResult::Failed { cid, error },
         SyncEvent::DagNeedsFetch {
@@ -375,7 +430,10 @@ where
             root_cid,
             doc_id,
             collection_id,
-            schema_version_id,
+            creator,
+            sender_peer,
+            is_explicit_replicator,
+            explicit_replay_authorization,
         } => {
             // DAG is complete after Bitswap fetch - process as block received
             tracing::info!(
@@ -388,7 +446,14 @@ where
                 handler,
                 config,
                 root_cid,
-                BlockMetadata::normal(&doc_id, &collection_id, &schema_version_id),
+                BlockMetadata::normal(
+                    &doc_id,
+                    &collection_id,
+                    &creator,
+                    sender_peer.as_deref(),
+                    is_explicit_replicator,
+                )
+                .with_explicit_replay_authorization(explicit_replay_authorization),
             )
             .await
         }

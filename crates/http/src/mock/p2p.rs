@@ -101,6 +101,7 @@ impl P2POperations for MockP2POperations {
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
+        _explicit_replay_authorizer: Option<&str>,
     ) -> Result<(), String> {
         self.replicators.write().unwrap().push(ReplicatorInfo {
             id: Some("12D3KooWNewReplicator".to_string()),
@@ -210,6 +211,7 @@ impl P2POperations for FailingMockP2POperations {
         &self,
         _collections: Vec<String>,
         _addr: Option<&str>,
+        _explicit_replay_authorizer: Option<&str>,
     ) -> Result<(), String> {
         Err(self.error.clone())
     }

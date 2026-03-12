@@ -57,6 +57,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
         }
 
-        self.manager.process_pushlog(&message).await
+        self.manager
+            .process_pushlog(&message, Some(propagation_source.as_str()), false, None)
+            .await
     }
 }

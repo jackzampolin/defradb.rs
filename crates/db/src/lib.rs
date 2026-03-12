@@ -84,6 +84,8 @@ pub mod peer_identity;
 #[cfg(feature = "p2p")]
 pub mod push_docs;
 #[cfg(feature = "p2p")]
+pub(crate) mod push_docs_common;
+#[cfg(feature = "p2p")]
 pub mod push_docs_transport;
 pub mod schema_loader;
 pub mod se;

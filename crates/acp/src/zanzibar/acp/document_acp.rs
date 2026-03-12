@@ -80,6 +80,27 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         Ok(!subjects.is_empty())
     }
 
+    async fn get_doc_owner(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<Option<identity::Did>> {
+        let owner = self
+            .store
+            .get_relation_subjects(policy_id, resource_name, doc_id, OWNER_RELATION)
+            .await?
+            .into_iter()
+            .next();
+
+        match owner.and_then(|subject| subject.as_entity().cloned()) {
+            Some(subject) => identity::Did::new(subject.as_str())
+                .map(Some)
+                .map_err(|error| Error::Storage(format!("invalid owner DID: {error}"))),
+            None => Ok(None),
+        }
+    }
+
     async fn check_doc_access(
         &self,
         identity: &Identity,

@@ -90,6 +90,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 creator: String::new(),
                 missing: std::iter::once(root_cid).collect(),
                 source_peer: Some(source_peer),
+                is_explicit_replicator: false,
+                explicit_replay_authorization: None,
                 inserted_at: Instant::now(),
             },
         ) {
@@ -126,6 +128,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 creator: String::new(),
                 missing: std::iter::once(root_cid).collect(),
                 source_peer: Some(source_peer),
+                is_explicit_replicator: false,
+                explicit_replay_authorization: None,
                 inserted_at: Instant::now(),
             },
         ) {
@@ -241,7 +245,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 root_cid: *root_cid,
                 doc_id: info.doc_id.clone(),
                 collection_id: info.collection_id.clone(),
-                schema_version_id: info.creator.clone(),
+                creator: info.creator.clone(),
+                sender_peer: info.source_peer.clone(),
+                is_explicit_replicator: info.is_explicit_replicator,
+                explicit_replay_authorization: info.explicit_replay_authorization.clone(),
             })
             .await;
 

@@ -105,7 +105,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         field_name = %payload.field_name,
                         "Counter delta skipped (nonce already applied)"
                     );
-                    Ok(MergeOutcome::skipped("nonce already applied"))
+                    Ok(MergeOutcome::terminal_skip("nonce already applied"))
                 }
             }
             Err(e) => {

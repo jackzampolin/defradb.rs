@@ -180,6 +180,8 @@ pub enum TransportEvent {
         peer_id: PeerId,
         request: PushLogRequest,
         token: Option<ResponseToken>,
+        is_explicit_replicator: bool,
+        explicit_replay_authorization: Option<crate::ExplicitReplayAuthorization>,
     },
     DocSyncRequest {
         peer_id: PeerId,

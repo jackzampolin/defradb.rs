@@ -63,7 +63,9 @@ async fn acp_p2p_test(cluster: TestCluster) {
     node0.p2p_connect(&[addr1]).unwrap();
     node0.p2p_collection_add(&["User"]).unwrap();
     node1.p2p_collection_add(&["User"]).unwrap();
-    node0.p2p_replicator_set(&["User"], addr1).unwrap();
+    node0
+        .p2p_replicator_set_with_identity(&["User"], addr1, &alice.private_key_hex)
+        .unwrap();
 
     // Create a public document (no identity) on node 0
     node0

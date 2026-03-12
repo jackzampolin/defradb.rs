@@ -35,7 +35,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     }
                     None => {
                         tracing::debug!(cid = %cid, "CollectionDefinition has no name and no resolvable previous version - skipping");
-                        return Ok(MergeOutcome::skipped(
+                        return Ok(MergeOutcome::terminal_skip(
                             "collection definition has no name and no previous version",
                         ));
                     }

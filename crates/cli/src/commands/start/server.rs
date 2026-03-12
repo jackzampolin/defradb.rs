@@ -115,7 +115,7 @@ impl Node {
                 (None, None, None)
             } else {
                 info!("Initializing P2P network (libp2p)");
-                let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, false));
+                let blockstore = Arc::new(blockstore::DefraBlockstore::new(store, true));
                 let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
                 let (handle, events, host_task) = Self::start_p2p(
                     config,
@@ -168,6 +168,7 @@ impl Node {
                 retry_loop_task,
                 restored_doc_ids,
                 mut set_merge_handler_acp,
+                mut set_doc_pusher_acp,
             ) = if config.net.p2p_disabled {
                 let mutator: Arc<dyn query::mutator::DocMutator> =
                     Arc::new(db::AutoCommitMutator::new(database.clone()));
@@ -183,6 +184,7 @@ impl Node {
                     None,
                     std::collections::HashSet::new(),
                     no_acp,
+                    None,
                 )
             } else if config.net.transport == TransportType::Iroh {
                 #[cfg(feature = "iroh")]
@@ -190,7 +192,7 @@ impl Node {
                     info!("Initializing P2P network (iroh)");
                     let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(
                         store_for_sync.clone(),
-                        false,
+                        true,
                     ));
                     let merge_blockstore = sync_blockstore.clone();
                     let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
@@ -268,11 +270,12 @@ impl Node {
                     }
 
                     let merge_blockstore_for_syncer = merge_blockstore.clone();
-                    let merge_handler =
+                    let merge_handler_inner =
                         Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
-                    let merge_handler_for_syncer = merge_handler.clone();
-                    let merge_handler_for_acp: Arc<db::DbMergeHandler<_, _>> =
-                        merge_handler.clone();
+                    let merge_handler =
+                        Arc::new(db::AcpMergeHandler::new(merge_handler_inner.clone()));
+                    let merge_handler_for_syncer = merge_handler_inner;
+                    let merge_handler_for_acp = merge_handler.clone();
 
                     // Spawn replication loop
                     let coordinator_for_replication = coordinator.clone();
@@ -363,11 +366,14 @@ impl Node {
                     );
 
                     // Create transport doc pusher
-                    let iroh_doc_pusher: Arc<dyn crate::transport_doc_pusher::TransportDocPusher> =
-                        crate::transport_doc_pusher::DbTransportDocPusher::new_arc(
+                    let iroh_doc_pusher_impl =
+                        Arc::new(crate::transport_doc_pusher::DbTransportDocPusher::new(
                             database.clone(),
                             iroh_transport_for_adapter.clone(),
-                        );
+                        ));
+                    let iroh_doc_pusher_for_acp = iroh_doc_pusher_impl.clone();
+                    let iroh_doc_pusher: Arc<dyn crate::transport_doc_pusher::TransportDocPusher> =
+                        iroh_doc_pusher_impl;
 
                     // Clone store for background tasks
                     let store_for_iroh_bg = store_for_sync.clone();
@@ -521,6 +527,9 @@ impl Node {
                     let set_acp: SetMergeAcp = Some(Box::new(move |acp| {
                         merge_handler_for_acp.set_document_acp(acp);
                     }));
+                    let set_doc_pusher_acp: SetMergeAcp = Some(Box::new(move |acp| {
+                        iroh_doc_pusher_for_acp.set_document_acp(acp);
+                    }));
                     (
                         None,
                         mutator,
@@ -532,6 +541,7 @@ impl Node {
                         Some(retry_loop_task),
                         restored_doc_ids,
                         set_acp,
+                        set_doc_pusher_acp,
                     )
                 }
                 #[cfg(not(feature = "iroh"))]
@@ -543,7 +553,7 @@ impl Node {
             } else if let Some(ref p2p_handle) = p2p {
                 let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(
                     store_for_sync.clone(),
-                    false,
+                    true,
                 ));
 
                 // Clone blockstore for merge handler (before moving into coordinator)
@@ -596,13 +606,14 @@ impl Node {
 
                 // Create merge handler for CRDT merging
                 let merge_blockstore_for_syncer = merge_blockstore.clone();
-                let merge_handler =
+                let merge_handler_inner =
                     Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
+                let merge_handler = Arc::new(db::AcpMergeHandler::new(merge_handler_inner.clone()));
 
                 // Clone merge handler for VersionSyncer and ACP wiring
                 // (before moving into replication loop)
-                let merge_handler_for_syncer = merge_handler.clone();
-                let merge_handler_for_acp: Arc<db::DbMergeHandler<_, _>> = merge_handler.clone();
+                let merge_handler_for_syncer = merge_handler_inner;
+                let merge_handler_for_acp = merge_handler.clone();
 
                 // Spawn replication loop to process incoming blocks
                 // Track the task handle for graceful shutdown
@@ -636,7 +647,7 @@ impl Node {
                                 p2p::sync::ReplicationResult::Failed { cid, error } => {
                                     error!(cid = %cid, error = %error, "Block merge failed");
                                 }
-                                p2p::sync::ReplicationResult::Skipped { cid, reason } => {
+                                p2p::sync::ReplicationResult::Skipped { cid, reason, .. } => {
                                     tracing::debug!(cid = %cid, reason = %reason, "Block skipped");
                                 }
                                 p2p::sync::ReplicationResult::MergedButNotMarked { cid, error } => {
@@ -678,7 +689,9 @@ impl Node {
                                         topic, propagation_source
                                     );
                                 }
-                                p2p::HostEvent::TwoStreamRequest { peer_id, request } => {
+                                p2p::HostEvent::TwoStreamRequest {
+                                    peer_id, request, ..
+                                } => {
                                     info!(
                                         peer_id = %peer_id,
                                         message_id = %request.metadata.message_id,
@@ -715,7 +728,10 @@ impl Node {
                     ));
 
                 // Create doc pusher for retry loop and P2PAdapter
-                let doc_pusher = crate::p2p_adapter::DbDocPusher::new_arc(database.clone());
+                let doc_pusher_impl =
+                    Arc::new(crate::p2p_adapter::DbDocPusher::new(database.clone()));
+                let doc_pusher_for_acp = doc_pusher_impl.clone();
+                let doc_pusher: Arc<dyn crate::p2p_adapter::DocPusher> = doc_pusher_impl;
 
                 // Spawn failure recorder task
                 let recorder_store = store_for_background.clone();
@@ -855,6 +871,9 @@ impl Node {
                 let set_acp: SetMergeAcp = Some(Box::new(move |acp| {
                     merge_handler_for_acp.set_document_acp(acp);
                 }));
+                let set_doc_pusher_acp: SetMergeAcp = Some(Box::new(move |acp| {
+                    doc_pusher_for_acp.set_document_acp(acp);
+                }));
                 (
                     Some(coordinator),
                     mutator,
@@ -866,6 +885,7 @@ impl Node {
                     Some(retry_loop_task),
                     restored_doc_ids,
                     set_acp,
+                    set_doc_pusher_acp,
                 )
             } else {
                 let mutator: Arc<dyn query::mutator::DocMutator> =
@@ -882,6 +902,7 @@ impl Node {
                     None,
                     std::collections::HashSet::new(),
                     no_acp,
+                    None,
                 )
             };
 
@@ -1019,6 +1040,9 @@ impl Node {
             // Wire DocumentACP into the P2P merge handler so it can register
             // replicated documents with the original owner DID (merge-denial).
             if let Some(set_acp) = set_merge_handler_acp.take() {
+                set_acp(document_acp.clone());
+            }
+            if let Some(set_acp) = set_doc_pusher_acp.take() {
                 set_acp(document_acp.clone());
             }
 

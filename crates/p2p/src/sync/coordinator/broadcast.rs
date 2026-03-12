@@ -273,14 +273,26 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     ) -> bool {
         let mut any_failed = false;
         for (cid, request) in requests {
-            if let Err(e) = transport.send_two_stream_request(peer_id, request).await {
-                tracing::debug!(
-                    peer_id = %peer_id,
-                    cid = %cid,
-                    error = %e,
-                    "PushLog to replicator failed"
-                );
-                any_failed = true;
+            match transport.send_two_stream_request(peer_id, request).await {
+                Ok(reply) if reply.err_message.is_some() => {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        cid = %cid,
+                        error = %reply.err_message.as_deref().unwrap_or("unknown pushlog error"),
+                        "PushLog to replicator was rejected"
+                    );
+                    any_failed = true;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        peer_id = %peer_id,
+                        cid = %cid,
+                        error = %e,
+                        "PushLog to replicator failed"
+                    );
+                    any_failed = true;
+                }
             }
         }
         any_failed

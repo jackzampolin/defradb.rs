@@ -323,6 +323,8 @@ async fn dispatch_stream(
                     peer_id: peer_id.clone(),
                     request,
                     token: Some(token),
+                    is_explicit_replicator: false,
+                    explicit_replay_authorization: None,
                 })
                 .await
                 .is_err()

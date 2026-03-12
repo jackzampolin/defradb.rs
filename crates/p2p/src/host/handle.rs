@@ -1,12 +1,18 @@
 //! P2P host handle for interacting with the host.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use cid::Cid;
 use libp2p::{gossipsub, identity::Keypair, Multiaddr, PeerId};
+use parking_lot::RwLock;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{Error, Result};
+use crate::explicit_replay;
 use crate::message::{PushLogBroadcast, PushLogReply, PushLogRequest};
 use crate::replicator::ReplicatorInfo;
+use crate::signing::sign_message;
 use crate::topics::DefraTopic;
 use crate::QueryId;
 
@@ -23,9 +29,54 @@ pub struct P2PHostHandle {
     local_peer_id: PeerId,
     /// Keypair for signing messages.
     keypair: Keypair,
+    /// Optional explicit replay capabilities keyed by (peer_id, collection_id).
+    explicit_replay_capabilities: Arc<RwLock<HashMap<(String, String), String>>>,
 }
 
 impl P2PHostHandle {
+    fn set_explicit_replay_capability_inner(
+        &self,
+        peer_id: &PeerId,
+        collections: &[String],
+        capability: &str,
+    ) {
+        let peer_id = peer_id.to_string();
+        let mut capabilities = self.explicit_replay_capabilities.write();
+        for collection_id in collections {
+            capabilities.insert(
+                (peer_id.clone(), collection_id.clone()),
+                capability.to_string(),
+            );
+        }
+    }
+
+    fn clear_explicit_replay_capability_inner(&self, peer_id: &PeerId, collections: &[String]) {
+        let peer_id = peer_id.to_string();
+        let mut capabilities = self.explicit_replay_capabilities.write();
+        for collection_id in collections {
+            capabilities.remove(&(peer_id.clone(), collection_id.clone()));
+        }
+    }
+
+    fn clear_all_explicit_replay_capabilities_inner(&self, peer_id: &PeerId) {
+        let peer_id = peer_id.to_string();
+        self.explicit_replay_capabilities
+            .write()
+            .retain(|(stored_peer_id, _), _| stored_peer_id != &peer_id);
+    }
+
+    fn attach_explicit_replay_capability(&self, peer_id: &PeerId, request: &mut PushLogRequest) {
+        if request.explicit_replay_capability.is_some() {
+            return;
+        }
+
+        request.explicit_replay_capability = self
+            .explicit_replay_capabilities
+            .read()
+            .get(&(peer_id.to_string(), request.collection_id.clone()))
+            .cloned();
+    }
+
     /// Create a new handle (internal use only).
     pub(super) fn new(
         command_tx: mpsc::Sender<HostCommand>,
@@ -38,6 +89,7 @@ impl P2PHostHandle {
             local_public_key_proto,
             local_peer_id,
             keypair,
+            explicit_replay_capabilities: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -299,10 +351,61 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Cache an explicit replay capability for future two-stream pushes.
+    ///
+    /// This is primarily intended for tests and lower-level integrations.
+    pub fn set_explicit_replay_capability(
+        &self,
+        peer_id: PeerId,
+        collections: &[String],
+        capability: &str,
+    ) {
+        self.set_explicit_replay_capability_inner(&peer_id, collections, capability);
+    }
+
+    /// Issue and cache dedicated explicit replay capabilities for the provided collections.
+    pub fn set_explicit_replay_authorizer(
+        &self,
+        peer_id: PeerId,
+        collections: &[String],
+        authorizer_did: &str,
+    ) -> Result<()> {
+        for collection_id in collections {
+            let capability = explicit_replay::generate_capability(
+                self.keypair(),
+                &self.local_peer_id_cached().to_string(),
+                &peer_id.to_string(),
+                collection_id,
+                authorizer_did,
+                explicit_replay::DEFAULT_CAPABILITY_TTL,
+            )
+            .map_err(Error::Transport)?;
+
+            self.set_explicit_replay_capability_inner(
+                &peer_id,
+                std::slice::from_ref(collection_id),
+                &capability,
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Clear cached explicit replay capabilities for the provided collections.
+    pub fn clear_explicit_replay_capability(&self, peer_id: PeerId, collections: &[String]) {
+        self.clear_explicit_replay_capability_inner(&peer_id, collections);
+    }
+
     /// Delete a replicator.
     ///
     /// Removes the peer from all collections they were replicating.
     pub async fn delete_replicator(&self, peer_id: PeerId) -> Result<()> {
+        if let Some(info) = self.get_replicator(peer_id).await? {
+            self.clear_explicit_replay_capability_inner(&peer_id, &info.collections);
+        } else {
+            self.clear_all_explicit_replay_capabilities_inner(&peer_id);
+        }
+
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
             .send(HostCommand::DeleteReplicator {
@@ -326,6 +429,8 @@ impl P2PHostHandle {
         peer_id: PeerId,
         collections: Vec<String>,
     ) -> Result<bool> {
+        self.clear_explicit_replay_capability_inner(&peer_id, &collections);
+
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
             .send(HostCommand::RemoveReplicatorCollections {
@@ -391,8 +496,11 @@ impl P2PHostHandle {
     pub async fn send_two_stream_request(
         &self,
         peer_id: PeerId,
-        request: PushLogRequest,
+        mut request: PushLogRequest,
     ) -> Result<PushLogReply> {
+        self.attach_explicit_replay_capability(&peer_id, &mut request);
+        sign_message(self.keypair(), &mut request)?;
+
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
             .send(HostCommand::SendTwoStreamRequest {
@@ -608,6 +716,7 @@ impl P2PHostHandle {
             local_public_key_proto: public_key_proto,
             local_peer_id,
             keypair,
+            explicit_replay_capabilities: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

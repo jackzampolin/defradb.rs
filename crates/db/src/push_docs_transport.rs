@@ -1,11 +1,13 @@
 use std::str::FromStr;
 
+use acp::DocumentACP;
 use p2p::message::PushLogRequest;
 use p2p::transport::PeerId;
 use p2p::P2PTransport;
 use storage::corekv::{IterOptions, Reader, Store};
 
 use crate::database::DB;
+use crate::push_docs_common::resolve_push_creator;
 
 /// Push existing documents to a replicator peer via a generic transport.
 ///
@@ -14,6 +16,7 @@ use crate::database::DB;
 pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTransport>(
     transport: &T,
     db: &DB<S>,
+    document_acp: Option<&dyn DocumentACP>,
     peer_id: &PeerId,
     collections: &[String],
     se_encryption_key: Option<&[u8]>,
@@ -86,6 +89,8 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
             .map_err(|e| format!("datastore close error: {}", e))?;
 
         for doc_id in &doc_ids {
+            let creator =
+                resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id).await;
             let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
             let opts = IterOptions::new().with_prefix(prefix);
             let mut iter = headstore
@@ -143,7 +148,7 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
                         doc_id.clone(),
                         field_cid,
                         collection.collection_id().to_string(),
-                        local_peer_id.clone(),
+                        creator.clone(),
                         field_data,
                     );
                     if let Err(e) = p2p::signing::sign_with_transport(transport, &mut field_req) {
@@ -157,7 +162,7 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
                     doc_id.clone(),
                     composite_cid,
                     collection.collection_id().to_string(),
-                    local_peer_id.clone(),
+                    creator.clone(),
                     composite_data,
                 );
                 if let Err(e) = p2p::signing::sign_with_transport(transport, &mut request) {
@@ -172,7 +177,26 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
                 let pid = peer_id.clone();
                 push_handles.push(tokio::spawn(async move {
                     for req in requests {
-                        let _ = t.send_two_stream_request(&pid, req).await;
+                        let cid = req.cid.clone();
+                        match t.send_two_stream_request(&pid, req).await {
+                            Ok(reply) if reply.err_message.is_some() => {
+                                tracing::warn!(
+                                    peer_id = %pid,
+                                    cid_len = cid.len(),
+                                    error = %reply.err_message.as_deref().unwrap_or("unknown pushlog error"),
+                                    "Existing document replay PushLog was rejected"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    peer_id = %pid,
+                                    cid_len = cid.len(),
+                                    error = %e,
+                                    "Existing document replay PushLog failed"
+                                );
+                            }
+                        }
                     }
                 }));
             }
@@ -301,11 +325,17 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
 pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
     transport: &T,
     db: &DB<S>,
+    document_acp: Option<&dyn DocumentACP>,
     peer_id: &PeerId,
     doc_id: &str,
     collection_id: &str,
 ) -> Result<(), String> {
     let local_peer_id = transport.local_peer_id().to_string();
+    let collection = db
+        .find_collection_by_id(collection_id)
+        .map_err(|e| format!("failed to get collection: {}", e))?
+        .ok_or_else(|| format!("collection '{}' not found", collection_id))?;
+    let creator = resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id).await;
 
     let headstore = storage::stores::Headstore::new(db.store().clone());
     let head_txn = headstore
@@ -355,15 +385,16 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
                             doc_id.to_string(),
                             link.link.to_bytes(),
                             collection_id.to_string(),
-                            local_peer_id.clone(),
+                            creator.clone(),
                             field_data,
                         );
-                        if p2p::signing::sign_with_transport(transport, &mut field_req).is_ok()
-                            && transport
-                                .send_two_stream_request(peer_id, field_req)
-                                .await
-                                .is_err()
-                        {
+                        if p2p::signing::sign_with_transport(transport, &mut field_req).is_ok() {
+                            match transport.send_two_stream_request(peer_id, field_req).await {
+                                Ok(reply) if reply.err_message.is_some() => any_failed = true,
+                                Ok(_) => {}
+                                Err(_) => any_failed = true,
+                            }
+                        } else {
                             any_failed = true;
                         }
                     }
@@ -375,7 +406,7 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
             doc_id.to_string(),
             head_cid.to_bytes(),
             collection_id.to_string(),
-            local_peer_id.clone(),
+            creator.clone(),
             block_data,
         );
 
@@ -384,12 +415,10 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
             continue;
         }
 
-        if transport
-            .send_two_stream_request(peer_id, request)
-            .await
-            .is_err()
-        {
-            any_failed = true;
+        match transport.send_two_stream_request(peer_id, request).await {
+            Ok(reply) if reply.err_message.is_some() => any_failed = true,
+            Ok(_) => {}
+            Err(_) => any_failed = true,
         }
     }
 

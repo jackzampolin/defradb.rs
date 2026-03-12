@@ -58,6 +58,7 @@ pub mod behaviour;
 pub mod bitswap;
 pub mod codec;
 pub mod error;
+mod explicit_replay;
 pub mod host;
 pub mod message;
 pub mod protocol;
@@ -78,6 +79,11 @@ pub use address::{parse_multiaddr_with_peer_id, ParsedMultiaddr};
 
 // Re-export main types for convenience
 pub use error::{Error, Result};
+pub use explicit_replay::{
+    generate_capability as generate_explicit_replay_capability,
+    generate_capability_from_claims as generate_explicit_replay_capability_from_claims,
+    ExplicitReplayAuthorization, ExplicitReplayCapabilityClaims,
+};
 pub use host::{
     convert_host_event, HostCommand, HostEvent, Libp2pTransport, P2PHost, P2PHostConfig,
     P2PHostHandle, ResponseChannel,

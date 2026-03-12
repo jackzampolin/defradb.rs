@@ -1,3 +1,4 @@
+use super::hook::CompositePostCommitAction;
 use super::*;
 
 use p2p::sync::MergeBlock;
@@ -5,6 +6,11 @@ use p2p::sync::MergeBlock;
 /// Event collected during batch processing, emitted after commit.
 pub(crate) struct PendingMergeEvent {
     pub message: Message,
+}
+
+/// Async side effect collected during batch processing, executed after commit.
+pub(crate) struct PendingPostCommitAction {
+    pub action: Box<dyn CompositePostCommitAction>,
 }
 
 impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMergeHandler<S, B> {
@@ -15,8 +21,14 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
     ) -> Vec<Result<MergeOutcome, MergeError>> {
         let mut results = Vec::with_capacity(blocks.len());
         for block in blocks {
-            let metadata =
-                BlockMetadata::normal(&block.doc_id, &block.collection_id, &block.creator);
+            let metadata = BlockMetadata::normal(
+                &block.doc_id,
+                &block.collection_id,
+                &block.creator,
+                block.sender_peer.as_deref(),
+                block.is_explicit_replicator,
+            )
+            .with_explicit_replay_authorization(block.explicit_replay_authorization.clone());
             results.push(
                 self.handle_block(&block.cid, &block.block_data, metadata)
                     .await,
@@ -73,6 +85,8 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         let batch_merged: std::sync::Mutex<HashSet<Cid>> = std::sync::Mutex::new(HashSet::new());
         let pending_events: std::sync::Mutex<Vec<PendingMergeEvent>> =
             std::sync::Mutex::new(Vec::new());
+        let pending_post_commit_actions: std::sync::Mutex<Vec<PendingPostCommitAction>> =
+            std::sync::Mutex::new(Vec::new());
 
         let mut results = Vec::with_capacity(blocks.len());
         let mut batch_error: Option<MergeError> = None;
@@ -86,8 +100,14 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
             let headstore = txn.headstore()?;
 
             for block in blocks {
-                let metadata =
-                    BlockMetadata::normal(&block.doc_id, &block.collection_id, &block.creator);
+                let metadata = BlockMetadata::normal(
+                    &block.doc_id,
+                    &block.collection_id,
+                    &block.creator,
+                    block.sender_peer.as_deref(),
+                    block.is_explicit_replicator,
+                )
+                .with_explicit_replay_authorization(block.explicit_replay_authorization.clone());
                 match self
                     .process_block_in_txn(
                         &datastore,
@@ -97,6 +117,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                         &metadata,
                         &batch_merged,
                         &pending_events,
+                        &pending_post_commit_actions,
                     )
                     .await
                 {
@@ -125,6 +146,16 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
             merged.extend(batch.iter());
         }
 
+        let post_commit_actions = pending_post_commit_actions.into_inner().unwrap();
+        for action in post_commit_actions {
+            if let Err(error) = action.action.run().await {
+                tracing::warn!(
+                    error = %error,
+                    "Post-commit batch merge action failed after commit"
+                );
+            }
+        }
+
         // Emit all collected events
         if let Some(bus) = self.db.event_bus() {
             let events = pending_events.into_inner().unwrap();
@@ -149,6 +180,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         metadata: &BlockMetadata<'_>,
         batch_merged: &std::sync::Mutex<HashSet<Cid>>,
         pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
+        pending_post_commit_actions: &std::sync::Mutex<Vec<PendingPostCommitAction>>,
     ) -> Result<MergeOutcome, MergeError> {
         // Decode the block from DAG-CBOR
         let block =
@@ -225,6 +257,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     false,
                     batch_merged,
                     pending_events,
+                    pending_post_commit_actions,
                     0,
                 )
                 .await
@@ -239,6 +272,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     &metadata,
                     batch_merged,
                     pending_events,
+                    pending_post_commit_actions,
                     0,
                 )
                 .await
@@ -248,7 +282,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                 let result = self.process_lww_delta_in_txn(&mut ds, cid, payload).await;
                 match result {
                     Ok(r) if r.applied => Ok(MergeOutcome::Merged),
-                    Ok(_) => Ok(MergeOutcome::skipped("rejected by CRDT")),
+                    Ok(_) => Ok(MergeOutcome::terminal_skip("rejected by CRDT")),
                     Err(e) => Err(e),
                 }
             }
@@ -259,11 +293,11 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     .await;
                 match result {
                     Ok(r) if r.applied => Ok(MergeOutcome::Merged),
-                    Ok(_) => Ok(MergeOutcome::skipped("rejected by CRDT")),
+                    Ok(_) => Ok(MergeOutcome::terminal_skip("rejected by CRDT")),
                     Err(e) => Err(e),
                 }
             }
-            CrdtDelta::FieldDefinition(_) => Ok(MergeOutcome::skipped(
+            CrdtDelta::FieldDefinition(_) => Ok(MergeOutcome::terminal_skip(
                 "field definition processed with collection",
             )),
             CrdtDelta::CollectionDefinition(payload) => {
@@ -271,7 +305,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                 self.process_collection_definition_delta(cid, &block, payload, &metadata)
                     .await
             }
-            CrdtDelta::CollectionSet(_) => Ok(MergeOutcome::skipped("collection set delta")),
+            CrdtDelta::CollectionSet(_) => Ok(MergeOutcome::terminal_skip("collection set delta")),
         }
     }
 }

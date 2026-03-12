@@ -87,8 +87,8 @@ impl P2pReplicatorAddArgs {
             .with_auth_token(ctx.auth_token.clone())
             .with_verbose(ctx.verbose);
 
-        // Use first address if provided (Go API sends all addresses)
         let address = self.addresses.first().map(|s| s.as_str());
+
         client.p2p_replicator_add(&self.collection, address).await?;
         println!(
             "Set replicator for collections: {}",

@@ -23,6 +23,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// messages from connected peers on subscribed topics. Document-level
     /// ACP still applies independently at merge time.
     ///
+    /// Important: collection access is broader than explicit replicator trust.
+    /// Callers that need to know whether a peer is an actual registered
+    /// replicator must use `is_registered_replicator()` instead of treating a
+    /// successful access check as equivalent.
+    ///
     /// Uses string-based registry lookup, supporting both libp2p and iroh peer IDs.
     pub(super) async fn check_access_str(
         &self,
@@ -57,6 +62,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             peer_id: peer_id_str.to_string(),
             collection_id: collection_id.to_string(),
         })
+    }
+
+    /// Returns true only when the peer is explicitly registered as a
+    /// replicator for the collection.
+    pub(super) fn is_registered_replicator(&self, peer_id_str: &str, collection_id: &str) -> bool {
+        self.replicators.is_replicator(collection_id, peer_id_str)
     }
 
     /// Check if a peer is authorized as a replicator for any collection.

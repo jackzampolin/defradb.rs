@@ -334,10 +334,17 @@ pub fn convert_host_event(event: crate::host::HostEvent) -> TransportEvent {
             cid,
             data,
         },
-        HostEvent::TwoStreamRequest { peer_id, request } => TransportEvent::TwoStreamRequest {
+        HostEvent::TwoStreamRequest {
+            peer_id,
+            request,
+            is_explicit_replicator,
+            explicit_replay_authorization,
+        } => TransportEvent::TwoStreamRequest {
             peer_id: PeerId::from(peer_id),
             request,
             token: None,
+            is_explicit_replicator,
+            explicit_replay_authorization,
         },
         HostEvent::DocSyncRequest { peer_id, request } => TransportEvent::DocSyncRequest {
             peer_id: PeerId::from(peer_id),

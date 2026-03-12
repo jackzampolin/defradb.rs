@@ -158,6 +158,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
+        _explicit_replay_authorizer: Option<&str>,
     ) -> Result<(), String> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
         let (endpoint_id, direct_addrs) = parse_iroh_address(addr_str);

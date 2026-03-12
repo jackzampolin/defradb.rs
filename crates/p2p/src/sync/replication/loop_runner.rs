@@ -90,7 +90,7 @@ impl ReplicationLoop {
                             "Block merged but re-broadcast failed"
                         );
                     }
-                    ReplicationResult::Skipped { cid, reason } => {
+                    ReplicationResult::Skipped { cid, reason, .. } => {
                         tracing::debug!(cid = %cid, reason = %reason, "Block skipped");
                     }
                     ReplicationResult::Failed { cid, error } => {

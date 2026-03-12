@@ -50,7 +50,10 @@ async fn test_process_pushlog_stores_block() {
     let msg = create_test_broadcast(&cid);
 
     // Process the pushlog
-    manager.process_pushlog(&msg).await.unwrap();
+    manager
+        .process_pushlog(&msg, None, false, None)
+        .await
+        .unwrap();
 
     // Block should be stored
     assert!(blockstore.has(&cid).await.unwrap());
@@ -88,7 +91,10 @@ async fn test_process_pushlog_already_merged() {
     blockstore.mark_as_merged(&cid).await.unwrap();
 
     // Process the pushlog
-    manager.process_pushlog(&msg).await.unwrap();
+    manager
+        .process_pushlog(&msg, None, false, None)
+        .await
+        .unwrap();
 
     // Should receive BlockAlreadyMerged event
     let event = events.try_recv().unwrap();
@@ -111,7 +117,10 @@ async fn test_mark_as_merged() {
     let msg = create_test_broadcast(&cid);
 
     // Process the pushlog
-    manager.process_pushlog(&msg).await.unwrap();
+    manager
+        .process_pushlog(&msg, None, false, None)
+        .await
+        .unwrap();
 
     // Not merged initially
     assert!(!manager.is_merged(&cid).await.unwrap());
@@ -138,7 +147,10 @@ async fn test_get_unmerged() {
     assert!(unmerged.is_empty());
 
     // Process pushlog
-    manager.process_pushlog(&msg).await.unwrap();
+    manager
+        .process_pushlog(&msg, None, false, None)
+        .await
+        .unwrap();
 
     // Now one unmerged
     let unmerged = manager.get_unmerged().await.unwrap();
@@ -169,7 +181,7 @@ async fn test_process_pushlog_invalid_cid_returns_error() {
     );
 
     // Processing should fail with InvalidCid error
-    let result = manager.process_pushlog(&msg).await;
+    let result = manager.process_pushlog(&msg, None, false, None).await;
     assert!(result.is_err());
     match result {
         Err(Error::InvalidCid(msg)) => {
@@ -195,7 +207,7 @@ async fn test_process_pushlog_cid_mismatch_returns_error() {
         b"tampered content".to_vec(),
     );
 
-    let result = manager.process_pushlog(&msg).await;
+    let result = manager.process_pushlog(&msg, None, false, None).await;
     assert!(result.is_err());
     assert!(matches!(result, Err(Error::BlockCidMismatch { .. })));
 }
@@ -221,7 +233,10 @@ async fn test_concurrent_processing_second_waiter_processes_on_first_not_merged(
     let msg1 = msg.clone();
     let first_done1 = first_done.clone();
     let first_task = tokio::spawn(async move {
-        manager1.process_pushlog(&msg1).await.unwrap();
+        manager1
+            .process_pushlog(&msg1, None, false, None)
+            .await
+            .unwrap();
         first_done1.store(true, Ordering::SeqCst);
     });
 
@@ -232,7 +247,10 @@ async fn test_concurrent_processing_second_waiter_processes_on_first_not_merged(
     let manager2 = manager.clone();
     let msg2 = msg.clone();
     let second_task = tokio::spawn(async move {
-        manager2.process_pushlog(&msg2).await.unwrap();
+        manager2
+            .process_pushlog(&msg2, None, false, None)
+            .await
+            .unwrap();
     });
 
     // Wait for both tasks
@@ -272,7 +290,7 @@ async fn test_process_pushlog_returns_error_when_receiver_dropped() {
     let msg = create_test_broadcast(&cid);
 
     // Processing should fail with ChannelSend error since receiver is dropped
-    let result = manager.process_pushlog(&msg).await;
+    let result = manager.process_pushlog(&msg, None, false, None).await;
     assert!(result.is_err());
     match result {
         Err(Error::ChannelSend) => {
@@ -303,7 +321,7 @@ async fn test_already_merged_returns_error_when_receiver_dropped() {
     drop(events);
 
     // Processing already-merged block should fail since we can't send event
-    let result = manager.process_pushlog(&msg).await;
+    let result = manager.process_pushlog(&msg, None, false, None).await;
     assert!(result.is_err());
     match result {
         Err(Error::ChannelSend) => {
@@ -337,7 +355,10 @@ async fn test_pending_dag_tracking() {
     let msg = create_test_broadcast(&cid);
 
     // Process pushlog - block has no parseable links, should be complete
-    manager.process_pushlog(&msg).await.unwrap();
+    manager
+        .process_pushlog(&msg, None, false, None)
+        .await
+        .unwrap();
 
     // Should receive BlockReceived since no missing links
     let event = events.try_recv().unwrap();

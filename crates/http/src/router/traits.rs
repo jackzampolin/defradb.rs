@@ -31,6 +31,7 @@ pub trait P2POperations: Send + Sync {
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
+        explicit_replay_authorizer: Option<&str>,
     ) -> Result<(), String>;
 
     /// Remove a replicator for collections.
