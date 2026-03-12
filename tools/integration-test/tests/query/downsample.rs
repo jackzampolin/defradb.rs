@@ -279,6 +279,45 @@ async fn downsample_test(cluster: TestCluster) {
         .expect("create metric");
     let source_doc_id = extract_doc_id(&create, "add_Metric");
 
+    let value_only_update = client.query(&format!(
+        r#"mutation {{
+            update_Metric(docID: "{source_doc_id}", input: {{value: 11}}) {{ _docID }}
+        }}"#
+    ));
+    let value_only_error = value_only_update.expect_err("value-only update should be rejected");
+    assert!(
+        value_only_error
+            .to_string()
+            .contains("'ts' and 'value' must be updated together"),
+        "unexpected value-only update error: {value_only_error}",
+    );
+
+    let ts_only_update = client.query(&format!(
+        r#"mutation {{
+            update_Metric(docID: "{source_doc_id}", input: {{ts: "{}"}}) {{ _docID }}
+        }}"#,
+        format_timestamp(t2)
+    ));
+    let ts_only_error = ts_only_update.expect_err("ts-only update should be rejected");
+    assert!(
+        ts_only_error
+            .to_string()
+            .contains("'ts' and 'value' must be updated together"),
+        "unexpected ts-only update error: {ts_only_error}",
+    );
+
+    let unchanged_source = query_metric(&client, &source_doc_id);
+    assert_eq!(
+        unchanged_source["_docID"].as_str(),
+        Some(source_doc_id.as_str())
+    );
+    assert_eq!(unchanged_source["label"].as_str(), Some("cpu"));
+    assert_eq!(
+        unchanged_source["ts"].as_str(),
+        Some(format_timestamp(t1).as_str())
+    );
+    assert_eq!(unchanged_source["value"].as_i64(), Some(10));
+
     client
         .query(&format!(
             r#"mutation {{ update_Metric(docID: "{source_doc_id}", input: {{ts: "{}", value: 20}}) {{ _docID }} }}"#,

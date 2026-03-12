@@ -173,7 +173,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         })?;
 
         self.db
-            .validate_downsample_write(&datastore, collection.schema(), &doc)
+            .validate_downsample_write(&datastore, collection.schema(), &doc, None)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
@@ -302,7 +302,12 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         }
 
         self.db
-            .validate_downsample_write(&datastore, collection.schema(), &doc)
+            .validate_downsample_write(
+                &datastore,
+                collection.schema(),
+                &doc,
+                Some(&modified_fields),
+            )
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 

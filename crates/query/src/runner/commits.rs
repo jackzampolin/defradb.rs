@@ -118,6 +118,32 @@ mod tests {
             HeightRangeExtraction::Empty
         );
     }
+
+    #[test]
+    fn test_commit_sum_preserves_large_int_precision() {
+        let values = [
+            CommitNumericValue::Int(9_007_199_254_740_992),
+            CommitNumericValue::Int(1),
+        ];
+        let sum = sum_commit_numeric_values(&values);
+        assert_eq!(sum.as_i64(), Some(9_007_199_254_740_993));
+    }
+
+    #[test]
+    fn test_commit_min_max_preserve_large_int_precision() {
+        let values = [
+            CommitNumericValue::Int(9_007_199_254_740_993),
+            CommitNumericValue::Int(9_007_199_254_740_992),
+        ];
+        assert_eq!(
+            min_commit_numeric_values(&values).as_i64(),
+            Some(9_007_199_254_740_992)
+        );
+        assert_eq!(
+            max_commit_numeric_values(&values).as_i64(),
+            Some(9_007_199_254_740_993)
+        );
+    }
 }
 
 impl CommitsHeightRange {
@@ -347,6 +373,72 @@ impl CommitNumericValue {
     }
 }
 
+fn sum_commit_numeric_values(values: &[CommitNumericValue]) -> JsonValue {
+    if values.iter().any(|value| value.is_float()) {
+        let sum = values.iter().map(|value| value.as_f64()).sum::<f64>();
+        serde_json::Number::from_f64(sum)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null)
+    } else {
+        values
+            .iter()
+            .try_fold(0i64, |sum, value| match value {
+                CommitNumericValue::Int(value) => sum.checked_add(*value),
+                CommitNumericValue::Float(_) => None,
+            })
+            .map(|sum| JsonValue::Number(sum.into()))
+            .unwrap_or(JsonValue::Null)
+    }
+}
+
+fn min_commit_numeric_values(values: &[CommitNumericValue]) -> JsonValue {
+    if values.iter().any(|value| value.is_float()) {
+        let min = values
+            .iter()
+            .map(|value| value.as_f64())
+            .fold(None, |current: Option<f64>, value| {
+                Some(current.map_or(value, |min| min.min(value)))
+            });
+        min.and_then(serde_json::Number::from_f64)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null)
+    } else {
+        values
+            .iter()
+            .filter_map(|value| match value {
+                CommitNumericValue::Int(value) => Some(*value),
+                CommitNumericValue::Float(_) => None,
+            })
+            .min()
+            .map(|value| JsonValue::Number(value.into()))
+            .unwrap_or(JsonValue::Null)
+    }
+}
+
+fn max_commit_numeric_values(values: &[CommitNumericValue]) -> JsonValue {
+    if values.iter().any(|value| value.is_float()) {
+        let max = values
+            .iter()
+            .map(|value| value.as_f64())
+            .fold(None, |current: Option<f64>, value| {
+                Some(current.map_or(value, |max| max.max(value)))
+            });
+        max.and_then(serde_json::Number::from_f64)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null)
+    } else {
+        values
+            .iter()
+            .filter_map(|value| match value {
+                CommitNumericValue::Int(value) => Some(*value),
+                CommitNumericValue::Float(_) => None,
+            })
+            .max()
+            .map(|value| JsonValue::Number(value.into()))
+            .unwrap_or(JsonValue::Null)
+    }
+}
+
 fn is_commit_aggregate_only_selection(select: &Select) -> bool {
     !select.fields.is_empty()
         && select
@@ -493,15 +585,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     return JsonValue::Number(0.into());
                 };
                 let values = self.collect_commit_numeric_values(commit, group_docs, field_name);
-                let has_float = values.iter().any(|value| value.is_float());
-                let sum = values.iter().map(|value| value.as_f64()).sum::<f64>();
-                if has_float {
-                    serde_json::Number::from_f64(sum)
-                        .map(JsonValue::Number)
-                        .unwrap_or(JsonValue::Null)
-                } else {
-                    JsonValue::Number((sum as i64).into())
-                }
+                sum_commit_numeric_values(&values)
             }
             AggregateType::Average => {
                 let Some(field_name) = self.commit_aggregate_target_field(agg) else {
@@ -522,42 +606,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     return JsonValue::Null;
                 };
                 let values = self.collect_commit_numeric_values(commit, group_docs, field_name);
-                let min = values
-                    .iter()
-                    .map(|value| value.as_f64())
-                    .fold(None, |current: Option<f64>, value| {
-                        Some(current.map_or(value, |min| min.min(value)))
-                    });
-                match min {
-                    Some(value) if values.iter().any(|numeric| numeric.is_float()) => {
-                        serde_json::Number::from_f64(value)
-                            .map(JsonValue::Number)
-                            .unwrap_or(JsonValue::Null)
-                    }
-                    Some(value) => JsonValue::Number((value as i64).into()),
-                    None => JsonValue::Null,
-                }
+                min_commit_numeric_values(&values)
             }
             AggregateType::Max => {
                 let Some(field_name) = self.commit_aggregate_target_field(agg) else {
                     return JsonValue::Null;
                 };
                 let values = self.collect_commit_numeric_values(commit, group_docs, field_name);
-                let max = values
-                    .iter()
-                    .map(|value| value.as_f64())
-                    .fold(None, |current: Option<f64>, value| {
-                        Some(current.map_or(value, |max| max.max(value)))
-                    });
-                match max {
-                    Some(value) if values.iter().any(|numeric| numeric.is_float()) => {
-                        serde_json::Number::from_f64(value)
-                            .map(JsonValue::Number)
-                            .unwrap_or(JsonValue::Null)
-                    }
-                    Some(value) => JsonValue::Number((value as i64).into()),
-                    None => JsonValue::Null,
-                }
+                max_commit_numeric_values(&values)
             }
         }
     }

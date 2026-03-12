@@ -8,18 +8,22 @@ use storage::keys::HeadstorePriorityKey;
 
 use crate::{Error, Result, DB};
 
+const COMMIT_PRIORITY_INDEX_MARKER_KEY: &[u8] = b"/meta/commit-priority-index-complete";
+
 impl<S: Store> DB<S> {
     pub(crate) async fn maybe_backfill_commit_priority_index(&self) -> Result<()> {
         let read_txn = self.new_txn(true).await?;
         let already_indexed = {
             let headstore = read_txn.headstore()?;
-            let mut iter = headstore
-                .iterator(IterOptions::new().with_prefix(b"/p/".to_vec()))
+            headstore
+                .get(COMMIT_PRIORITY_INDEX_MARKER_KEY)
                 .await
                 .map_err(Error::Storage)?;
-            let has_entries = iter.next().await.map_err(Error::Storage)?.is_some();
-            iter.close().await.map_err(Error::Storage)?;
-            has_entries
+            headstore
+                .get(COMMIT_PRIORITY_INDEX_MARKER_KEY)
+                .await
+                .map_err(Error::Storage)?
+                .is_some()
         };
         let _ = read_txn.discard();
 
@@ -99,9 +103,12 @@ impl<S: Store> DB<S> {
             indexed_count
         };
 
-        if indexed_count == 0 {
-            let _ = write_txn.discard();
-            return Ok(());
+        {
+            let headstore = write_txn.headstore()?;
+            headstore
+                .set(COMMIT_PRIORITY_INDEX_MARKER_KEY, b"1")
+                .await
+                .map_err(Error::Storage)?;
         }
 
         write_txn.commit().await?;
@@ -136,6 +143,15 @@ mod tests {
         }
         iter.close().await.unwrap();
         count
+    }
+
+    async fn has_priority_index_marker<S: Store>(txn: &DbTxn<S>) -> bool {
+        txn.headstore()
+            .unwrap()
+            .get(COMMIT_PRIORITY_INDEX_MARKER_KEY)
+            .await
+            .unwrap()
+            .is_some()
     }
 
     #[tokio::test]
@@ -213,12 +229,14 @@ mod tests {
 
         let verify_txn = seed_db.new_txn(true).await.unwrap();
         assert_eq!(count_priority_entries(&verify_txn).await, 0);
+        assert!(!has_priority_index_marker(&verify_txn).await);
         let _ = verify_txn.discard();
 
         let reopened = DB::open_from_arc(store.clone()).await.unwrap();
 
         let read_txn = reopened.new_txn(true).await.unwrap();
         assert_eq!(count_priority_entries(&read_txn).await, 7);
+        assert!(has_priority_index_marker(&read_txn).await);
 
         let fetcher = CommitsFetcher::new(Arc::new(async_lock::Mutex::new(Some(read_txn))));
         let composite_commits = fetcher
@@ -266,6 +284,74 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("age")
         );
+    }
+
+    #[tokio::test]
+    async fn test_backfill_commit_priority_index_repairs_partial_index_without_marker() {
+        let store = Arc::new(MemoryStore::new());
+        let seed_db = DB::from_arc(store.clone()).unwrap();
+
+        let partial_count = {
+            let write_txn = seed_db.new_txn(false).await.unwrap();
+            {
+                let blockstore = write_txn.blockstore().unwrap();
+                let headstore = write_txn.headstore().unwrap();
+
+                let mut doc = Document::new();
+                doc.generate_and_set_doc_id().unwrap();
+                doc.set("name", NormalValue::String("Alice".to_string()));
+                doc.set("age", NormalValue::Int(30));
+
+                write_document_blocks(&blockstore, &headstore, &doc, "schema-v1", None, None, None)
+                    .await
+                    .unwrap();
+
+                doc.set("age", NormalValue::Int(31));
+                let age_only = std::iter::once("age".to_string()).collect();
+                write_document_blocks(
+                    &blockstore,
+                    &headstore,
+                    &doc,
+                    "schema-v1",
+                    Some(&age_only),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+
+                let mut iter = headstore
+                    .iterator(IterOptions::new().with_prefix(b"/p/".to_vec()))
+                    .await
+                    .unwrap();
+                let mut seen_first = false;
+                while let Some(pair) = iter.next().await.unwrap() {
+                    if !seen_first {
+                        headstore.delete(&pair.key).await.unwrap();
+                        seen_first = true;
+                    }
+                }
+                iter.close().await.unwrap();
+            }
+            write_txn.commit().await.unwrap();
+
+            let verify_txn = seed_db.new_txn(true).await.unwrap();
+            let count = count_priority_entries(&verify_txn).await;
+            assert!(
+                count > 0,
+                "test should leave a partially populated /p/ index"
+            );
+            assert!(!has_priority_index_marker(&verify_txn).await);
+            let _ = verify_txn.discard();
+            count
+        };
+
+        let reopened = DB::open_from_arc(store.clone()).await.unwrap();
+        let read_txn = reopened.new_txn(true).await.unwrap();
+        let rebuilt_count = count_priority_entries(&read_txn).await;
+        assert!(rebuilt_count > partial_count);
+        assert!(has_priority_index_marker(&read_txn).await);
+        let _ = read_txn.discard();
     }
 
     #[test]
