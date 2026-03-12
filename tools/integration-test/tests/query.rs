@@ -4,6 +4,8 @@ mod commits_aggregate;
 mod commits_height_filter;
 #[path = "query/continuous_rollup.rs"]
 mod continuous_rollup;
+#[path = "query/downsample.rs"]
+mod downsample;
 #[path = "query/explain_nested.rs"]
 mod explain_nested;
 #[path = "query/index_management.rs"]

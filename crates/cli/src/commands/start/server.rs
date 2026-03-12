@@ -21,8 +21,8 @@ impl Node {
     /// This function creates the database, loads collections, sets up the query
     /// runner with proper transaction support, and returns the HTTP server.
     ///
-    /// Returns a tuple of (P2PHostHandle, P2PTasks, HTTP Server) where the tasks
-    /// are tracked for graceful shutdown.
+    /// Returns a tuple of (P2PHostHandle, P2PTasks, scheduled view task, HTTP Server)
+    /// where the background tasks are tracked for graceful shutdown.
     pub(super) async fn init_store_and_server<S>(
         store: Arc<S>,
         config: &Config,
@@ -34,6 +34,7 @@ impl Node {
     ) -> Result<(
         Option<p2p::P2PHostHandle>,
         Option<P2PTasks>,
+        Option<tokio::task::JoinHandle<()>>,
         defra_http::Server,
         Option<pg_compat::PgServer>,
     )>
@@ -100,6 +101,9 @@ impl Node {
             .map_err(|e| Error::Storage(storage::Error::Other(e.to_string())))?
             .len();
         info!("Loaded {} collection schema(s)", collection_count);
+
+        let scheduled_view_task = Some(database.clone().start_scheduled_view_refresh_task());
+        info!("Scheduled downsample refresher enabled");
 
         // Set up P2P if enabled
         // Clone store before potential move for sync coordinator blockstore
@@ -1315,6 +1319,6 @@ impl Node {
             (server, p2p_tasks, pg_server)
         };
 
-        Ok((p2p, p2p_tasks, http_server, pg_server))
+        Ok((p2p, p2p_tasks, scheduled_view_task, http_server, pg_server))
     }
 }

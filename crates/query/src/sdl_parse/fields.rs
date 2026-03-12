@@ -335,6 +335,23 @@ impl<'a> SdlParser<'a> {
                         .get_bool_with_warning(directive, "if", &type_name, None)
                         .unwrap_or(true);
                 }
+                "downsample" => {
+                    let interval = self
+                        .get_int_with_warning(directive, "interval", &type_name, None)
+                        .ok_or_else(|| {
+                            QueryError::parse(
+                                "@downsample directive requires a positive integer 'interval' argument",
+                            )
+                        })?;
+                    if interval <= 0 {
+                        return Err(QueryError::parse(format!(
+                            "@downsample interval must be positive, got {}",
+                            interval
+                        )));
+                    }
+                    result.is_materialized = true;
+                    result.downsample_interval = Some(interval as u64);
+                }
                 "branchable" => {
                     result.is_branchable = self
                         .get_bool_with_warning(directive, "if", &type_name, None)

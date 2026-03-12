@@ -28,6 +28,7 @@ type EmbeddedTxnRegistry<S> = db::DbTransactionRegistry<S>;
 /// Embedded DefraDB node assembled for native/mobile embedding.
 pub struct EmbeddedNode<S: storage::corekv::Store> {
     pub database: Arc<db::DB<S>>,
+    background_tasks: Arc<BackgroundTasks>,
     pub txn_registry: Arc<EmbeddedTxnRegistry<S>>,
     pub query_runner: Arc<dyn query::QueryExecutor>,
     pub nac_manager: Arc<dyn db::NacManagerApi>,
@@ -45,6 +46,10 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
 
     pub fn p2p(&self) -> Option<&Arc<ManagedP2PSystem>> {
         self.p2p.as_ref()
+    }
+
+    pub fn background_tasks(&self) -> Arc<BackgroundTasks> {
+        self.background_tasks.clone()
     }
 
     pub async fn execute(&self, query_str: &str) -> query::QueryResponse {
@@ -67,6 +72,26 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
         }
 
         Ok(())
+    }
+}
+
+pub struct BackgroundTasks {
+    scheduled_view_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl BackgroundTasks {
+    fn new(scheduled_view_task: Option<tokio::task::JoinHandle<()>>) -> Self {
+        Self {
+            scheduled_view_task,
+        }
+    }
+}
+
+impl Drop for BackgroundTasks {
+    fn drop(&mut self) {
+        if let Some(task) = self.scheduled_view_task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -238,6 +263,9 @@ where
         .map_err(|error| anyhow!("failed to open database: {error}"))?;
     database.set_event_bus(event_bus.clone());
     let database = Arc::new(database);
+    let background_tasks = Arc::new(BackgroundTasks::new(Some(
+        database.clone().start_scheduled_view_refresh_task(),
+    )));
 
     let mut p2p_setup = match &config.transport {
         TransportConfig::None => None,
@@ -288,6 +316,7 @@ where
 
     Ok(EmbeddedNode {
         database,
+        background_tasks,
         txn_registry,
         query_runner,
         nac_manager,

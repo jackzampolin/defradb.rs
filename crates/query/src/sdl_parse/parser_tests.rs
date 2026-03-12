@@ -405,6 +405,42 @@ fn test_materialized_directive() {
 }
 
 #[test]
+fn test_downsample_directive() {
+    let sdl = r#"
+        type CpuRollup @downsample(interval: 60) {
+            avg: Float
+        }
+    "#;
+
+    let collections = parse_sdl(sdl).unwrap();
+    let view = &collections[0];
+
+    assert!(
+        view.is_materialized,
+        "@downsample should materialize the view"
+    );
+    assert_eq!(view.downsample_interval, Some(60));
+}
+
+#[test]
+fn test_downsample_requires_positive_interval() {
+    let sdl = r#"
+        type CpuRollup @downsample(interval: 0) {
+            avg: Float
+        }
+    "#;
+
+    let result = parse_sdl(sdl);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("@downsample interval must be positive"),
+        "expected positive interval validation error, got: {}",
+        err
+    );
+}
+
+#[test]
 fn test_branchable_directive() {
     let sdl = r#"
         type VersionedDoc @branchable {
@@ -1185,6 +1221,31 @@ fn test_unknown_argument_on_type_directive_emits_warning() {
             assert_eq!(directive_name, "materialized");
             assert_eq!(argument_name, "unknownArg");
             assert!(field_name.is_none()); // type-level, not field-level
+        }
+        other => panic!("expected UnknownDirectiveArgument warning, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_unknown_argument_on_downsample_directive_emits_warning() {
+    let sdl = r#"
+        type CpuRollup @downsample(interval: 60, extraArg: "value") {
+            avg: Float
+        }
+    "#;
+
+    let output = parse_sdl_with_warnings(sdl).unwrap();
+    assert_eq!(output.collections.len(), 1);
+    assert_eq!(output.warnings.len(), 1);
+
+    match &output.warnings[0] {
+        ParseWarning::UnknownDirectiveArgument {
+            directive_name,
+            argument_name,
+            ..
+        } => {
+            assert_eq!(directive_name, "downsample");
+            assert_eq!(argument_name, "extraArg");
         }
         other => panic!("expected UnknownDirectiveArgument warning, got {:?}", other),
     }

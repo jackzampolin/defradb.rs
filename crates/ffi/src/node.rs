@@ -44,16 +44,20 @@ pub(crate) async fn build_node_state(
         .map_err(|error| error.to_string())?;
 
     Ok(NodeState {
-        database: node.database,
-        txn_registry: node.txn_registry,
-        query_runner: node.query_runner,
-        nac_manager: node.nac_manager,
-        document_acp: node.document_acp,
-        event_bus: node.event_bus,
+        database: node.database.clone(),
+        background_tasks: node.background_tasks(),
+        txn_registry: node.txn_registry.clone(),
+        query_runner: node.query_runner.clone(),
+        nac_manager: node.nac_manager.clone(),
+        document_acp: node.document_acp.clone(),
+        event_bus: node.event_bus.clone(),
         policy_store: Arc::new(PolicyStore::new()),
-        p2p: node.p2p.map(|system| Arc::new(P2PState::new(system))),
-        node_identity_did: node.node_identity_did,
-        sourcehub_acp: node.sourcehub_acp,
+        p2p: node
+            .p2p
+            .clone()
+            .map(|system| Arc::new(P2PState::new(system))),
+        node_identity_did: node.node_identity_did.clone(),
+        sourcehub_acp: node.sourcehub_acp.clone(),
         se_encryption_key: None,
     })
 }

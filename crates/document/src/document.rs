@@ -550,6 +550,7 @@ mod tests {
             policy: None,
             is_active: true,
             is_materialized: false,
+            downsample_interval: None,
             is_branchable: false,
             is_embedded_only: false,
             is_placeholder: false,

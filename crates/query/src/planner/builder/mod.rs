@@ -192,8 +192,11 @@ impl Planner {
             .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?
             .clone();
 
-        // If this collection is a non-materialized view, build a view plan instead
+        // Route views through either the cached or live view planner based on materialization.
         if let Some(ref query_source) = collection.query {
+            if collection.is_materialized {
+                return self.build_cached_view_plan(select, &collection);
+            }
             return self.build_view_plan(select, &collection, query_source);
         }
 

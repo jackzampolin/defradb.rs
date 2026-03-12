@@ -58,6 +58,9 @@ pub enum SchemaError {
 
     #[error("index with name already exists. Name: {0}")]
     DuplicateIndexName(String),
+
+    #[error("invalid downsample configuration: {0}")]
+    InvalidDownsample(String),
 }
 
 impl From<serde_json::Error> for SchemaError {

@@ -48,6 +48,7 @@ pub(super) struct ParsedTypeDirectives {
     pub(super) indexes: Vec<CompositeIndex>,
     /// Default true for collections (Go compatibility)
     pub(super) is_materialized: bool,
+    pub(super) downsample_interval: Option<u64>,
     pub(super) is_branchable: bool,
     pub(super) policy: Option<PolicyConfig>,
 }
@@ -58,6 +59,7 @@ impl Default for ParsedTypeDirectives {
             indexes: Vec::new(),
             // Go defaults IsMaterialized to true for regular collections
             is_materialized: true,
+            downsample_interval: None,
             is_branchable: false,
             policy: None,
         }

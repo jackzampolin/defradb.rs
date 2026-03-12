@@ -11,6 +11,7 @@
 
 mod aggregates;
 mod builder;
+mod cached_view_builder;
 pub mod index_selection;
 mod joins;
 mod mapping;

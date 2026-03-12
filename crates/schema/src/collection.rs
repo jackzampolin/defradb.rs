@@ -109,6 +109,14 @@ pub struct CollectionVersion {
     #[serde(rename = "IsMaterialized", default)]
     pub is_materialized: bool,
 
+    /// Optional automatic refresh interval for downsampled materialized views, in seconds.
+    #[serde(
+        rename = "DownsampleInterval",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub downsample_interval: Option<u64>,
+
     /// Whether the collection history is tracked as a single verifiable entity
     #[serde(rename = "IsBranchable", default)]
     pub is_branchable: bool,
@@ -163,6 +171,7 @@ impl CollectionVersion {
             policy: None,
             is_active: true,
             is_materialized: false,
+            downsample_interval: None,
             is_branchable: false,
             is_embedded_only: false,
             is_placeholder: false,
@@ -272,6 +281,7 @@ impl CollectionVersion {
         self.validate_no_duplicate_index_names()?;
         self.validate_fields()?;
         self.validate_policy()?;
+        self.validate_downsample()?;
         Ok(())
     }
 
@@ -288,6 +298,30 @@ impl CollectionVersion {
     fn validate_policy(&self) -> Result<()> {
         if let Some(ref policy) = self.policy {
             policy.validate()?;
+        }
+        Ok(())
+    }
+
+    fn validate_downsample(&self) -> Result<()> {
+        if let Some(interval) = self.downsample_interval {
+            if interval == 0 {
+                return Err(SchemaError::InvalidDownsample(format!(
+                    "interval must be positive. Collection: {}",
+                    self.name
+                )));
+            }
+            if self.query.is_none() {
+                return Err(SchemaError::InvalidDownsample(format!(
+                    "downsampled collections must define a query source. Collection: {}",
+                    self.name
+                )));
+            }
+            if !self.is_materialized {
+                return Err(SchemaError::InvalidDownsample(format!(
+                    "downsampled collections must be materialized. Collection: {}",
+                    self.name
+                )));
+            }
         }
         Ok(())
     }

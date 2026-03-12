@@ -6,8 +6,13 @@
 use crate::error::{Error, Result};
 use datastore::NamespaceView;
 use schema::CollectionVersion;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::datastore::ViewCacheKey;
+use tokio::task::JoinHandle;
+use tokio::time::{self, Instant, MissedTickBehavior};
 
 /// Options for refreshing materialized views.
 #[derive(Debug, Clone, Default)]
@@ -26,6 +31,19 @@ impl RefreshViewsOptions {
     pub fn with_names(names: Vec<String>) -> Self {
         Self { names: Some(names) }
     }
+}
+
+/// Scheduled refresh metadata for a downsampled materialized view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledViewRefresh {
+    pub name: String,
+    pub interval: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct ScheduledViewState {
+    interval: Duration,
+    next_refresh: Instant,
 }
 
 /// Delete all keys matching a prefix from a namespace view.
@@ -74,6 +92,99 @@ impl<S: Store> crate::database::DB<S> {
         }
 
         Ok(())
+    }
+
+    /// Return all active downsampled materialized views with their refresh interval.
+    pub fn scheduled_view_refreshes(&self) -> Result<Vec<ScheduledViewRefresh>> {
+        let mut scheduled_views: Vec<_> = self
+            .get_all_active_collections_internal()?
+            .into_iter()
+            .filter_map(|col| {
+                col.downsample_interval.and_then(|interval| {
+                    if col.query.is_some() && col.is_materialized && !col.is_embedded_only {
+                        Some(ScheduledViewRefresh {
+                            name: col.name,
+                            interval: Duration::from_secs(interval),
+                        })
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+        scheduled_views.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(scheduled_views)
+    }
+
+    /// Spawn a background task that periodically refreshes downsampled materialized views.
+    pub fn start_scheduled_view_refresh_task(self: Arc<Self>) -> JoinHandle<()>
+    where
+        S: 'static,
+    {
+        tokio::spawn(async move {
+            let mut ticker = time::interval(Duration::from_millis(250));
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            let mut schedules: HashMap<String, ScheduledViewState> = HashMap::new();
+
+            loop {
+                ticker.tick().await;
+
+                let scheduled_views = match self.scheduled_view_refreshes() {
+                    Ok(views) => views,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "Failed to load scheduled downsample views"
+                        );
+                        continue;
+                    }
+                };
+
+                let now = Instant::now();
+                let active_names: HashSet<String> = scheduled_views
+                    .iter()
+                    .map(|view| view.name.clone())
+                    .collect();
+                let mut due_names = Vec::new();
+
+                for view in scheduled_views {
+                    match schedules.entry(view.name.clone()) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(ScheduledViewState {
+                                interval: view.interval,
+                                next_refresh: now + view.interval,
+                            });
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            let state = entry.get_mut();
+                            if state.interval != view.interval {
+                                state.interval = view.interval;
+                                state.next_refresh = now + view.interval;
+                            }
+                            if state.next_refresh <= now {
+                                due_names.push(view.name.clone());
+                                state.next_refresh = now + state.interval;
+                            }
+                        }
+                    }
+                }
+
+                schedules.retain(|name, _| active_names.contains(name));
+
+                for name in due_names {
+                    if let Err(error) = self
+                        .refresh_views(Some(RefreshViewsOptions::with_names(vec![name.clone()])))
+                        .await
+                    {
+                        tracing::warn!(
+                            view = %name,
+                            error = %error,
+                            "Failed to refresh scheduled downsample view"
+                        );
+                    }
+                }
+            }
+        })
     }
 
     /// Clear the view cache for a collection.

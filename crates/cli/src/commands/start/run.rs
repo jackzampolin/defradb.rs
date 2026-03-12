@@ -140,6 +140,12 @@ impl Node {
             }
         }
 
+        if let Some(task) = self.scheduled_view_task.take() {
+            info!("Stopping scheduled downsample refresher...");
+            task.abort();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
+        }
+
         // Shutdown P2P tasks first, then the handle
         if let Some(tasks) = self.p2p_tasks.take() {
             info!("Stopping P2P background tasks...");
