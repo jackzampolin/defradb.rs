@@ -57,6 +57,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     ))
                 })?;
 
+            self.db
+                .validate_downsample_write(&datastore, collection.schema(), &doc)
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
             // Use create_with_indexes to enforce unique constraints and maintain indexes.
             // Blind create skips existence check for content-addressed (generated) IDs.
             collection

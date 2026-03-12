@@ -140,6 +140,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     ))
                 })?;
 
+                self.db
+                    .validate_downsample_write(&datastore, collection.schema(), &doc)
+                    .await
+                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
                 collection
                     .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
                     .await

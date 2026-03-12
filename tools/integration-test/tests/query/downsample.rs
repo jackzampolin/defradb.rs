@@ -36,6 +36,7 @@ type Metric4Rollup @downsample(interval: "800ms", timeField: "window_start") {
 const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const BUCKET_MS: i64 = 400;
+const PARENT_BUCKET_MS: i64 = 800;
 
 fn format_timestamp(timestamp: DateTime<Utc>) -> String {
     if timestamp.timestamp_subsec_nanos() == 0 {
@@ -47,7 +48,7 @@ fn format_timestamp(timestamp: DateTime<Utc>) -> String {
 
 fn align_base_timestamp() -> DateTime<Utc> {
     let now_ms = Utc::now().timestamp_millis();
-    let base_ms = ((now_ms / BUCKET_MS) + 8) * BUCKET_MS;
+    let base_ms = ((now_ms / PARENT_BUCKET_MS) + 8) * PARENT_BUCKET_MS;
     Utc.timestamp_millis_opt(base_ms)
         .single()
         .expect("aligned base timestamp")
@@ -113,6 +114,25 @@ fn query_rollup(
         .expect("query rollup collection");
 
     extract_rows(&data, collection).first().cloned()
+}
+
+fn query_metric(client: &integration_test::DefraClient, doc_id: &str) -> Value {
+    let data = client
+        .query(&format!(
+            r#"query {{
+                Metric(docID: "{doc_id}") {{
+                    _docID
+                    label
+                    ts
+                    value
+                }}
+            }}"#
+        ))
+        .expect("query Metric collection");
+
+    let rows = extract_rows(&data, "Metric");
+    assert_eq!(rows.len(), 1, "expected a single Metric row");
+    rows[0].clone()
 }
 
 fn assert_rollup_row(
@@ -244,11 +264,11 @@ async fn downsample_test(cluster: TestCluster) {
 
     let base = align_base_timestamp();
     let t1 = base;
-    let t2 = base + ChronoDuration::milliseconds(200);
-    let t3 = base + ChronoDuration::milliseconds(400);
-    let t4 = base + ChronoDuration::milliseconds(600);
-    let first_window_end = base + ChronoDuration::milliseconds(400);
-    let second_window_end = base + ChronoDuration::milliseconds(800);
+    let t2 = base + ChronoDuration::milliseconds(BUCKET_MS / 2);
+    let t3 = base + ChronoDuration::milliseconds(BUCKET_MS);
+    let t4 = base + ChronoDuration::milliseconds(BUCKET_MS + (BUCKET_MS / 2));
+    let first_window_end = base + ChronoDuration::milliseconds(BUCKET_MS);
+    let second_window_end = base + ChronoDuration::milliseconds(PARENT_BUCKET_MS);
 
     let create = client
         .query(&format!(
@@ -404,6 +424,46 @@ async fn downsample_test(cluster: TestCluster) {
     let rollup4_height_history = aggregate_commit_field(&client, rollup4_doc_id, "source_height");
     assert_eq!(rollup4_height_history["count"].as_i64(), Some(1));
     assert_eq!(rollup4_height_history["maxValue"].as_i64(), Some(2));
+
+    let late_update = client.query(&format!(
+        r#"mutation {{
+            update_Metric(
+                docID: "{source_doc_id}"
+                input: {{ts: "{}", value: 5}}
+            ) {{ _docID }}
+        }}"#,
+        format_timestamp(t2)
+    ));
+    let late_error = late_update.expect_err("late data update should be rejected");
+    let late_error_message = late_error.to_string();
+    assert!(
+        late_error_message.contains("late data is not accepted"),
+        "unexpected late-data error: {late_error_message}"
+    );
+
+    let source_row = query_metric(&client, &source_doc_id);
+    assert_eq!(source_row["_docID"].as_str(), Some(source_doc_id.as_str()));
+    assert_eq!(source_row["label"].as_str(), Some("cpu"));
+    assert_eq!(
+        source_row["ts"].as_str(),
+        Some(format_timestamp(t4).as_str())
+    );
+    assert_eq!(source_row["value"].as_i64(), Some(40));
+
+    let unchanged_rollup = query_rollup(&client, "Metric2Rollup", &source_doc_id)
+        .expect("Metric2Rollup row should remain after late-data rejection");
+    assert_rollup_row(
+        &unchanged_rollup,
+        &source_doc_id,
+        4,
+        &format_timestamp(t3),
+        &format_timestamp(second_window_end),
+        2,
+        70,
+        35.0,
+        30,
+        40,
+    );
 }
 
 #[tokio::test]

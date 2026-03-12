@@ -51,6 +51,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     ))
                 })?;
 
+            self.db
+                .validate_downsample_write(&datastore, collection.schema(), &doc)
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
             // Use update_with_indexes to maintain index consistency
             collection
                 .update_with_indexes(&datastore, &doc, &index_manager)

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use storage::corekv::Store;
 
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
+use crate::database::DB;
 use crate::txn::DbTxn;
 
 /// Document mutator that uses a database transaction.
@@ -38,6 +39,7 @@ use crate::txn::DbTxn;
 /// not true snapshot isolation - if collections are accessed at different times,
 /// they reflect the store state at the time of first access.
 pub struct DbDocMutator<S: Store> {
+    db: Arc<DB<S>>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
 }
 
@@ -45,8 +47,9 @@ impl<S: Store> DbDocMutator<S> {
     /// Create a new transaction-scoped document mutator.
     ///
     /// Collections will be loaded lazily from the transaction's cache.
-    pub fn new(txn: DbTxn<S>) -> Self {
+    pub fn new(db: Arc<DB<S>>, txn: DbTxn<S>) -> Self {
         Self {
+            db,
             txn: Arc::new(TokioMutex::new(Some(txn))),
         }
     }
@@ -55,8 +58,8 @@ impl<S: Store> DbDocMutator<S> {
     ///
     /// This is used by `DbTransactionContext` to create a mutator that shares
     /// the same transaction as the `DbDocFetcher`.
-    pub(crate) fn from_shared_txn(txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
-        Self { txn }
+    pub(crate) fn from_shared_txn(db: Arc<DB<S>>, txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
+        Self { db, txn }
     }
 
     /// Take the transaction out of the mutator (for commit/rollback).
@@ -100,6 +103,11 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             query::error::QueryError::execution("document should have ID after generation")
         })?;
 
+        self.db
+            .validate_downsample_write(&datastore, collection.schema(), &doc)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
         // Use create_with_indexes to enforce unique constraints and maintain indexes.
         // Blind create skips existence check for content-addressed (generated) IDs.
         collection
@@ -128,6 +136,11 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     ) -> query::error::Result<UpdateResult> {
         let (collection, datastore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+
+        self.db
+            .validate_downsample_write(&datastore, collection.schema(), &doc)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
         // Use update_with_indexes to maintain index consistency
         collection
