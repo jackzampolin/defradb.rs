@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 const RAW_SCHEMA: &str = "type Metric { label: String  ts: DateTime  value: Int }";
 const ROLLUP2_SDL: &str = r#"
-type Metric2Rollup @downsample(interval: "400ms", timeField: "ts") {
+type Metric2Rollup @downsample(interval: "1000ms", timeField: "ts") {
   label: String
   source_doc_id: String
   source_height: Int
@@ -19,7 +19,7 @@ type Metric2Rollup @downsample(interval: "400ms", timeField: "ts") {
 }
 "#;
 const ROLLUP4_SDL: &str = r#"
-type Metric4Rollup @downsample(interval: "800ms", timeField: "window_start") {
+type Metric4Rollup @downsample(interval: "2000ms", timeField: "window_start") {
   label: String
   source_doc_id: String
   source_height: Int
@@ -35,8 +35,9 @@ type Metric4Rollup @downsample(interval: "800ms", timeField: "window_start") {
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-const BUCKET_MS: i64 = 400;
-const PARENT_BUCKET_MS: i64 = 800;
+const BUCKET_MS: i64 = 1_000;
+const PARENT_BUCKET_MS: i64 = 2_000;
+const BASE_OFFSET_BUCKETS: i64 = 3;
 
 fn format_timestamp(timestamp: DateTime<Utc>) -> String {
     if timestamp.timestamp_subsec_nanos() == 0 {
@@ -48,7 +49,7 @@ fn format_timestamp(timestamp: DateTime<Utc>) -> String {
 
 fn align_base_timestamp() -> DateTime<Utc> {
     let now_ms = Utc::now().timestamp_millis();
-    let base_ms = ((now_ms / PARENT_BUCKET_MS) + 8) * PARENT_BUCKET_MS;
+    let base_ms = ((now_ms / PARENT_BUCKET_MS) + BASE_OFFSET_BUCKETS) * PARENT_BUCKET_MS;
     Utc.timestamp_millis_opt(base_ms)
         .single()
         .expect("aligned base timestamp")
@@ -240,7 +241,7 @@ async fn downsample_test(cluster: TestCluster) {
         .expect("create Metric2Rollup downsample");
     assert_eq!(
         created_rollup2[0]["DownsampleInterval"].as_str(),
-        Some("400ms")
+        Some("1000ms")
     );
     assert_eq!(
         created_rollup2[0]["DownsampleTimeField"].as_str(),
@@ -255,7 +256,7 @@ async fn downsample_test(cluster: TestCluster) {
         .expect("create Metric4Rollup downsample");
     assert_eq!(
         created_rollup4[0]["DownsampleInterval"].as_str(),
-        Some("800ms")
+        Some("2000ms")
     );
     assert_eq!(
         created_rollup4[0]["DownsampleTimeField"].as_str(),
