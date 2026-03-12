@@ -122,6 +122,7 @@ pub use database::{DbOptions, DB};
 pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
 pub use doc_fetcher::DbDocFetcher;
 pub use doc_mutator::DbDocMutator;
+pub use downsample::GcDownsampleHistoriesOptions;
 pub use error::{Error, Result};
 #[cfg(feature = "p2p")]
 pub use head_provider::DbHeadProvider;

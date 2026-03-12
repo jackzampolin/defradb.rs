@@ -132,4 +132,12 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
             .await
             .map_err(|e| format!("failed to refresh views: {}", e))
     }
+
+    async fn gc_downsample_histories(&self, names: Option<Vec<String>>) -> Result<(), String> {
+        let options = names.map(db::downsample::GcDownsampleHistoriesOptions::with_names);
+        self.database
+            .gc_downsample_histories(options)
+            .await
+            .map_err(|e| format!("failed to GC downsample histories: {}", e))
+    }
 }

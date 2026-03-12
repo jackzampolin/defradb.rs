@@ -248,6 +248,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // =====================================================================
         "/api/v0/views" => RoutePermission::Required(NodePermission::ViewAdd),
         "/api/v0/views/refresh" => RoutePermission::Required(NodePermission::ViewRefresh),
+        "/api/v0/views/gc" => RoutePermission::Required(NodePermission::ViewGc),
 
         // =====================================================================
         // Encrypted indexes (global list)
@@ -693,6 +694,11 @@ mod tests {
                 "/api/v0/views/refresh",
                 Method::POST,
                 RoutePermission::Required(NodePermission::ViewRefresh),
+            ),
+            (
+                "/api/v0/views/gc",
+                Method::POST,
+                RoutePermission::Required(NodePermission::ViewGc),
             ),
             // Utility
             (

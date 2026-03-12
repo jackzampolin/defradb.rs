@@ -8,6 +8,22 @@ use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, ffi_entry, try_ffi};
 use query::select_to_go_json;
 
+fn parse_view_names(value: &serde_json::Value) -> Option<Vec<String>> {
+    value.get("Names").and_then(|n| n.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect::<Vec<_>>()
+    })
+}
+
+fn parse_view_names_options(options: Option<String>) -> Option<Vec<String>> {
+    options.and_then(|opts_str| {
+        serde_json::from_str::<serde_json::Value>(&opts_str)
+            .ok()
+            .and_then(|json| parse_view_names(&json))
+    })
+}
+
 /// Add a view to the database.
 ///
 /// Creates a new Defra View from a GQL query and SDL schema.
@@ -178,29 +194,53 @@ pub unsafe extern "C" fn refresh_views(node_ptr: usize, options: *const c_char) 
         let rt = try_ffi!(get_rt());
         let database = try_ffi!(get_node_database(node_ptr));
 
-        // Parse options if provided
-        let refresh_options = if let Some(opts_str) = c_str_to_string(options) {
-            // Parse JSON options
-            match serde_json::from_str::<serde_json::Value>(&opts_str) {
-                Ok(json) => {
-                    let names = json.get("Names").and_then(|n| n.as_array()).map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                            .collect::<Vec<_>>()
-                    });
-                    names.map(db::RefreshViewsOptions::with_names)
-                }
-                Err(_) => None,
-            }
-        } else {
-            None
-        };
+        let refresh_options =
+            parse_view_names_options(c_str_to_string(options)).map(db::RefreshViewsOptions::with_names);
 
         ffi_async!(rt, {
             database
                 .refresh_views(refresh_options)
                 .await
                 .map_err(|e| format!("failed to refresh views: {}", e))?;
+
+            Ok("{}".to_string())
+        })
+    }
+}
+
+/// Run explicit downsample history GC.
+///
+/// Applies retention policies to all downsample views matching the given options.
+///
+/// # Arguments
+///
+/// * `node_ptr` - Handle to the node
+/// * `options` - JSON string with optional "Names" field (null for all downsample views)
+///
+/// # Returns
+///
+/// - Status 0: Success (value is "{}")
+/// - Status 1: Error (error field contains message)
+///
+/// # Safety
+///
+/// `options` must be null or a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn gc_downsample_histories(
+    node_ptr: usize,
+    options: *const c_char,
+) -> FfiResult {
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        let database = try_ffi!(get_node_database(node_ptr));
+        let gc_options = parse_view_names_options(c_str_to_string(options))
+            .map(db::downsample::GcDownsampleHistoriesOptions::with_names);
+
+        ffi_async!(rt, {
+            database
+                .gc_downsample_histories(gc_options)
+                .await
+                .map_err(|e| format!("failed to GC downsample histories: {}", e))?;
 
             Ok("{}".to_string())
         })
@@ -274,6 +314,26 @@ mod tests {
         assert_eq!(result.status, 1, "should fail with null query");
 
         unsafe { crate::types::defra_free_string(result.error) };
+        node_close(node);
+    }
+
+    #[test]
+    fn test_gc_downsample_histories_empty_ok() {
+        assert!(crate::runtime::init_runtime());
+
+        let options = NodeInitOptions::default();
+        let result = new_node(options);
+        assert_eq!(result.status, 0);
+        let node = result.node_ptr;
+
+        let result = unsafe { gc_downsample_histories(node, std::ptr::null()) };
+        assert_eq!(result.status, 0, "gc_downsample_histories should succeed");
+        assert!(!result.value.is_null());
+
+        let value = unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+        assert_eq!(value.as_ref(), "{}");
+
+        unsafe { crate::types::defra_free_string(result.value) };
         node_close(node);
     }
 }

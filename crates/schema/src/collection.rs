@@ -125,6 +125,14 @@ pub struct CollectionVersion {
     )]
     pub downsample_time_field: Option<String>,
 
+    /// Optional retention duration for the source history consumed by this downsample.
+    #[serde(
+        rename = "DownsampleRetention",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub downsample_retention: Option<String>,
+
     /// Query source metadata used to drive downsample collection updates.
     #[serde(
         rename = "DownsampleSource",
@@ -189,6 +197,7 @@ impl CollectionVersion {
             is_materialized: false,
             downsample_interval: None,
             downsample_time_field: None,
+            downsample_retention: None,
             downsample_source: None,
             is_branchable: false,
             is_embedded_only: false,
@@ -321,7 +330,10 @@ impl CollectionVersion {
     }
 
     fn validate_downsample(&self) -> Result<()> {
-        if self.downsample_interval.is_some() || self.downsample_time_field.is_some() {
+        if self.downsample_interval.is_some()
+            || self.downsample_time_field.is_some()
+            || self.downsample_retention.is_some()
+        {
             let Some(interval) = self.downsample_interval.as_ref() else {
                 return Err(SchemaError::InvalidDownsample(format!(
                     "downsampled collections must define an interval. Collection: {}",
@@ -343,6 +355,16 @@ impl CollectionVersion {
             if time_field.trim().is_empty() {
                 return Err(SchemaError::InvalidDownsample(format!(
                     "time field must not be empty. Collection: {}",
+                    self.name
+                )));
+            }
+            if self
+                .downsample_retention
+                .as_ref()
+                .is_some_and(|retention| retention.trim().is_empty())
+            {
+                return Err(SchemaError::InvalidDownsample(format!(
+                    "retention must not be empty. Collection: {}",
                     self.name
                 )));
             }

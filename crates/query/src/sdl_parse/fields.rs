@@ -371,9 +371,18 @@ impl<'a> SdlParser<'a> {
                     if time_field.trim().is_empty() {
                         return Err(QueryError::parse("@downsample timeField must not be empty"));
                     }
+                    let retention =
+                        self.get_string_with_warning(directive, "retention", &type_name, None);
+                    if retention
+                        .as_ref()
+                        .is_some_and(|retention| retention.trim().is_empty())
+                    {
+                        return Err(QueryError::parse("@downsample retention must not be empty"));
+                    }
                     result.is_materialized = true;
                     result.downsample_interval = Some(interval);
                     result.downsample_time_field = Some(time_field);
+                    result.downsample_retention = retention;
                 }
                 "branchable" => {
                     result.is_branchable = self

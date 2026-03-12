@@ -18,6 +18,8 @@ pub enum ViewCommand {
     Add(ViewAddArgs),
     /// Refresh views
     Refresh(ViewRefreshArgs),
+    /// Run explicit downsample history GC for views
+    Gc(ViewGcArgs),
 }
 
 /// Arguments for view add command
@@ -52,11 +54,20 @@ pub struct ViewRefreshArgs {
     pub name: Option<String>,
 }
 
+/// Arguments for manual downsample GC command
+#[derive(Args, Debug)]
+pub struct ViewGcArgs {
+    /// Collection name to GC (GCs all downsample views if not specified)
+    #[arg(long)]
+    pub name: Option<String>,
+}
+
 impl ViewArgs {
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
         match &self.command {
             ViewCommand::Add(args) => args.execute(ctx).await,
             ViewCommand::Refresh(args) => args.execute(ctx).await,
+            ViewCommand::Gc(args) => args.execute(ctx).await,
         }
     }
 }
@@ -106,6 +117,19 @@ impl ViewRefreshArgs {
 
         let names = self.name.as_ref().map(|n| vec![n.clone()]);
         let result = client.view_refresh(names).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        Ok(())
+    }
+}
+
+impl ViewGcArgs {
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+
+        let names = self.name.as_ref().map(|n| vec![n.clone()]);
+        let result = client.view_gc(names).await?;
         println!("{}", serde_json::to_string_pretty(&result)?);
         Ok(())
     }

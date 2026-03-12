@@ -148,9 +148,9 @@ pub use batch::{batch_sign, batch_start};
 pub use block::block_verify_signature;
 pub use collection::{
     add_view, delete_collection, delete_collection_versions, delete_documents,
-    find_collection_by_id, get_collection_by_name, get_collection_by_version_id, has_collection,
-    patch_collection, refresh_views, set_active_collection_version, set_migration,
-    truncate_collection,
+    find_collection_by_id, gc_downsample_histories, get_collection_by_name,
+    get_collection_by_version_id, has_collection, patch_collection, refresh_views,
+    set_active_collection_version, set_migration, truncate_collection,
 };
 pub use document::{collection_create, is_json_array, parse_duration, parse_string_array};
 pub use encrypted_index::{

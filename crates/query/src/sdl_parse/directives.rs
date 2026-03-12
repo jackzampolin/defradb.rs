@@ -43,7 +43,7 @@ pub fn known_directive_arguments(directive_name: &str) -> &'static [&'static str
         ],
         "constraints" => &["size"],
         "materialized" => &["if"],
-        "downsample" => &["interval", "timeField"],
+        "downsample" => &["interval", "timeField", "retention"],
         "branchable" => &["if"],
         "policy" => &["id", "resource"],
         "embedding" => &["provider", "model", "url", "fields", "template"],

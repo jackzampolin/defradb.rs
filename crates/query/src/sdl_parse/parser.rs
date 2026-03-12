@@ -50,6 +50,7 @@ pub(super) struct ParsedTypeDirectives {
     pub(super) is_materialized: bool,
     pub(super) downsample_interval: Option<String>,
     pub(super) downsample_time_field: Option<String>,
+    pub(super) downsample_retention: Option<String>,
     pub(super) is_branchable: bool,
     pub(super) policy: Option<PolicyConfig>,
 }
@@ -62,6 +63,7 @@ impl Default for ParsedTypeDirectives {
             is_materialized: true,
             downsample_interval: None,
             downsample_time_field: None,
+            downsample_retention: None,
             is_branchable: false,
             policy: None,
         }

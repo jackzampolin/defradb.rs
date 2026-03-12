@@ -207,7 +207,8 @@ pub fn create_router_with_state(state: AppState) -> Router {
     // View routes
     let view_routes = Router::new()
         .route("/", post(handlers::views::add_view))
-        .route("/refresh", post(handlers::views::refresh_views));
+        .route("/refresh", post(handlers::views::refresh_views))
+        .route("/gc", post(handlers::views::gc_downsample_histories));
 
     // API v0 routes
     let api_routes = Router::new()

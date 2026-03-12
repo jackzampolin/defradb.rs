@@ -15,7 +15,7 @@ struct AddViewRequest {
 }
 
 #[derive(Serialize)]
-struct RefreshViewsRequest {
+struct ViewNamesRequest {
     #[serde(rename = "Names", skip_serializing_if = "Option::is_none")]
     names: Option<Vec<String>>,
 }
@@ -38,7 +38,13 @@ impl HttpClient {
 
     pub async fn view_refresh(&self, names: Option<Vec<String>>) -> Result<JsonValue> {
         let url = format!("{}/api/v0/views/refresh", self.base_url());
-        let body = RefreshViewsRequest { names };
+        let body = ViewNamesRequest { names };
+        self.post_json(&url, &body).await
+    }
+
+    pub async fn view_gc(&self, names: Option<Vec<String>>) -> Result<JsonValue> {
+        let url = format!("{}/api/v0/views/gc", self.base_url());
+        let body = ViewNamesRequest { names };
         self.post_json(&url, &body).await
     }
 }

@@ -407,7 +407,7 @@ fn test_materialized_directive() {
 #[test]
 fn test_downsample_directive() {
     let sdl = r#"
-        type CpuRollup @downsample(interval: "60s", timeField: "ts") {
+        type CpuRollup @downsample(interval: "60s", timeField: "ts", retention: "168h") {
             ts: DateTime
             avg: Float
         }
@@ -422,6 +422,7 @@ fn test_downsample_directive() {
     );
     assert_eq!(view.downsample_interval.as_deref(), Some("60s"));
     assert_eq!(view.downsample_time_field.as_deref(), Some("ts"));
+    assert_eq!(view.downsample_retention.as_deref(), Some("168h"));
 }
 
 #[test]
@@ -457,6 +458,25 @@ fn test_downsample_requires_time_field() {
     assert!(
         err.contains("@downsample directive requires a string 'timeField' argument"),
         "expected missing timeField validation error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_downsample_rejects_empty_retention() {
+    let sdl = r#"
+        type CpuRollup @downsample(interval: "60s", timeField: "ts", retention: "") {
+            ts: DateTime
+            avg: Float
+        }
+    "#;
+
+    let result = parse_sdl(sdl);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("@downsample retention must not be empty"),
+        "expected empty retention validation error, got: {}",
         err
     );
 }
