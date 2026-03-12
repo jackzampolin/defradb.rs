@@ -31,3 +31,10 @@ async-trait.workspace = true
 
 # Logging
 tracing.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "block"
+harness = false

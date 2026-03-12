@@ -125,6 +125,7 @@ tracing = "0.1"
 
 # Testing
 proptest = "1.4"
+criterion = { version = "0.5", features = ["async_tokio"] }
 
 # Synchronization (non-poisoning locks)
 parking_lot = "0.12"

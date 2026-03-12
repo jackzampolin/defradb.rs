@@ -151,6 +151,11 @@ impl GroupByNode {
         Ok(key)
     }
 
+    /// Public wrapper for external benchmarking of the group-key hot path.
+    pub fn generate_key_for_doc(&self, doc: &Doc) -> Result<String> {
+        self.generate_key(doc)
+    }
+
     /// Convert a JSON value to a string key component
     pub(super) fn value_to_key(value: Option<&JsonValue>) -> String {
         match value {

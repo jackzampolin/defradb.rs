@@ -1772,6 +1772,7 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "cid 0.10.1",
+ "criterion 0.5.1",
  "crypto",
  "defra-core",
  "lru 0.12.5",
@@ -3036,6 +3037,7 @@ name = "crdt"
 version = "0.5.0"
 dependencies = [
  "async-trait",
+ "criterion 0.5.1",
  "defra-core",
  "proptest",
  "serde",
@@ -3056,6 +3058,7 @@ dependencies = [
  "ciborium",
  "clap",
  "criterion-plot 0.5.0",
+ "futures",
  "is-terminal",
  "itertools 0.10.5",
  "num-traits",
@@ -3068,6 +3071,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
@@ -3612,6 +3616,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "cid 0.10.1",
+ "criterion 0.5.1",
  "libipld",
  "multihash 0.18.1",
  "serde",
@@ -9758,6 +9763,7 @@ dependencies = [
  "ciborium",
  "cid 0.10.1",
  "crdt",
+ "criterion 0.5.1",
  "datastore",
  "db",
  "defra-core",
