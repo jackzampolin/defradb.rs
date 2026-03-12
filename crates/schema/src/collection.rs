@@ -109,13 +109,29 @@ pub struct CollectionVersion {
     #[serde(rename = "IsMaterialized", default)]
     pub is_materialized: bool,
 
-    /// Optional automatic refresh interval for downsampled materialized views, in seconds.
+    /// Optional bucket interval for downsampled collections.
     #[serde(
         rename = "DownsampleInterval",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub downsample_interval: Option<u64>,
+    pub downsample_interval: Option<String>,
+
+    /// Source field containing the event time used for downsample windowing.
+    #[serde(
+        rename = "DownsampleTimeField",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub downsample_time_field: Option<String>,
+
+    /// Query source metadata used to drive downsample collection updates.
+    #[serde(
+        rename = "DownsampleSource",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub downsample_source: Option<QuerySource>,
 
     /// Whether the collection history is tracked as a single verifiable entity
     #[serde(rename = "IsBranchable", default)]
@@ -172,6 +188,8 @@ impl CollectionVersion {
             is_active: true,
             is_materialized: false,
             downsample_interval: None,
+            downsample_time_field: None,
+            downsample_source: None,
             is_branchable: false,
             is_embedded_only: false,
             is_placeholder: false,
@@ -303,22 +321,46 @@ impl CollectionVersion {
     }
 
     fn validate_downsample(&self) -> Result<()> {
-        if let Some(interval) = self.downsample_interval {
-            if interval == 0 {
+        if self.downsample_interval.is_some() || self.downsample_time_field.is_some() {
+            let Some(interval) = self.downsample_interval.as_ref() else {
                 return Err(SchemaError::InvalidDownsample(format!(
-                    "interval must be positive. Collection: {}",
+                    "downsampled collections must define an interval. Collection: {}",
+                    self.name
+                )));
+            };
+            if interval.trim().is_empty() {
+                return Err(SchemaError::InvalidDownsample(format!(
+                    "interval must not be empty. Collection: {}",
                     self.name
                 )));
             }
-            if self.query.is_none() {
+            let Some(time_field) = self.downsample_time_field.as_ref() else {
                 return Err(SchemaError::InvalidDownsample(format!(
-                    "downsampled collections must define a query source. Collection: {}",
+                    "downsampled collections must define a time field. Collection: {}",
+                    self.name
+                )));
+            };
+            if time_field.trim().is_empty() {
+                return Err(SchemaError::InvalidDownsample(format!(
+                    "time field must not be empty. Collection: {}",
+                    self.name
+                )));
+            }
+            if self.downsample_source.is_none() {
+                return Err(SchemaError::InvalidDownsample(format!(
+                    "downsampled collections must define a source query. Collection: {}",
                     self.name
                 )));
             }
             if !self.is_materialized {
                 return Err(SchemaError::InvalidDownsample(format!(
                     "downsampled collections must be materialized. Collection: {}",
+                    self.name
+                )));
+            }
+            if self.query.is_some() {
+                return Err(SchemaError::InvalidDownsample(format!(
+                    "downsampled collections can not also be query-backed views. Collection: {}",
                     self.name
                 )));
             }

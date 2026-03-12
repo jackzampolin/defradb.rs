@@ -140,8 +140,8 @@ impl Node {
             }
         }
 
-        if let Some(task) = self.scheduled_view_task.take() {
-            info!("Stopping scheduled downsample refresher...");
+        if let Some(task) = self.downsample_task.take() {
+            info!("Stopping downsample worker...");
             task.abort();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
         }

@@ -35,7 +35,7 @@ pub struct Node {
     pub(super) config: Config,
     pub(super) p2p_handle: Option<p2p::P2PHostHandle>,
     pub(super) p2p_tasks: Option<P2PTasks>,
-    pub(super) scheduled_view_task: Option<JoinHandle<()>>,
+    pub(super) downsample_task: Option<JoinHandle<()>>,
     pub(super) http_server: Option<defra_http::Server>,
     pub(super) pg_server: Option<pg_compat::PgServer>,
     /// Shutdown signal sender (for tests)
@@ -72,7 +72,7 @@ impl Node {
             };
 
         // Initialize storage, database, and set up P2P and HTTP server
-        let (p2p_handle, p2p_tasks, scheduled_view_task, http_server, pg_server) =
+        let (p2p_handle, p2p_tasks, downsample_task, http_server, pg_server) =
             match config.datastore.store {
                 DatastoreType::Memory => {
                     info!("Using in-memory datastore");
@@ -192,7 +192,7 @@ impl Node {
             config,
             p2p_handle,
             p2p_tasks,
-            scheduled_view_task,
+            downsample_task,
             http_server: Some(http_server),
             pg_server,
             shutdown_tx,

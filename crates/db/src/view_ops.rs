@@ -46,6 +46,16 @@ struct ScheduledViewState {
     next_refresh: Instant,
 }
 
+fn legacy_downsample_refresh_interval(raw: &str) -> Option<Duration> {
+    let trimmed = raw.trim();
+    let secs = trimmed
+        .strip_suffix('s')
+        .unwrap_or(trimmed)
+        .parse::<u64>()
+        .ok()?;
+    Some(Duration::from_secs(secs))
+}
+
 /// Delete all keys matching a prefix from a namespace view.
 async fn delete_prefix(store: &NamespaceView, prefix: Vec<u8>) -> Result<()> {
     let opts = IterOptions::new().with_prefix(prefix);
@@ -100,16 +110,19 @@ impl<S: Store> crate::database::DB<S> {
             .get_all_active_collections_internal()?
             .into_iter()
             .filter_map(|col| {
-                col.downsample_interval.and_then(|interval| {
-                    if col.query.is_some() && col.is_materialized && !col.is_embedded_only {
-                        Some(ScheduledViewRefresh {
-                            name: col.name,
-                            interval: Duration::from_secs(interval),
-                        })
-                    } else {
-                        None
-                    }
-                })
+                col.downsample_interval
+                    .as_deref()
+                    .and_then(legacy_downsample_refresh_interval)
+                    .and_then(|interval| {
+                        if col.query.is_some() && col.is_materialized && !col.is_embedded_only {
+                            Some(ScheduledViewRefresh {
+                                name: col.name,
+                                interval,
+                            })
+                        } else {
+                            None
+                        }
+                    })
             })
             .collect();
         scheduled_views.sort_by(|left, right| left.name.cmp(&right.name));

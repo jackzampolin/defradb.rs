@@ -407,7 +407,8 @@ fn test_materialized_directive() {
 #[test]
 fn test_downsample_directive() {
     let sdl = r#"
-        type CpuRollup @downsample(interval: 60) {
+        type CpuRollup @downsample(interval: "60s", timeField: "ts") {
+            ts: DateTime
             avg: Float
         }
     "#;
@@ -419,13 +420,15 @@ fn test_downsample_directive() {
         view.is_materialized,
         "@downsample should materialize the view"
     );
-    assert_eq!(view.downsample_interval, Some(60));
+    assert_eq!(view.downsample_interval.as_deref(), Some("60s"));
+    assert_eq!(view.downsample_time_field.as_deref(), Some("ts"));
 }
 
 #[test]
-fn test_downsample_requires_positive_interval() {
+fn test_downsample_requires_interval() {
     let sdl = r#"
-        type CpuRollup @downsample(interval: 0) {
+        type CpuRollup @downsample(timeField: "ts") {
+            ts: DateTime
             avg: Float
         }
     "#;
@@ -434,8 +437,26 @@ fn test_downsample_requires_positive_interval() {
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("@downsample interval must be positive"),
-        "expected positive interval validation error, got: {}",
+        err.contains("@downsample directive requires an 'interval' argument"),
+        "expected missing interval validation error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_downsample_requires_time_field() {
+    let sdl = r#"
+        type CpuRollup @downsample(interval: "60s") {
+            avg: Float
+        }
+    "#;
+
+    let result = parse_sdl(sdl);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("@downsample directive requires a string 'timeField' argument"),
+        "expected missing timeField validation error, got: {}",
         err
     );
 }
@@ -1229,7 +1250,8 @@ fn test_unknown_argument_on_type_directive_emits_warning() {
 #[test]
 fn test_unknown_argument_on_downsample_directive_emits_warning() {
     let sdl = r#"
-        type CpuRollup @downsample(interval: 60, extraArg: "value") {
+        type CpuRollup @downsample(interval: "60s", timeField: "ts", extraArg: "value") {
+            ts: DateTime
             avg: Float
         }
     "#;

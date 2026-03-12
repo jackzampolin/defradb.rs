@@ -65,6 +65,7 @@ pub mod database;
 pub mod definition_validation;
 pub mod doc_fetcher;
 pub mod doc_mutator;
+pub mod downsample;
 pub mod dump;
 pub mod embedding;
 pub mod error;

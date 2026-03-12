@@ -95,10 +95,22 @@ pub unsafe extern "C" fn add_view(
             let view_collections: Vec<_> = collections
                 .into_iter()
                 .map(|mut col_version| {
-                    col_version.query = Some(query_source.clone());
+                    if col_version.downsample_interval.is_some() {
+                        col_version.downsample_source = Some(query_source.clone());
+                    } else {
+                        col_version.query = Some(query_source.clone());
+                    }
                     col_version
                 })
                 .collect();
+
+            for collection in &view_collections {
+                if collection.downsample_interval.is_some() {
+                    database
+                        .validate_downsample_collection(collection)
+                        .map_err(|e| format!("invalid downsample definition: {}", e))?;
+                }
+            }
 
             // Create all view collections atomically (all-or-nothing)
             let created_versions = database
@@ -110,7 +122,12 @@ pub unsafe extern "C" fn add_view(
             // Exclude embedded-only types (interfaces) - they can't be queried
             let materialized_names: Vec<String> = created_versions
                 .iter()
-                .filter(|col| col.is_materialized && !col.is_embedded_only)
+                .filter(|col| col.query.is_some() && col.is_materialized && !col.is_embedded_only)
+                .map(|col| col.name.clone())
+                .collect();
+            let downsample_names: Vec<String> = created_versions
+                .iter()
+                .filter(|col| col.downsample_interval.is_some())
                 .map(|col| col.name.clone())
                 .collect();
 
@@ -121,6 +138,13 @@ pub unsafe extern "C" fn add_view(
                     )))
                     .await
                     .map_err(|e| format!("failed to refresh materialized views: {}", e))?;
+            }
+
+            if !downsample_names.is_empty() {
+                database
+                    .bootstrap_downsamples(Some(&downsample_names))
+                    .await
+                    .map_err(|e| format!("failed to bootstrap downsample collections: {}", e))?;
             }
 
             let json = serde_json::to_string(&created_versions)

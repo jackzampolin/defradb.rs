@@ -76,20 +76,18 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
 }
 
 pub struct BackgroundTasks {
-    scheduled_view_task: Option<tokio::task::JoinHandle<()>>,
+    downsample_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl BackgroundTasks {
-    fn new(scheduled_view_task: Option<tokio::task::JoinHandle<()>>) -> Self {
-        Self {
-            scheduled_view_task,
-        }
+    fn new(downsample_task: Option<tokio::task::JoinHandle<()>>) -> Self {
+        Self { downsample_task }
     }
 }
 
 impl Drop for BackgroundTasks {
     fn drop(&mut self) {
-        if let Some(task) = self.scheduled_view_task.take() {
+        if let Some(task) = self.downsample_task.take() {
             task.abort();
         }
     }
@@ -264,7 +262,7 @@ where
     database.set_event_bus(event_bus.clone());
     let database = Arc::new(database);
     let background_tasks = Arc::new(BackgroundTasks::new(Some(
-        database.clone().start_scheduled_view_refresh_task(),
+        database.clone().start_downsample_task(),
     )));
 
     let mut p2p_setup = match &config.transport {

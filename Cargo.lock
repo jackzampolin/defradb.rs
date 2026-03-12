@@ -3523,6 +3523,7 @@ dependencies = [
  "base64 0.22.1",
  "blockstore",
  "blst",
+ "chrono",
  "ciborium",
  "cid 0.10.1",
  "crdt",
@@ -5930,6 +5931,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "chrono",
  "crypto",
  "ctor",
  "defra-harness",

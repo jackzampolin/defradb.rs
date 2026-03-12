@@ -21,7 +21,7 @@ impl Node {
     /// This function creates the database, loads collections, sets up the query
     /// runner with proper transaction support, and returns the HTTP server.
     ///
-    /// Returns a tuple of (P2PHostHandle, P2PTasks, scheduled view task, HTTP Server)
+    /// Returns a tuple of (P2PHostHandle, P2PTasks, downsample task, HTTP Server)
     /// where the background tasks are tracked for graceful shutdown.
     pub(super) async fn init_store_and_server<S>(
         store: Arc<S>,
@@ -102,8 +102,8 @@ impl Node {
             .len();
         info!("Loaded {} collection schema(s)", collection_count);
 
-        let scheduled_view_task = Some(database.clone().start_scheduled_view_refresh_task());
-        info!("Scheduled downsample refresher enabled");
+        let downsample_task = Some(database.clone().start_downsample_task());
+        info!("Downsample worker enabled");
 
         // Set up P2P if enabled
         // Clone store before potential move for sync coordinator blockstore
@@ -1319,6 +1319,6 @@ impl Node {
             (server, p2p_tasks, pg_server)
         };
 
-        Ok((p2p, p2p_tasks, scheduled_view_task, http_server, pg_server))
+        Ok((p2p, p2p_tasks, downsample_task, http_server, pg_server))
     }
 }
