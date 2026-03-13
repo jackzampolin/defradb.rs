@@ -119,8 +119,8 @@ mod tests {
 
         let resource = policy.get_resource(NODE_RESOURCE_NAME).unwrap();
 
-        // Should have owner, admin, and 48 permission relations = 50 total
-        assert_eq!(resource.relations.len(), 50);
+        // Should have owner, admin, and 49 permission relations = 51 total
+        assert_eq!(resource.relations.len(), 51);
     }
 
     #[test]
@@ -142,8 +142,8 @@ mod tests {
         let resource = policy.get_resource(NODE_RESOURCE_NAME).unwrap();
         let admin = resource.get_relation(ADMIN_RELATION).unwrap();
 
-        // Admin should manage all 48 permissions
-        assert_eq!(admin.manages.len(), 48);
+        // Admin should manage all 49 permissions
+        assert_eq!(admin.manages.len(), 49);
     }
 
     #[test]

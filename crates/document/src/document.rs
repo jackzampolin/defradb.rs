@@ -552,6 +552,7 @@ mod tests {
             is_materialized: false,
             downsample_interval: None,
             downsample_time_field: None,
+            downsample_retention: None,
             downsample_source: None,
             is_branchable: false,
             is_embedded_only: false,
