@@ -1,7 +1,8 @@
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
+use std::fmt::Write;
 
-use crate::document::DocumentMapping;
+use crate::document::{DocumentMapping, RenderKey};
 use crate::mapper::{AggregateType, Filter, Limit, OrderBy, OrderDirection};
 use crate::planner::Doc;
 
@@ -145,23 +146,17 @@ impl GroupByNode {
         // Sub-group documents by the inner groupBy field values
         let mut sub_groups: Vec<(String, Vec<&Doc>)> = Vec::new();
         let mut sub_group_map: HashMap<String, usize> = HashMap::new();
+        let mut key_buf = String::with_capacity(self.inner_group_by_fields.len() * 16);
 
         for doc in docs {
-            let mut key = String::new();
-            for field_name in &self.inner_group_by_fields {
-                if let Some(idx) = self.document_mapping.first_index_of_name(field_name) {
-                    key.push_str(&format!("{}_", idx));
-                    let value = doc.get(idx);
-                    key.push_str(&format!("{}_", Self::value_to_key(value)));
-                }
-            }
+            self.build_group_key_for_fields(&mut key_buf, &self.inner_group_by_fields, doc);
 
-            if let Some(&idx) = sub_group_map.get(&key) {
+            if let Some(&idx) = sub_group_map.get(key_buf.as_str()) {
                 sub_groups[idx].1.push(doc);
             } else {
                 let idx = sub_groups.len();
-                sub_group_map.insert(key.clone(), idx);
-                sub_groups.push((key, vec![doc]));
+                sub_group_map.insert(key_buf.clone(), idx);
+                sub_groups.push((key_buf.clone(), vec![doc]));
             }
         }
 
@@ -296,23 +291,17 @@ impl GroupByNode {
         // Sub-group documents by the third-level groupBy fields
         let mut sub_groups: Vec<(String, Vec<&Doc>)> = Vec::new();
         let mut sub_group_map: HashMap<String, usize> = HashMap::new();
+        let mut key_buf = String::with_capacity(self.third_level_group_by_fields.len() * 16);
 
         for doc in docs {
-            let mut key = String::new();
-            for field_name in &self.third_level_group_by_fields {
-                if let Some(idx) = self.document_mapping.first_index_of_name(field_name) {
-                    key.push_str(&format!("{}_", idx));
-                    let value = doc.get(idx);
-                    key.push_str(&format!("{}_", Self::value_to_key(value)));
-                }
-            }
+            self.build_group_key_for_fields(&mut key_buf, &self.third_level_group_by_fields, doc);
 
-            if let Some(&idx) = sub_group_map.get(&key) {
+            if let Some(&idx) = sub_group_map.get(key_buf.as_str()) {
                 sub_groups[idx].1.push(doc);
             } else {
                 let idx = sub_groups.len();
-                sub_group_map.insert(key.clone(), idx);
-                sub_groups.push((key, vec![doc]));
+                sub_group_map.insert(key_buf.clone(), idx);
+                sub_groups.push((key_buf.clone(), vec![doc]));
             }
         }
 
@@ -376,21 +365,17 @@ impl GroupByNode {
         // Sub-group documents by the sub-grouping field values
         let mut sub_groups: Vec<(String, Vec<&Doc>)> = Vec::new();
         let mut sub_group_map: HashMap<String, usize> = HashMap::new();
+        let mut key_buf = String::with_capacity(sub_group_fields.len() * 16);
 
         for doc in docs {
-            let mut key = String::new();
-            for field in &sub_group_fields {
-                key.push_str(&format!("{}_", field.index));
-                let value = doc.get(field.index);
-                key.push_str(&format!("{}_", Self::value_to_key(value)));
-            }
+            self.build_group_key_for_render_keys(&mut key_buf, &sub_group_fields, doc);
 
-            if let Some(&idx) = sub_group_map.get(&key) {
+            if let Some(&idx) = sub_group_map.get(key_buf.as_str()) {
                 sub_groups[idx].1.push(doc);
             } else {
                 let idx = sub_groups.len();
-                sub_group_map.insert(key.clone(), idx);
-                sub_groups.push((key, vec![doc]));
+                sub_group_map.insert(key_buf.clone(), idx);
+                sub_groups.push((key_buf.clone(), vec![doc]));
             }
         }
 
@@ -456,6 +441,31 @@ impl GroupByNode {
         }
 
         JsonValue::Array(array)
+    }
+
+    fn build_group_key_for_fields(&self, buf: &mut String, fields: &[String], doc: &Doc) {
+        buf.clear();
+        for field_name in fields {
+            if let Some(index) = self.document_mapping.first_index_of_name(field_name) {
+                write!(buf, "{index}_").unwrap();
+                Self::write_value_key(buf, doc.get(index));
+                buf.push('_');
+            }
+        }
+    }
+
+    fn build_group_key_for_render_keys(
+        &self,
+        buf: &mut String,
+        render_keys: &[&RenderKey],
+        doc: &Doc,
+    ) {
+        buf.clear();
+        for render_key in render_keys {
+            write!(buf, "{}_", render_key.index).unwrap();
+            Self::write_value_key(buf, doc.get(render_key.index));
+            buf.push('_');
+        }
     }
 
     /// Compute an aggregate value inline for a sub-group of documents.
