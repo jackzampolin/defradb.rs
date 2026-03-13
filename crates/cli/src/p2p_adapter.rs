@@ -927,23 +927,27 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 return Err(format!("failed to sign DocSync request: {}", e));
             }
 
+            let mut any_sent = false;
             for peer_id in &connected_peers {
                 match self
                     .handle
                     .send_doc_sync_request(*peer_id, request.clone())
                     .await
                 {
-                    Ok(()) => {}
+                    Ok(()) => any_sent = true,
                     Err(e) => {
                         tracing::warn!(peer_id = %peer_id, error = %e, "failed to send DocSync request")
                     }
                 }
             }
 
-            // Wait for merges with idle timeout
+            if !any_sent {
+                break;
+            }
+
             let mut last_merge = std::time::Instant::now();
             while total_received < total_expected && start.elapsed() < overall_timeout {
-                if total_received >= doc_ids.len() && last_merge.elapsed() > idle_timeout {
+                if last_merge.elapsed() > idle_timeout {
                     break;
                 }
 

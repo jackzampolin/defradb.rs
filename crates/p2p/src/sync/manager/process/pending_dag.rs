@@ -41,6 +41,30 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .and_then(|dag| dag.source_peer.clone())
     }
 
+    /// Retry pending DAGs that were waiting on `cid`.
+    ///
+    /// This covers the explicit replay path where a composite can be registered
+    /// as pending before its linked field blocks arrive via later PushLog
+    /// requests rather than Bitswap.
+    pub async fn retry_pending_dags_waiting_on(&self, cid: &Cid) -> Result<Vec<Cid>> {
+        let waiting_roots: Vec<Cid> = {
+            let pending = self.pending_dags.read();
+            pending
+                .iter()
+                .filter_map(|(root_cid, dag)| dag.missing.contains(cid).then_some(*root_cid))
+                .collect()
+        };
+
+        let mut completed = Vec::new();
+        for root_cid in waiting_roots {
+            if self.retry_pending_dag(&root_cid).await? {
+                completed.push(root_cid);
+            }
+        }
+
+        Ok(completed)
+    }
+
     /// Insert a pending DAG entry, enforcing TTL eviction and capacity limits.
     ///
     /// Expired entries (older than `PENDING_DAG_TTL`) are removed before checking

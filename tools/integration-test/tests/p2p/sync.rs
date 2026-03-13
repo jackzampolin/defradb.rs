@@ -184,6 +184,110 @@ async fn sync_branchable_test(cluster: TestCluster) {
     );
 }
 
+#[tokio::test]
+async fn rust_rust_batch_create_replication_exact_doc_ids() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(2)
+        .with_p2p()
+        .build()
+        .await
+        .unwrap();
+
+    let source = cluster.client(0);
+    let replica = cluster.client(1);
+
+    let timeout = Duration::from_secs(15);
+    cluster
+        .wait_for_log(0, "p2p_listening", timeout)
+        .await
+        .expect("node0 P2P listener did not start");
+    cluster
+        .wait_for_log(1, "p2p_listening", timeout)
+        .await
+        .expect("node1 P2P listener did not start");
+
+    let info0 = source.p2p_info().expect("failed to get node0 p2p info");
+    let addr0 = info0
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .expect("node0 has no P2P address");
+
+    source
+        .schema_add("type Transcript { body: String idx: Int }")
+        .expect("add schema node0");
+    replica
+        .schema_add("type Transcript { body: String idx: Int }")
+        .expect("add schema node1");
+
+    replica.p2p_connect(&[addr0]).expect("p2p connect");
+    source
+        .p2p_collection_add(&["Transcript"])
+        .expect("collection add node0");
+    replica
+        .p2p_collection_add(&["Transcript"])
+        .expect("collection add node1");
+
+    let batch = source
+        .query(
+            r#"mutation {
+                add_Transcript(input: [
+                    {body: "first", idx: 1},
+                    {body: "second", idx: 2},
+                    {body: "third", idx: 3}
+                ]) {
+                    _docID
+                    idx
+                }
+            }"#,
+        )
+        .expect("batch create transcripts");
+
+    let rows = batch["add_Transcript"]
+        .as_array()
+        .expect("batch create result not array");
+    assert_eq!(rows.len(), 3, "expected 3 created transcripts");
+
+    let expected_ids: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            row["_docID"]
+                .as_str()
+                .expect("missing _docID from batch create")
+                .to_string()
+        })
+        .collect();
+
+    let mut expected_ids_sorted = expected_ids.clone();
+    expected_ids_sorted.sort();
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let result = replica
+            .query("query { Transcript { _docID idx body } }")
+            .expect("query Transcript on replica");
+        let docs = result["Transcript"]
+            .as_array()
+            .expect("Transcript query result not array");
+
+        let mut actual_ids: Vec<String> = docs
+            .iter()
+            .filter_map(|row| row["_docID"].as_str().map(str::to_string))
+            .collect();
+        actual_ids.sort();
+        if actual_ids == expected_ids_sorted {
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "replica did not surface exact batched doc IDs within timeout: {}",
+            serde_json::to_string_pretty(&result).unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 for_each_runtime!(p2p_sync_invalid_cid, invalid_cid_rejection_test, .with_p2p());
 for_each_p2p_topology!(p2p_sync_document, document_sync_test, .with_p2p());
 for_each_p2p_topology!(p2p_sync_versions, collection_sync_versions_test, .with_p2p());
