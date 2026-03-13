@@ -5,7 +5,7 @@
 //! - `parse_filter_object()` - Parse a filter object into conditions map
 
 use graphql_parser::query::Value;
-use serde_json::Value as JsonValue;
+use serde_json::{Map, Value as JsonValue};
 use std::collections::HashMap;
 
 use crate::error::{QueryError, Result};
@@ -34,9 +34,7 @@ pub(super) fn parse_filter_value(
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))
             })?;
             if let JsonValue::Object(obj) = json_val {
-                let conditions: HashMap<String, JsonValue> =
-                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                Ok(Filter::from_conditions(conditions))
+                Ok(Filter::from_conditions(obj.clone()))
             } else {
                 Err(QueryError::parse("filter must be an object"))
             }
@@ -49,8 +47,8 @@ pub(super) fn parse_filter_value(
 pub(super) fn parse_filter_object(
     obj: &std::collections::BTreeMap<String, Value<'_, String>>,
     variables: Option<&HashMap<String, JsonValue>>,
-) -> Result<HashMap<String, JsonValue>> {
-    let mut conditions = HashMap::new();
+) -> Result<Map<String, JsonValue>> {
+    let mut conditions = Map::new();
 
     for (key, val) in obj {
         let json_val = graphql_value_to_json(val, variables)?;

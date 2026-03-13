@@ -166,14 +166,9 @@ impl Planner {
             if !filter_json.is_null() {
                 if let Some(conditions) = filter_json.get("Conditions").and_then(|c| c.as_object())
                 {
-                    let conditions_map: std::collections::HashMap<String, serde_json::Value> =
-                        conditions
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                    if !conditions_map.is_empty() {
+                    if !conditions.is_empty() {
                         source_select.filter =
-                            Some(crate::mapper::Filter::from_conditions(conditions_map));
+                            Some(crate::mapper::Filter::from_conditions(conditions.clone()));
                     }
                 }
             }

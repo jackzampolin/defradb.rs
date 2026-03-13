@@ -1,7 +1,5 @@
 //! JSON matching utilities - evaluate filters against JSON values
 
-use std::collections::HashMap;
-
 use serde_json::Value as JsonValue;
 
 use super::eval::eval_op;
@@ -32,10 +30,10 @@ impl Filter {
                             .as_array()
                             .ok_or_else(|| QueryError::invalid_filter("_and requires array"))?;
                         for item in arr {
-                            let sub: HashMap<String, JsonValue> =
-                                serde_json::from_value(item.clone())
-                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                            let f = Filter::from_conditions(sub);
+                            let sub = item.as_object().ok_or_else(|| {
+                                QueryError::invalid_filter("_and items must be objects")
+                            })?;
+                            let f = Filter::from_conditions(sub.clone());
                             if !f.matches_scalar_value(value)? {
                                 return Ok(false);
                             }
@@ -47,10 +45,10 @@ impl Filter {
                             .ok_or_else(|| QueryError::invalid_filter("_or requires array"))?;
                         let mut any_match = false;
                         for item in arr {
-                            let sub: HashMap<String, JsonValue> =
-                                serde_json::from_value(item.clone())
-                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                            let f = Filter::from_conditions(sub);
+                            let sub = item.as_object().ok_or_else(|| {
+                                QueryError::invalid_filter("_or items must be objects")
+                            })?;
+                            let f = Filter::from_conditions(sub.clone());
                             if f.matches_scalar_value(value)? {
                                 any_match = true;
                                 break;
@@ -61,10 +59,10 @@ impl Filter {
                         }
                     }
                     FilterOp::Not => {
-                        let sub: HashMap<String, JsonValue> =
-                            serde_json::from_value(expected.clone())
-                                .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                        let f = Filter::from_conditions(sub);
+                        let sub = expected
+                            .as_object()
+                            .ok_or_else(|| QueryError::invalid_filter("_not requires object"))?;
+                        let f = Filter::from_conditions(sub.clone());
                         if f.matches_scalar_value(value)? {
                             return Ok(false);
                         }
@@ -109,10 +107,10 @@ impl Filter {
                             .as_array()
                             .ok_or_else(|| QueryError::invalid_filter("_and requires array"))?;
                         for item in arr {
-                            let sub: HashMap<String, JsonValue> =
-                                serde_json::from_value(item.clone())
-                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                            let f = Filter::from_conditions(sub);
+                            let sub = item.as_object().ok_or_else(|| {
+                                QueryError::invalid_filter("_and items must be objects")
+                            })?;
+                            let f = Filter::from_conditions(sub.clone());
                             if !f.matches_json_object(obj)? {
                                 return Ok(false);
                             }
@@ -124,10 +122,10 @@ impl Filter {
                             .ok_or_else(|| QueryError::invalid_filter("_or requires array"))?;
                         let mut any_match = false;
                         for item in arr {
-                            let sub: HashMap<String, JsonValue> =
-                                serde_json::from_value(item.clone())
-                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                            let f = Filter::from_conditions(sub);
+                            let sub = item.as_object().ok_or_else(|| {
+                                QueryError::invalid_filter("_or items must be objects")
+                            })?;
+                            let f = Filter::from_conditions(sub.clone());
                             if f.matches_json_object(obj)? {
                                 any_match = true;
                                 break;
@@ -138,10 +136,10 @@ impl Filter {
                         }
                     }
                     FilterOp::Not => {
-                        let sub: HashMap<String, JsonValue> =
-                            serde_json::from_value(expected.clone())
-                                .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                        let f = Filter::from_conditions(sub);
+                        let sub = expected
+                            .as_object()
+                            .ok_or_else(|| QueryError::invalid_filter("_not requires object"))?;
+                        let f = Filter::from_conditions(sub.clone());
                         if f.matches_json_object(obj)? {
                             return Ok(false);
                         }
@@ -167,11 +165,7 @@ impl Filter {
                     // If they're field-based, recursively use matches_json_object
                     let has_field_conditions =
                         conditions_obj.keys().any(|k| FilterOp::parse(k).is_none());
-                    let sub_conditions: HashMap<String, JsonValue> = conditions_obj
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    let f = Filter::from_conditions(sub_conditions);
+                    let f = Filter::from_conditions(conditions_obj.clone());
                     if has_field_conditions {
                         // Nested field access - recursively match
                         if !f.matches_json_object(field_value)? {

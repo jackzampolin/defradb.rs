@@ -3,10 +3,8 @@
 //! Splits and transforms the query filter into scalar, relation, and plan-level
 //! components for use in different plan tree positions.
 
-use std::collections::HashMap;
-
 use schema::CollectionVersion;
-use serde_json::Value as JsonValue;
+use serde_json::{Map, Value as JsonValue};
 
 use crate::mapper::{Filter, Select};
 
@@ -42,11 +40,11 @@ impl super::Planner {
         // filter condition, not just used for explain output.
         let filter_for_plan = if let Some(ref doc_ids) = select.doc_ids {
             let doc_ids_filter = if doc_ids.len() == 1 {
-                let mut conditions = HashMap::new();
+                let mut conditions = Map::new();
                 conditions.insert("_docID".to_string(), serde_json::json!({"_eq": doc_ids[0]}));
                 Filter::from_conditions(conditions)
             } else {
-                let mut conditions = HashMap::new();
+                let mut conditions = Map::new();
                 conditions.insert("_docID".to_string(), serde_json::json!({"_in": doc_ids}));
                 Filter::from_conditions(conditions)
             };
@@ -95,7 +93,7 @@ impl super::Planner {
         // This allows relation _docID filters to work as scalar filters without requiring a join.
         // Example: {author: {_docID: {_eq: "bae-..."}}} → {_authorID: {_eq: "bae-..."}}
         let scalar_filter = {
-            let mut combined_conditions: HashMap<String, JsonValue> = scalar_filter_raw
+            let mut combined_conditions: Map<String, JsonValue> = scalar_filter_raw
                 .as_ref()
                 .map(|f| f.conditions().clone())
                 .unwrap_or_default();

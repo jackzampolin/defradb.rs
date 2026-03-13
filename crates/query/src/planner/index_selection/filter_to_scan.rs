@@ -1,10 +1,7 @@
 //! Core filter-to-index-scan conversion.
 
-use std::collections::HashMap;
-
 use document::{JsonLeafValue, JsonPath, JsonScalarValue, NormalValue};
 use schema::{FieldKind, IndexDescription, ScalarKind};
-use serde_json::Value as JsonValue;
 use storage::index::Bound;
 
 use crate::mapper::{Filter, FilterOp, OrderBy};
@@ -465,11 +462,8 @@ fn extract_or_branches(filter: &Filter) -> Option<Vec<Filter>> {
     let branches: Vec<Filter> = arr
         .iter()
         .filter_map(|item| {
-            item.as_object().map(|obj| {
-                let map: HashMap<String, JsonValue> =
-                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                Filter::from_conditions(map)
-            })
+            item.as_object()
+                .map(|obj| Filter::from_conditions(obj.clone()))
         })
         .collect();
     if branches.len() == arr.len() && !branches.is_empty() {

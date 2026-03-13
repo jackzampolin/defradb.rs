@@ -1,8 +1,7 @@
 //! Condition analysis and scoring for index selection.
 
-use std::collections::HashMap;
-
 use schema::IndexDescription;
+use serde_json::Map;
 use serde_json::Value as JsonValue;
 
 use crate::mapper::{Filter, FilterOp, OrderBy, OrderDirection};
@@ -61,7 +60,7 @@ pub fn extract_field_conditions(filter: &Filter) -> Vec<FieldCondition> {
 }
 
 fn extract_conditions_recursive(
-    obj: &HashMap<String, JsonValue>,
+    obj: &Map<String, JsonValue>,
     conditions: &mut Vec<FieldCondition>,
 ) {
     for (key, value) in obj {
@@ -75,9 +74,7 @@ fn extract_conditions_recursive(
                 if let Some(arr) = value.as_array() {
                     for item in arr {
                         if let Some(obj) = item.as_object() {
-                            let nested: HashMap<String, JsonValue> =
-                                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                            extract_conditions_recursive(&nested, conditions);
+                            extract_conditions_recursive(obj, conditions);
                         }
                     }
                 }

@@ -327,7 +327,7 @@ impl Planner {
                     if agg.aggregate_type == AggregateType::Average {
                         if let Some(ref field_name) = target.field_name {
                             let neq_null_filter = Filter::from_conditions({
-                                let mut c = HashMap::new();
+                                let mut c = serde_json::Map::new();
                                 c.insert(
                                     field_name.clone(),
                                     serde_json::json!({"_neq": serde_json::Value::Null}),

@@ -3,6 +3,12 @@ use crate::mapper::{Field, Filter};
 use crate::planner::index_selection::IndexScanType;
 use schema::{FieldDescription, FieldKind, IndexDescription, IndexedFieldDescription};
 
+fn map<const N: usize>(
+    entries: [(String, serde_json::Value); N],
+) -> serde_json::Map<String, serde_json::Value> {
+    entries.into_iter().collect()
+}
+
 fn make_test_collection() -> CollectionVersion {
     CollectionVersion::new(
         "Users",
@@ -125,11 +131,9 @@ async fn test_plan_unknown_collection() {
 
 #[tokio::test]
 async fn test_plan_with_filter() {
-    use std::collections::HashMap;
-
     let planner = Planner::new(vec![make_test_collection()]);
 
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "name".to_string(),
         serde_json::json!({"_eq": "Alice"}),
     )]));
@@ -177,11 +181,9 @@ fn test_build_mapping_with_alias() {
 
 #[tokio::test]
 async fn test_plan_uses_index_for_eq_filter() {
-    use std::collections::HashMap;
-
     let planner = Planner::new(vec![make_test_collection_with_index()]);
 
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "name".to_string(),
         serde_json::json!({"_eq": "Alice"}),
     )]));
@@ -203,11 +205,9 @@ async fn test_plan_uses_index_for_eq_filter() {
 
 #[tokio::test]
 async fn test_plan_uses_index_for_range_filter() {
-    use std::collections::HashMap;
-
     let planner = Planner::new(vec![make_test_collection_with_index()]);
 
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "age".to_string(),
         serde_json::json!({"_gte": 18, "_lt": 65}),
     )]));
@@ -243,12 +243,10 @@ async fn test_plan_no_index_without_filter() {
 
 #[tokio::test]
 async fn test_plan_no_index_for_non_indexed_field() {
-    use std::collections::HashMap;
-
     // Collection without indexes
     let planner = Planner::new(vec![make_test_collection()]);
 
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "name".to_string(),
         serde_json::json!({"_eq": "Alice"}),
     )]));
@@ -265,12 +263,10 @@ async fn test_plan_no_index_for_non_indexed_field() {
 
 #[tokio::test]
 async fn test_plan_uses_index_for_ne_filter() {
-    use std::collections::HashMap;
-
     let planner = Planner::new(vec![make_test_collection_with_index()]);
 
     // _ne uses full index scan (matching Go behavior)
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "name".to_string(),
         serde_json::json!({"_ne": "Alice"}),
     )]));
@@ -287,11 +283,9 @@ async fn test_plan_uses_index_for_ne_filter() {
 
 #[tokio::test]
 async fn test_plan_uses_index_for_in_filter() {
-    use std::collections::HashMap;
-
     let planner = Planner::new(vec![make_test_collection_with_index()]);
 
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "name".to_string(),
         serde_json::json!({"_in": ["Alice", "Bob"]}),
     )]));
@@ -316,12 +310,10 @@ async fn test_plan_uses_index_for_in_filter() {
 
 #[tokio::test]
 async fn test_plan_result_uses_index_method() {
-    use std::collections::HashMap;
-
     let planner = Planner::new(vec![make_test_collection_with_index()]);
 
     // With index
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "name".to_string(),
         serde_json::json!({"_eq": "Alice"}),
     )]));
@@ -442,7 +434,7 @@ async fn test_plan_with_nested_filter_on_type_join_many() {
     let planner = Planner::new(vec![make_users_collection(), make_posts_collection()]);
 
     // Build nested select with filter
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "title".to_string(),
         serde_json::json!({"_eq": "Hello"}),
     )]));
@@ -472,7 +464,7 @@ async fn test_plan_with_nested_filter_on_type_join_one() {
     let planner = Planner::new(vec![make_users_collection(), make_posts_collection()]);
 
     // Build nested select with filter
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "name".to_string(),
         serde_json::json!({"_eq": "Alice"}),
     )]));
@@ -505,13 +497,13 @@ async fn test_plan_nested_filter_with_parent_filter() {
     let planner = Planner::new(vec![make_users_collection(), make_posts_collection()]);
 
     // Parent filter
-    let parent_filter = Filter::from_conditions(HashMap::from([(
+    let parent_filter = Filter::from_conditions(map([(
         "name".to_string(),
         serde_json::json!({"_eq": "Bob"}),
     )]));
 
     // Child filter
-    let child_filter = Filter::from_conditions(HashMap::from([(
+    let child_filter = Filter::from_conditions(map([(
         "title".to_string(),
         serde_json::json!({"_like": "Hello%"}),
     )]));
@@ -544,7 +536,7 @@ async fn test_plan_nested_filter_references_unselected_field_fails_at_planning()
     let planner = Planner::new(vec![make_users_collection(), make_posts_collection()]);
 
     // Filter references "author_id" which is NOT in the select list
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "author_id".to_string(),
         serde_json::json!({"_eq": "user-1"}),
     )]));

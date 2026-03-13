@@ -1,8 +1,6 @@
-use std::collections::HashMap;
-
 use document::{JsonPathPart, JsonScalarValue, NormalValue};
 use schema::{IndexDescription, IndexedFieldDescription};
-use serde_json::{json, Value as JsonValue};
+use serde_json::{json, Map, Value as JsonValue};
 use storage::index::Bound;
 
 use crate::mapper::{Filter, FilterOp};
@@ -10,7 +8,11 @@ use crate::mapper::{Filter, FilterOp};
 use super::values::json_to_normal_value;
 use super::*;
 
-fn make_filter(conditions: HashMap<String, JsonValue>) -> Filter {
+fn map<const N: usize>(entries: [(String, JsonValue); N]) -> Map<String, JsonValue> {
+    entries.into_iter().collect()
+}
+
+fn make_filter(conditions: Map<String, JsonValue>) -> Filter {
     Filter::from_conditions(conditions)
 }
 
@@ -55,10 +57,7 @@ fn unique_index(field: &str) -> IndexDescription {
 
 #[test]
 fn test_can_use_index_eq() {
-    let filter = make_filter(HashMap::from([(
-        "name".to_string(),
-        json!({"_eq": "alice"}),
-    )]));
+    let filter = make_filter(map([("name".to_string(), json!({"_eq": "alice"}))]));
     let index = single_field_index("name");
 
     assert!(can_use_index(&filter, &index));
@@ -66,7 +65,7 @@ fn test_can_use_index_eq() {
 
 #[test]
 fn test_can_use_index_wrong_field() {
-    let filter = make_filter(HashMap::from([("age".to_string(), json!({"_eq": 30}))]));
+    let filter = make_filter(map([("age".to_string(), json!({"_eq": 30}))]));
     let index = single_field_index("name");
 
     assert!(!can_use_index(&filter, &index));
@@ -74,10 +73,7 @@ fn test_can_use_index_wrong_field() {
 
 #[test]
 fn test_can_use_index_range() {
-    let filter = make_filter(HashMap::from([(
-        "age".to_string(),
-        json!({"_gt": 18, "_lt": 65}),
-    )]));
+    let filter = make_filter(map([("age".to_string(), json!({"_gt": 18, "_lt": 65}))]));
     let index = single_field_index("age");
 
     assert!(can_use_index(&filter, &index));
@@ -85,7 +81,7 @@ fn test_can_use_index_range() {
 
 #[test]
 fn test_can_use_index_in() {
-    let filter = make_filter(HashMap::from([(
+    let filter = make_filter(map([(
         "status".to_string(),
         json!({"_in": ["active", "pending"]}),
     )]));
@@ -97,10 +93,7 @@ fn test_can_use_index_in() {
 #[test]
 fn test_can_use_index_ne() {
     // _ne uses full index scan (matching Go behavior)
-    let filter = make_filter(HashMap::from([(
-        "name".to_string(),
-        json!({"_ne": "alice"}),
-    )]));
+    let filter = make_filter(map([("name".to_string(), json!({"_ne": "alice"}))]));
     let index = single_field_index("name");
 
     assert!(can_use_index(&filter, &index));
@@ -109,10 +102,7 @@ fn test_can_use_index_ne() {
 #[test]
 fn test_can_use_index_like() {
     // _like uses full index scan (matching Go behavior)
-    let filter = make_filter(HashMap::from([(
-        "name".to_string(),
-        json!({"_like": "%alice%"}),
-    )]));
+    let filter = make_filter(map([("name".to_string(), json!({"_like": "%alice%"}))]));
     let index = single_field_index("name");
 
     assert!(can_use_index(&filter, &index));
@@ -120,10 +110,7 @@ fn test_can_use_index_like() {
 
 #[test]
 fn test_filter_to_scan_exact_match() {
-    let filter = make_filter(HashMap::from([(
-        "name".to_string(),
-        json!({"_eq": "alice"}),
-    )]));
+    let filter = make_filter(map([("name".to_string(), json!({"_eq": "alice"}))]));
     let index = single_field_index("name");
 
     let params = filter_to_index_scan(&filter, &index, None, &[], None, 0).unwrap();
@@ -140,7 +127,7 @@ fn test_filter_to_scan_exact_match() {
 
 #[test]
 fn test_filter_to_scan_in() {
-    let filter = make_filter(HashMap::from([(
+    let filter = make_filter(map([(
         "status".to_string(),
         json!({"_in": ["active", "pending"]}),
     )]));
@@ -158,10 +145,7 @@ fn test_filter_to_scan_in() {
 
 #[test]
 fn test_filter_to_scan_range() {
-    let filter = make_filter(HashMap::from([(
-        "age".to_string(),
-        json!({"_gte": 18, "_lt": 65}),
-    )]));
+    let filter = make_filter(map([("age".to_string(), json!({"_gte": 18, "_lt": 65}))]));
     let index = single_field_index("age");
 
     let params = filter_to_index_scan(&filter, &index, None, &[], None, 0).unwrap();
@@ -189,7 +173,7 @@ fn test_filter_to_scan_range() {
 
 #[test]
 fn test_select_best_index_prefers_eq() {
-    let filter = make_filter(HashMap::from([
+    let filter = make_filter(map([
         ("name".to_string(), json!({"_eq": "alice"})),
         ("age".to_string(), json!({"_gt": 18})),
     ]));
@@ -202,10 +186,7 @@ fn test_select_best_index_prefers_eq() {
 
 #[test]
 fn test_select_best_index_prefers_unique() {
-    let filter = make_filter(HashMap::from([(
-        "email".to_string(),
-        json!({"_eq": "a@b.com"}),
-    )]));
+    let filter = make_filter(map([("email".to_string(), json!({"_eq": "a@b.com"}))]));
 
     let indexes = vec![single_field_index("email"), unique_index("email")];
 
@@ -215,7 +196,7 @@ fn test_select_best_index_prefers_unique() {
 
 #[test]
 fn test_select_best_index_composite() {
-    let filter = make_filter(HashMap::from([
+    let filter = make_filter(map([
         ("category".to_string(), json!({"_eq": "electronics"})),
         ("brand".to_string(), json!({"_eq": "sony"})),
     ]));
@@ -231,7 +212,7 @@ fn test_select_best_index_composite() {
 
 #[test]
 fn test_extract_field_conditions_simple() {
-    let filter = make_filter(HashMap::from([
+    let filter = make_filter(map([
         ("name".to_string(), json!({"_eq": "alice"})),
         ("age".to_string(), json!({"_gt": 18})),
     ]));
@@ -248,7 +229,7 @@ fn test_extract_field_conditions_simple() {
 
 #[test]
 fn test_extract_field_conditions_and() {
-    let filter = make_filter(HashMap::from([(
+    let filter = make_filter(map([(
         "_and".to_string(),
         json!([
             {"name": {"_eq": "alice"}},
@@ -310,10 +291,7 @@ fn test_condition_value_variants() {
 #[test]
 fn test_can_use_index_array_any() {
     // Filter: {numbers: {_any: {_eq: 30}}}
-    let filter = make_filter(HashMap::from([(
-        "numbers".to_string(),
-        json!({"_any": {"_eq": 30}}),
-    )]));
+    let filter = make_filter(map([("numbers".to_string(), json!({"_any": {"_eq": 30}}))]));
     let index = single_field_index("numbers");
 
     assert!(can_use_index(&filter, &index));
@@ -322,10 +300,7 @@ fn test_can_use_index_array_any() {
 #[test]
 fn test_can_use_index_array_all() {
     // Filter: {numbers: {_all: {_eq: 30}}}
-    let filter = make_filter(HashMap::from([(
-        "numbers".to_string(),
-        json!({"_all": {"_eq": 30}}),
-    )]));
+    let filter = make_filter(map([("numbers".to_string(), json!({"_all": {"_eq": 30}}))]));
     let index = single_field_index("numbers");
 
     assert!(can_use_index(&filter, &index));
@@ -334,7 +309,7 @@ fn test_can_use_index_array_all() {
 #[test]
 fn test_cannot_use_index_array_none() {
     // Filter: {numbers: {_none: {_eq: 30}}} - _none cannot use index
-    let filter = make_filter(HashMap::from([(
+    let filter = make_filter(map([(
         "numbers".to_string(),
         json!({"_none": {"_eq": 30}}),
     )]));
@@ -348,7 +323,7 @@ fn test_can_use_index_array_all_with_range_op() {
     // Filter: {numbers: {_all: {_geq: 33}}}
     // _all with range operators (not just _eq/_in) should use index
     // Index provides candidates, residual filter verifies ALL match
-    let filter = make_filter(HashMap::from([(
+    let filter = make_filter(map([(
         "numbers".to_string(),
         json!({"_all": {"_gte": 33}}),
     )]));
@@ -362,7 +337,7 @@ fn test_can_use_composite_index_with_none_on_second_field() {
     // Filter: {name: {_eq: "Shahzad"}, numbers: {_none: {_eq: 3}}}
     // Composite index [name, numbers] should be usable because first field has _eq
     // _none on second field is handled by residual filter
-    let filter = make_filter(HashMap::from([
+    let filter = make_filter(map([
         ("name".to_string(), json!({"_eq": "Shahzad"})),
         ("numbers".to_string(), json!({"_none": {"_eq": 3}})),
     ]));
@@ -375,7 +350,7 @@ fn test_can_use_composite_index_with_none_on_second_field() {
 fn test_cannot_use_composite_index_with_none_on_first_field() {
     // Filter: {numbers: {_none: {_eq: 3}}, name: {_eq: "Shahzad"}}
     // Composite index [numbers, name] cannot be used because first field has _none
-    let filter = make_filter(HashMap::from([
+    let filter = make_filter(map([
         ("numbers".to_string(), json!({"_none": {"_eq": 3}})),
         ("name".to_string(), json!({"_eq": "Shahzad"})),
     ]));
@@ -386,10 +361,7 @@ fn test_cannot_use_composite_index_with_none_on_first_field() {
 
 #[test]
 fn test_filter_to_scan_array_any() {
-    let filter = make_filter(HashMap::from([(
-        "numbers".to_string(),
-        json!({"_any": {"_eq": 30}}),
-    )]));
+    let filter = make_filter(map([("numbers".to_string(), json!({"_any": {"_eq": 30}}))]));
     let index = single_field_index("numbers");
 
     let params = filter_to_index_scan(&filter, &index, None, &[], None, 0).unwrap();
@@ -470,7 +442,7 @@ fn test_extract_json_path_nested() {
 #[test]
 fn test_can_use_index_json_path() {
     // Filter: {custom: {height: {_gt: 170}}}
-    let filter = make_filter(HashMap::from([(
+    let filter = make_filter(map([(
         "custom".to_string(),
         json!({"height": {"_gt": 170}}),
     )]));
@@ -482,7 +454,7 @@ fn test_can_use_index_json_path() {
 #[test]
 fn test_filter_to_scan_json_path_eq() {
     // Filter: {custom: {height: {_eq: 168}}}
-    let filter = make_filter(HashMap::from([(
+    let filter = make_filter(map([(
         "custom".to_string(),
         json!({"height": {"_eq": 168}}),
     )]));
@@ -511,7 +483,7 @@ fn test_filter_to_scan_json_path_eq() {
 #[test]
 fn test_filter_to_scan_json_path_range() {
     // Filter: {custom: {height: {_gt: 170}}}
-    let filter = make_filter(HashMap::from([(
+    let filter = make_filter(map([(
         "custom".to_string(),
         json!({"height": {"_gt": 170}}),
     )]));
@@ -552,7 +524,7 @@ fn test_filter_to_scan_json_path_range() {
 #[test]
 fn test_filter_to_scan_json_path_in() {
     // Filter: {custom: {status: {_in: ["active", "pending"]}}}
-    let filter = make_filter(HashMap::from([(
+    let filter = make_filter(map([(
         "custom".to_string(),
         json!({"status": {"_in": ["active", "pending"]}}),
     )]));

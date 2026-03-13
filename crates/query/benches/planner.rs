@@ -1,11 +1,15 @@
-use std::collections::HashMap;
-
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use query::mapper::Field;
 use query::{Filter, Planner, Select};
 use schema::{
     CollectionVersion, FieldDescription, FieldKind, IndexDescription, IndexedFieldDescription,
 };
+
+fn map<const N: usize>(
+    entries: [(String, serde_json::Value); N],
+) -> serde_json::Map<String, serde_json::Value> {
+    entries.into_iter().collect()
+}
 
 fn make_test_collection() -> CollectionVersion {
     CollectionVersion::new(
@@ -95,7 +99,7 @@ fn bench_planner(c: &mut Criterion) {
     });
 
     let equality_planner = Planner::new(vec![make_test_collection_with_index()]);
-    let equality_filter = Filter::from_conditions(HashMap::from([(
+    let equality_filter = Filter::from_conditions(map([(
         "name".to_string(),
         serde_json::json!({"_eq": "Alice"}),
     )]));
@@ -113,7 +117,7 @@ fn bench_planner(c: &mut Criterion) {
     });
 
     let range_planner = Planner::new(vec![make_test_collection_with_index()]);
-    let range_filter = Filter::from_conditions(HashMap::from([(
+    let range_filter = Filter::from_conditions(map([(
         "age".to_string(),
         serde_json::json!({"_gte": 18, "_lt": 65}),
     )]));

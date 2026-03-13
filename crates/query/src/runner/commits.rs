@@ -828,10 +828,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         if let JsonValue::Array(arr) = condition_value {
                             for sub_cond in arr {
                                 if let JsonValue::Object(obj) = sub_cond {
-                                    let sub_map: std::collections::HashMap<String, JsonValue> =
-                                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                                     let sub_filter =
-                                        crate::mapper::Filter::from_conditions(sub_map);
+                                        crate::mapper::Filter::from_conditions(obj.clone());
                                     if !self.json_item_matches_filter(item, &sub_filter) {
                                         return false;
                                     }
@@ -844,10 +842,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             let mut any_match = false;
                             for sub_cond in arr {
                                 if let JsonValue::Object(obj) = sub_cond {
-                                    let sub_map: std::collections::HashMap<String, JsonValue> =
-                                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                                     let sub_filter =
-                                        crate::mapper::Filter::from_conditions(sub_map);
+                                        crate::mapper::Filter::from_conditions(obj.clone());
                                     if self.json_item_matches_filter(item, &sub_filter) {
                                         any_match = true;
                                         break;
@@ -861,9 +857,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     }
                     FilterOp::Not => {
                         if let JsonValue::Object(obj) = condition_value {
-                            let sub_map: std::collections::HashMap<String, JsonValue> =
-                                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                            let sub_filter = crate::mapper::Filter::from_conditions(sub_map);
+                            let sub_filter = crate::mapper::Filter::from_conditions(obj.clone());
                             if self.json_item_matches_filter(item, &sub_filter) {
                                 return false;
                             }

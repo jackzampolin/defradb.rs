@@ -154,11 +154,7 @@ pub(super) fn parse_aggregate_target_from_json(
                 "filter" => {
                     // Convert JSON filter to a Filter
                     if let JsonValue::Object(filter_obj) = val {
-                        let conditions: HashMap<String, JsonValue> = filter_obj
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        target.filter = Some(Filter::from_conditions(conditions));
+                        target.filter = Some(Filter::from_conditions(filter_obj.clone()));
                     }
                 }
                 "limit" => {

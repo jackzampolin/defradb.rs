@@ -1,8 +1,6 @@
 //! Filter types and evaluation for query conditions
 
-use std::collections::HashMap;
-
-use serde_json::Value as JsonValue;
+use serde_json::{Map, Value as JsonValue};
 
 use super::eval::{eval_op, values_equal};
 use super::op::FilterOp;
@@ -22,7 +20,7 @@ const MAX_FILTER_DEPTH: usize = 50;
 #[derive(Debug, Clone, Default)]
 pub struct Filter {
     /// Parsed filter conditions
-    conditions: HashMap<String, JsonValue>,
+    conditions: Map<String, JsonValue>,
 }
 
 impl Filter {
@@ -32,7 +30,7 @@ impl Filter {
     }
 
     /// Create a filter from conditions map
-    pub fn from_conditions(conditions: HashMap<String, JsonValue>) -> Self {
+    pub fn from_conditions(conditions: Map<String, JsonValue>) -> Self {
         Self { conditions }
     }
 
@@ -45,7 +43,7 @@ impl Filter {
     ///
     /// Returns a new filter where both conditions must be satisfied.
     pub fn and(&self, other: Filter) -> Filter {
-        let mut combined_conditions = HashMap::new();
+        let mut combined_conditions = Map::new();
         combined_conditions.insert(
             "_and".to_string(),
             serde_json::json!([self.conditions, other.conditions]),
@@ -54,7 +52,7 @@ impl Filter {
     }
 
     /// Get a reference to the conditions map
-    pub fn conditions(&self) -> &HashMap<String, JsonValue> {
+    pub fn conditions(&self) -> &Map<String, JsonValue> {
         &self.conditions
     }
 
@@ -68,7 +66,7 @@ impl Filter {
 
     fn eval_conditions(
         &self,
-        conditions: &HashMap<String, JsonValue>,
+        conditions: &Map<String, JsonValue>,
         fields: &[Option<JsonValue>],
         mapping: &DocumentMapping,
         depth: usize,
@@ -93,10 +91,10 @@ impl Filter {
                             .as_array()
                             .ok_or_else(|| QueryError::invalid_filter("_and requires array"))?;
                         for item in arr {
-                            let sub_conditions: HashMap<String, JsonValue> =
-                                serde_json::from_value(item.clone())
-                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                            if !self.eval_conditions(&sub_conditions, fields, mapping, depth + 1)? {
+                            let sub_conditions = item.as_object().ok_or_else(|| {
+                                QueryError::invalid_filter("_and items must be objects")
+                            })?;
+                            if !self.eval_conditions(sub_conditions, fields, mapping, depth + 1)? {
                                 return Ok(false);
                             }
                         }
@@ -112,10 +110,10 @@ impl Filter {
                             .ok_or_else(|| QueryError::invalid_filter("_or requires array"))?;
                         let mut any_match = false;
                         for item in arr {
-                            let sub_conditions: HashMap<String, JsonValue> =
-                                serde_json::from_value(item.clone())
-                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                            if self.eval_conditions(&sub_conditions, fields, mapping, depth + 1)? {
+                            let sub_conditions = item.as_object().ok_or_else(|| {
+                                QueryError::invalid_filter("_or items must be objects")
+                            })?;
+                            if self.eval_conditions(sub_conditions, fields, mapping, depth + 1)? {
                                 any_match = true;
                                 break;
                             }
@@ -130,10 +128,10 @@ impl Filter {
                         if value.is_null() {
                             continue;
                         }
-                        let sub_conditions: HashMap<String, JsonValue> =
-                            serde_json::from_value(value.clone())
-                                .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                        if self.eval_conditions(&sub_conditions, fields, mapping, depth + 1)? {
+                        let sub_conditions = value
+                            .as_object()
+                            .ok_or_else(|| QueryError::invalid_filter("_not requires object"))?;
+                        if self.eval_conditions(sub_conditions, fields, mapping, depth + 1)? {
                             return Ok(false);
                         }
                         continue;
@@ -150,16 +148,15 @@ impl Filter {
                 if value.is_null() {
                     return Ok(false);
                 }
-                let alias_conditions: HashMap<String, JsonValue> =
-                    match serde_json::from_value(value.clone()) {
-                        Ok(v) => v,
-                        Err(_) => {
-                            // Non-object _alias (e.g., integer) filters everything out
-                            return Ok(false);
-                        }
-                    };
+                let alias_conditions = match value.as_object() {
+                    Some(v) => v,
+                    None => {
+                        // Non-object _alias (e.g., integer) filters everything out
+                        return Ok(false);
+                    }
+                };
 
-                if !self.eval_alias_conditions(&alias_conditions, fields, mapping)? {
+                if !self.eval_alias_conditions(alias_conditions, fields, mapping)? {
                     return Ok(false);
                 }
                 continue;

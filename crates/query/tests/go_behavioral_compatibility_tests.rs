@@ -16,7 +16,11 @@ use query::plan::{AverageNode, CountNode, ScanNode, SumNode};
 use query::planner::{Doc, PlanNode};
 use schema::{CollectionVersion, FieldDescription, FieldKind};
 use serde_json::json;
-use std::collections::HashMap;
+fn map<const N: usize>(
+    entries: [(String, serde_json::Value); N],
+) -> serde_json::Map<String, serde_json::Value> {
+    entries.into_iter().collect()
+}
 
 // =============================================================================
 // P0: AVG of Empty Set
@@ -150,7 +154,7 @@ fn make_filter_mapping() -> DocumentMapping {
 fn test_p0_null_gt_comparison_returns_false() {
     // Go DefraDB behavior: null _gt 5 returns false (not error)
     // From gt.go: if data is nil, returns false
-    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_gt": 25}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -173,7 +177,7 @@ fn test_p0_null_gt_comparison_returns_false() {
 #[test]
 fn test_p0_null_lt_comparison_returns_false() {
     // Go DefraDB behavior: null _lt 5 returns false
-    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_lt": 25}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_lt": 25}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -190,7 +194,7 @@ fn test_p0_null_lt_comparison_returns_false() {
 
 #[test]
 fn test_p0_null_gte_comparison_returns_false() {
-    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gte": 25}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_gte": 25}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -207,7 +211,7 @@ fn test_p0_null_gte_comparison_returns_false() {
 
 #[test]
 fn test_p0_null_lte_comparison_returns_false() {
-    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_lte": 25}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_lte": 25}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -225,7 +229,7 @@ fn test_p0_null_lte_comparison_returns_false() {
 #[test]
 fn test_p0_missing_field_gt_returns_false() {
     // Missing field (None) should also return false, not error
-    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_gt": 25}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -255,7 +259,7 @@ fn test_p0_missing_field_gt_returns_false() {
 fn test_p0_int_gt_float_coercion() {
     // Go DefraDB: Comparing int field against float condition works
     // From gt.go: numbers.TryUpcast handles int64 -> float64 conversion
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "age".to_string(),
         json!({"_gt": 25.5}), // float condition
     )]));
@@ -281,7 +285,7 @@ fn test_p0_int_gt_float_coercion() {
 #[test]
 fn test_p0_float_gt_int_coercion() {
     // Float field against int condition
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "score".to_string(),
         json!({"_gt": 90}), // int condition
     )]));
@@ -303,7 +307,7 @@ fn test_p0_float_gt_int_coercion() {
 #[test]
 fn test_p0_int_eq_float_coercion() {
     // Integer 30 should equal float 30.0
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "age".to_string(),
         json!({"_eq": 30.0}), // float condition
     )]));
@@ -324,8 +328,7 @@ fn test_p0_int_eq_float_coercion() {
 #[test]
 fn test_p0_int_lt_float_boundary() {
     // Boundary test: 30 < 30.1 should be true
-    let filter =
-        Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_lt": 30.1}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_lt": 30.1}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -348,8 +351,7 @@ fn test_p0_int_lt_float_boundary() {
 #[test]
 fn test_compatible_null_eq_null() {
     // Both Go and Rust: null == null is true
-    let filter =
-        Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_eq": null}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_eq": null}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -367,7 +369,7 @@ fn test_compatible_null_eq_null() {
 #[test]
 fn test_compatible_null_ne_value() {
     // Both Go and Rust: null != 25 is true
-    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_ne": 25}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_ne": 25}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -385,8 +387,7 @@ fn test_compatible_null_ne_value() {
 #[test]
 fn test_compatible_value_eq_null_false() {
     // Both Go and Rust: 30 == null is false
-    let filter =
-        Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_eq": null}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_eq": null}))]));
 
     let mapping = make_filter_mapping();
     let fields = vec![
@@ -482,7 +483,7 @@ async fn test_compatible_count_empty_returns_zero() {
 
 #[test]
 fn test_p2_string_vs_int_comparison_returns_false() {
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "name".to_string(), // string field
         json!({"_gt": 5}),  // numeric comparison
     )]));

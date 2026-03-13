@@ -651,12 +651,12 @@ impl Planner {
                 // Create a filter: _docID IN [...]
                 if doc_ids.len() == 1 {
                     // Single ID: _docID == "..."
-                    let mut conditions = HashMap::new();
+                    let mut conditions = serde_json::Map::new();
                     conditions.insert("_docID".to_string(), serde_json::json!({"_eq": doc_ids[0]}));
                     Some(Filter::from_conditions(conditions))
                 } else {
                     // Multiple IDs: _docID IN [...]
-                    let mut conditions = HashMap::new();
+                    let mut conditions = serde_json::Map::new();
                     conditions.insert("_docID".to_string(), serde_json::json!({"_in": doc_ids}));
                     Some(Filter::from_conditions(conditions))
                 }
