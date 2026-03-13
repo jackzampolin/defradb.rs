@@ -1,4 +1,8 @@
+use std::collections::HashSet;
+
 use acp::DocumentACP;
+use cid::Cid;
+use storage::corekv::Reader;
 
 use crate::Collection;
 
@@ -62,4 +66,58 @@ pub(crate) async fn resolve_push_creator(
         "Falling back to peer identity for replicator replay creator"
     );
     fallback_creator.to_string()
+}
+
+pub(crate) async fn load_push_dag_blocks<R: Reader + ?Sized>(
+    reader: &R,
+    root_cid: Cid,
+    root_data: Vec<u8>,
+) -> Vec<(Cid, Vec<u8>)> {
+    let mut ordered = Vec::new();
+    let mut visited = HashSet::new();
+    let mut stack = vec![(root_cid, root_data, false)];
+
+    while let Some((cid, data, expanded)) = stack.pop() {
+        if expanded {
+            ordered.push((cid, data));
+            continue;
+        }
+
+        if !visited.insert(cid) {
+            continue;
+        }
+
+        let linked_cids = extract_block_links(&data);
+        stack.push((cid, data, true));
+
+        for linked_cid in linked_cids.into_iter().rev() {
+            match reader.get(&linked_cid.to_bytes()).await {
+                Ok(Some(linked_data)) => stack.push((linked_cid, linked_data, false)),
+                Ok(None) => {
+                    tracing::warn!(
+                        root_cid = %root_cid,
+                        missing_cid = %linked_cid,
+                        "Replay DAG block missing from local blockstore"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        root_cid = %root_cid,
+                        missing_cid = %linked_cid,
+                        error = %error,
+                        "Failed to load replay DAG block from local blockstore"
+                    );
+                }
+            }
+        }
+    }
+
+    ordered
+}
+
+fn extract_block_links(block_data: &[u8]) -> Vec<Cid> {
+    defra_core::Block::from_dag_cbor(block_data)
+        .ok()
+        .and_then(|block| defra_core::collect_block_links(&block).ok())
+        .unwrap_or_default()
 }

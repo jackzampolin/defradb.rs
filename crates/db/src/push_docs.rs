@@ -5,7 +5,7 @@ use p2p::message::PushLogRequest;
 use storage::corekv::{IterOptions, Reader, Store};
 
 use crate::database::DB;
-use crate::push_docs_common::resolve_push_creator;
+use crate::push_docs_common::{load_push_dag_blocks, resolve_push_creator};
 
 /// Push existing documents to a replicator peer.
 ///
@@ -116,8 +116,8 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                 .await
                 .map_err(|e| format!("failed to iterate headstore: {}", e))?;
 
-            // Collect phase: pre-load all block data before spawning tasks.
-            let mut heads = Vec::new();
+            // Collect phase: pre-load all DAG blocks before spawning tasks.
+            let mut doc_blocks = Vec::new();
 
             while let Some(pair) = iter
                 .next()
@@ -141,52 +141,24 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                     _ => continue,
                 };
 
-                // Parse composite block to extract linked field block CIDs.
-                let mut field_blocks = Vec::new();
-                if let Ok(parsed) = defra_core::Block::from_dag_cbor(&block_data) {
-                    if let Some(ref links) = parsed.links {
-                        for link in links {
-                            if let Ok(Some(field_data)) =
-                                blockstore_view.get(&link.link.to_bytes()).await
-                            {
-                                field_blocks.push((link.link.to_bytes(), field_data));
-                            }
-                        }
-                    }
-                }
-
-                heads.push((head_cid.to_bytes(), block_data, field_blocks));
+                doc_blocks
+                    .extend(load_push_dag_blocks(&blockstore_view, head_cid, block_data).await);
             }
 
             iter.close()
                 .await
                 .map_err(|e| format!("headstore close error: {}", e))?;
 
-            // Send phase: build signed requests (field blocks first, composite last),
+            // Send phase: build signed requests in DAG dependency order,
             // then spawn a task to send them sequentially so ordering is preserved.
             let mut requests = Vec::new();
-            for (composite_cid, composite_data, field_blocks) in heads {
-                for (field_cid, field_data) in field_blocks {
-                    let mut field_req = PushLogRequest::new(
-                        doc_id.clone(),
-                        field_cid,
-                        collection.collection_id().to_string(),
-                        creator.clone(),
-                        field_data,
-                    );
-                    if let Err(e) = p2p::signing::sign_message(handle.keypair(), &mut field_req) {
-                        tracing::warn!(error = %e, "Failed to sign field block PushLog request");
-                        continue;
-                    }
-                    requests.push(field_req);
-                }
-
+            for (block_cid, block_data) in doc_blocks {
                 let mut request = PushLogRequest::new(
                     doc_id.clone(),
-                    composite_cid,
+                    block_cid.to_bytes(),
                     collection.collection_id().to_string(),
                     creator.clone(),
-                    composite_data,
+                    block_data,
                 );
                 if let Err(e) = p2p::signing::sign_message(handle.keypair(), &mut request) {
                     tracing::warn!(error = %e, "Failed to sign PushLog request");
@@ -417,50 +389,26 @@ pub async fn retry_doc<S: Store + 'static>(
             _ => continue,
         };
 
-        // Send the full DAG: field blocks first, then composite last.
-        if let Ok(parsed) = defra_core::Block::from_dag_cbor(&block_data) {
-            if let Some(ref links) = parsed.links {
-                for link in links {
-                    if let Ok(Some(field_data)) = block_txn.get(&link.link.to_bytes()).await {
-                        let mut field_req = PushLogRequest::new(
-                            doc_id.to_string(),
-                            link.link.to_bytes(),
-                            collection_id.to_string(),
-                            creator.clone(),
-                            field_data,
-                        );
-                        if p2p::signing::sign_message(handle.keypair(), &mut field_req).is_ok() {
-                            match handle.send_two_stream_request(peer_id, field_req).await {
-                                Ok(reply) if reply.err_message.is_some() => any_failed = true,
-                                Ok(_) => {}
-                                Err(_) => any_failed = true,
-                            }
-                        } else {
-                            any_failed = true;
-                        }
-                    }
-                }
+        for (block_cid, block_data) in load_push_dag_blocks(&*block_txn, head_cid, block_data).await
+        {
+            let mut request = PushLogRequest::new(
+                doc_id.to_string(),
+                block_cid.to_bytes(),
+                collection_id.to_string(),
+                creator.clone(),
+                block_data,
+            );
+
+            if p2p::signing::sign_message(handle.keypair(), &mut request).is_err() {
+                any_failed = true;
+                continue;
             }
-        }
 
-        // Send composite block last
-        let mut request = PushLogRequest::new(
-            doc_id.to_string(),
-            head_cid.to_bytes(),
-            collection_id.to_string(),
-            creator.clone(),
-            block_data,
-        );
-
-        if p2p::signing::sign_message(handle.keypair(), &mut request).is_err() {
-            any_failed = true;
-            continue;
-        }
-
-        match handle.send_two_stream_request(peer_id, request).await {
-            Ok(reply) if reply.err_message.is_some() => any_failed = true,
-            Ok(_) => {}
-            Err(_) => any_failed = true,
+            match handle.send_two_stream_request(peer_id, request).await {
+                Ok(reply) if reply.err_message.is_some() => any_failed = true,
+                Ok(_) => {}
+                Err(_) => any_failed = true,
+            }
         }
     }
 

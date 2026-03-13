@@ -1,5 +1,7 @@
 //! Broadcasting local updates to the network.
 
+use std::collections::HashSet;
+
 use blockstore::Blockstore;
 use cid::Cid;
 
@@ -43,7 +45,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         self.broadcaster.broadcast_update(&broadcast).await
     }
 
-    /// Push a composite block and all its linked field blocks to replicator peers.
+    /// Push a full document DAG to replicator peers.
     pub async fn push_dag_to_replicators(
         &self,
         cid: &Cid,
@@ -55,7 +57,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .await
     }
 
-    /// Push a composite block and field blocks to replicators with optional creator override.
+    /// Push a full document DAG to replicators with optional creator override.
     pub async fn push_dag_to_replicators_with_creator(
         &self,
         cid: &Cid,
@@ -77,14 +79,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return;
         }
 
-        let field_blocks = self.load_linked_blocks(block).await;
+        let dag_blocks = self.load_dag_blocks(*cid, block.to_vec()).await;
 
         tracing::debug!(
             cid = %cid,
             doc_id = %doc_id,
             collection_id = %collection_id,
             replicator_count = replicators.len(),
-            field_block_count = field_blocks.len(),
+            dag_block_count = dag_blocks.len(),
             "Pushing DAG to replicators"
         );
 
@@ -102,31 +104,18 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
             let mut requests: Vec<(Cid, PushLogRequest)> = Vec::new();
 
-            for (field_cid, field_data) in &field_blocks {
+            for (block_cid, block_data) in &dag_blocks {
                 let mut req = PushLogRequest::new(
                     doc_id.to_string(),
-                    field_cid.to_bytes(),
+                    block_cid.to_bytes(),
                     collection_id.to_string(),
                     creator.to_string(),
-                    field_data.clone(),
+                    block_data.clone(),
                 );
                 if sign_with_transport(&self.transport, &mut req).is_ok() {
-                    requests.push((*field_cid, req));
+                    requests.push((*block_cid, req));
                 }
             }
-
-            let mut composite_req = PushLogRequest::new(
-                doc_id.to_string(),
-                cid.to_bytes(),
-                collection_id.to_string(),
-                creator.to_string(),
-                block.to_vec(),
-            );
-            if let Err(e) = sign_with_transport(&self.transport, &mut composite_req) {
-                tracing::debug!(error = %e, "Failed to sign composite PushLog request");
-                continue;
-            }
-            requests.push((*cid, composite_req));
 
             // Spawn a task per peer, bounded by push_semaphore to prevent
             // resource exhaustion during document creation bursts.
@@ -238,31 +227,52 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
     }
 
-    /// Load all blocks linked from a composite block's DAG links.
-    async fn load_linked_blocks(&self, composite_bytes: &[u8]) -> Vec<(Cid, Vec<u8>)> {
-        let parsed = match defra_core::Block::from_dag_cbor(composite_bytes) {
-            Ok(b) => b,
-            Err(_) => return vec![],
-        };
+    /// Load every transitive block in a document DAG, with dependencies first.
+    async fn load_dag_blocks(&self, root_cid: Cid, root_bytes: Vec<u8>) -> Vec<(Cid, Vec<u8>)> {
+        let mut ordered = Vec::new();
+        let mut visited = HashSet::new();
+        let mut stack = vec![(root_cid, root_bytes, false)];
 
-        let links = match parsed.links {
-            Some(ref links) => links,
-            None => return vec![],
-        };
+        while let Some((cid, data, expanded)) = stack.pop() {
+            if expanded {
+                ordered.push((cid, data));
+                continue;
+            }
 
-        let mut blocks = Vec::with_capacity(links.len());
-        for link in links {
-            match self.blockstore().get(&link.link).await {
-                Ok(Some(data)) => blocks.push((link.link, data)),
-                Ok(None) => {
-                    tracing::debug!(cid = %link.link, "Linked block not found in blockstore");
-                }
-                Err(e) => {
-                    tracing::debug!(cid = %link.link, error = %e, "Failed to load linked block");
+            if !visited.insert(cid) {
+                continue;
+            }
+
+            let linked_cids = defra_core::Block::from_dag_cbor(&data)
+                .ok()
+                .and_then(|block| defra_core::collect_block_links(&block).ok())
+                .unwrap_or_default();
+
+            stack.push((cid, data, true));
+
+            for linked_cid in linked_cids.into_iter().rev() {
+                match self.blockstore().get(&linked_cid).await {
+                    Ok(Some(linked_data)) => stack.push((linked_cid, linked_data, false)),
+                    Ok(None) => {
+                        tracing::debug!(
+                            root_cid = %root_cid,
+                            linked_cid = %linked_cid,
+                            "Linked DAG block not found in blockstore"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            root_cid = %root_cid,
+                            linked_cid = %linked_cid,
+                            error = %error,
+                            "Failed to load linked DAG block"
+                        );
+                    }
                 }
             }
         }
-        blocks
+
+        ordered
     }
 
     /// Send PushLog requests to a peer in order via the transport, waiting for each to complete.

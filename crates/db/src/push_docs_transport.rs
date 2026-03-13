@@ -7,7 +7,7 @@ use p2p::P2PTransport;
 use storage::corekv::{IterOptions, Reader, Store};
 
 use crate::database::DB;
-use crate::push_docs_common::resolve_push_creator;
+use crate::push_docs_common::{load_push_dag_blocks, resolve_push_creator};
 
 /// Push existing documents to a replicator peer via a generic transport.
 ///
@@ -98,7 +98,7 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
                 .await
                 .map_err(|e| format!("failed to iterate headstore: {}", e))?;
 
-            let mut heads = Vec::new();
+            let mut doc_blocks = Vec::new();
 
             while let Some(pair) = iter
                 .next()
@@ -121,20 +121,8 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
                     _ => continue,
                 };
 
-                let mut field_blocks = Vec::new();
-                if let Ok(parsed) = defra_core::Block::from_dag_cbor(&block_data) {
-                    if let Some(ref links) = parsed.links {
-                        for link in links {
-                            if let Ok(Some(field_data)) =
-                                blockstore_view.get(&link.link.to_bytes()).await
-                            {
-                                field_blocks.push((link.link.to_bytes(), field_data));
-                            }
-                        }
-                    }
-                }
-
-                heads.push((head_cid.to_bytes(), block_data, field_blocks));
+                doc_blocks
+                    .extend(load_push_dag_blocks(&blockstore_view, head_cid, block_data).await);
             }
 
             iter.close()
@@ -142,28 +130,13 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
                 .map_err(|e| format!("headstore close error: {}", e))?;
 
             let mut requests = Vec::new();
-            for (composite_cid, composite_data, field_blocks) in heads {
-                for (field_cid, field_data) in field_blocks {
-                    let mut field_req = PushLogRequest::new(
-                        doc_id.clone(),
-                        field_cid,
-                        collection.collection_id().to_string(),
-                        creator.clone(),
-                        field_data,
-                    );
-                    if let Err(e) = p2p::signing::sign_with_transport(transport, &mut field_req) {
-                        tracing::warn!(error = %e, "Failed to sign field block PushLog request");
-                        continue;
-                    }
-                    requests.push(field_req);
-                }
-
+            for (block_cid, block_data) in doc_blocks {
                 let mut request = PushLogRequest::new(
                     doc_id.clone(),
-                    composite_cid,
+                    block_cid.to_bytes(),
                     collection.collection_id().to_string(),
                     creator.clone(),
-                    composite_data,
+                    block_data,
                 );
                 if let Err(e) = p2p::signing::sign_with_transport(transport, &mut request) {
                     tracing::warn!(error = %e, "Failed to sign PushLog request");
@@ -377,48 +350,26 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
             _ => continue,
         };
 
-        if let Ok(parsed) = defra_core::Block::from_dag_cbor(&block_data) {
-            if let Some(ref links) = parsed.links {
-                for link in links {
-                    if let Ok(Some(field_data)) = block_txn.get(&link.link.to_bytes()).await {
-                        let mut field_req = PushLogRequest::new(
-                            doc_id.to_string(),
-                            link.link.to_bytes(),
-                            collection_id.to_string(),
-                            creator.clone(),
-                            field_data,
-                        );
-                        if p2p::signing::sign_with_transport(transport, &mut field_req).is_ok() {
-                            match transport.send_two_stream_request(peer_id, field_req).await {
-                                Ok(reply) if reply.err_message.is_some() => any_failed = true,
-                                Ok(_) => {}
-                                Err(_) => any_failed = true,
-                            }
-                        } else {
-                            any_failed = true;
-                        }
-                    }
-                }
+        for (block_cid, block_data) in load_push_dag_blocks(&*block_txn, head_cid, block_data).await
+        {
+            let mut request = PushLogRequest::new(
+                doc_id.to_string(),
+                block_cid.to_bytes(),
+                collection_id.to_string(),
+                creator.clone(),
+                block_data,
+            );
+
+            if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
+                any_failed = true;
+                continue;
             }
-        }
 
-        let mut request = PushLogRequest::new(
-            doc_id.to_string(),
-            head_cid.to_bytes(),
-            collection_id.to_string(),
-            creator.clone(),
-            block_data,
-        );
-
-        if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
-            any_failed = true;
-            continue;
-        }
-
-        match transport.send_two_stream_request(peer_id, request).await {
-            Ok(reply) if reply.err_message.is_some() => any_failed = true,
-            Ok(_) => {}
-            Err(_) => any_failed = true,
+            match transport.send_two_stream_request(peer_id, request).await {
+                Ok(reply) if reply.err_message.is_some() => any_failed = true,
+                Ok(_) => {}
+                Err(_) => any_failed = true,
+            }
         }
     }
 
