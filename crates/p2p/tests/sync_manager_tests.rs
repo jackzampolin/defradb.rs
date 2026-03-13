@@ -6,6 +6,7 @@ use std::time::Duration;
 use blockstore::{Blockstore, DefraBlockstore};
 use cid::multihash::{Code, MultihashDigest};
 use cid::Cid;
+use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
 use storage::backends::MemoryStore;
 
 use p2p::error::Error;
@@ -37,6 +38,39 @@ fn create_test_broadcast(cid: &Cid) -> PushLogBroadcast {
         "creator1".to_string(),
         BLOCK_DATA.to_vec(),
     )
+}
+
+fn create_lww_block(field_name: &str) -> (Cid, Vec<u8>) {
+    let block = Block::new(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            doc_id: b"doc123".to_vec(),
+            field_name: field_name.to_string(),
+            priority: 1,
+            schema_version_id: "schema1".to_string(),
+            data: b"value".to_vec(),
+        }),
+        vec![],
+        vec![],
+    );
+    let bytes = block.to_dag_cbor().expect("encode lww block");
+    let cid = block.generate_cid().expect("generate lww cid");
+    (cid, bytes)
+}
+
+fn create_composite_block(links: Vec<DAGLink>) -> (Cid, Vec<u8>) {
+    let block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            doc_id: b"doc123".to_vec(),
+            schema_version_id: "schema1".to_string(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        links,
+    );
+    let bytes = block.to_dag_cbor().expect("encode composite block");
+    let cid = block.generate_cid().expect("generate composite cid");
+    (cid, bytes)
 }
 
 #[tokio::test]
@@ -371,6 +405,96 @@ async fn test_pending_dag_tracking() {
 
     // No pending dags since block was complete
     assert_eq!(manager.pending_dag_count(), 0);
+}
+
+#[tokio::test]
+async fn test_pending_dag_completes_when_missing_block_arrives_via_pushlog() {
+    let store = Arc::new(MemoryStore::new());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let (manager, mut events) =
+        SyncManager::new(blockstore.clone(), test_peer_state(), SyncConfig::default());
+
+    let (field_cid, field_block) = create_lww_block("name");
+    let (composite_cid, composite_block) =
+        create_composite_block(vec![DAGLink::new("name", field_cid)]);
+
+    let composite_msg = PushLogBroadcast::new(
+        "doc123".to_string(),
+        composite_cid.to_bytes(),
+        "collection1".to_string(),
+        "creator1".to_string(),
+        composite_block,
+    );
+
+    manager
+        .process_pushlog(&composite_msg, Some("peer-1"), false, None)
+        .await
+        .unwrap();
+
+    match events.try_recv().expect("pending DAG event") {
+        SyncEvent::DagNeedsFetch {
+            root_cid, missing, ..
+        } => {
+            assert_eq!(root_cid, composite_cid);
+            assert_eq!(missing, vec![field_cid]);
+        }
+        other => panic!("expected DagNeedsFetch event, got {:?}", other),
+    }
+    assert_eq!(
+        manager.pending_dag_count(),
+        1,
+        "composite should be pending"
+    );
+
+    let field_msg = PushLogBroadcast::new(
+        "doc123".to_string(),
+        field_cid.to_bytes(),
+        "collection1".to_string(),
+        "creator1".to_string(),
+        field_block,
+    );
+
+    manager
+        .process_pushlog(&field_msg, Some("peer-1"), false, None)
+        .await
+        .unwrap();
+
+    let mut saw_field = false;
+    let mut saw_root_ready = false;
+    for _ in 0..2 {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("expected pending DAG retry event")
+            .expect("event channel closed");
+        match event {
+            SyncEvent::BlockReceived { cid, .. } if cid == field_cid => {
+                saw_field = true;
+            }
+            SyncEvent::DagReady { root_cid, .. } if root_cid == composite_cid => {
+                saw_root_ready = true;
+            }
+            other => panic!("unexpected event after field arrival: {:?}", other),
+        }
+    }
+
+    assert!(saw_field, "field block should still be processed normally");
+    assert!(
+        saw_root_ready,
+        "pending composite should become ready when its missing field arrives via PushLog"
+    );
+    assert_eq!(
+        manager.pending_dag_count(),
+        0,
+        "pending DAG should be cleared"
+    );
+    assert!(
+        blockstore.has(&field_cid).await.unwrap(),
+        "field block should be stored"
+    );
+    assert!(
+        blockstore.has(&composite_cid).await.unwrap(),
+        "composite block should remain stored"
+    );
 }
 
 #[tokio::test]

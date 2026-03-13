@@ -260,6 +260,27 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 );
                 return Err(Error::ChannelSend);
             }
+
+            match self.retry_pending_dags_waiting_on(cid).await {
+                Ok(completed_roots) => {
+                    if !completed_roots.is_empty() {
+                        tracing::info!(
+                            received_cid = %cid,
+                            completed_count = completed_roots.len(),
+                            completed_roots = ?completed_roots,
+                            "Late PushLog block completed pending DAGs"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        received_cid = %cid,
+                        error = %e,
+                        "Failed to retry pending DAGs after PushLog block arrival"
+                    );
+                    return Err(e);
+                }
+            }
         } else {
             // DAG has missing blocks - track as pending and request Bitswap fetch
             tracing::info!(

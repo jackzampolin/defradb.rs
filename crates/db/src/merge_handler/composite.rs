@@ -731,6 +731,19 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     );
                     bus.publish(Message::update(update));
 
+                    if !from_collection {
+                        let mc = MergeCompleteData {
+                            doc_id: doc_id_str.clone(),
+                            cid: *cid,
+                            collection_id: metadata
+                                .collection_id
+                                .unwrap_or(&payload.schema_version_id)
+                                .to_string(),
+                            by_peer: metadata.sender_peer.unwrap_or("").to_string(),
+                        };
+                        bus.publish(Message::merge_complete(mc));
+                    }
+
                     // For branchable collections, emit a collection-level merge_complete
                     // event. Uses composite CID to match the sender's Update event CID.
                     if is_branchable {
@@ -1318,6 +1331,21 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     pe.push(PendingMergeEvent {
                         message: Message::update(update),
                     });
+
+                    if !from_collection {
+                        let mc = MergeCompleteData {
+                            doc_id: doc_id_str.clone(),
+                            cid: *cid,
+                            collection_id: metadata
+                                .collection_id
+                                .unwrap_or(&payload.schema_version_id)
+                                .to_string(),
+                            by_peer: metadata.sender_peer.unwrap_or("").to_string(),
+                        };
+                        pe.push(PendingMergeEvent {
+                            message: Message::merge_complete(mc),
+                        });
+                    }
 
                     if is_branchable {
                         let by_peer = metadata.sender_peer.unwrap_or("").to_string();

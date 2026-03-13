@@ -577,14 +577,18 @@ impl Node {
                 };
 
                 let libp2p_transport = p2p::Libp2pTransport::new(p2p_handle.clone());
+                let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
+                    Arc::new(db::DbHeadProvider::new(database.clone()));
 
                 let (mut coordinator, sync_events) =
-                    p2p::sync::SyncCoordinator::with_collection_store(
+                    p2p::sync::SyncCoordinator::with_head_provider(
                         libp2p_transport,
                         sync_blockstore,
                         p2p::sync::SyncConfig::default(),
                         access_mode,
+                        Arc::new(p2p::ReplicatorRegistry::new()),
                         collection_store,
+                        head_provider,
                     )
                     .await
                     .map_err(Error::P2P)?;
