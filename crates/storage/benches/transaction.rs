@@ -18,6 +18,8 @@ struct BenchStore {
     pending_key: Vec<u8>,
     pending_value: Vec<u8>,
     scan_prefix: Vec<u8>,
+    scan_large_prefix: Vec<u8>,
+    keys_only_prefix: Vec<u8>,
     random_keys: Vec<Vec<u8>>,
     set_counter: AtomicUsize,
 }
@@ -33,6 +35,8 @@ impl BenchStore {
         let pending_key = b"pending:hot".to_vec();
         let pending_value = b"pending-value".to_vec();
         let scan_prefix = b"scan:".to_vec();
+        let scan_large_prefix = b"scan_large:".to_vec();
+        let keys_only_prefix = b"scan_keys:".to_vec();
         let random_keys: Vec<Vec<u8>> = (0..1000)
             .map(|index| format!("rand:{:04}", (index * 37) % 1000).into_bytes())
             .collect();
@@ -48,6 +52,22 @@ impl BenchStore {
                 )
                 .await
                 .unwrap();
+            }
+
+            for index in 0..1000 {
+                txn.set(
+                    format!("scan_large:{index:04}").as_bytes(),
+                    format!("value-large-{index:04}").as_bytes(),
+                )
+                .await
+                .unwrap();
+            }
+
+            for index in 0..1000 {
+                let value = vec![b'x'; 1024];
+                txn.set(format!("scan_keys:{index:04}").as_bytes(), &value)
+                    .await
+                    .unwrap();
             }
 
             for key in &random_keys {
@@ -73,6 +93,8 @@ impl BenchStore {
             pending_key,
             pending_value,
             scan_prefix,
+            scan_large_prefix,
+            keys_only_prefix,
             random_keys,
             set_counter: AtomicUsize::new(0),
         }
@@ -169,6 +191,56 @@ fn bench_storage(c: &mut Criterion) {
                         if scanned == 100 {
                             break;
                         }
+                    }
+                    black_box(scanned);
+                    iter.close().await.unwrap();
+                    txn.discard();
+                });
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function(BenchmarkId::from_parameter("sequential_scan_1000"), |b| {
+        b.iter_batched(
+            || runtime().block_on(async { fixture.store.new_txn(true).await.unwrap() }),
+            |txn| {
+                runtime().block_on(async {
+                    let mut iter = txn
+                        .iterator(IterOptions::new().with_prefix(fixture.scan_large_prefix.clone()))
+                        .await
+                        .unwrap();
+                    let mut scanned = 0usize;
+                    while let Some(entry) = iter.next().await.unwrap() {
+                        black_box(entry);
+                        scanned += 1;
+                    }
+                    black_box(scanned);
+                    iter.close().await.unwrap();
+                    txn.discard();
+                });
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function(BenchmarkId::from_parameter("keys_only_scan_1000"), |b| {
+        b.iter_batched(
+            || runtime().block_on(async { fixture.store.new_txn(true).await.unwrap() }),
+            |txn| {
+                runtime().block_on(async {
+                    let mut iter = txn
+                        .iterator(
+                            IterOptions::new()
+                                .with_prefix(fixture.keys_only_prefix.clone())
+                                .with_keys_only(true),
+                        )
+                        .await
+                        .unwrap();
+                    let mut scanned = 0usize;
+                    while let Some(entry) = iter.next().await.unwrap() {
+                        black_box(entry);
+                        scanned += 1;
                     }
                     black_box(scanned);
                     iter.close().await.unwrap();

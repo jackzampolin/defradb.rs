@@ -189,6 +189,7 @@ impl Reader for RedbTxn {
 
         // Compute the effective range bounds for efficient range queries
         let (start_bound, end_bound) = compute_range_bounds(&opts);
+        let keys_only = opts.keys_only();
 
         // Helper to check prefix
         let matches_prefix =
@@ -202,9 +203,16 @@ impl Reader for RedbTxn {
                 let mut items = Vec::new();
                 for result in range {
                     let (key, value) = result?;
-                    let k = key.value().to_vec();
-                    if matches_prefix(&k) {
-                        items.push((k, value.value().to_vec()));
+                    let key_bytes = key.value();
+                    if matches_prefix(key_bytes) {
+                        items.push((
+                            key_bytes.to_vec(),
+                            if keys_only {
+                                Vec::new()
+                            } else {
+                                value.value().to_vec()
+                            },
+                        ));
                     }
                 }
                 items
@@ -221,7 +229,13 @@ impl Reader for RedbTxn {
             pending
                 .range((start_bound, end_bound))
                 .filter(|(k, _)| matches_prefix(k))
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.as_ref()
+                            .map(|value| if keys_only { Vec::new() } else { value.clone() }),
+                    )
+                })
                 .collect()
         };
 

@@ -129,6 +129,7 @@ impl Reader for FjallTxn {
         }
 
         let (start_bound, end_bound) = compute_range_bounds(&opts);
+        let keys_only = opts.keys_only();
 
         let matches_prefix =
             |key: &[u8]| -> bool { opts.prefix().is_none_or(|p| key.starts_with(p)) };
@@ -150,9 +151,12 @@ impl Reader for FjallTxn {
             for guard in iter {
                 match guard.into_inner() {
                     Ok((k, v)) => {
-                        let key_bytes = k.to_vec();
-                        if matches_prefix(&key_bytes) {
-                            items.push((key_bytes, v.to_vec()));
+                        let key_bytes = k.as_ref();
+                        if matches_prefix(key_bytes) {
+                            items.push((
+                                key_bytes.to_vec(),
+                                if keys_only { Vec::new() } else { v.to_vec() },
+                            ));
                         }
                     }
                     Err(e) => {
@@ -169,7 +173,13 @@ impl Reader for FjallTxn {
         let pending_items: Vec<(Vec<u8>, Option<Vec<u8>>)> = pending
             .range((start_bound, end_bound))
             .filter(|(k, _)| matches_prefix(k))
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    v.as_ref()
+                        .map(|value| if keys_only { Vec::new() } else { value.clone() }),
+                )
+            })
             .collect();
 
         Ok(Box::new(MergingIterator::new(
