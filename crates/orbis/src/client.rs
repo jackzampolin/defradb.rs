@@ -338,8 +338,22 @@ impl RemoteSigner for OrbisClient {
         data: &[u8],
         authorization: Option<&SigningAuthorization>,
     ) -> Result<Vec<u8>, String> {
-        self.runtime
-            .block_on(self.sign_async(data, authorization.cloned()))
+        let authorization = authorization.cloned();
+
+        if tokio::runtime::Handle::try_current().is_ok() {
+            // `sign_sync` can be called while Defra is already executing on a Tokio
+            // runtime thread (for example, the HTTP GraphQL path). Running
+            // `Runtime::block_on` directly there panics, so hop to a plain OS thread
+            // and use the dedicated Orbis runtime from that synchronous context.
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| self.runtime.block_on(self.sign_async(data, authorization)))
+                    .join()
+                    .map_err(|_| "Orbis sign_sync worker thread panicked".to_string())?
+            })
+        } else {
+            self.runtime.block_on(self.sign_async(data, authorization))
+        }
     }
 }
 
