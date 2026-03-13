@@ -193,7 +193,7 @@ impl<'a> BlockMetadata<'a> {
             .as_ref()
             .filter(|authorization| authorization.collection_id == collection_id)
             .and_then(|authorization| {
-                (self.creator == Some(authorization.authorizer_did.as_str()))
+                (self.effective_creator() == Some(authorization.authorizer_did.as_str()))
                     .then_some(authorization.authorizer_did.as_str())
             })
     }
@@ -336,9 +336,27 @@ mod tests {
     }
 
     #[test]
-    fn explicit_replay_authorizer_uses_creator_metadata() {
-        let mut meta = BlockMetadata::normal("doc1", "col1", "did:key:OWNER", None, false);
-        meta.verified_creator = Some("did:key:NODE_SIGNER".to_string());
+    fn explicit_replay_authorizer_falls_back_to_self_reported_creator() {
+        let meta = BlockMetadata::normal("doc1", "col1", "did:key:OWNER", None, false)
+            .with_explicit_replay_authorization(Some(ExplicitReplayAuthorization {
+                source_peer_id: "peer-a".to_string(),
+                target_peer_id: "peer-b".to_string(),
+                collection_id: "col1".to_string(),
+                authorizer_did: "did:key:OWNER".to_string(),
+                expires_at: 1,
+            }));
+
+        assert_eq!(
+            meta.explicit_replay_authorizer_for("col1"),
+            Some("did:key:OWNER")
+        );
+        assert!(meta.allows_explicit_replay_for("col1"));
+    }
+
+    #[test]
+    fn explicit_replay_authorizer_prefers_verified_creator() {
+        let mut meta = BlockMetadata::normal("doc1", "col1", "12D3KooWPEER", None, false);
+        meta.verified_creator = Some("did:key:OWNER".to_string());
         meta = meta.with_explicit_replay_authorization(Some(ExplicitReplayAuthorization {
             source_peer_id: "peer-a".to_string(),
             target_peer_id: "peer-b".to_string(),
