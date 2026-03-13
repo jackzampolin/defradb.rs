@@ -218,18 +218,22 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
             return Ok(());
         }
 
-        // Fallback: check storage
-        if self.has(cid).await? {
-            return Ok(());
-        }
-
         let mut txn = self.store.new_txn(false).await?;
-        {
+        let already_exists = {
             let bs_txn = txn
                 .as_any_mut()
                 .downcast_mut::<BlockstoreTxn>()
                 .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-            bs_txn.put_block(cid, data).await?;
+            if bs_txn.has_block(cid).await? {
+                true
+            } else {
+                bs_txn.put_block(cid, data).await?;
+                false
+            }
+        };
+        if already_exists {
+            txn.discard();
+            return Ok(());
         }
         txn.commit().await?;
 
@@ -243,6 +247,18 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
             return Ok(());
         }
 
+        let blocks_to_write: Vec<_> = {
+            let cache = self.cache.lock();
+            blocks
+                .iter()
+                .copied()
+                .filter(|(cid, _)| !cache.contains(cid))
+                .collect()
+        };
+        if blocks_to_write.is_empty() {
+            return Ok(());
+        }
+
         let mut txn = self.store.new_txn(false).await?;
         let mut written: Vec<(Cid, Vec<u8>)> = Vec::new();
         {
@@ -250,16 +266,12 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
                 .as_any_mut()
                 .downcast_mut::<BlockstoreTxn>()
                 .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-            for (cid, data) in blocks {
-                // Check cache first, then storage
-                if self.cache.lock().contains(cid) {
-                    continue;
-                }
+            for (cid, data) in blocks_to_write {
                 if bs_txn.has_block(cid).await? {
                     continue;
                 }
                 bs_txn.put_block(cid, data).await?;
-                written.push((**cid, data.to_vec()));
+                written.push((*cid, data.to_vec()));
             }
         }
         txn.commit().await?;
