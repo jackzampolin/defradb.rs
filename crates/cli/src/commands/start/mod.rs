@@ -27,6 +27,10 @@ const DEV_MODE_BANNER: &str = r#"
 /// Arguments for the start command
 #[derive(Args, Debug)]
 pub struct StartArgs {
+    /// Emit a Chrome trace file for profiling
+    #[arg(long)]
+    pub profile: bool,
+
     /// List of peers to connect to
     #[arg(long, value_delimiter = ',')]
     pub peers: Option<Vec<String>>,

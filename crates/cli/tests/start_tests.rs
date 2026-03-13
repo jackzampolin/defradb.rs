@@ -6,6 +6,7 @@ use cli::error::Error;
 
 fn default_start_args() -> StartArgs {
     StartArgs {
+        profile: false,
         peers: None,
         max_txn_retries: None,
         store: None,
@@ -89,6 +90,7 @@ fn test_apply_to_config_redb_store_succeeds() {
 fn test_apply_to_config_all_flags() {
     let mut config = Config::default();
     let args = StartArgs {
+        profile: false,
         peers: Some(vec!["peer1".to_string(), "peer2".to_string()]),
         max_txn_retries: Some(10),
         store: Some("memory".to_string()),

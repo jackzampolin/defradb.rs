@@ -1,6 +1,7 @@
 //! Filter types and evaluation for query conditions
 
 use serde_json::{Map, Value as JsonValue};
+use tracing::instrument;
 
 use super::eval::{eval_op, values_equal};
 use super::op::FilterOp;
@@ -57,6 +58,7 @@ impl Filter {
     }
 
     /// Evaluate the filter against document fields
+    #[instrument(level = "trace", skip(self, fields, mapping))]
     pub fn matches(&self, fields: &[Option<JsonValue>], mapping: &DocumentMapping) -> Result<bool> {
         if self.conditions.is_empty() {
             return Ok(true);

@@ -48,6 +48,8 @@ pub mod nac_check;
 pub mod node;
 pub mod p2p;
 mod policy_yaml;
+#[cfg(feature = "profiling")]
+pub mod profiling;
 pub mod query;
 pub mod runtime;
 pub mod schema;

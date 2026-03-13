@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use tracing::error;
 
-use cli::cli::Cli;
+use cli::cli::{Cli, Command};
 use cli::config::Config;
 use cli::error::Result;
 
@@ -31,8 +31,14 @@ async fn run() -> Result<()> {
     let config = Config::load(&cli)?;
 
     // Initialize logging based on config
-    cli::logging::init(&config)?;
+    let logging = cli::logging::init(&config, should_profile(&cli))?;
 
     // Execute the command
-    cli.execute(config).await
+    let result = cli.execute(config).await;
+    logging.finish();
+    result
+}
+
+fn should_profile(cli: &Cli) -> bool {
+    matches!(&cli.command, Command::Start(args) if args.profile)
 }

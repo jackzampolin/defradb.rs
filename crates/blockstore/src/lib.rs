@@ -58,6 +58,7 @@ use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::blockstore::{BlockstoreKey, ToMergeIndexKey};
 use storage::stores::blockstore::BlockstoreTxn;
 use storage::stores::Blockstore as InternalBlockstore;
+use tracing::instrument;
 
 /// Default number of entries in the block cache (matches Go's 1M entry LRU).
 const DEFAULT_BLOCK_CACHE_SIZE: usize = 1_000_000;
@@ -180,6 +181,7 @@ impl<S: Store + 'static> DefraBlockstore<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
+    #[instrument(level = "trace", skip(self))]
     async fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>> {
         // Check LRU cache first (skip cache when hash verification is enabled,
         // since cached data may not have been verified yet)
@@ -212,6 +214,7 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
         Ok(result)
     }
 
+    #[instrument(level = "trace", skip(self))]
     async fn put(&self, cid: &Cid, data: &[u8]) -> Result<()> {
         // Check cache for existence (avoids storage read for recently-written blocks)
         if self.cache.lock().contains(cid) {
