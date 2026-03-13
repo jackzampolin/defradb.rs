@@ -48,6 +48,33 @@ impl PlanNode for GroupByNode {
         let mut ordered_keys: Vec<String> = Vec::new();
         let mut key_set: HashSet<String> = HashSet::new();
 
+        if !has_simple_group_order {
+            let mut group_map: HashMap<String, usize> = HashMap::with_capacity(all_docs.len());
+            self.groups.reserve(all_docs.len());
+
+            for doc in all_docs {
+                let key = self.generate_key(&doc)?;
+
+                if let Some(&idx) = group_map.get(&key) {
+                    self.groups[idx].1.docs.push(doc);
+                    continue;
+                }
+
+                let idx = self.groups.len();
+                let representative = doc.deep_clone();
+                group_map.insert(key.clone(), idx);
+                self.groups.push((
+                    key,
+                    DocumentGroup {
+                        docs: vec![doc],
+                        representative,
+                    },
+                ));
+            }
+
+            return Ok(());
+        }
+
         if has_simple_group_order {
             let order = group_order.as_ref().unwrap();
             if !all_docs.is_empty() {
@@ -85,16 +112,6 @@ impl PlanNode for GroupByNode {
                     if key_set.insert(child_key.clone()) {
                         ordered_keys.push(child_key);
                     }
-                }
-            }
-        }
-
-        // Fallback: if no interleaving was done, use scan order
-        if ordered_keys.is_empty() {
-            for doc in &all_docs {
-                let key = self.generate_key(doc)?;
-                if key_set.insert(key.clone()) {
-                    ordered_keys.push(key);
                 }
             }
         }
