@@ -217,7 +217,7 @@ fn key_type_from_identity_bytes(name: &str, key_bytes: &[u8]) -> Result<crypto::
         32 => Ok(crypto::KeyType::Secp256k1),
         64 => Ok(crypto::KeyType::Ed25519),
         len => Err(Error::InvalidIdentity(format!(
-            "key '{}' has invalid length: {} bytes (expected 32 for secp256k1 or 64 for ed25519)",
+            "invalid key length for '{}': {} bytes (expected 32 for secp256k1 or 64 for ed25519)",
             name, len
         ))),
     }
