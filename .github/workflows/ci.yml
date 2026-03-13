@@ -140,9 +140,16 @@ jobs:
         run: >-
           cargo test -p integration-test
           --test basic --test query --test acp --test nac
-          --test p2p --test encryption --test identity
+          --test encryption --test identity
           --test backup --test fts
           -- ::rust_
+
+      - name: Run rust P2P integration tests
+        if: matrix.suite == 'rust'
+        run: >-
+          cargo test -p integration-test
+          --test p2p
+          -- --test-threads=1 ::rust_
 
       - name: Run go-compat integration tests
         if: matrix.suite == 'go-compat'
