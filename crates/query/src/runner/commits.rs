@@ -10,7 +10,6 @@
 use document::Document;
 use identity::Did;
 use serde_json::Value as JsonValue;
-use std::collections::HashMap;
 
 use crate::error::Result;
 use crate::mapper::{Aggregate, AggregateType, Requestable, Select};
@@ -213,7 +212,7 @@ fn extract_commits_height_range(filter: &crate::mapper::Filter) -> HeightRangeEx
 }
 
 fn extract_commits_height_range_from_conditions(
-    conditions: &HashMap<String, JsonValue>,
+    conditions: &serde_json::Map<String, JsonValue>,
 ) -> HeightRangeExtraction {
     let mut extracted = HeightRangeExtraction::None;
 
@@ -233,7 +232,7 @@ fn extract_commits_height_range_from_conditions(
                 };
                 for item in items {
                     let Ok(sub_conditions) =
-                        serde_json::from_value::<HashMap<String, JsonValue>>(item.clone())
+                        serde_json::from_value::<serde_json::Map<String, JsonValue>>(item.clone())
                     else {
                         return HeightRangeExtraction::Unsupported;
                     };
@@ -257,16 +256,14 @@ fn extract_commits_height_range_from_conditions(
 fn logical_value_contains_top_level_height(value: &JsonValue) -> bool {
     match value {
         JsonValue::Array(items) => items.iter().any(logical_value_contains_top_level_height),
-        JsonValue::Object(obj) => logical_conditions_contain_top_level_height(
-            &obj.iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-        ),
+        JsonValue::Object(obj) => logical_conditions_contain_top_level_height(obj),
         _ => false,
     }
 }
 
-fn logical_conditions_contain_top_level_height(conditions: &HashMap<String, JsonValue>) -> bool {
+fn logical_conditions_contain_top_level_height(
+    conditions: &serde_json::Map<String, JsonValue>,
+) -> bool {
     conditions.iter().any(|(field_name, value)| {
         field_name == "height"
             || matches!(
