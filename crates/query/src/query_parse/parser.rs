@@ -708,7 +708,7 @@ pub(super) fn parse_selection_set(
                 let field_name = field.name.clone();
                 let alias = field.alias.clone();
 
-                // Check if this is a _bm25 field
+                // Check if this is a BM25 full-text score field
                 if field_name == "BM25" {
                     let fts = parse_bm25_field(field, variables)?;
                     let fts = if let Some(ref a) = alias {

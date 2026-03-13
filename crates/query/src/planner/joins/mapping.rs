@@ -71,6 +71,18 @@ impl Planner {
             }
         }
 
+        // Copy BM25 virtual fields from render_mapping.
+        // These are not in the schema, so they need dedicated slots in the join mapping.
+        for render_key in &render_mapping.render_keys {
+            if let Some(field_name) = render_mapping.try_find_name_from_index(render_key.index) {
+                if field_name == "BM25" {
+                    let new_index = mapping.next_index();
+                    mapping.add(new_index, "BM25");
+                    mapping.add_render_key(new_index, &render_key.key);
+                }
+            }
+        }
+
         // Copy _deleted virtual field from render_mapping if present.
         // _deleted is not in the schema, so it must be explicitly added to the scan mapping.
         if let Some(deleted_render_idx) = render_mapping.first_index_of_name("_deleted") {

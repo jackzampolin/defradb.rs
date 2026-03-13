@@ -58,7 +58,7 @@ impl Planner {
         Ok(plan)
     }
 
-    /// Add BM25Node(s) to the plan for each _bm25 field in the select.
+    /// Add BM25Node(s) to the plan for each BM25 field in the select.
     ///
     /// Scores are pre-computed from the inverted index and injected here.
     pub(super) fn add_bm25_nodes(
@@ -66,6 +66,7 @@ impl Planner {
         mut plan: Box<dyn PlanNode>,
         select: &Select,
         mapping: &DocumentMapping,
+        scope_path: &[String],
     ) -> Result<Box<dyn PlanNode>> {
         for field in &select.fields {
             if let Requestable::FullTextSearch(fts) = field {
@@ -78,11 +79,8 @@ impl Planner {
                         ))
                     })?;
 
-                let precomputed = self
-                    .fts_scores
-                    .get(fts.output_name())
-                    .cloned()
-                    .unwrap_or_default();
+                let score_key = Planner::fts_score_key(scope_path, fts.output_name());
+                let precomputed = self.fts_scores.get(&score_key).cloned().unwrap_or_default();
 
                 plan = Box::new(BM25Node::new(
                     plan,

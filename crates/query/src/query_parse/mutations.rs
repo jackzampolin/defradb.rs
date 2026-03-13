@@ -312,9 +312,9 @@ fn parse_document_input(
     Ok(fields)
 }
 
-/// Parse a _bm25 field from a GraphQL query.
+/// Parse a BM25 field from a GraphQL query.
 ///
-/// Format: `_bm25(query: "search terms", fields: ["title", "body"])`
+/// Format: `BM25(query: "search terms", fields: ["title", "body"])`
 pub(super) fn parse_bm25_field(
     field: &Field<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
@@ -345,7 +345,7 @@ pub(super) fn parse_bm25_field(
                             .to_string()
                     }
                     _ => {
-                        return Err(QueryError::parse("_bm25 query argument must be a string"));
+                        return Err(QueryError::parse("BM25 query argument must be a string"));
                     }
                 });
             }
@@ -361,7 +361,7 @@ pub(super) fn parse_bm25_field(
                         .collect(),
                     _ => {
                         return Err(QueryError::parse(
-                            "_bm25 fields argument must be a list of strings",
+                            "BM25 fields argument must be a list of strings",
                         ));
                     }
                 };
@@ -371,11 +371,11 @@ pub(super) fn parse_bm25_field(
     }
 
     let query_str =
-        query_str.ok_or_else(|| QueryError::parse("_bm25 requires a 'query' argument"))?;
+        query_str.ok_or_else(|| QueryError::parse("BM25 requires a 'query' argument"))?;
 
     if fields.is_empty() {
         return Err(QueryError::parse(
-            "_bm25 requires a non-empty 'fields' argument",
+            "BM25 requires a non-empty 'fields' argument",
         ));
     }
 

@@ -64,6 +64,7 @@ impl Planner {
         mut mapping: DocumentMapping,
         depth: usize,
         parent_filter: Option<&crate::mapper::Filter>,
+        scope_path: &[String],
     ) -> JoinResult {
         // Internal keys for aggregate relation data when there's a collision with a relation selection.
         let mut aggregate_internal_keys: HashMap<String, (String, String)> = HashMap::new();
@@ -678,6 +679,9 @@ impl Planner {
             // Validate that all explicitly-filtered fields exist in the render mapping.
             if let Some(ref explicit_filter) = nested_select.filter {
                 for field in explicit_filter.referenced_fields() {
+                    if field.starts_with('_') {
+                        continue;
+                    }
                     if !child_render_mapping.has_field(&field) {
                         return Err(QueryError::filter_field_not_selected(
                             &field,
@@ -703,6 +707,11 @@ impl Planner {
                 child_scan_mapping.clone(),
                 depth + 1,
                 None, // Nested relation filters handled differently
+                &{
+                    let mut child_scope_path = scope_path.to_vec();
+                    child_scope_path.push(output_name.to_string());
+                    child_scope_path
+                },
             )?;
             child_plan = nested_joins_result.0;
             // Merge nested aggregate internal keys into our collection
@@ -939,6 +948,15 @@ impl Planner {
                     }
                 }
             }
+
+            let mut child_scope_path = scope_path.to_vec();
+            child_scope_path.push(output_name.to_string());
+            child_plan = self.add_bm25_nodes(
+                child_plan,
+                nested_select,
+                &child_scan_mapping,
+                &child_scope_path,
+            )?;
 
             // Now wrap with SelectNode if there's a filter (deferred from earlier).
             // At this point, relation sub-joins are in place so the filter can evaluate

@@ -32,7 +32,9 @@ impl TypeJoinMany {
             children.sort_by(|a, b| {
                 for condition in &order_by.conditions {
                     let field_name = condition.fields.first().map(|s| s.as_str()).unwrap_or("");
-                    let field_idx = child_mapping.first_index_of_name(field_name);
+                    let field_idx = child_mapping
+                        .try_find_index_from_render_key(field_name)
+                        .or_else(|| child_mapping.first_index_of_name(field_name));
 
                     if let Some(idx) = field_idx {
                         let val_a = a.get(idx);
@@ -464,9 +466,23 @@ impl TypeJoinMany {
                 all_children.sort_by(|a, b| {
                     for condition in &order_by.conditions {
                         let field_name = condition.fields.first().map(|s| s.as_str()).unwrap_or("");
-                        let field_idx = child_mapping.first_index_of_name(field_name);
+                        let field_idx = child_mapping
+                            .try_find_index_from_render_key(field_name)
+                            .or_else(|| child_mapping.first_index_of_name(field_name));
                         if let Some(idx) = field_idx {
-                            let cmp = compare_json_values(a.get(idx), b.get(idx));
+                            let val_a = a.get(idx);
+                            let val_b = b.get(idx);
+                            let (resolved_a, resolved_b) = if condition.fields.len() > 1 {
+                                let nested_path = &condition.fields[1..];
+                                (
+                                    resolve_nested_field(val_a, nested_path),
+                                    resolve_nested_field(val_b, nested_path),
+                                )
+                            } else {
+                                (val_a.cloned(), val_b.cloned())
+                            };
+
+                            let cmp = compare_json_values(resolved_a.as_ref(), resolved_b.as_ref());
                             let cmp = match condition.direction {
                                 OrderDirection::Asc => cmp,
                                 OrderDirection::Desc => cmp.reverse(),

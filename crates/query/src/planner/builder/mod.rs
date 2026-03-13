@@ -79,6 +79,14 @@ pub struct Planner {
 }
 
 impl Planner {
+    pub(crate) fn fts_score_key(scope_path: &[String], output_name: &str) -> String {
+        if scope_path.is_empty() {
+            output_name.to_string()
+        } else {
+            format!("{}::{}", scope_path.join("."), output_name)
+        }
+    }
+
     /// Create a new planner with the given collection schemas.
     pub fn new(collections: Vec<CollectionVersion>) -> Self {
         let collections: HashMap<String, Arc<CollectionVersion>> = collections
@@ -341,8 +349,15 @@ impl Planner {
         } else {
             filter_for_plan.as_ref()
         };
-        let joins_result =
-            self.apply_joins(plan, select, &collection, scan_mapping, 0, filter_for_joins)?;
+        let joins_result = self.apply_joins(
+            plan,
+            select,
+            &collection,
+            scan_mapping,
+            0,
+            filter_for_joins,
+            &[select.field.output_name().to_string()],
+        )?;
         plan = joins_result.0;
         scan_mapping = joins_result.1;
         let aggregate_internal_keys = joins_result.2;
@@ -510,8 +525,13 @@ impl Planner {
         // These compute per-document dot product before filters/ordering can reference results.
         plan = self.add_similarity_nodes(plan, select, &scan_mapping)?;
 
-        // 4c2. Add BM25Nodes for _bm25 full-text search fields.
-        plan = self.add_bm25_nodes(plan, select, &scan_mapping)?;
+        // 4c2. Add BM25Nodes for BM25 full-text search fields.
+        plan = self.add_bm25_nodes(
+            plan,
+            select,
+            &scan_mapping,
+            &[select.field.output_name().to_string()],
+        )?;
 
         // 4d. Apply deferred _alias filter for similarity results (non-grouped queries only).
         // Only apply alias conditions that do NOT reference aggregate fields.
