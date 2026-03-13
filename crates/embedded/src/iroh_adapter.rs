@@ -107,10 +107,15 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
     async fn connect_peer(&self, addr: &str) -> Result<(), String> {
         let (endpoint_id, direct_addrs) = parse_iroh_address(addr);
         let peer_id = PeerId::new(endpoint_id);
+        let dial_timeout = if direct_addrs.is_empty() {
+            std::time::Duration::from_secs(10)
+        } else {
+            std::time::Duration::from_secs(5)
+        };
 
-        self.transport
-            .dial(&peer_id, direct_addrs)
+        tokio::time::timeout(dial_timeout, self.transport.dial(&peer_id, direct_addrs))
             .await
+            .map_err(|_| format!("failed to connect: timeout dialing {peer_id}"))?
             .map_err(|error| format!("failed to connect: {error}"))?;
         self.transport
             .poll_until_connected(&peer_id, std::time::Duration::from_secs(10))
