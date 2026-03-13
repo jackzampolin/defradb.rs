@@ -156,4 +156,4 @@ async fn backup_restore_test(cluster: TestCluster) {
     );
 }
 
-for_each_runtime!(backup_restore, backup_restore_test);
+for_each_runtime!(backup_restore, backup_restore_test, .with_development());

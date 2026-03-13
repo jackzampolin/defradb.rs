@@ -53,6 +53,7 @@ serde_yaml = "0.9"
 # Logging
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-chrome = { version = "0.7", optional = true }
 
 # Error handling
 thiserror = { workspace = true }
@@ -107,6 +108,7 @@ fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]
 vendored-openssl = ["dep:openssl-sys"]
 iroh = ["p2p/iroh-transport", "dep:iroh-net", "dep:rand"]
+profiling = ["dep:tracing-chrome"]
 
 [dev-dependencies]
 tempfile = "3.17"

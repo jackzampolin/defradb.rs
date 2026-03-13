@@ -150,3 +150,9 @@ overflow-checks = true
 
 [profile.bench]
 opt-level = 3
+
+[profile.profile]
+inherits = "release"
+strip = false
+debug = 1
+lto = "thin"

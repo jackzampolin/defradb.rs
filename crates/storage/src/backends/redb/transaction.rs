@@ -4,6 +4,7 @@ use redb::{Database, ReadTransaction};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use tracing::instrument;
 
 use super::config::DurabilityMode;
 use super::group_commit::{GroupCommitBuffer, PendingCommit};
@@ -146,6 +147,7 @@ impl RedbTxn {
 
 #[async_trait]
 impl Reader for RedbTxn {
+    #[instrument(level = "trace", skip(self))]
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
@@ -249,6 +251,7 @@ impl Reader for RedbTxn {
 
 #[async_trait]
 impl Writer for RedbTxn {
+    #[instrument(level = "trace", skip(self))]
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
@@ -288,6 +291,7 @@ impl Writer for RedbTxn {
 
 #[async_trait]
 impl Txn for RedbTxn {
+    #[instrument(level = "trace", skip(self))]
     async fn commit(self: Box<Self>) -> Result<()> {
         // Note: active_txn_count is decremented by Drop impl when self is dropped
         // at the end of this function (on any exit path).
