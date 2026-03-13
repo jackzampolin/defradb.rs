@@ -46,13 +46,11 @@ pub use type_join::{
 };
 pub use view::ViewNode;
 
-use std::collections::HashMap;
-
 /// Strip `_docID` conditions from filter for explain output.
 /// Go handles docIDs as prefix scans and strips them from filter display.
 /// This handles `_docID` at any nesting level within `_and`/`_or` arrays.
 pub(crate) fn strip_docid_from_conditions(
-    conditions: &HashMap<String, serde_json::Value>,
+    conditions: &serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Value {
     strip_docid_value(&serde_json::json!(conditions))
 }

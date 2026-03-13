@@ -1,10 +1,12 @@
-use std::collections::HashMap;
-
 use serde_json::{json, Value as JsonValue};
 
 use super::Filter;
 use super::FilterOp;
 use crate::document::DocumentMapping;
+
+fn map<const N: usize>(entries: [(String, JsonValue); N]) -> serde_json::Map<String, JsonValue> {
+    entries.into_iter().collect()
+}
 
 fn make_mapping() -> DocumentMapping {
     let mut m = DocumentMapping::new();
@@ -34,23 +36,18 @@ fn test_empty_filter_matches_all() {
 
 #[test]
 fn test_eq_filter() {
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_eq": "Alice"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_eq": "Alice"}))]));
     let mapping = make_mapping();
     let fields = make_fields();
     assert!(filter.matches(&fields, &mapping).unwrap());
 
-    let filter =
-        Filter::from_conditions(HashMap::from([("name".to_string(), json!({"_eq": "Bob"}))]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_eq": "Bob"}))]));
     assert!(!filter.matches(&fields, &mapping).unwrap());
 }
 
 #[test]
 fn test_ne_filter() {
-    let filter =
-        Filter::from_conditions(HashMap::from([("name".to_string(), json!({"_ne": "Bob"}))]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_ne": "Bob"}))]));
     let mapping = make_mapping();
     let fields = make_fields();
     assert!(filter.matches(&fields, &mapping).unwrap());
@@ -58,18 +55,18 @@ fn test_ne_filter() {
 
 #[test]
 fn test_gt_filter() {
-    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_gt": 25}))]));
     let mapping = make_mapping();
     let fields = make_fields();
     assert!(filter.matches(&fields, &mapping).unwrap());
 
-    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 35}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_gt": 35}))]));
     assert!(!filter.matches(&fields, &mapping).unwrap());
 }
 
 #[test]
 fn test_in_filter() {
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "name".to_string(),
         json!({"_in": ["Alice", "Bob", "Charlie"]}),
     )]));
@@ -77,7 +74,7 @@ fn test_in_filter() {
     let fields = make_fields();
     assert!(filter.matches(&fields, &mapping).unwrap());
 
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "name".to_string(),
         json!({"_in": ["Bob", "Charlie"]}),
     )]));
@@ -86,7 +83,7 @@ fn test_in_filter() {
 
 #[test]
 fn test_and_filter() {
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "_and".to_string(),
         json!([
             {"name": {"_eq": "Alice"}},
@@ -97,7 +94,7 @@ fn test_and_filter() {
     let fields = make_fields();
     assert!(filter.matches(&fields, &mapping).unwrap());
 
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "_and".to_string(),
         json!([
             {"name": {"_eq": "Alice"}},
@@ -109,7 +106,7 @@ fn test_and_filter() {
 
 #[test]
 fn test_or_filter() {
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "_or".to_string(),
         json!([
             {"name": {"_eq": "Bob"}},
@@ -120,7 +117,7 @@ fn test_or_filter() {
     let fields = make_fields();
     assert!(filter.matches(&fields, &mapping).unwrap());
 
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "_or".to_string(),
         json!([
             {"name": {"_eq": "Bob"}},
@@ -132,10 +129,8 @@ fn test_or_filter() {
 
 #[test]
 fn test_not_filter() {
-    let filter = Filter::from_conditions(HashMap::from([(
-        "_not".to_string(),
-        json!({"name": {"_eq": "Bob"}}),
-    )]));
+    let filter =
+        Filter::from_conditions(map([("_not".to_string(), json!({"name": {"_eq": "Bob"}}))]));
     let mapping = make_mapping();
     let fields = make_fields();
     assert!(filter.matches(&fields, &mapping).unwrap());
@@ -143,28 +138,19 @@ fn test_not_filter() {
 
 #[test]
 fn test_like_filter() {
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_like": "Ali%"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_like": "Ali%"}))]));
     let mapping = make_mapping();
     let fields = make_fields();
     assert!(filter.matches(&fields, &mapping).unwrap());
 
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_like": "%ice"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_like": "%ice"}))]));
     assert!(filter.matches(&fields, &mapping).unwrap());
 }
 
 #[test]
 fn test_ilike_filter_case_insensitive_prefix() {
     // Pattern "ALI%" should match "Alice" (case-insensitive)
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_ilike": "ALI%"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_ilike": "ALI%"}))]));
     let mapping = make_mapping();
     let fields = make_fields(); // name = "Alice"
     assert!(filter.matches(&fields, &mapping).unwrap());
@@ -173,10 +159,7 @@ fn test_ilike_filter_case_insensitive_prefix() {
 #[test]
 fn test_ilike_filter_case_insensitive_suffix() {
     // Pattern "%ICE" should match "Alice" (case-insensitive)
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_ilike": "%ICE"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_ilike": "%ICE"}))]));
     let mapping = make_mapping();
     let fields = make_fields();
     assert!(filter.matches(&fields, &mapping).unwrap());
@@ -185,10 +168,7 @@ fn test_ilike_filter_case_insensitive_suffix() {
 #[test]
 fn test_ilike_filter_case_insensitive_contains() {
     // Pattern "%LIC%" should match "Alice" (case-insensitive)
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_ilike": "%LIC%"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_ilike": "%LIC%"}))]));
     let mapping = make_mapping();
     let fields = make_fields();
     assert!(filter.matches(&fields, &mapping).unwrap());
@@ -197,10 +177,7 @@ fn test_ilike_filter_case_insensitive_contains() {
 #[test]
 fn test_ilike_filter_case_insensitive_exact() {
     // Pattern "ALICE" should match "Alice" (case-insensitive exact)
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_ilike": "ALICE"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_ilike": "ALICE"}))]));
     let mapping = make_mapping();
     let fields = make_fields();
     assert!(filter.matches(&fields, &mapping).unwrap());
@@ -209,10 +186,7 @@ fn test_ilike_filter_case_insensitive_exact() {
 #[test]
 fn test_ilike_filter_no_match() {
     // Pattern "BOB%" should NOT match "Alice"
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_ilike": "BOB%"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_ilike": "BOB%"}))]));
     let mapping = make_mapping();
     let fields = make_fields();
     assert!(!filter.matches(&fields, &mapping).unwrap());
@@ -221,29 +195,20 @@ fn test_ilike_filter_no_match() {
 #[test]
 fn test_nilike_filter() {
     // Negated: pattern "BOB%" should NOT match "Alice", so nilike returns true
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_nilike": "BOB%"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_nilike": "BOB%"}))]));
     let mapping = make_mapping();
     let fields = make_fields();
     assert!(filter.matches(&fields, &mapping).unwrap());
 
     // Negated: pattern "ALI%" WOULD match "Alice", so nilike returns false
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_nilike": "ALI%"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_nilike": "ALI%"}))]));
     assert!(!filter.matches(&fields, &mapping).unwrap());
 }
 
 #[test]
 fn test_ilike_underscore_as_literal() {
     // Underscore is treated as literal character (matches Go behavior)
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_ilike": "Al_ce"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_ilike": "Al_ce"}))]));
     let mapping = make_mapping();
     let fields = make_fields(); // name = "Alice"
                                 // "Al_ce" should NOT match "Alice" because _ is literal, not wildcard
@@ -258,10 +223,7 @@ fn test_ilike_underscore_as_literal() {
 #[test]
 fn test_ilike_prefix_suffix_pattern() {
     // Pattern "Ali%ce" should match "Alice" (starts with "ali" AND ends with "ce")
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_ilike": "ALI%CE"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_ilike": "ALI%CE"}))]));
     let mapping = make_mapping();
     let fields = make_fields(); // name = "Alice"
     assert!(filter.matches(&fields, &mapping).unwrap());
@@ -270,29 +232,21 @@ fn test_ilike_prefix_suffix_pattern() {
 #[test]
 fn test_like_prefix_suffix_pattern() {
     // Pattern "Ali%ce" should match "Alice" (case-sensitive)
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_like": "Ali%ce"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_like": "Ali%ce"}))]));
     let mapping = make_mapping();
     let fields = make_fields(); // name = "Alice"
     assert!(filter.matches(&fields, &mapping).unwrap());
 
     // Wrong case should NOT match
-    let filter_wrong_case = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_like": "ALI%CE"}),
-    )]));
+    let filter_wrong_case =
+        Filter::from_conditions(map([("name".to_string(), json!({"_like": "ALI%CE"}))]));
     assert!(!filter_wrong_case.matches(&fields, &mapping).unwrap());
 }
 
 #[test]
 fn test_ilike_prefix_suffix_no_match() {
     // Pattern "Bob%son" should NOT match "Alice"
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_ilike": "Bob%son"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_ilike": "Bob%son"}))]));
     let mapping = make_mapping();
     let fields = make_fields();
     assert!(!filter.matches(&fields, &mapping).unwrap());
@@ -301,10 +255,7 @@ fn test_ilike_prefix_suffix_no_match() {
 #[test]
 fn test_ilike_null_field_returns_false() {
     // Null field should return false for _ilike (not error), matching Go behavior
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_ilike": "Ali%"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_ilike": "Ali%"}))]));
     let mapping = make_mapping();
     let mut fields = make_fields();
     fields[1] = Some(json!(null)); // name is null
@@ -315,10 +266,7 @@ fn test_ilike_null_field_returns_false() {
 fn test_nilike_null_field_returns_true() {
     // Go's nilike = !ilike. For null data, ilike returns false (non-string),
     // so nilike returns !false = true. Null doesn't match pattern → negation is true.
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_nilike": "Ali%"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_nilike": "Ali%"}))]));
     let mapping = make_mapping();
     let mut fields = make_fields();
     fields[1] = Some(json!(null)); // name is null
@@ -350,10 +298,7 @@ fn make_extended_fields() -> Vec<Option<JsonValue>> {
 
 #[test]
 fn test_contains_filter_match() {
-    let filter = Filter::from_conditions(HashMap::from([(
-        "tags".to_string(),
-        json!({"_contains": "rust"}),
-    )]));
+    let filter = Filter::from_conditions(map([("tags".to_string(), json!({"_contains": "rust"}))]));
     let mapping = make_extended_mapping();
     let fields = make_extended_fields();
     assert!(filter.matches(&fields, &mapping).unwrap());
@@ -361,10 +306,8 @@ fn test_contains_filter_match() {
 
 #[test]
 fn test_contains_filter_no_match() {
-    let filter = Filter::from_conditions(HashMap::from([(
-        "tags".to_string(),
-        json!({"_contains": "python"}),
-    )]));
+    let filter =
+        Filter::from_conditions(map([("tags".to_string(), json!({"_contains": "python"}))]));
     let mapping = make_extended_mapping();
     let fields = make_extended_fields();
     assert!(!filter.matches(&fields, &mapping).unwrap());
@@ -372,10 +315,7 @@ fn test_contains_filter_no_match() {
 
 #[test]
 fn test_contains_filter_non_array_error() {
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_contains": "rust"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_contains": "rust"}))]));
     let mapping = make_extended_mapping();
     let fields = make_extended_fields();
     let result = filter.matches(&fields, &mapping);
@@ -389,7 +329,7 @@ fn test_contains_filter_non_array_error() {
 #[test]
 fn test_contained_in_filter_match() {
     // All elements of tags are in the given array
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "tags".to_string(),
         json!({"_contained_in": ["rust", "database", "graphql", "sql", "nosql"]}),
     )]));
@@ -401,7 +341,7 @@ fn test_contained_in_filter_match() {
 #[test]
 fn test_contained_in_filter_no_match() {
     // Not all elements of tags are in the given array (missing "graphql")
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "tags".to_string(),
         json!({"_contained_in": ["rust", "database"]}),
     )]));
@@ -413,7 +353,7 @@ fn test_contained_in_filter_no_match() {
 #[test]
 fn test_contained_in_filter_empty_field_array() {
     // Empty array is contained in any array
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "tags".to_string(),
         json!({"_contained_in": ["anything"]}),
     )]));
@@ -425,7 +365,7 @@ fn test_contained_in_filter_empty_field_array() {
 
 #[test]
 fn test_has_key_filter_match() {
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "metadata".to_string(),
         json!({"_has_key": "version"}),
     )]));
@@ -436,7 +376,7 @@ fn test_has_key_filter_match() {
 
 #[test]
 fn test_has_key_filter_no_match() {
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "metadata".to_string(),
         json!({"_has_key": "nonexistent"}),
     )]));
@@ -447,10 +387,8 @@ fn test_has_key_filter_no_match() {
 
 #[test]
 fn test_has_key_filter_non_object_error() {
-    let filter = Filter::from_conditions(HashMap::from([(
-        "tags".to_string(),
-        json!({"_has_key": "version"}),
-    )]));
+    let filter =
+        Filter::from_conditions(map([("tags".to_string(), json!({"_has_key": "version"}))]));
     let mapping = make_extended_mapping();
     let fields = make_extended_fields();
     let result = filter.matches(&fields, &mapping);
@@ -479,8 +417,7 @@ fn test_filter_op_parse() {
 #[test]
 fn test_null_field_comparison() {
     // When a field is null/None, comparisons should handle it gracefully
-    let filter =
-        Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_eq": null}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_eq": null}))]));
     let mapping = make_mapping();
     // Field at index 2 (age) is None
     let fields = vec![
@@ -496,7 +433,7 @@ fn test_null_field_comparison() {
 #[test]
 fn test_null_field_gt_comparison_returns_false() {
     // Go DefraDB behavior: null _gt 25 returns false (null is "smaller" than any value)
-    let filter = Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": 25}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_gt": 25}))]));
     let mapping = make_mapping();
     let fields = vec![
         Some(json!("doc1")),
@@ -512,8 +449,7 @@ fn test_null_field_gt_comparison_returns_false() {
 #[test]
 fn test_value_gt_null_returns_true() {
     // Go DefraDB behavior: 25 _gt null returns true (any non-null value > null)
-    let filter =
-        Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_gt": null}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_gt": null}))]));
     let mapping = make_mapping();
     let fields = make_fields(); // age = 30
     let result = filter.matches(&fields, &mapping);
@@ -524,8 +460,7 @@ fn test_value_gt_null_returns_true() {
 #[test]
 fn test_value_ge_null_returns_true() {
     // Go DefraDB behavior: any value >= null returns true
-    let filter =
-        Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_ge": null}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_ge": null}))]));
     let mapping = make_mapping();
     let fields = make_fields(); // age = 30
     let result = filter.matches(&fields, &mapping);
@@ -536,8 +471,7 @@ fn test_value_ge_null_returns_true() {
 #[test]
 fn test_null_ge_null_returns_true() {
     // Go DefraDB behavior: null >= null returns true
-    let filter =
-        Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_ge": null}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_ge": null}))]));
     let mapping = make_mapping();
     let fields = vec![
         Some(json!("doc1")),
@@ -553,8 +487,7 @@ fn test_null_ge_null_returns_true() {
 #[test]
 fn test_value_lt_null_returns_false() {
     // Go DefraDB behavior: value _lt null returns false (no value is less than null)
-    let filter =
-        Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_lt": null}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_lt": null}))]));
     let mapping = make_mapping();
     let fields = make_fields(); // age = 30
     let result = filter.matches(&fields, &mapping);
@@ -565,8 +498,7 @@ fn test_value_lt_null_returns_false() {
 #[test]
 fn test_null_le_null_returns_true() {
     // Go DefraDB behavior: null <= null returns true
-    let filter =
-        Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_le": null}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_le": null}))]));
     let mapping = make_mapping();
     let fields = vec![
         Some(json!("doc1")),
@@ -582,8 +514,7 @@ fn test_null_le_null_returns_true() {
 #[test]
 fn test_value_le_null_returns_false() {
     // Go DefraDB behavior: value _le null returns false (only null <= null)
-    let filter =
-        Filter::from_conditions(HashMap::from([("age".to_string(), json!({"_le": null}))]));
+    let filter = Filter::from_conditions(map([("age".to_string(), json!({"_le": null}))]));
     let mapping = make_mapping();
     let fields = make_fields(); // age = 30
     let result = filter.matches(&fields, &mapping);
@@ -594,7 +525,7 @@ fn test_value_le_null_returns_false() {
 #[test]
 fn test_nested_and_or_operators() {
     // Test _and containing _or: match if (name=Alice OR name=Bob) AND age>=18
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "_and".to_string(),
         json!([
             {"_or": [
@@ -628,7 +559,7 @@ fn test_nested_and_or_operators() {
 #[test]
 fn test_nested_not_and_operators() {
     // Test _not containing _and: match if NOT (name=Alice AND age<18)
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "_not".to_string(),
         json!({"_and": [
             {"name": {"_eq": "Alice"}},
@@ -654,10 +585,7 @@ fn test_nested_not_and_operators() {
 #[test]
 fn test_like_underscore_as_literal() {
     // Underscore is treated as literal character (matches Go behavior)
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_like": "Al_ce"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_like": "Al_ce"}))]));
     let mapping = make_mapping();
     let fields = make_fields();
     // "Al_ce" should NOT match "Alice" because _ is literal
@@ -667,10 +595,7 @@ fn test_like_underscore_as_literal() {
 #[test]
 fn test_like_complex_pattern() {
     // Multiple % should be handled by the DP algorithm
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_like": "%li%ce"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_like": "%li%ce"}))]));
     let mapping = make_mapping();
     let fields = make_fields();
     let result = filter.matches(&fields, &mapping);
@@ -685,10 +610,7 @@ fn test_like_complex_pattern() {
 #[test]
 fn test_contains_null_field_returns_false() {
     // When field is null, _contains should return false (not error)
-    let filter = Filter::from_conditions(HashMap::from([(
-        "tags".to_string(),
-        json!({"_contains": "rust"}),
-    )]));
+    let filter = Filter::from_conditions(map([("tags".to_string(), json!({"_contains": "rust"}))]));
     let mapping = make_extended_mapping();
     let mut fields = make_extended_fields();
     fields[4] = Some(json!(null)); // tags is null
@@ -698,7 +620,7 @@ fn test_contains_null_field_returns_false() {
 #[test]
 fn test_contained_in_null_field_returns_false() {
     // When field is null, _contained_in should return false (not error)
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "tags".to_string(),
         json!({"_contained_in": ["rust", "go"]}),
     )]));
@@ -711,7 +633,7 @@ fn test_contained_in_null_field_returns_false() {
 #[test]
 fn test_has_key_null_field_returns_false() {
     // When field is null, _has_key should return false (not error)
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "metadata".to_string(),
         json!({"_has_key": "version"}),
     )]));
@@ -724,10 +646,7 @@ fn test_has_key_null_field_returns_false() {
 #[test]
 fn test_contains_with_null_in_array() {
     // Array contains null, searching for null should find it
-    let filter = Filter::from_conditions(HashMap::from([(
-        "tags".to_string(),
-        json!({"_contains": null}),
-    )]));
+    let filter = Filter::from_conditions(map([("tags".to_string(), json!({"_contains": null}))]));
     let mapping = make_extended_mapping();
     let mut fields = make_extended_fields();
     fields[4] = Some(json!(["rust", null, "graphql"])); // Array with null
@@ -737,10 +656,7 @@ fn test_contains_with_null_in_array() {
 #[test]
 fn test_contains_null_not_in_array() {
     // Array doesn't contain null, searching for null should not find it
-    let filter = Filter::from_conditions(HashMap::from([(
-        "tags".to_string(),
-        json!({"_contains": null}),
-    )]));
+    let filter = Filter::from_conditions(map([("tags".to_string(), json!({"_contains": null}))]));
     let mapping = make_extended_mapping();
     let fields = make_extended_fields(); // No null in tags
     assert!(!filter.matches(&fields, &mapping).unwrap());
@@ -753,10 +669,7 @@ fn test_contains_null_not_in_array() {
 #[test]
 fn test_contains_empty_array() {
     // Empty array should never contain anything
-    let filter = Filter::from_conditions(HashMap::from([(
-        "tags".to_string(),
-        json!({"_contains": "rust"}),
-    )]));
+    let filter = Filter::from_conditions(map([("tags".to_string(), json!({"_contains": "rust"}))]));
     let mapping = make_extended_mapping();
     let mut fields = make_extended_fields();
     fields[4] = Some(json!([])); // Empty array
@@ -767,10 +680,7 @@ fn test_contains_empty_array() {
 fn test_contained_in_empty_expected_array() {
     // Non-empty field array vs empty expected array
     // [a,b,c] is NOT contained in [] (no elements of expected contain the actuals)
-    let filter = Filter::from_conditions(HashMap::from([(
-        "tags".to_string(),
-        json!({"_contained_in": []}),
-    )]));
+    let filter = Filter::from_conditions(map([("tags".to_string(), json!({"_contained_in": []}))]));
     let mapping = make_extended_mapping();
     let fields = make_extended_fields(); // tags = ["rust", "database", "graphql"]
     assert!(!filter.matches(&fields, &mapping).unwrap());
@@ -779,10 +689,7 @@ fn test_contained_in_empty_expected_array() {
 #[test]
 fn test_has_key_empty_string_key() {
     // Empty string keys are valid in JSON objects
-    let filter = Filter::from_conditions(HashMap::from([(
-        "metadata".to_string(),
-        json!({"_has_key": ""}),
-    )]));
+    let filter = Filter::from_conditions(map([("metadata".to_string(), json!({"_has_key": ""}))]));
     let mapping = make_extended_mapping();
     let mut fields = make_extended_fields();
     fields[5] = Some(json!({"": "empty key value", "version": "1.0"}));
@@ -796,8 +703,7 @@ fn test_has_key_empty_string_key() {
 #[test]
 fn test_like_pattern_only_percent() {
     // Pattern "%" should match any non-empty string (suffix after empty prefix)
-    let filter =
-        Filter::from_conditions(HashMap::from([("name".to_string(), json!({"_like": "%"}))]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_like": "%"}))]));
     let mapping = make_mapping();
     let fields = make_fields();
     assert!(filter.matches(&fields, &mapping).unwrap());
@@ -806,8 +712,7 @@ fn test_like_pattern_only_percent() {
 #[test]
 fn test_like_empty_pattern() {
     // Empty pattern should only match empty string
-    let filter =
-        Filter::from_conditions(HashMap::from([("name".to_string(), json!({"_like": ""}))]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_like": ""}))]));
     let mapping = make_mapping();
     let fields = make_fields(); // name = "Alice"
     assert!(!filter.matches(&fields, &mapping).unwrap());
@@ -816,8 +721,7 @@ fn test_like_empty_pattern() {
 #[test]
 fn test_like_empty_pattern_matches_empty_string() {
     // Empty pattern should match empty string
-    let filter =
-        Filter::from_conditions(HashMap::from([("name".to_string(), json!({"_like": ""}))]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_like": ""}))]));
     let mapping = make_mapping();
     let mut fields = make_fields();
     fields[1] = Some(json!("")); // empty name
@@ -828,17 +732,14 @@ fn test_like_empty_pattern_matches_empty_string() {
 #[test]
 fn test_is_complex_simple_scalar() {
     // Simple scalar filter is NOT complex
-    let filter = Filter::from_conditions(HashMap::from([(
-        "name".to_string(),
-        json!({"_eq": "Alice"}),
-    )]));
+    let filter = Filter::from_conditions(map([("name".to_string(), json!({"_eq": "Alice"}))]));
     assert!(!filter.is_complex());
 }
 
 #[test]
 fn test_is_complex_simple_relation_at_root() {
     // Relation filter at root level (no logical wrapper) is NOT complex
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "author".to_string(),
         json!({"verified": {"_eq": true}}),
     )]));
@@ -848,7 +749,7 @@ fn test_is_complex_simple_relation_at_root() {
 #[test]
 fn test_is_complex_and_with_only_scalars() {
     // _and with only scalar conditions is NOT complex
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "_and".to_string(),
         json!([
             {"name": {"_eq": "Alice"}},
@@ -861,7 +762,7 @@ fn test_is_complex_and_with_only_scalars() {
 #[test]
 fn test_is_complex_and_with_relation() {
     // _and containing a relation filter IS complex
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "_and".to_string(),
         json!([
             {"rating": {"_ge": 4.0}},
@@ -874,7 +775,7 @@ fn test_is_complex_and_with_relation() {
 #[test]
 fn test_is_complex_or_with_relation() {
     // _or containing a relation filter IS complex
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "_or".to_string(),
         json!([
             {"rating": {"_ge": 4.0}},
@@ -887,7 +788,7 @@ fn test_is_complex_or_with_relation() {
 #[test]
 fn test_is_complex_not_with_relation() {
     // _not containing a relation filter IS complex
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "_not".to_string(),
         json!({"author": {"verified": {"_eq": true}}}),
     )]));
@@ -902,7 +803,7 @@ fn test_is_complex_not_with_relation() {
 fn test_get_multi_level_relation_paths_simple_relation() {
     // Single-level relation like {author: {verified: {_eq: true}}}
     // Path is ["author"] which has length 1, so should NOT be in multi-level paths
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "author".to_string(),
         json!({"verified": {"_eq": true}}),
     )]));
@@ -917,7 +818,7 @@ fn test_get_multi_level_relation_paths_simple_relation() {
 fn test_get_multi_level_relation_paths_two_level() {
     // Two-level relation like {author: {published: {rating: {_eq: 4.9}}}}
     // Path is ["author", "published"] which has length 2
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "author".to_string(),
         json!({"published": {"rating": {"_eq": 4.9}}}),
     )]));
@@ -932,7 +833,7 @@ fn test_get_multi_level_relation_paths_two_level() {
 #[test]
 fn test_get_multi_level_relation_paths_three_level() {
     // Three-level relation like {author: {publisher: {country: {name: {_eq: "USA"}}}}}
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "author".to_string(),
         json!({"publisher": {"country": {"name": {"_eq": "USA"}}}}),
     )]));
@@ -951,8 +852,7 @@ fn test_get_multi_level_relation_paths_three_level() {
 #[test]
 fn test_get_multi_level_relation_paths_no_relation() {
     // Scalar filter, no relations
-    let filter =
-        Filter::from_conditions(HashMap::from([("rating".to_string(), json!({"_eq": 4.9}))]));
+    let filter = Filter::from_conditions(map([("rating".to_string(), json!({"_eq": 4.9}))]));
     let paths = filter.get_multi_level_relation_paths();
     assert!(paths.is_empty());
 }
@@ -960,7 +860,7 @@ fn test_get_multi_level_relation_paths_no_relation() {
 #[test]
 fn test_extract_filter_at_path_single_level() {
     // Extract filter at ["author"] from {author: {verified: {_eq: true}}}
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "author".to_string(),
         json!({"verified": {"_eq": true}}),
     )]));
@@ -974,7 +874,7 @@ fn test_extract_filter_at_path_single_level() {
 #[test]
 fn test_extract_filter_at_path_two_level() {
     // Extract filter at ["author", "published"] from {author: {published: {rating: {_eq: 4.9}}}}
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "author".to_string(),
         json!({"published": {"rating": {"_eq": 4.9}}}),
     )]));
@@ -988,7 +888,7 @@ fn test_extract_filter_at_path_two_level() {
 #[test]
 fn test_extract_filter_at_path_empty_path() {
     // Empty path should return the full filter
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "author".to_string(),
         json!({"verified": {"_eq": true}}),
     )]));
@@ -1001,7 +901,7 @@ fn test_extract_filter_at_path_empty_path() {
 #[test]
 fn test_extract_filter_at_path_nonexistent() {
     // Path that doesn't exist should return None
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "author".to_string(),
         json!({"verified": {"_eq": true}}),
     )]));
@@ -1032,7 +932,7 @@ fn make_scores_fields() -> Vec<Option<JsonValue>> {
 #[test]
 fn test_any_filter_match() {
     // _any: {_gt: 90} should match because 95 > 90
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "testScores".to_string(),
         json!({"_any": {"_gt": 90}}),
     )]));
@@ -1044,7 +944,7 @@ fn test_any_filter_match() {
 #[test]
 fn test_any_filter_no_match() {
     // _any: {_gt: 100} should not match because no score > 100
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "testScores".to_string(),
         json!({"_any": {"_gt": 100}}),
     )]));
@@ -1056,7 +956,7 @@ fn test_any_filter_no_match() {
 #[test]
 fn test_any_filter_empty_array() {
     // _any on empty array should return false
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "testScores".to_string(),
         json!({"_any": {"_gt": 50}}),
     )]));
@@ -1072,7 +972,7 @@ fn test_any_filter_empty_array() {
 #[test]
 fn test_any_filter_null_field() {
     // _any on null field should return false
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "testScores".to_string(),
         json!({"_any": {"_gt": 50}}),
     )]));
@@ -1088,7 +988,7 @@ fn test_any_filter_null_field() {
 #[test]
 fn test_all_filter_match() {
     // _all: {_gte: 70} should match because all scores >= 70
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "testScores".to_string(),
         json!({"_all": {"_gte": 70}}),
     )]));
@@ -1100,7 +1000,7 @@ fn test_all_filter_match() {
 #[test]
 fn test_all_filter_no_match() {
     // _all: {_gte: 80} should not match because 75 < 80
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "testScores".to_string(),
         json!({"_all": {"_gte": 80}}),
     )]));
@@ -1112,7 +1012,7 @@ fn test_all_filter_no_match() {
 #[test]
 fn test_all_filter_empty_array() {
     // _all on empty array should return true (vacuous truth)
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "testScores".to_string(),
         json!({"_all": {"_gt": 100}}),
     )]));
@@ -1128,7 +1028,7 @@ fn test_all_filter_empty_array() {
 #[test]
 fn test_all_filter_null_field() {
     // _all on null field should return false
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "testScores".to_string(),
         json!({"_all": {"_gt": 50}}),
     )]));
@@ -1144,7 +1044,7 @@ fn test_all_filter_null_field() {
 #[test]
 fn test_none_filter_match() {
     // _none: {_lt: 70} should match because no score < 70
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "testScores".to_string(),
         json!({"_none": {"_lt": 70}}),
     )]));
@@ -1156,7 +1056,7 @@ fn test_none_filter_match() {
 #[test]
 fn test_none_filter_no_match() {
     // _none: {_lt: 80} should not match because 75 < 80
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "testScores".to_string(),
         json!({"_none": {"_lt": 80}}),
     )]));
@@ -1168,7 +1068,7 @@ fn test_none_filter_no_match() {
 #[test]
 fn test_none_filter_empty_array() {
     // _none on empty array should return true (no elements match)
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "testScores".to_string(),
         json!({"_none": {"_lt": 100}}),
     )]));
@@ -1184,7 +1084,7 @@ fn test_none_filter_empty_array() {
 #[test]
 fn test_none_filter_null_field() {
     // _none on null field should return false
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "testScores".to_string(),
         json!({"_none": {"_gt": 50}}),
     )]));
@@ -1200,7 +1100,7 @@ fn test_none_filter_null_field() {
 #[test]
 fn test_any_with_multiple_conditions() {
     // _any: {_gt: 80, _lt: 92} should match 85 and 90
-    let filter = Filter::from_conditions(HashMap::from([(
+    let filter = Filter::from_conditions(map([(
         "testScores".to_string(),
         json!({"_any": {"_gt": 80, "_lt": 92}}),
     )]));

@@ -1,8 +1,6 @@
 //! Filter splitting utilities - decompose filters for query planning
 
-use std::collections::HashMap;
-
-use serde_json::Value as JsonValue;
+use serde_json::{Map, Value as JsonValue};
 
 use super::filter_impl::Filter;
 use super::op::FilterOp;
@@ -16,8 +14,8 @@ impl Filter {
     ///
     /// This is used to apply scalar filters before TypeJoin and relation filters after.
     pub fn split_by_relation(&self) -> (Option<Filter>, Option<Filter>) {
-        let mut scalar_conditions = HashMap::new();
-        let mut relation_conditions = HashMap::new();
+        let mut scalar_conditions = Map::new();
+        let mut relation_conditions = Map::new();
 
         for (key, value) in self.conditions() {
             // Logical operators need special handling - we can't easily split them
@@ -28,19 +26,11 @@ impl Filter {
                         // Check if this logical block contains relation filters
                         let has_relation = match value {
                             JsonValue::Array(arr) => arr.iter().any(|item| {
-                                if let JsonValue::Object(obj) = item {
-                                    let nested: HashMap<String, JsonValue> =
-                                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                    Self::check_for_relation_filters(&nested)
-                                } else {
-                                    false
-                                }
+                                item.as_object()
+                                    .map(Self::check_for_relation_filters)
+                                    .unwrap_or(false)
                             }),
-                            JsonValue::Object(obj) => {
-                                let nested: HashMap<String, JsonValue> =
-                                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                Self::check_for_relation_filters(&nested)
-                            }
+                            JsonValue::Object(obj) => Self::check_for_relation_filters(obj),
                             _ => false,
                         };
                         if has_relation {
@@ -94,8 +84,8 @@ impl Filter {
     /// since alias filters on aggregate fields can only be evaluated after the
     /// aggregate values have been computed.
     pub fn split_alias(&self) -> (Option<Filter>, Option<Filter>) {
-        let mut non_alias = HashMap::new();
-        let mut alias_only = HashMap::new();
+        let mut non_alias = Map::new();
+        let mut alias_only = Map::new();
 
         for (key, value) in self.conditions() {
             if key == "_alias" {
@@ -130,7 +120,7 @@ impl Filter {
     /// - filtered: Filter without _alias conditions referencing the given aggregate names
     /// - has_aggregate_alias: true if any _alias conditions were referencing aggregates
     pub fn strip_aggregate_alias_conditions(&self, aggregate_names: &[&str]) -> (Filter, bool) {
-        let mut new_conditions = HashMap::new();
+        let mut new_conditions = Map::new();
         let mut has_aggregate_alias = false;
 
         for (key, value) in self.conditions() {

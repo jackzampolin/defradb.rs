@@ -1,8 +1,6 @@
 //! Alias-based filter condition evaluation
 
-use std::collections::HashMap;
-
-use serde_json::Value as JsonValue;
+use serde_json::{Map, Value as JsonValue};
 
 use super::eval::eval_op;
 use super::op::FilterOp;
@@ -17,7 +15,7 @@ impl Filter {
     /// Supports logical operators (_and, _or, _not) within the alias block.
     pub(crate) fn eval_alias_conditions(
         &self,
-        conditions: &HashMap<String, JsonValue>,
+        conditions: &Map<String, JsonValue>,
         fields: &[Option<JsonValue>],
         mapping: &DocumentMapping,
     ) -> Result<bool> {
@@ -30,10 +28,10 @@ impl Filter {
                             QueryError::invalid_filter("_and requires array in _alias")
                         })?;
                         for item in arr {
-                            let sub_conditions: HashMap<String, JsonValue> =
-                                serde_json::from_value(item.clone())
-                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                            if !self.eval_alias_conditions(&sub_conditions, fields, mapping)? {
+                            let sub_conditions = item.as_object().ok_or_else(|| {
+                                QueryError::invalid_filter("_and items must be objects in _alias")
+                            })?;
+                            if !self.eval_alias_conditions(sub_conditions, fields, mapping)? {
                                 return Ok(false);
                             }
                         }
@@ -45,10 +43,10 @@ impl Filter {
                         })?;
                         let mut any_match = false;
                         for item in arr {
-                            let sub_conditions: HashMap<String, JsonValue> =
-                                serde_json::from_value(item.clone())
-                                    .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                            if self.eval_alias_conditions(&sub_conditions, fields, mapping)? {
+                            let sub_conditions = item.as_object().ok_or_else(|| {
+                                QueryError::invalid_filter("_or items must be objects in _alias")
+                            })?;
+                            if self.eval_alias_conditions(sub_conditions, fields, mapping)? {
                                 any_match = true;
                                 break;
                             }
@@ -59,10 +57,10 @@ impl Filter {
                         continue;
                     }
                     FilterOp::Not => {
-                        let sub_conditions: HashMap<String, JsonValue> =
-                            serde_json::from_value(value.clone())
-                                .map_err(|e| QueryError::invalid_filter(e.to_string()))?;
-                        if self.eval_alias_conditions(&sub_conditions, fields, mapping)? {
+                        let sub_conditions = value.as_object().ok_or_else(|| {
+                            QueryError::invalid_filter("_not requires object in _alias")
+                        })?;
+                        if self.eval_alias_conditions(sub_conditions, fields, mapping)? {
                             return Ok(false);
                         }
                         continue;

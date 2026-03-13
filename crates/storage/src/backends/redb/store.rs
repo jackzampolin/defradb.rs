@@ -3,7 +3,7 @@ use parking_lot::Mutex;
 use redb::{Database, ReadableTable};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -319,8 +319,8 @@ impl Store for RedbStore {
             pending: Mutex::new(BTreeMap::new()),
             readonly,
             durability: self.durability,
-            discarded: Mutex::new(false),
-            committed: Mutex::new(false),
+            discarded: AtomicBool::new(false),
+            committed: AtomicBool::new(false),
             callbacks: CallbackManager::new(),
             group_commit: self.group_commit.clone(),
         }))

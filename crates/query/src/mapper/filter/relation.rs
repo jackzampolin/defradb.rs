@@ -1,8 +1,6 @@
 //! Relation filter utilities - extraction and path analysis
 
-use std::collections::HashMap;
-
-use serde_json::Value as JsonValue;
+use serde_json::{Map, Value as JsonValue};
 
 use super::filter_impl::Filter;
 use super::op::FilterOp;
@@ -18,10 +16,7 @@ impl Filter {
         names
     }
 
-    fn collect_relation_field_names(
-        conditions: &HashMap<String, JsonValue>,
-        names: &mut Vec<String>,
-    ) {
+    fn collect_relation_field_names(conditions: &Map<String, JsonValue>, names: &mut Vec<String>) {
         for (key, value) in conditions {
             // Check logical operators recursively
             if let Some(op) = FilterOp::parse(key) {
@@ -30,18 +25,14 @@ impl Filter {
                         if let JsonValue::Array(arr) = value {
                             for item in arr {
                                 if let JsonValue::Object(obj) = item {
-                                    let nested: HashMap<String, JsonValue> =
-                                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                    Self::collect_relation_field_names(&nested, names);
+                                    Self::collect_relation_field_names(obj, names);
                                 }
                             }
                         }
                     }
                     FilterOp::Not => {
                         if let JsonValue::Object(obj) = value {
-                            let nested: HashMap<String, JsonValue> =
-                                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                            Self::collect_relation_field_names(&nested, names);
+                            Self::collect_relation_field_names(obj, names);
                         }
                     }
                     _ => {}
@@ -97,10 +88,7 @@ impl Filter {
                 // Check if this is a nested filter (has non-operator keys)
                 let is_nested = obj.keys().any(|k| FilterOp::parse(k).is_none());
                 if is_nested {
-                    // Convert the nested object to a Filter
-                    let nested_conditions: HashMap<String, JsonValue> =
-                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                    return Some(Filter::from_conditions(nested_conditions));
+                    return Some(Filter::from_conditions(obj.clone()));
                 }
             }
         }
@@ -116,11 +104,7 @@ impl Filter {
                                     let is_nested =
                                         rel_obj.keys().any(|k| FilterOp::parse(k).is_none());
                                     if is_nested {
-                                        let nested_conditions: HashMap<String, JsonValue> = rel_obj
-                                            .iter()
-                                            .map(|(k, v)| (k.clone(), v.clone()))
-                                            .collect();
-                                        return Some(Filter::from_conditions(nested_conditions));
+                                        return Some(Filter::from_conditions(rel_obj.clone()));
                                     }
                                 }
                             }
@@ -155,7 +139,7 @@ impl Filter {
     /// - "rating" is a scalar (its value only has operator keys like "_eq")
     ///   So the path is ["author", "published"].
     fn collect_relation_paths(
-        conditions: &HashMap<String, JsonValue>,
+        conditions: &Map<String, JsonValue>,
         current_path: &mut Vec<String>,
         paths: &mut Vec<Vec<String>>,
     ) {
@@ -169,20 +153,14 @@ impl Filter {
                             if let JsonValue::Array(arr) = value {
                                 for item in arr {
                                     if let JsonValue::Object(obj) = item {
-                                        let nested: HashMap<String, JsonValue> = obj
-                                            .iter()
-                                            .map(|(k, v)| (k.clone(), v.clone()))
-                                            .collect();
-                                        Self::collect_relation_paths(&nested, current_path, paths);
+                                        Self::collect_relation_paths(obj, current_path, paths);
                                     }
                                 }
                             }
                         }
                         FilterOp::Not => {
                             if let JsonValue::Object(obj) = value {
-                                let nested: HashMap<String, JsonValue> =
-                                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                Self::collect_relation_paths(&nested, current_path, paths);
+                                Self::collect_relation_paths(obj, current_path, paths);
                             }
                         }
                         _ => {}
@@ -204,11 +182,8 @@ impl Filter {
                     // This is a relation - add to path and recurse
                     current_path.push(key.clone());
 
-                    let nested: HashMap<String, JsonValue> =
-                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-
                     // Check if nested has any relations (non-operator keys that are objects with non-operator keys)
-                    let nested_has_relations = nested.iter().any(|(k, v)| {
+                    let nested_has_relations = obj.iter().any(|(k, v)| {
                         if FilterOp::parse(k).is_some() {
                             return false;
                         }
@@ -221,7 +196,7 @@ impl Filter {
 
                     if nested_has_relations {
                         // Continue recursing - there are more relations
-                        Self::collect_relation_paths(&nested, current_path, paths);
+                        Self::collect_relation_paths(obj, current_path, paths);
                     } else {
                         // This is the deepest level - save the path
                         paths.push(current_path.clone());
@@ -248,7 +223,7 @@ impl Filter {
     }
 
     fn extract_at_path_recursive(
-        conditions: &HashMap<String, JsonValue>,
+        conditions: &Map<String, JsonValue>,
         path: &[String],
     ) -> Option<Filter> {
         if path.is_empty() {
@@ -261,15 +236,12 @@ impl Filter {
         // Look for the key at this level
         if let Some(value) = conditions.get(current_key) {
             if let Some(obj) = value.as_object() {
-                let nested: HashMap<String, JsonValue> =
-                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-
                 if remaining_path.is_empty() {
                     // We've reached the end of the path - return this level's conditions
-                    return Some(Filter::from_conditions(nested));
+                    return Some(Filter::from_conditions(obj.clone()));
                 } else {
                     // Continue down the path
-                    return Self::extract_at_path_recursive(&nested, remaining_path);
+                    return Self::extract_at_path_recursive(obj, remaining_path);
                 }
             }
         }
@@ -280,9 +252,7 @@ impl Filter {
                 if let Some(arr) = value.as_array() {
                     for item in arr {
                         if let Some(obj) = item.as_object() {
-                            let nested: HashMap<String, JsonValue> =
-                                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                            if let Some(filter) = Self::extract_at_path_recursive(&nested, path) {
+                            if let Some(filter) = Self::extract_at_path_recursive(obj, path) {
                                 return Some(filter);
                             }
                         }

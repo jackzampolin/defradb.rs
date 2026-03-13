@@ -1,8 +1,6 @@
 //! Filter inspection methods - boolean queries about filter structure
 
-use std::collections::HashMap;
-
-use serde_json::Value as JsonValue;
+use serde_json::{Map, Value as JsonValue};
 
 use super::filter_impl::Filter;
 use super::op::FilterOp;
@@ -28,7 +26,7 @@ impl Filter {
         fields
     }
 
-    fn collect_fields(conditions: &HashMap<String, JsonValue>, fields: &mut Vec<String>) {
+    fn collect_fields(conditions: &Map<String, JsonValue>, fields: &mut Vec<String>) {
         for (key, value) in conditions {
             // Skip logical operators
             if FilterOp::parse(key).is_some() {
@@ -36,16 +34,12 @@ impl Filter {
                     JsonValue::Array(arr) => {
                         for item in arr {
                             if let JsonValue::Object(obj) = item {
-                                let nested: HashMap<String, JsonValue> =
-                                    obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                Self::collect_fields(&nested, fields);
+                                Self::collect_fields(obj, fields);
                             }
                         }
                     }
                     JsonValue::Object(obj) => {
-                        let nested: HashMap<String, JsonValue> =
-                            obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                        Self::collect_fields(&nested, fields);
+                        Self::collect_fields(obj, fields);
                     }
                     _ => {}
                 }
@@ -70,7 +64,7 @@ impl Filter {
     /// Check if a conditions map contains relation filters.
     ///
     /// Shared helper used by both inspection and split methods.
-    pub(crate) fn check_for_relation_filters(conditions: &HashMap<String, JsonValue>) -> bool {
+    pub(crate) fn check_for_relation_filters(conditions: &Map<String, JsonValue>) -> bool {
         for (key, value) in conditions {
             // Check logical operators recursively
             if let Some(op) = FilterOp::parse(key) {
@@ -79,9 +73,7 @@ impl Filter {
                         if let JsonValue::Array(arr) = value {
                             for item in arr {
                                 if let JsonValue::Object(obj) = item {
-                                    let nested: HashMap<String, JsonValue> =
-                                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                    if Self::check_for_relation_filters(&nested) {
+                                    if Self::check_for_relation_filters(obj) {
                                         return true;
                                     }
                                 }
@@ -90,9 +82,7 @@ impl Filter {
                     }
                     FilterOp::Not => {
                         if let JsonValue::Object(obj) = value {
-                            let nested: HashMap<String, JsonValue> =
-                                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                            if Self::check_for_relation_filters(&nested) {
+                            if Self::check_for_relation_filters(obj) {
                                 return true;
                             }
                         }
@@ -141,7 +131,7 @@ impl Filter {
         Self::check_for_complex_filters(self.conditions())
     }
 
-    fn check_for_complex_filters(conditions: &HashMap<String, JsonValue>) -> bool {
+    fn check_for_complex_filters(conditions: &Map<String, JsonValue>) -> bool {
         for (key, value) in conditions {
             if let Some(op) = FilterOp::parse(key) {
                 match op {
@@ -150,14 +140,12 @@ impl Filter {
                             // Check if this logical block contains any relation filters
                             for item in arr {
                                 if let JsonValue::Object(obj) = item {
-                                    let nested: HashMap<String, JsonValue> =
-                                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                                     // If any item in the logical block has a relation filter, it's complex
-                                    if Self::check_for_relation_filters(&nested) {
+                                    if Self::check_for_relation_filters(obj) {
                                         return true;
                                     }
                                     // Also check recursively for nested complex filters
-                                    if Self::check_for_complex_filters(&nested) {
+                                    if Self::check_for_complex_filters(obj) {
                                         return true;
                                     }
                                 }
@@ -166,12 +154,10 @@ impl Filter {
                     }
                     FilterOp::Not => {
                         if let JsonValue::Object(obj) = value {
-                            let nested: HashMap<String, JsonValue> =
-                                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                            if Self::check_for_relation_filters(&nested) {
+                            if Self::check_for_relation_filters(obj) {
                                 return true;
                             }
-                            if Self::check_for_complex_filters(&nested) {
+                            if Self::check_for_complex_filters(obj) {
                                 return true;
                             }
                         }

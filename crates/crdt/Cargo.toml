@@ -22,5 +22,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+[[bench]]
+name = "merge"
+harness = false

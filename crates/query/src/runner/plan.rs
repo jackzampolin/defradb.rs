@@ -213,7 +213,7 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
 }
 
 /// Format filter conditions in Go graphql-go style (unquoted keys).
-fn format_graphql_conditions(conditions: &std::collections::HashMap<String, JsonValue>) -> String {
+fn format_graphql_conditions(conditions: &serde_json::Map<String, JsonValue>) -> String {
     let entries: Vec<String> = conditions
         .iter()
         .map(|(k, v)| format!("{}: {}", k, format_graphql_value(v)))
@@ -450,7 +450,7 @@ pub(crate) fn build_plan(
                             Filter::from_conditions(merged)
                         }
                         None => {
-                            let mut conditions = std::collections::HashMap::new();
+                            let mut conditions = serde_json::Map::new();
                             conditions.insert(
                                 field_name.clone(),
                                 serde_json::json!({"_neq": serde_json::Value::Null}),

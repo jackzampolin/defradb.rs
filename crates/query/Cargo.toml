@@ -62,6 +62,23 @@ tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 proptest.workspace = true
+criterion.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 db = { path = "../db" }
 datastore = { path = "../datastore" }
+
+[[bench]]
+name = "parsing"
+harness = false
+
+[[bench]]
+name = "filter"
+harness = false
+
+[[bench]]
+name = "groupby"
+harness = false
+
+[[bench]]
+name = "planner"
+harness = false

@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use serde_json::Value as JsonValue;
 
 use crate::document::DocumentMapping;
@@ -133,7 +135,7 @@ impl GroupByNode {
     /// Format: `{field_index}_{field_value}_` for each GROUP BY field
     /// Returns an error if any GROUP BY field is not found in the document mapping
     pub(super) fn generate_key(&self, doc: &Doc) -> Result<String> {
-        let mut key = String::new();
+        let mut key = String::with_capacity(self.group_by.fields.len() * 16);
         for field_name in &self.group_by.fields {
             let index = self
                 .document_mapping
@@ -144,37 +146,57 @@ impl GroupByNode {
                         field_name
                     ))
                 })?;
-            key.push_str(&format!("{}_", index));
-            let value = doc.get(index);
-            key.push_str(&format!("{}_", Self::value_to_key(value)));
+            write!(key, "{index}_").unwrap();
+            Self::write_value_key(&mut key, doc.get(index));
+            key.push('_');
         }
         Ok(key)
     }
 
-    /// Convert a JSON value to a string key component
-    pub(super) fn value_to_key(value: Option<&JsonValue>) -> String {
+    /// Public wrapper for external benchmarking of the group-key hot path.
+    pub fn generate_key_for_doc(&self, doc: &Doc) -> Result<String> {
+        self.generate_key(doc)
+    }
+
+    /// Public wrapper for benchmarking the document-rendering hot path.
+    #[doc(hidden)]
+    pub fn render_docs_for_bench(
+        docs: &[Doc],
+        render_keys: &[crate::document::RenderKey],
+        type_name: Option<&str>,
+    ) -> JsonValue {
+        Self::render_docs_with_keys(docs.iter(), render_keys, type_name)
+    }
+
+    /// Write a JSON value directly into a key buffer without allocating
+    /// an intermediate string representation.
+    pub(super) fn write_value_key(buf: &mut String, value: Option<&JsonValue>) {
         match value {
-            None | Some(JsonValue::Null) => "null".to_string(),
-            Some(JsonValue::Bool(b)) => b.to_string(),
-            Some(JsonValue::Number(n)) => n.to_string(),
-            Some(JsonValue::String(s)) => s.clone(),
+            None | Some(JsonValue::Null) => buf.push_str("null"),
+            Some(JsonValue::Bool(b)) => write!(buf, "{b}").unwrap(),
+            Some(JsonValue::Number(n)) => write!(buf, "{n}").unwrap(),
+            Some(JsonValue::String(s)) => buf.push_str(s),
             Some(JsonValue::Array(arr)) => {
-                format!(
-                    "[{}]",
-                    arr.iter()
-                        .map(|v| Self::value_to_key(Some(v)))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
+                buf.push('[');
+                for (index, value) in arr.iter().enumerate() {
+                    if index > 0 {
+                        buf.push(',');
+                    }
+                    Self::write_value_key(buf, Some(value));
+                }
+                buf.push(']');
             }
             Some(JsonValue::Object(obj)) => {
-                format!(
-                    "{{{}}}",
-                    obj.iter()
-                        .map(|(k, v)| format!("{}:{}", k, Self::value_to_key(Some(v))))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
+                buf.push('{');
+                for (index, (key, value)) in obj.iter().enumerate() {
+                    if index > 0 {
+                        buf.push(',');
+                    }
+                    buf.push_str(key);
+                    buf.push(':');
+                    Self::write_value_key(buf, Some(value));
+                }
+                buf.push('}');
             }
         }
     }
