@@ -153,6 +153,39 @@ impl HubRsProvider {
         hasher.update(permission.as_bytes());
         hex::encode(hasher.finalize())
     }
+
+    fn relations_for_permission(permission: &str) -> Vec<&str> {
+        match permission {
+            "read" => vec!["owner", "writer", "reader"],
+            "update" => vec!["owner", "writer"],
+            "delete" => vec!["owner"],
+            _ => vec![permission],
+        }
+    }
+
+    async fn verify_access_request_live(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        permission: &str,
+        actor_did: &str,
+    ) -> Result<bool, ProviderError> {
+        let call = IAcp::verifyAccessRequestCall {
+            policyId: Self::policy_id_to_bytes32(policy_id),
+            resources: vec![resource.to_string()],
+            objectIds: vec![object_id.to_string()],
+            permissions: vec![permission.to_string()],
+            actor: actor_did.to_string(),
+        };
+        let calldata = Bytes::from(call.abi_encode());
+        let result = self
+            .guarded_eth_call(|| self.client.eth_call(ACP_ADDRESS, calldata.clone()))
+            .await?;
+
+        IAcp::verifyAccessRequestCall::abi_decode_returns(&result)
+            .map_err(|e| ProviderError::Query(format!("ABI decode: {}", e)))
+    }
 }
 
 impl Drop for HubRsProvider {
@@ -507,24 +540,12 @@ impl SourceHubProvider for HubRsProvider {
         permission: &str,
         actor_did: &str,
     ) -> Result<bool, ProviderError> {
-        // Map permission to the relations that grant it.
-        // DefraDB standard policy expressions:
-        //   read   = owner + writer + reader
-        //   update = owner + writer
-        //   delete = owner
-        let relations: &[&str] = match permission {
-            "read" => &["owner", "writer", "reader"],
-            "update" => &["owner", "writer"],
-            "delete" => &["owner"],
-            _ => &["owner"],
-        };
-
         let actor_subject =
             zanzibar::Subject::Entity(zanzibar::Did::new_unchecked(actor_did.to_string()));
         let actor_hash = actor_subject.storage_hash();
         let wildcard_hash = zanzibar::Subject::Wildcard.storage_hash();
 
-        for relation in relations {
+        for relation in Self::relations_for_permission(permission) {
             let storage_key = format!(
                 "/rel/{}/{}/{}/{}",
                 resource, object_id, relation, actor_hash
@@ -563,6 +584,16 @@ impl SourceHubProvider for HubRsProvider {
         permission: &str,
         actor_did: &str,
     ) -> Result<Option<String>, ProviderError> {
+        let currently_allowed = self
+            .verify_access_request_live(policy_id, resource, object_id, permission, actor_did)
+            .await?;
+        if !currently_allowed {
+            return Err(ProviderError::Query(format!(
+                "actor {} denied {} on {}:{}",
+                actor_did, permission, resource, object_id
+            )));
+        }
+
         let call = IAcp::checkAccessCall {
             policyId: Self::policy_id_to_bytes32(policy_id),
             resources: vec![resource.to_string()],
@@ -707,5 +738,33 @@ mod tests {
 
         defra_core::signing::clear_request_bearer_token(&did);
         defra_core::signing::clear_identity_store();
+    }
+
+    #[test]
+    fn relations_for_permission_expands_standard_permissions() {
+        assert_eq!(
+            HubRsProvider::relations_for_permission("read"),
+            vec!["owner", "writer", "reader"]
+        );
+        assert_eq!(
+            HubRsProvider::relations_for_permission("update"),
+            vec!["owner", "writer"]
+        );
+        assert_eq!(
+            HubRsProvider::relations_for_permission("delete"),
+            vec!["owner"]
+        );
+    }
+
+    #[test]
+    fn relations_for_permission_preserves_relation_style_checks() {
+        assert_eq!(
+            HubRsProvider::relations_for_permission("writer"),
+            vec!["writer"]
+        );
+        assert_eq!(
+            HubRsProvider::relations_for_permission("signer"),
+            vec!["signer"]
+        );
     }
 }
