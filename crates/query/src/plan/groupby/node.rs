@@ -158,6 +158,16 @@ impl GroupByNode {
         self.generate_key(doc)
     }
 
+    /// Public wrapper for benchmarking the document-rendering hot path.
+    #[doc(hidden)]
+    pub fn render_docs_for_bench(
+        docs: &[Doc],
+        render_keys: &[crate::document::RenderKey],
+        type_name: Option<&str>,
+    ) -> JsonValue {
+        Self::render_docs_with_keys(docs.iter(), render_keys, type_name)
+    }
+
     /// Write a JSON value directly into a key buffer without allocating
     /// an intermediate string representation.
     pub(super) fn write_value_key(buf: &mut String, value: Option<&JsonValue>) {

@@ -568,31 +568,69 @@ impl GroupByNode {
     }
 
     /// Render a list of documents to a JSON array using the given render keys.
-    fn render_docs_with_keys<'a>(
+    pub(super) fn render_docs_with_keys<'a>(
         docs: impl IntoIterator<Item = &'a Doc>,
         render_keys: &[crate::document::RenderKey],
         type_name: Option<&str>,
     ) -> JsonValue {
+        enum PreparedValueSource {
+            Field(usize),
+            Static(JsonValue),
+        }
+
+        struct PreparedRenderField {
+            key: String,
+            source: PreparedValueSource,
+        }
+
         let docs = docs.into_iter();
         let mut array = Vec::with_capacity(docs.size_hint().0);
+
+        let mut prepared_fields: Vec<PreparedRenderField> = Vec::with_capacity(render_keys.len());
+        for render_key in render_keys {
+            if render_key.key == "GROUP" {
+                continue;
+            }
+
+            let source = if render_key.key == "__typename" {
+                if let Some(name) = type_name {
+                    PreparedValueSource::Static(JsonValue::String(name.to_owned()))
+                } else {
+                    PreparedValueSource::Field(render_key.index)
+                }
+            } else {
+                PreparedValueSource::Field(render_key.index)
+            };
+
+            if let Some(existing_field) = prepared_fields
+                .iter_mut()
+                .find(|field| field.key == render_key.key)
+            {
+                existing_field.source = source;
+            } else {
+                prepared_fields.push(PreparedRenderField {
+                    key: render_key.key.clone(),
+                    source,
+                });
+            }
+        }
+
+        prepared_fields.sort_by(|left, right| left.key.cmp(&right.key));
+
+        let mut template = serde_json::Map::new();
+        for field in &prepared_fields {
+            template.insert(field.key.clone(), JsonValue::Null);
+        }
+
         for doc in docs {
-            let mut obj = serde_json::Map::new();
-            for render_key in render_keys {
-                if render_key.key == "GROUP" {
-                    continue;
-                }
-                // Handle __typename
-                if render_key.key == "__typename" {
-                    if let Some(name) = type_name {
-                        obj.insert(render_key.key.clone(), JsonValue::String(name.to_string()));
-                        continue;
+            let mut obj = template.clone();
+            for (value_slot, field) in obj.values_mut().zip(&prepared_fields) {
+                *value_slot = match &field.source {
+                    PreparedValueSource::Field(index) => {
+                        doc.get(*index).cloned().unwrap_or(JsonValue::Null)
                     }
-                }
-                let value = doc
-                    .get(render_key.index)
-                    .cloned()
-                    .unwrap_or(JsonValue::Null);
-                obj.insert(render_key.key.clone(), value);
+                    PreparedValueSource::Static(value) => value.clone(),
+                };
             }
             array.push(JsonValue::Object(obj));
         }

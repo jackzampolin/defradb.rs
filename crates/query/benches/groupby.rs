@@ -85,6 +85,43 @@ impl GroupByCase {
     }
 }
 
+#[derive(Clone)]
+struct RenderCase {
+    docs: Vec<Doc>,
+    mapping: DocumentMapping,
+}
+
+impl RenderCase {
+    fn new(doc_count: usize, field_count: usize) -> Self {
+        let mut mapping = DocumentMapping::new();
+
+        for field_index in 0..field_count {
+            let field_name = format!("field_{field_index}");
+            mapping.add(field_index, field_name.clone());
+            mapping.add_render_key(field_index, field_name);
+        }
+
+        let docs = (0..doc_count)
+            .map(|doc_index| {
+                let fields = (0..field_count)
+                    .map(|field_index| {
+                        if field_index % 2 == 0 {
+                            Some(JsonValue::String(format!(
+                                "doc-{doc_index:04}-field-{field_index:02}"
+                            )))
+                        } else {
+                            Some(JsonValue::from((doc_index + field_index) as u64))
+                        }
+                    })
+                    .collect();
+                Doc::with_fields(fields)
+            })
+            .collect();
+
+        Self { docs, mapping }
+    }
+}
+
 struct VecPlanNode {
     docs: Vec<Doc>,
     mapping: DocumentMapping,
@@ -159,6 +196,14 @@ fn execute_groupby(node: &mut GroupByNode) {
     });
 }
 
+fn execute_render(case: &RenderCase) {
+    black_box(GroupByNode::render_docs_for_bench(
+        &case.docs,
+        &case.mapping.render_keys,
+        None,
+    ));
+}
+
 fn bench_groupby(c: &mut Criterion) {
     let mut group = c.benchmark_group("groupby");
     let render_cases = [
@@ -182,6 +227,15 @@ fn bench_groupby(c: &mut Criterion) {
             }
         });
     });
+
+    let render_case = RenderCase::new(1000, 10);
+    group.bench_with_input(
+        BenchmarkId::from_parameter("render_only_1000_docs_10_fields"),
+        &render_case,
+        |b, case| {
+            b.iter(|| execute_render(black_box(case)));
+        },
+    );
 
     group.finish();
 }
