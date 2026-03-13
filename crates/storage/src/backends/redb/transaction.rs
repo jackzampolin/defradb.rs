@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use redb::{Database, ReadTransaction};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::config::DurabilityMode;
@@ -53,10 +53,10 @@ pub(crate) struct RedbTxn {
     pub(crate) durability: DurabilityMode,
 
     /// Whether the transaction has been discarded
-    pub(crate) discarded: Mutex<bool>,
+    pub(crate) discarded: AtomicBool,
 
     /// Whether the transaction has been committed
-    pub(crate) committed: Mutex<bool>,
+    pub(crate) committed: AtomicBool,
 
     /// Transaction lifecycle callbacks
     pub(crate) callbacks: CallbackManager,
@@ -71,8 +71,8 @@ impl Drop for RedbTxn {
         self.active_txn_count.fetch_sub(1, Ordering::SeqCst);
 
         // Log warning if dropped without explicit commit/discard
-        let was_committed = *self.committed.lock();
-        let was_discarded = *self.discarded.lock();
+        let was_committed = self.committed.load(Ordering::Acquire);
+        let was_discarded = self.discarded.load(Ordering::Acquire);
         if !was_committed && !was_discarded {
             let has_pending = !self.pending.lock().is_empty();
             // Count skipped callbacks to include in warning
@@ -106,12 +106,12 @@ impl RedbTxn {
 
     /// Get a value, checking pending changes first, then the read transaction.
     fn get_internal(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        // Check pending changes first
-        let pending = self.pending.lock();
-        if let Some(pending_value) = pending.get(key) {
-            return Ok(pending_value.clone());
+        if !self.readonly {
+            let pending = self.pending.lock();
+            if let Some(pending_value) = pending.get(key) {
+                return Ok(pending_value.clone());
+            }
         }
-        drop(pending);
 
         // Fall back to redb ReadTransaction
         let table = match self.read_txn.open_table(KV_TABLE) {
@@ -127,12 +127,12 @@ impl RedbTxn {
 
     /// Check if a key exists.
     fn has_internal(&self, key: &[u8]) -> Result<bool> {
-        // Check pending changes first
-        let pending = self.pending.lock();
-        if let Some(pending_value) = pending.get(key) {
-            return Ok(pending_value.is_some());
+        if !self.readonly {
+            let pending = self.pending.lock();
+            if let Some(pending_value) = pending.get(key) {
+                return Ok(pending_value.is_some());
+            }
         }
-        drop(pending);
 
         // Fall back to redb ReadTransaction
         let table = match self.read_txn.open_table(KV_TABLE) {
@@ -147,7 +147,7 @@ impl RedbTxn {
 #[async_trait]
 impl Reader for RedbTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -159,7 +159,7 @@ impl Reader for RedbTxn {
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -171,7 +171,7 @@ impl Reader for RedbTxn {
     }
 
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -183,7 +183,7 @@ impl Reader for RedbTxn {
     }
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -214,12 +214,16 @@ impl Reader for RedbTxn {
         };
 
         // Extract pending items into Vec (sorted by BTreeMap, with Option for deletions)
-        let pending = self.pending.lock();
-        let pending_items: Vec<(Vec<u8>, Option<Vec<u8>>)> = pending
-            .range((start_bound, end_bound))
-            .filter(|(k, _)| matches_prefix(k))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let pending_items = if self.readonly {
+            Vec::new()
+        } else {
+            let pending = self.pending.lock();
+            pending
+                .range((start_bound, end_bound))
+                .filter(|(k, _)| matches_prefix(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
 
         Ok(Box::new(MergingIterator::new(
             snapshot_items,
@@ -232,7 +236,7 @@ impl Reader for RedbTxn {
 #[async_trait]
 impl Writer for RedbTxn {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -251,7 +255,7 @@ impl Writer for RedbTxn {
     }
 
     async fn delete(&mut self, key: &[u8]) -> Result<()> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -274,14 +278,14 @@ impl Txn for RedbTxn {
         // Note: active_txn_count is decremented by Drop impl when self is dropped
         // at the end of this function (on any exit path).
 
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             tracing::warn!("Attempted to commit a discarded transaction");
             CallbackManager::execute_callbacks(self.callbacks.take_error());
             CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
             return Err(Error::DiscardedTxn);
         }
 
-        if *self.committed.lock() {
+        if self.committed.load(Ordering::Acquire) {
             tracing::warn!("Attempted to commit an already committed transaction");
             return Err(Error::Other("Transaction already committed".into()));
         }
@@ -310,7 +314,7 @@ impl Txn for RedbTxn {
                     return Err(Error::Other("group commit channel closed".into()));
                 }
 
-                *self.committed.lock() = true;
+                self.committed.store(true, Ordering::Release);
 
                 // Wait for the batch flush to complete
                 return result_rx
@@ -422,7 +426,7 @@ impl Txn for RedbTxn {
         }
 
         // Mark as committed AFTER successful database commit
-        *self.committed.lock() = true;
+        self.committed.store(true, Ordering::Release);
 
         // Execute success callbacks
         CallbackManager::execute_callbacks(self.callbacks.take_success());
@@ -435,7 +439,7 @@ impl Txn for RedbTxn {
         // Note: active_txn_count is decremented by Drop impl when self is dropped
         // at the end of this function.
 
-        *self.discarded.lock() = true;
+        self.discarded.store(true, Ordering::Release);
 
         // Execute sync discard callbacks
         CallbackManager::execute_callbacks(self.callbacks.take_discard());
