@@ -56,6 +56,7 @@ impl Planner {
     ///
     /// If `parent_filter` is provided, relation filters are extracted and passed
     /// to the TypeJoin nodes to filter parents based on their children.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn apply_joins(
         &self,
         mut plan: Box<dyn PlanNode>,
