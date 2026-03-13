@@ -1,10 +1,11 @@
 //! P2P replicator command implementations
 
 use clap::{Args, Subcommand};
+use defra_http::router::ExplicitReplayCapabilityInput;
 
 use crate::commands::client::http_client::HttpClient;
-use crate::commands::client::{validate_identifier, ClientContext};
-use crate::error::Result;
+use crate::commands::client::{raw_identity_from_key_bytes, validate_identifier, ClientContext};
+use crate::error::{Error, Result};
 
 /// Replicator management subcommands
 #[derive(Args, Debug)]
@@ -88,14 +89,76 @@ impl P2pReplicatorAddArgs {
             .with_verbose(ctx.verbose);
 
         let address = self.addresses.first().map(|s| s.as_str());
+        let explicit_replay_capabilities =
+            build_explicit_replay_capabilities(&client, ctx, &self.collection, address).await?;
 
-        client.p2p_replicator_add(&self.collection, address).await?;
+        client
+            .p2p_replicator_add(&self.collection, address, &explicit_replay_capabilities)
+            .await?;
         println!(
             "Set replicator for collections: {}",
             self.collection.join(", ")
         );
         Ok(())
     }
+}
+
+async fn build_explicit_replay_capabilities(
+    client: &HttpClient,
+    ctx: &ClientContext,
+    collections: &[String],
+    address: Option<&str>,
+) -> Result<Vec<ExplicitReplayCapabilityInput>> {
+    let Some(identity_key_bytes) = ctx.identity_key_bytes.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let Some(address) = address else {
+        return Ok(Vec::new());
+    };
+
+    let local_info = client.p2p_info().await?;
+    let source_peer_id = local_info
+        .first()
+        .ok_or_else(|| Error::Server("local node has no P2P listen address".to_string()))
+        .and_then(|addr| {
+            p2p::parse_multiaddr_with_peer_id(addr)
+                .map(|parsed| parsed.peer_id.to_string())
+                .map_err(Error::Server)
+        })?;
+    let target_peer_id = p2p::parse_multiaddr_with_peer_id(address)
+        .map_err(Error::Server)?
+        .peer_id
+        .to_string();
+    let identity = raw_identity_from_key_bytes("replicator identity", identity_key_bytes)?;
+    let collections_by_name = client.collection_versions().await?;
+
+    collections
+        .iter()
+        .map(|name| {
+            let collection_id = collections_by_name
+                .iter()
+                .find(|collection| collection.name == *name && collection.is_active)
+                .or_else(|| {
+                    collections_by_name
+                        .iter()
+                        .find(|collection| collection.name == *name)
+                })
+                .map(|collection| collection.collection_id.clone())
+                .ok_or_else(|| Error::CollectionNotFound(name.clone()))?;
+            let capability = p2p::generate_explicit_replay_capability(
+                &identity,
+                &source_peer_id,
+                &target_peer_id,
+                &collection_id,
+                p2p::DEFAULT_EXPLICIT_REPLAY_CAPABILITY_TTL,
+            )
+            .map_err(Error::Server)?;
+            Ok(ExplicitReplayCapabilityInput {
+                collection_id,
+                capability,
+            })
+        })
+        .collect()
 }
 
 impl P2pReplicatorDeleteArgs {

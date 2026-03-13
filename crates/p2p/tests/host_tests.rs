@@ -8,6 +8,10 @@ use p2p::testutil::MockBitswapStore;
 use p2p::{message::PushLogReply, signing::sign_message, P2PHost, PeerId, PushLogRequest};
 use tokio::time::timeout;
 
+fn authorizer_identity() -> RawIdentity {
+    RawIdentity::from_private_key(generate_ed25519().unwrap()).unwrap()
+}
+
 async fn wait_until_connected(handle: &p2p::P2PHostHandle, peer_id: PeerId) {
     let start = std::time::Instant::now();
     loop {
@@ -79,15 +83,13 @@ fn explicit_replay_capability(
     target_peer_id: PeerId,
     collection_id: &str,
 ) -> (String, String) {
-    let key = generate_ed25519().unwrap();
-    let identity = RawIdentity::from_private_key(key).unwrap();
+    let identity = authorizer_identity();
     let did = identity.did().unwrap().to_string();
     let capability = p2p::generate_explicit_replay_capability(
-        sender.keypair(),
+        &identity,
         &sender.local_peer_id_cached().to_string(),
         &target_peer_id.to_string(),
         collection_id,
-        &did,
         Duration::from_secs(60 * 60),
     )
     .unwrap();
@@ -317,13 +319,14 @@ async fn test_two_stream_expired_capability_is_rejected() {
     wait_until_connected(&handle0, peer1).await;
     wait_until_connected(&handle1, peer0).await;
 
+    let authorizer = authorizer_identity();
     let claims = p2p::ExplicitReplayCapabilityClaims {
         version: 1,
         purpose: "explicit-replay".to_string(),
         source_peer_id: handle0.local_peer_id_cached().to_string(),
         target_peer_id: peer1.to_string(),
         collection_id: "collection1".to_string(),
-        authorizer_did: "did:key:z6MkExpired".to_string(),
+        authorizer_did: authorizer.did().unwrap().to_string(),
         expires_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -331,13 +334,13 @@ async fn test_two_stream_expired_capability_is_rejected() {
             .saturating_sub(1),
     };
     let capability =
-        p2p::generate_explicit_replay_capability_from_claims(handle0.keypair(), claims).unwrap();
+        p2p::generate_explicit_replay_capability_from_claims(&authorizer, claims).unwrap();
 
     let mut request = PushLogRequest::new(
         "doc1".to_string(),
         vec![1, 2, 3],
         "collection1".to_string(),
-        "did:key:z6MkExpired".to_string(),
+        authorizer.did().unwrap().to_string(),
         b"block-data".to_vec(),
     );
     request.explicit_replay_capability = Some(capability);
@@ -350,6 +353,118 @@ async fn test_two_stream_expired_capability_is_rejected() {
 
     handle0.shutdown().await.unwrap();
     handle1.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_two_stream_invalid_authorizer_signature_is_rejected() {
+    let store0 = MockBitswapStore::new();
+    let store1 = MockBitswapStore::new();
+    let (host0, handle0, _events0, _replicators0) = P2PHost::new(store0).await.unwrap();
+    let (host1, handle1, mut events1, _replicators1) = P2PHost::new(store1).await.unwrap();
+
+    tokio::spawn(host0.run());
+    tokio::spawn(host1.run());
+
+    handle1
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr1 = handle1.listen_addresses().await.unwrap().remove(0);
+    let peer1 = handle1.local_peer_id_cached();
+    let peer0 = handle0.local_peer_id_cached();
+
+    handle0.dial(peer1, vec![addr1]).await.unwrap();
+    wait_until_connected(&handle0, peer1).await;
+    wait_until_connected(&handle1, peer0).await;
+
+    let claimed_authorizer = authorizer_identity();
+    let wrong_signer = authorizer_identity();
+    let claims = p2p::ExplicitReplayCapabilityClaims {
+        version: 1,
+        purpose: "explicit-replay".to_string(),
+        source_peer_id: handle0.local_peer_id_cached().to_string(),
+        target_peer_id: peer1.to_string(),
+        collection_id: "collection1".to_string(),
+        authorizer_did: claimed_authorizer.did().unwrap().to_string(),
+        expires_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .saturating_add(60 * 60),
+    };
+    let capability =
+        p2p::generate_explicit_replay_capability_from_claims(&wrong_signer, claims).unwrap();
+
+    let mut request = PushLogRequest::new(
+        "doc1".to_string(),
+        vec![1, 2, 3],
+        "collection1".to_string(),
+        claimed_authorizer.did().unwrap().to_string(),
+        b"block-data".to_vec(),
+    );
+    request.explicit_replay_capability = Some(capability);
+    sign_message(handle0.keypair(), &mut request).unwrap();
+
+    let is_explicit =
+        send_two_stream_request_and_capture_flag(&handle0, &handle1, &mut events1, peer1, request)
+            .await;
+    assert!(
+        !is_explicit,
+        "capability with an invalid authorizer signature must be rejected"
+    );
+
+    handle0.shutdown().await.unwrap();
+    handle1.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_two_stream_capability_is_edge_scoped() {
+    let store0 = MockBitswapStore::new();
+    let store1 = MockBitswapStore::new();
+    let store2 = MockBitswapStore::new();
+    let (host0, handle0, _events0, _replicators0) = P2PHost::new(store0).await.unwrap();
+    let (host1, handle1, _events1, _replicators1) = P2PHost::new(store1).await.unwrap();
+    let (host2, handle2, mut events2, _replicators2) = P2PHost::new(store2).await.unwrap();
+
+    tokio::spawn(host0.run());
+    tokio::spawn(host1.run());
+    tokio::spawn(host2.run());
+
+    handle2
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr2 = handle2.listen_addresses().await.unwrap().remove(0);
+    let peer2 = handle2.local_peer_id_cached();
+    let peer1 = handle1.local_peer_id_cached();
+
+    handle1.dial(peer2, vec![addr2]).await.unwrap();
+    wait_until_connected(&handle1, peer2).await;
+    wait_until_connected(&handle2, peer1).await;
+
+    let (creator, capability_for_a_to_b) =
+        explicit_replay_capability(&handle0, handle1.local_peer_id_cached(), "collection1");
+    let mut request = PushLogRequest::new(
+        "doc1".to_string(),
+        vec![1, 2, 3],
+        "collection1".to_string(),
+        creator,
+        b"block-data".to_vec(),
+    );
+    request.explicit_replay_capability = Some(capability_for_a_to_b);
+    sign_message(handle1.keypair(), &mut request).unwrap();
+
+    let is_explicit =
+        send_two_stream_request_and_capture_flag(&handle1, &handle2, &mut events2, peer2, request)
+            .await;
+    assert!(
+        !is_explicit,
+        "capability for A->B must not authorize replay on B->C"
+    );
+
+    handle0.shutdown().await.unwrap();
+    handle1.shutdown().await.unwrap();
+    handle2.shutdown().await.unwrap();
 }
 
 #[tokio::test]

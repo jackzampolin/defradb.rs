@@ -82,7 +82,9 @@ pub use error::{Error, Result};
 pub use explicit_replay::{
     generate_capability as generate_explicit_replay_capability,
     generate_capability_from_claims as generate_explicit_replay_capability_from_claims,
-    ExplicitReplayAuthorization, ExplicitReplayCapabilityClaims,
+    verify_capability as verify_explicit_replay_capability, ExplicitReplayAuthorization,
+    ExplicitReplayCapabilityClaims,
+    DEFAULT_CAPABILITY_TTL as DEFAULT_EXPLICIT_REPLAY_CAPABILITY_TTL,
 };
 pub use host::{
     convert_host_event, HostCommand, HostEvent, Libp2pTransport, P2PHost, P2PHostConfig,

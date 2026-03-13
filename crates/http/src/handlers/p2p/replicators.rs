@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
-use crate::router::{AppState, NodePermission};
+use crate::router::{AppState, ExplicitReplayCapabilityInput, NodePermission};
 use crate::validation::{validate_collection_name, validate_multiaddr};
 
 /// Response for replicator info (Go-compatible format with PascalCase).
@@ -33,6 +33,8 @@ pub struct ReplicatorRequest {
     /// List of peer multiaddrs to replicate to.
     #[serde(rename = "Addresses", default)]
     pub addresses: Vec<String>,
+    #[serde(rename = "ExplicitReplayCapabilities", default)]
+    pub explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
 }
 
 /// Request body for replicator removal (Go-compatible).
@@ -113,12 +115,13 @@ pub async fn add_replicator(
 
     // Use first address if provided (Go sends array, trait takes optional single)
     let addr = request.addresses.first().map(|s| s.as_str());
-    let explicit_replay_authorizer = identity.did().map(|did| did.to_string());
+    let expected_authorizer_did = identity.did().map(|did| did.to_string());
 
     p2p.add_replicator(
         request.collections,
         addr,
-        explicit_replay_authorizer.as_deref(),
+        request.explicit_replay_capabilities,
+        expected_authorizer_did.as_deref(),
     )
     .await
     .map_err(HttpError::BadRequest)?;

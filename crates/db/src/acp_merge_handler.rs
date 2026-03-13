@@ -109,7 +109,9 @@ impl CompositeMergeHook for AcpCompositeMergeHook {
     ) -> Option<Box<dyn CompositePostCommitAction>> {
         let acp = self.document_acp()?.clone();
         let policy = collection.policy.as_ref()?;
-        let creator = metadata.effective_creator()?;
+        let creator = metadata
+            .explicit_replay_authorizer_for(&collection.collection_id)
+            .or_else(|| metadata.effective_creator())?;
         let did = identity::Did::new(creator).ok()?;
 
         Some(Box::new(RegisterReplicatedDocAction {

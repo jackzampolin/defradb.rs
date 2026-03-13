@@ -9,9 +9,9 @@ pub use state::{AppState, AppStateBuilder};
 pub use traits::{
     AcpLightClientStatus, AcpOperations, BackupOperations, BlockOperations,
     CollectionManagementOperations, DocumentAcpOperations, DumpOperations, EncryptedIndexInfo,
-    EncryptedIndexOperations, ImportResult, IndexFieldInfo, IndexInfo, IndexOperations,
-    LensOperations, NacStatus, NacStatusInfo, NodeAcpOperations, NodePermission, P2POperations,
-    P2pDocumentInfo, P2pDocumentRequest, PolicyInfo, ReplicatorInfo, SchemaOperations,
-    SyncBranchableRequest, SyncDocumentsRequest, SyncVersionsRequest, TransactionOperations,
-    ViewOperations,
+    EncryptedIndexOperations, ExplicitReplayCapabilityInput, ImportResult, IndexFieldInfo,
+    IndexInfo, IndexOperations, LensOperations, NacStatus, NacStatusInfo, NodeAcpOperations,
+    NodePermission, P2POperations, P2pDocumentInfo, P2pDocumentRequest, PolicyInfo, ReplicatorInfo,
+    SchemaOperations, SyncBranchableRequest, SyncDocumentsRequest, SyncVersionsRequest,
+    TransactionOperations, ViewOperations,
 };

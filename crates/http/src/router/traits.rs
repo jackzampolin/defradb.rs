@@ -1,5 +1,13 @@
 //! Operation traits and supporting types for the HTTP router.
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExplicitReplayCapabilityInput {
+    #[serde(rename = "CollectionID")]
+    pub collection_id: String,
+    #[serde(rename = "Capability")]
+    pub capability: String,
+}
+
 /// Trait for P2P operations that can be accessed via HTTP.
 ///
 /// Abstracts P2P host functionality to decouple HTTP handlers from the
@@ -31,7 +39,8 @@ pub trait P2POperations: Send + Sync {
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
-        explicit_replay_authorizer: Option<&str>,
+        explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
+        expected_authorizer_did: Option<&str>,
     ) -> Result<(), String>;
 
     /// Remove a replicator for collections.

@@ -1,7 +1,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use libp2p::identity::{Keypair, PublicKey};
+use crypto::{did::parse_did_key, public_key_from_bytes};
+use identity::FullIdentity;
 use serde::{Deserialize, Serialize};
 
 const CAPABILITY_VERSION: u8 = 1;
@@ -22,8 +23,6 @@ pub struct ExplicitReplayCapabilityClaims {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct ExplicitReplayCapabilityEnvelope {
     claims: ExplicitReplayCapabilityClaims,
-    #[serde(with = "serde_bytes")]
-    source_pubkey: Vec<u8>,
     #[serde(with = "serde_bytes")]
     signature: Vec<u8>,
 }
@@ -113,16 +112,18 @@ fn validate_claims(
     Ok(())
 }
 
-pub fn generate_capability(
-    keypair: &Keypair,
+pub fn generate_capability<I: FullIdentity>(
+    authorizer: &I,
     source_peer_id: &str,
     target_peer_id: &str,
     collection_id: &str,
-    authorizer_did: &str,
     lifetime: Duration,
 ) -> Result<String, String> {
     let issued_at = now_unix()?;
     let expires_at = issued_at.saturating_add(lifetime.as_secs());
+    let authorizer_did = authorizer
+        .did()
+        .map_err(|error| format!("failed to derive explicit replay authorizer DID: {error}"))?;
     let claims = ExplicitReplayCapabilityClaims {
         version: CAPABILITY_VERSION,
         purpose: CAPABILITY_PURPOSE.to_string(),
@@ -132,28 +133,33 @@ pub fn generate_capability(
         authorizer_did: authorizer_did.to_string(),
         expires_at,
     };
-    generate_capability_from_claims(keypair, claims)
+    generate_capability_from_claims(authorizer, claims)
 }
 
-pub fn generate_capability_from_claims(
-    keypair: &Keypair,
+pub fn generate_capability_from_claims<I: FullIdentity>(
+    authorizer: &I,
     claims: ExplicitReplayCapabilityClaims,
 ) -> Result<String, String> {
     let claims_bytes = encode_claims(&claims)?;
-    let signature = keypair
+    let signature = authorizer
         .sign(&claims_bytes)
         .map_err(|error| format!("failed to sign explicit replay capability: {error}"))?;
 
-    let envelope = ExplicitReplayCapabilityEnvelope {
-        claims,
-        source_pubkey: keypair.public().encode_protobuf(),
-        signature,
-    };
+    let envelope = ExplicitReplayCapabilityEnvelope { claims, signature };
 
     let envelope_bytes = serde_cbor::to_vec(&envelope)
         .map_err(|error| format!("failed to encode explicit replay capability: {error}"))?;
 
     Ok(URL_SAFE_NO_PAD.encode(envelope_bytes))
+}
+
+fn decode_authorizer_public_key(
+    authorizer_did: &str,
+) -> Result<Box<dyn crypto::keys::PublicKey>, String> {
+    let (key_type, public_key_bytes) = parse_did_key(authorizer_did)
+        .map_err(|error| format!("invalid explicit replay capability authorizer DID: {error}"))?;
+    public_key_from_bytes(key_type, &public_key_bytes)
+        .map_err(|error| format!("invalid explicit replay capability authorizer key: {error}"))
 }
 
 pub fn verify_capability(
@@ -170,19 +176,14 @@ pub fn verify_capability(
         collection_id,
     )?;
 
-    let public_key = PublicKey::try_decode_protobuf(&envelope.source_pubkey)
-        .map_err(|error| format!("invalid explicit replay capability public key: {error}"))?;
-
-    let derived_peer_id = public_key.to_peer_id().to_string();
-    if derived_peer_id != envelope.claims.source_peer_id {
-        return Err(format!(
-            "explicit replay capability source key derived peer {} did not match claim {}",
-            derived_peer_id, envelope.claims.source_peer_id
-        ));
-    }
-
+    let public_key = decode_authorizer_public_key(&envelope.claims.authorizer_did)?;
     let claims_bytes = encode_claims(&envelope.claims)?;
-    if !public_key.verify(&claims_bytes, &envelope.signature) {
+    if !public_key
+        .verify(&claims_bytes, &envelope.signature)
+        .map_err(|error| {
+            format!("explicit replay capability signature verification error: {error}")
+        })?
+    {
         return Err("explicit replay capability signature verification failed".to_string());
     }
 
@@ -198,21 +199,22 @@ pub fn verify_capability(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crypto::generate_ed25519;
+    use identity::{Identity, RawIdentity};
 
-    fn keypair() -> Keypair {
-        Keypair::generate_ed25519()
+    fn authorizer() -> RawIdentity {
+        RawIdentity::from_private_key(generate_ed25519().unwrap()).unwrap()
     }
 
     #[test]
     fn verify_capability_accepts_valid_sender_target_and_collection() {
-        let keypair = keypair();
-        let source_peer_id = keypair.public().to_peer_id().to_string();
+        let authorizer = authorizer();
+        let source_peer_id = "peer-source".to_string();
         let capability = generate_capability(
-            &keypair,
+            &authorizer,
             &source_peer_id,
             "peer-target",
             "collection-a",
-            "did:key:z6MkAuthorizer",
             Duration::from_secs(60),
         )
         .unwrap();
@@ -223,19 +225,21 @@ mod tests {
         assert_eq!(authorization.source_peer_id, source_peer_id);
         assert_eq!(authorization.target_peer_id, "peer-target");
         assert_eq!(authorization.collection_id, "collection-a");
-        assert_eq!(authorization.authorizer_did, "did:key:z6MkAuthorizer");
+        assert_eq!(
+            authorization.authorizer_did,
+            authorizer.did().unwrap().to_string()
+        );
     }
 
     #[test]
     fn verify_capability_rejects_collection_mismatch() {
-        let keypair = keypair();
-        let source_peer_id = keypair.public().to_peer_id().to_string();
+        let authorizer = authorizer();
+        let source_peer_id = "peer-source".to_string();
         let capability = generate_capability(
-            &keypair,
+            &authorizer,
             &source_peer_id,
             "peer-target",
             "collection-a",
-            "did:key:z6MkAuthorizer",
             Duration::from_secs(60),
         )
         .unwrap();
@@ -251,17 +255,17 @@ mod tests {
 
     #[test]
     fn verify_capability_rejects_expired_capability() {
-        let keypair = keypair();
-        let source_peer_id = keypair.public().to_peer_id().to_string();
+        let authorizer = authorizer();
+        let source_peer_id = "peer-source".to_string();
         let capability = generate_capability_from_claims(
-            &keypair,
+            &authorizer,
             ExplicitReplayCapabilityClaims {
                 version: CAPABILITY_VERSION,
                 purpose: CAPABILITY_PURPOSE.to_string(),
                 source_peer_id: source_peer_id.clone(),
                 target_peer_id: "peer-target".to_string(),
                 collection_id: "collection-a".to_string(),
-                authorizer_did: "did:key:z6MkAuthorizer".to_string(),
+                authorizer_did: authorizer.did().unwrap().to_string(),
                 expires_at: now_unix().unwrap().saturating_sub(1),
             },
         )
@@ -271,5 +275,30 @@ mod tests {
             .unwrap_err();
 
         assert!(error.contains("expired"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn verify_capability_rejects_wrong_authorizer_signature() {
+        let claimed_authorizer = authorizer();
+        let wrong_signer = authorizer();
+        let source_peer_id = "peer-source".to_string();
+        let capability = generate_capability_from_claims(
+            &wrong_signer,
+            ExplicitReplayCapabilityClaims {
+                version: CAPABILITY_VERSION,
+                purpose: CAPABILITY_PURPOSE.to_string(),
+                source_peer_id: source_peer_id.clone(),
+                target_peer_id: "peer-target".to_string(),
+                collection_id: "collection-a".to_string(),
+                authorizer_did: claimed_authorizer.did().unwrap().to_string(),
+                expires_at: now_unix().unwrap().saturating_add(60),
+            },
+        )
+        .unwrap();
+
+        let error = verify_capability(&capability, &source_peer_id, "peer-target", "collection-a")
+            .unwrap_err();
+
+        assert!(error.contains("signature"), "unexpected error: {error}");
     }
 }

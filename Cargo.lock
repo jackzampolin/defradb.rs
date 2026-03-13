@@ -8676,7 +8676,6 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_cbor",
- "serde_json",
  "storage",
  "thiserror 1.0.69",
  "tokio",

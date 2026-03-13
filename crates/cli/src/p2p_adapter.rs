@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use blockstore::Blockstore;
 
-use defra_http::router::{P2POperations, ReplicatorInfo};
+use defra_http::router::{ExplicitReplayCapabilityInput, P2POperations, ReplicatorInfo};
 use p2p::sync::Libp2pSyncCoordinator;
 use p2p::topics::DefraTopic;
 use p2p::P2PHostHandle;
@@ -536,7 +536,8 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
-        explicit_replay_authorizer: Option<&str>,
+        explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
+        expected_authorizer_did: Option<&str>,
     ) -> Result<(), String> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
         let parsed = p2p::parse_multiaddr_with_peer_id(addr_str)?;
@@ -567,14 +568,56 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         }
 
         let peer_id = parsed.peer_id;
+        let requested_collections: HashSet<String> = collection_cids.iter().cloned().collect();
+        let local_peer_id = self.handle.local_peer_id_cached().to_string();
+        let target_peer_id = peer_id.to_string();
+        let mut validated_capabilities = Vec::new();
 
-        if let Some(authorizer_did) = explicit_replay_authorizer {
-            self.handle
-                .set_explicit_replay_authorizer(peer_id, &collection_cids, authorizer_did)
-                .map_err(|e| e.to_string())?;
-        } else {
-            self.handle
-                .clear_explicit_replay_capability(peer_id, &collection_cids);
+        if !explicit_replay_capabilities.is_empty() {
+            let expected_authorizer_did = expected_authorizer_did.ok_or_else(|| {
+                "explicit replay capabilities require an authenticated identity".to_string()
+            })?;
+
+            for capability in explicit_replay_capabilities {
+                if !requested_collections.contains(&capability.collection_id) {
+                    return Err(format!(
+                        "explicit replay capability collection '{}' was not requested",
+                        capability.collection_id
+                    ));
+                }
+
+                let authorization = p2p::verify_explicit_replay_capability(
+                    &capability.capability,
+                    &local_peer_id,
+                    &target_peer_id,
+                    &capability.collection_id,
+                )
+                .map_err(|error| {
+                    format!(
+                        "invalid explicit replay capability for collection '{}': {}",
+                        capability.collection_id, error
+                    )
+                })?;
+
+                if authorization.authorizer_did != expected_authorizer_did {
+                    return Err(format!(
+                        "explicit replay capability authorizer '{}' did not match authenticated identity '{}'",
+                        authorization.authorizer_did, expected_authorizer_did
+                    ));
+                }
+
+                validated_capabilities.push((capability.collection_id, capability.capability));
+            }
+        }
+
+        self.handle
+            .clear_explicit_replay_capability(peer_id, &collection_cids);
+        for (collection_id, capability) in validated_capabilities {
+            self.handle.set_explicit_replay_capability(
+                peer_id,
+                std::slice::from_ref(&collection_id),
+                &capability,
+            );
         }
 
         // Dial peer

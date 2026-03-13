@@ -9,7 +9,6 @@ use parking_lot::RwLock;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{Error, Result};
-use crate::explicit_replay;
 use crate::message::{PushLogBroadcast, PushLogReply, PushLogRequest};
 use crate::replicator::ReplicatorInfo;
 use crate::signing::sign_message;
@@ -361,34 +360,6 @@ impl P2PHostHandle {
         capability: &str,
     ) {
         self.set_explicit_replay_capability_inner(&peer_id, collections, capability);
-    }
-
-    /// Issue and cache dedicated explicit replay capabilities for the provided collections.
-    pub fn set_explicit_replay_authorizer(
-        &self,
-        peer_id: PeerId,
-        collections: &[String],
-        authorizer_did: &str,
-    ) -> Result<()> {
-        for collection_id in collections {
-            let capability = explicit_replay::generate_capability(
-                self.keypair(),
-                &self.local_peer_id_cached().to_string(),
-                &peer_id.to_string(),
-                collection_id,
-                authorizer_did,
-                explicit_replay::DEFAULT_CAPABILITY_TTL,
-            )
-            .map_err(Error::Transport)?;
-
-            self.set_explicit_replay_capability_inner(
-                &peer_id,
-                std::slice::from_ref(collection_id),
-                &capability,
-            );
-        }
-
-        Ok(())
     }
 
     /// Clear cached explicit replay capabilities for the provided collections.

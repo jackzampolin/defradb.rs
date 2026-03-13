@@ -1,5 +1,6 @@
 //! P2P HTTP client methods
 
+use defra_http::router::ExplicitReplayCapabilityInput;
 use serde::{Deserialize, Serialize};
 
 use super::HttpClient;
@@ -52,6 +53,11 @@ pub struct P2pReplicatorRequest {
     pub collections: Vec<String>,
     #[serde(rename = "Addresses")]
     pub addresses: Vec<String>,
+    #[serde(
+        rename = "ExplicitReplayCapabilities",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
 }
 
 /// P2P collection request
@@ -94,12 +100,14 @@ impl HttpClient {
         &self,
         collections: &[String],
         address: Option<&str>,
+        explicit_replay_capabilities: &[ExplicitReplayCapabilityInput],
     ) -> Result<()> {
         let url = format!("{}/api/v0/p2p/replicator", self.base_url);
         let addresses = address.map(|s| vec![s.to_string()]).unwrap_or_default();
         let body = serde_json::to_string(&P2pReplicatorRequest {
             collections: collections.to_vec(),
             addresses,
+            explicit_replay_capabilities: explicit_replay_capabilities.to_vec(),
         })?;
         self.request_void("POST", &url, Some(&body)).await
     }

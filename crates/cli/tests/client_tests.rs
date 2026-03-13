@@ -209,6 +209,7 @@ fn test_client_context_with_identity() {
     let ctx = ClientContext {
         url: url.to_string(),
         auth_token: auth_token.clone(),
+        identity_key_bytes: None,
         tx_id: None,
         verbose: false,
     };
@@ -227,6 +228,7 @@ fn test_client_context_without_identity() {
     let ctx = ClientContext {
         url: "http://localhost:9181".to_string(),
         auth_token: None,
+        identity_key_bytes: None,
         tx_id: None,
         verbose: false,
     };
@@ -240,6 +242,7 @@ fn test_client_context_with_tx() {
     let ctx = ClientContext {
         url: "http://localhost:9181".to_string(),
         auth_token: None,
+        identity_key_bytes: None,
         tx_id: Some("12345".to_string()),
         verbose: false,
     };

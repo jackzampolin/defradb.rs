@@ -38,7 +38,7 @@ pub struct PushLogRequest {
     #[serde(rename = "Block", with = "serde_bytes")]
     pub block: Vec<u8>,
 
-    /// Optional sender-issued explicit replay capability for encrypted replay.
+    /// Optional authorizer-signed explicit replay capability for encrypted replay.
     #[serde(
         rename = "ExplicitReplayCapability",
         skip_serializing_if = "Option::is_none",

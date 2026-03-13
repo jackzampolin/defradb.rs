@@ -364,6 +364,7 @@ impl HttpClient {
     endpoint!(p2p_collection_list, GET  "/api/v0/p2p/collections"    => Vec<String>);
     endpoint!(p2p_active_peers,    GET  "/api/v0/p2p/active-peers"   => JsonValue);
     endpoint!(p2p_document_list,   GET  "/api/v0/p2p/documents"      => JsonValue);
+    endpoint!(collection_versions, GET  "/api/v0/collections/versions" => Vec<schema::CollectionVersion>);
     // ACP / NAC
     endpoint!(acp_list_policies,   GET  "/api/v0/acp/policy"         => Vec<AcpPolicy>);
     endpoint!(nac_status,          GET  "/api/v0/acp/node/status"    => JsonValue);

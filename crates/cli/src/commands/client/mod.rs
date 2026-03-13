@@ -52,6 +52,8 @@ pub struct ClientContext {
     pub url: String,
     /// Authentication token (generated from identity)
     pub auth_token: Option<String>,
+    /// Raw identity private key bytes, when provided by the caller.
+    pub identity_key_bytes: Option<Vec<u8>>,
     /// Transaction ID
     pub tx_id: Option<String>,
     /// Verbose mode
@@ -141,11 +143,21 @@ impl ClientArgs {
     pub async fn execute(&self, config: Config, url_override: Option<String>) -> Result<()> {
         let url = get_url(&config, url_override);
 
-        // Generate auth token from identity (hex key or keyring name)
-        let auth_token = if let Some(ref identity_hex) = self.identity {
-            Some(generate_auth_token(identity_hex, &url)?)
+        let identity_key_bytes = if let Some(ref identity_hex) = self.identity {
+            Some(decode_identity_hex(identity_hex)?)
         } else if let Some(ref name) = self.identity_name {
-            Some(generate_auth_token_from_keyring(&config, name, &url)?)
+            Some(load_identity_bytes_from_keyring(&config, name)?)
+        } else {
+            None
+        };
+
+        let auth_token = if let Some(ref key_bytes) = identity_key_bytes {
+            let identity_name = self.identity_name.as_deref().unwrap_or("inline identity");
+            Some(generate_auth_token_from_key_bytes(
+                identity_name,
+                key_bytes,
+                &url,
+            )?)
         } else {
             None
         };
@@ -153,6 +165,7 @@ impl ClientArgs {
         let ctx = ClientContext {
             url,
             auth_token,
+            identity_key_bytes,
             tx_id: self.tx.map(|id| id.to_string()),
             verbose: self.verbose,
         };
@@ -182,52 +195,8 @@ impl ClientArgs {
 ///
 /// Supports both secp256k1 (32 bytes, Go CLI default) and ed25519 (64 bytes) keys.
 pub fn generate_auth_token(identity_hex: &str, audience: &str) -> Result<String> {
-    use crypto::KeyType;
-    use identity::{new_token, RawIdentity};
-
-    // Decode hex private key
-    let key_bytes = hex::decode(identity_hex)
-        .map_err(|e| Error::InvalidIdentity(format!("invalid hex: {}", e)))?;
-
-    // Determine key type based on length:
-    // - secp256k1: 32 bytes (Go CLI default)
-    // - ed25519: 64 bytes (seed + public key) or 32 bytes (seed only)
-    let key_type = match key_bytes.len() {
-        32 => KeyType::Secp256k1, // Default to secp256k1 for 32-byte keys (Go CLI compat)
-        64 => KeyType::Ed25519,
-        len => {
-            return Err(Error::InvalidIdentity(format!(
-                "invalid key length: {} bytes (expected 32 for secp256k1 or 64 for ed25519)",
-                len
-            )))
-        }
-    };
-
-    // Create identity from private key bytes
-    let identity = RawIdentity::from_bytes(key_type, &key_bytes)
-        .map_err(|e| Error::InvalidIdentity(format!("invalid private key: {}", e)))?;
-
-    // The audience must be bare host:port (matches Go's req.Host behavior)
-    let audience_host = strip_url_scheme(audience);
-
-    // Generate JWT token with 15-minute expiration (matches Go CLI)
-    let token_bytes = new_token(
-        &identity,
-        std::time::Duration::from_secs(15 * 60),
-        Some(audience_host.to_string()),
-        None,
-    )
-    .map_err(|e| Error::InvalidIdentity(format!("failed to generate token: {}", e)))?;
-
-    // Convert bytes to string
-    String::from_utf8(token_bytes)
-        .map_err(|e| Error::InvalidIdentity(format!("token is not valid UTF-8: {}", e)))
-}
-
-/// Generate a JWT auth token from a named key in the keyring.
-fn generate_auth_token_from_keyring(config: &Config, name: &str, audience: &str) -> Result<String> {
-    let key_bytes = load_identity_bytes_from_keyring(config, name)?;
-    generate_auth_token_from_key_bytes(name, &key_bytes, audience)
+    let key_bytes = decode_identity_hex(identity_hex)?;
+    generate_auth_token_from_key_bytes("inline identity", &key_bytes, audience)
 }
 
 fn load_identity_bytes_from_keyring(config: &Config, name: &str) -> Result<Vec<u8>> {
@@ -239,27 +208,38 @@ fn load_identity_bytes_from_keyring(config: &Config, name: &str) -> Result<Vec<u
         .map_err(|e| Error::Keyring(e.to_string()))
 }
 
+fn decode_identity_hex(identity_hex: &str) -> Result<Vec<u8>> {
+    hex::decode(identity_hex).map_err(|e| Error::InvalidIdentity(format!("invalid hex: {}", e)))
+}
+
+fn key_type_from_identity_bytes(name: &str, key_bytes: &[u8]) -> Result<crypto::KeyType> {
+    match key_bytes.len() {
+        32 => Ok(crypto::KeyType::Secp256k1),
+        64 => Ok(crypto::KeyType::Ed25519),
+        len => Err(Error::InvalidIdentity(format!(
+            "key '{}' has invalid length: {} bytes (expected 32 for secp256k1 or 64 for ed25519)",
+            name, len
+        ))),
+    }
+}
+
+pub(crate) fn raw_identity_from_key_bytes(
+    name: &str,
+    key_bytes: &[u8],
+) -> Result<identity::RawIdentity> {
+    let key_type = key_type_from_identity_bytes(name, key_bytes)?;
+    identity::RawIdentity::from_bytes(key_type, key_bytes)
+        .map_err(|e| Error::InvalidIdentity(format!("invalid key '{}': {}", name, e)))
+}
+
 fn generate_auth_token_from_key_bytes(
     name: &str,
     key_bytes: &[u8],
     audience: &str,
 ) -> Result<String> {
-    use crypto::KeyType;
-    use identity::{new_token, RawIdentity};
+    use identity::new_token;
 
-    let key_type = match key_bytes.len() {
-        32 => KeyType::Secp256k1,
-        64 => KeyType::Ed25519,
-        len => {
-            return Err(Error::InvalidIdentity(format!(
-            "key '{}' has invalid length: {} bytes (expected 32 for secp256k1 or 64 for ed25519)",
-            name, len
-        )))
-        }
-    };
-
-    let identity = RawIdentity::from_bytes(key_type, key_bytes)
-        .map_err(|e| Error::InvalidIdentity(format!("invalid key '{}': {}", name, e)))?;
+    let identity = raw_identity_from_key_bytes(name, key_bytes)?;
 
     let audience_host = strip_url_scheme(audience);
 
