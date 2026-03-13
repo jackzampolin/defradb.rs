@@ -1,0 +1,36 @@
+[package]
+name = "defra-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reusable embedded DefraDB node builder"
+
+[features]
+default = []
+http = ["dep:defra-http"]
+p2p = ["dep:p2p", "dep:blockstore", "dep:iroh", "dep:rand"]
+
+[dependencies]
+db = { path = "../db" }
+storage = { path = "../storage" }
+query = { path = "../query" }
+events = { path = "../events" }
+acp = { path = "../acp" }
+identity = { path = "../identity" }
+defra-core = { path = "../defra-core" }
+schema = { path = "../schema" }
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+async-trait = "0.1"
+serde.workspace = true
+serde_json.workspace = true
+
+# Optional — HTTP server
+defra-http = { path = "../http", optional = true }
+
+# Optional — P2P replication (IROH transport)
+p2p = { path = "../p2p", optional = true, features = ["iroh-transport"] }
+blockstore = { path = "../blockstore", optional = true }
+iroh = { workspace = true, optional = true }
+rand = { version = "0.9", optional = true }

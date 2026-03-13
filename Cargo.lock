@@ -3683,6 +3683,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "defra-node"
+version = "0.5.0"
+dependencies = [
+ "acp",
+ "anyhow",
+ "async-trait",
+ "blockstore",
+ "db",
+ "defra-core",
+ "defra-http",
+ "events",
+ "identity",
+ "iroh",
+ "p2p",
+ "query",
+ "rand 0.9.2",
+ "schema",
+ "serde",
+ "serde_json",
+ "storage",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "defra-version"
 version = "0.5.0"
 dependencies = [

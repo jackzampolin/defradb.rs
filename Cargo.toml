@@ -27,6 +27,7 @@ members = [
     "crates/orbis",
     "crates/wasm",
     "crates/pg-compat",
+    "crates/defra-node",
     "tools/ffi-test",
     "tools/integration-test",
 ]
