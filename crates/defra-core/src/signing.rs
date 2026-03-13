@@ -132,6 +132,20 @@ pub fn get_identity(did: &str) -> Option<SigningConfig> {
         .and_then(|store| store.get(did).cloned())
 }
 
+/// Find a registered DID backed by a remote signer.
+///
+/// This is used by HTTP request handling when the authenticated caller DID has no
+/// locally registered signing identity. In Orbis-backed deployments, the node
+/// should fall back to the remote signer identity rather than a local `--identity`
+/// secp256k1 key, so create mutations still go through the signing gate.
+pub fn find_remote_signer_did() -> Option<String> {
+    identity_store().lock().ok().and_then(|store| {
+        store
+            .iter()
+            .find_map(|(did, config)| config.has_remote_signer().then(|| did.clone()))
+    })
+}
+
 /// Resolve signing config for a request identity with node-identity fallback.
 ///
 /// - If `identity_did` is `Some(non-empty)`, look up that DID's signing config.
@@ -231,6 +245,40 @@ mod tests {
         let resolved = resolve_signing_config(Some("did:key:request"), Some("did:key:node"))
             .expect("node fallback should resolve");
         assert_eq!(resolved.public_key_hex, "node");
+
+        clear_identity_store();
+    }
+
+    #[test]
+    fn find_remote_signer_did_returns_registered_remote_signer() {
+        struct NoopRemoteSigner;
+
+        impl RemoteSigner for NoopRemoteSigner {
+            fn sign_sync(
+                &self,
+                _data: &[u8],
+                _authorization: Option<&SigningAuthorization>,
+            ) -> Result<Vec<u8>, String> {
+                Ok(vec![])
+            }
+        }
+
+        clear_identity_store();
+        store_identity("did:key:local", make_config("local"));
+        store_identity(
+            "did:key:remote",
+            SigningConfig {
+                key_type: "bls".to_string(),
+                private_key_bytes: vec![],
+                public_key_bytes: vec![],
+                public_key_hex: "remote".to_string(),
+                remote_signer: Some(Arc::new(NoopRemoteSigner)),
+                signing_authorization: None,
+            },
+        );
+
+        let resolved = find_remote_signer_did().expect("remote signer DID should resolve");
+        assert_eq!(resolved, "did:key:remote");
 
         clear_identity_store();
     }

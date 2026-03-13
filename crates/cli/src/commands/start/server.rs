@@ -1127,15 +1127,23 @@ impl Node {
                 .with_rest(rest_ops)
                 .with_dev_mode(config.development);
 
-            // Wire signing identity DID for anonymous-request fallback in HTTP handlers.
-            // Prefer user_did (from --identity) because store_identity() stores the
-            // signing config under that DID. Fall back to node_identity_did (P2P peer
-            // key) which shares a DID only when no explicit --identity is given.
-            let signing_did = user_did
-                .as_ref()
-                .map(|d| d.to_string())
+            // Wire signing identity DID for HTTP request fallback in handlers.
+            //
+            // For Orbis-backed signing, authenticated service JWTs do not have locally
+            // registered signing configs, so request resolution must fall back to the
+            // remote signer DID rather than the local `--identity` secp256k1 key.
+            // Otherwise CREATE mutations bypass the Orbis signing gate entirely.
+            let remote_signer_did = defra_core::signing::find_remote_signer_did();
+            let signing_did = remote_signer_did
+                .clone()
+                .or_else(|| user_did.as_ref().map(|d| d.to_string()))
                 .or(node_identity_did);
             if let Some(did) = signing_did {
+                info!(
+                    signing_did = %did,
+                    remote_signer_fallback = remote_signer_did.is_some(),
+                    "Configured HTTP signing fallback identity"
+                );
                 server = server.with_node_identity_did(did);
             }
 
