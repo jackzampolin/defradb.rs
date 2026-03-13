@@ -37,7 +37,7 @@ use defra_core::encryption::EncryptionConfig;
 use defra_core::signing::SigningConfig;
 use document::{Document, NormalValue};
 use storage::corekv::Key;
-use storage::keys::headstore::{HeadstoreColKey, HeadstoreDocKey};
+use storage::keys::headstore::{HeadstoreColKey, HeadstoreDocKey, HeadstorePriorityKey};
 
 pub(super) fn encrypt_delta(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
     let (ciphertext, _nonce) = crypto::encryption::aes::encrypt_aes(plaintext, key, &[], true)
@@ -190,6 +190,10 @@ pub(super) fn decode_priority_varint(buf: &[u8]) -> u64 {
         shift += 7;
     }
     n
+}
+
+pub(super) fn priority_index_key(doc_id: &str, priority: u64, cid: Cid) -> Vec<u8> {
+    HeadstorePriorityKey::new(doc_id, priority, cid).bytes()
 }
 
 /// A single head entry for a document field.

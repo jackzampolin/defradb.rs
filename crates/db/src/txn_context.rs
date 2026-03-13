@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use storage::corekv::Store;
 
+use crate::database::DB;
 use crate::doc_mutator::DbDocMutator;
 use crate::lensed_fetcher::LensedDocFetcher;
 use crate::txn::DbTxn;
@@ -17,6 +18,7 @@ use crate::txn::DbTxn;
 /// document fetching to the query executor. Uses `LensedDocFetcher` to support
 /// lens migrations within transactions.
 pub struct DbTransactionContext<S: Store> {
+    db: Arc<DB<S>>,
     id: String,
     readonly: bool,
     fetcher: Arc<LensedDocFetcher<S>>,
@@ -25,8 +27,14 @@ pub struct DbTransactionContext<S: Store> {
 
 impl<S: Store> DbTransactionContext<S> {
     /// Create a new transaction context.
-    pub(crate) fn new(id: String, readonly: bool, fetcher: Arc<LensedDocFetcher<S>>) -> Self {
+    pub(crate) fn new(
+        db: Arc<DB<S>>,
+        id: String,
+        readonly: bool,
+        fetcher: Arc<LensedDocFetcher<S>>,
+    ) -> Self {
         Self {
+            db,
             id,
             readonly,
             fetcher,
@@ -69,7 +77,10 @@ impl<S: Store + 'static> DbTransactionContext<S> {
     /// Should only be called on non-readonly transactions. Attempting to mutate
     /// via the returned mutator on a readonly transaction will fail.
     pub fn doc_mutator(&self) -> Arc<dyn DocMutator> {
-        Arc::new(DbDocMutator::from_shared_txn(self.fetcher.shared_txn()))
+        Arc::new(DbDocMutator::from_shared_txn(
+            self.db.clone(),
+            self.fetcher.shared_txn(),
+        ))
     }
 
     /// Get the underlying fetcher's shared transaction.

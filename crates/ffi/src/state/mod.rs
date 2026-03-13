@@ -86,6 +86,8 @@ pub type FfiTransactionRegistry = db::DbTransactionRegistry<FfiStore>;
 pub struct NodeState {
     /// The database instance.
     pub database: Arc<FfiDatabase>,
+    /// Background tasks owned by the embedded node (e.g. the downsample worker).
+    pub background_tasks: Arc<embedded::BackgroundTasks>,
     /// The transaction registry for managing explicit transactions.
     pub txn_registry: Arc<FfiTransactionRegistry>,
     /// The query runner for executing GraphQL queries.

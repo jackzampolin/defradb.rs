@@ -12,7 +12,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 pub use libp2p_adapter::{CollectionLookup, DbDocPusher, DocPusher};
-pub use node::{build_with_store, EmbeddedNode, NodeBuilder};
+pub use node::{build_with_store, BackgroundTasks, EmbeddedNode, NodeBuilder};
 pub use transport_doc_pusher::{DbTransportDocPusher, TransportDocPusher};
 pub use transport_version_syncer::{DbTransportVersionSyncer, TransportVersionSyncer};
 pub use version_syncer::DbVersionSyncer;

@@ -242,6 +242,8 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             doc_id: options.doc_id.clone(),
             cid: options.cid.clone(),
             depth: options.depth,
+            height_start: options.height_start,
+            height_end: options.height_end,
             field_name: options.field_name.clone(),
         };
 

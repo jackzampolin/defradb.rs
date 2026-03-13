@@ -50,6 +50,32 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             "Processing Composite delta (document-level)"
         );
 
+        let collection_lookup = self
+            .db
+            .find_collection_by_id(&payload.schema_version_id)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                metadata
+                    .collection_id
+                    .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
+            });
+
+        if let Some(collection) = collection_lookup.as_ref() {
+            if let Some(reason) = self
+                .db
+                .replicated_downsample_source_skip_reason(collection.schema())?
+            {
+                tracing::warn!(
+                    collection = %collection.name(),
+                    doc_id = %doc_id_str,
+                    reason = %reason,
+                    "Skipping replicated write into local-only downsample source"
+                );
+                return Ok(MergeOutcome::terminal_skip(reason));
+            }
+        }
+
         // Recursively merge parent composites referenced in `heads` before
         // processing this block.  This matches Go's processLog which walks
         // the DAG backwards and merges from oldest to newest, ensuring all
@@ -133,16 +159,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Create a SINGLE transaction for all field merges AND document storage
         let txn = self.db.new_txn(false).await?;
 
-        let collection_for_policy = self
-            .db
-            .find_collection_by_id(&payload.schema_version_id)
-            .ok()
-            .flatten()
-            .or_else(|| {
-                metadata
-                    .collection_id
-                    .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
-            });
+        let collection_for_policy = collection_lookup.clone();
 
         // Collect winning field values for document reconstruction
         // These are the values that WON conflict resolution, not just the incoming values
@@ -343,20 +360,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             // the P2P metadata's collection_id (handles cross-version sync
             // where the incoming block's schema version differs from local)
             if process_error.is_none() {
-                let collection_lookup = self
-                    .db
-                    .find_collection_by_id(&payload.schema_version_id)
-                    .ok()
-                    .flatten()
-                    .or_else(|| {
-                        metadata
-                            .collection_id
-                            .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
-                    });
-
                 let is_delete = payload.status == 2;
 
-                match collection_lookup {
+                match collection_lookup.clone() {
                     Some(collection) => {
                         is_branchable = collection.schema().is_branchable;
                         if is_delete {
@@ -591,6 +597,22 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 {
                     tracing::warn!(error = %e, "Failed to write composite head to headstore");
                 }
+                let composite_priority_key = storage::keys::headstore::HeadstorePriorityKey::new(
+                    &doc_id_str,
+                    payload.priority,
+                    *cid,
+                );
+                if let Err(e) = headstore
+                    .set(
+                        &<storage::keys::headstore::HeadstorePriorityKey as storage::corekv::Key>::bytes(
+                            &composite_priority_key,
+                        ),
+                        &[],
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, "Failed to write composite priority index");
+                }
 
                 // Field heads: only delete heads that each field block supersedes
                 if let Some(links) = &block.links {
@@ -627,6 +649,27 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                 field = %dag_link.name,
                                 error = %e,
                                 "Failed to write field head to headstore"
+                            );
+                        }
+                        let field_priority_key =
+                            storage::keys::headstore::HeadstorePriorityKey::new(
+                                &doc_id_str,
+                                payload.priority,
+                                dag_link.link,
+                            );
+                        if let Err(e) = headstore
+                            .set(
+                                &<storage::keys::headstore::HeadstorePriorityKey as storage::corekv::Key>::bytes(
+                                    &field_priority_key,
+                                ),
+                                &[],
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                field = %dag_link.name,
+                                error = %e,
+                                "Failed to write field priority index"
                             );
                         }
                     }
@@ -757,6 +800,32 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             "Processing Composite delta in batch txn"
         );
 
+        let collection_lookup = self
+            .db
+            .find_collection_by_id(&payload.schema_version_id)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                metadata
+                    .collection_id
+                    .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
+            });
+
+        if let Some(collection) = collection_lookup.as_ref() {
+            if let Some(reason) = self
+                .db
+                .replicated_downsample_source_skip_reason(collection.schema())?
+            {
+                tracing::warn!(
+                    collection = %collection.name(),
+                    doc_id = %doc_id_str,
+                    reason = %reason,
+                    "Skipping replicated write into local-only downsample source"
+                );
+                return Ok(MergeOutcome::terminal_skip(reason));
+            }
+        }
+
         // Recursively merge parent composites (using batch dedup)
         if let Some(heads) = &block.heads {
             for head_cid in heads {
@@ -809,16 +878,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
-        let collection_for_policy = self
-            .db
-            .find_collection_by_id(&payload.schema_version_id)
-            .ok()
-            .flatten()
-            .or_else(|| {
-                metadata
-                    .collection_id
-                    .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
-            });
+        let collection_for_policy = collection_lookup.clone();
 
         // Process field links within the shared transaction
         let mut field_values: HashMap<String, NormalValue> = HashMap::new();
@@ -968,20 +1028,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
             // Store document if no errors
             if process_error.is_none() {
-                let collection_lookup = self
-                    .db
-                    .find_collection_by_id(&payload.schema_version_id)
-                    .ok()
-                    .flatten()
-                    .or_else(|| {
-                        metadata
-                            .collection_id
-                            .and_then(|cid| self.db.find_collection_by_id(cid).ok().flatten())
-                    });
-
                 let is_delete = payload.status == 2;
 
-                match collection_lookup {
+                match collection_lookup.clone() {
                     Some(collection) => {
                         is_branchable = collection.schema().is_branchable;
                         if is_delete {
@@ -1173,6 +1222,19 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         &priority_bytes,
                     )
                     .await;
+                let composite_priority_key = storage::keys::headstore::HeadstorePriorityKey::new(
+                    &doc_id_str,
+                    payload.priority,
+                    *cid,
+                );
+                let _ = headstore
+                    .set(
+                        &<storage::keys::headstore::HeadstorePriorityKey as storage::corekv::Key>::bytes(
+                            &composite_priority_key,
+                        ),
+                        &[],
+                    )
+                    .await;
 
                 if let Some(links) = &block.links {
                     for dag_link in links {
@@ -1199,6 +1261,20 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             .set(
                                 &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&field_head_key),
                                 &priority_bytes,
+                            )
+                            .await;
+                        let field_priority_key =
+                            storage::keys::headstore::HeadstorePriorityKey::new(
+                                &doc_id_str,
+                                payload.priority,
+                                dag_link.link,
+                            );
+                        let _ = headstore
+                            .set(
+                                &<storage::keys::headstore::HeadstorePriorityKey as storage::corekv::Key>::bytes(
+                                    &field_priority_key,
+                                ),
+                                &[],
                             )
                             .await;
                     }

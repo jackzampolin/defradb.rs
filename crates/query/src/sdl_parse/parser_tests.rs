@@ -405,6 +405,83 @@ fn test_materialized_directive() {
 }
 
 #[test]
+fn test_downsample_directive() {
+    let sdl = r#"
+        type CpuRollup @downsample(interval: "60s", timeField: "ts", retention: "168h") {
+            ts: DateTime
+            avg: Float
+        }
+    "#;
+
+    let collections = parse_sdl(sdl).unwrap();
+    let view = &collections[0];
+
+    assert!(
+        view.is_materialized,
+        "@downsample should materialize the view"
+    );
+    assert_eq!(view.downsample_interval.as_deref(), Some("60s"));
+    assert_eq!(view.downsample_time_field.as_deref(), Some("ts"));
+    assert_eq!(view.downsample_retention.as_deref(), Some("168h"));
+}
+
+#[test]
+fn test_downsample_requires_interval() {
+    let sdl = r#"
+        type CpuRollup @downsample(timeField: "ts") {
+            ts: DateTime
+            avg: Float
+        }
+    "#;
+
+    let result = parse_sdl(sdl);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("@downsample directive requires an 'interval' argument"),
+        "expected missing interval validation error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_downsample_requires_time_field() {
+    let sdl = r#"
+        type CpuRollup @downsample(interval: "60s") {
+            avg: Float
+        }
+    "#;
+
+    let result = parse_sdl(sdl);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("@downsample directive requires a string 'timeField' argument"),
+        "expected missing timeField validation error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_downsample_rejects_empty_retention() {
+    let sdl = r#"
+        type CpuRollup @downsample(interval: "60s", timeField: "ts", retention: "") {
+            ts: DateTime
+            avg: Float
+        }
+    "#;
+
+    let result = parse_sdl(sdl);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("@downsample retention must not be empty"),
+        "expected empty retention validation error, got: {}",
+        err
+    );
+}
+
+#[test]
 fn test_branchable_directive() {
     let sdl = r#"
         type VersionedDoc @branchable {
@@ -1185,6 +1262,32 @@ fn test_unknown_argument_on_type_directive_emits_warning() {
             assert_eq!(directive_name, "materialized");
             assert_eq!(argument_name, "unknownArg");
             assert!(field_name.is_none()); // type-level, not field-level
+        }
+        other => panic!("expected UnknownDirectiveArgument warning, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_unknown_argument_on_downsample_directive_emits_warning() {
+    let sdl = r#"
+        type CpuRollup @downsample(interval: "60s", timeField: "ts", extraArg: "value") {
+            ts: DateTime
+            avg: Float
+        }
+    "#;
+
+    let output = parse_sdl_with_warnings(sdl).unwrap();
+    assert_eq!(output.collections.len(), 1);
+    assert_eq!(output.warnings.len(), 1);
+
+    match &output.warnings[0] {
+        ParseWarning::UnknownDirectiveArgument {
+            directive_name,
+            argument_name,
+            ..
+        } => {
+            assert_eq!(directive_name, "downsample");
+            assert_eq!(argument_name, "extraArg");
         }
         other => panic!("expected UnknownDirectiveArgument warning, got {:?}", other),
     }

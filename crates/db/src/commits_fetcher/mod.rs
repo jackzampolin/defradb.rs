@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use storage::corekv::{IterOptions, Store};
+use storage::keys::HeadstorePriorityKey;
 
 use crate::error::{Error, Result};
 use crate::txn::DbTxn;
@@ -28,6 +29,10 @@ pub struct CommitsQueryOptions {
     pub cid: Option<String>,
     /// Maximum depth to traverse (None = unlimited)
     pub depth: Option<u64>,
+    /// Inclusive minimum commit height for indexed range scans
+    pub height_start: Option<u64>,
+    /// Exclusive maximum commit height for indexed range scans
+    pub height_end: Option<u64>,
     /// Filter by field name
     pub field_name: Option<String>,
 }
@@ -50,6 +55,13 @@ impl<S: Store> CommitsFetcher<S> {
 
         if let Some(ref cid_str) = options.cid {
             return self.fetch_commit_by_cid(txn, cid_str, options).await;
+        }
+
+        if options.doc_id.is_some()
+            && options.depth.is_none()
+            && (options.height_start.is_some() || options.height_end.is_some())
+        {
+            return self.fetch_commits_by_height_range(txn, options).await;
         }
 
         self.fetch_commits_from_heads(txn, options).await
@@ -150,6 +162,64 @@ impl<S: Store> CommitsFetcher<S> {
                 }
             }
         }
+
+        self.sort_commits_go_order(&mut commits);
+
+        Ok(commits)
+    }
+
+    /// Fetch commits through the secondary `(doc_id, priority) -> cid` index.
+    async fn fetch_commits_by_height_range(
+        &self,
+        txn: &mut DbTxn<S>,
+        options: &CommitsQueryOptions,
+    ) -> Result<Vec<Document>> {
+        let doc_id = options.doc_id.as_ref().ok_or_else(|| {
+            Error::Serialization("doc_id is required for height range scans".to_string())
+        })?;
+        let headstore = txn.headstore()?;
+
+        let prefix = HeadstorePriorityKey::document_prefix(doc_id);
+        let start =
+            HeadstorePriorityKey::priority_prefix(doc_id, options.height_start.unwrap_or(0));
+
+        let mut opts = IterOptions::new().with_prefix(prefix).with_start(start);
+        if let Some(end) = options.height_end {
+            opts = opts.with_end(HeadstorePriorityKey::priority_prefix(doc_id, end));
+        }
+
+        let cid_offset = HeadstorePriorityKey::cid_offset(doc_id);
+        let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
+        let mut commits = Vec::new();
+        let mut visited = HashSet::new();
+
+        while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
+            let Some(cid_bytes) = pair.key.get(cid_offset..) else {
+                continue;
+            };
+            let Ok(cid) = Cid::try_from(cid_bytes) else {
+                continue;
+            };
+            if !visited.insert(cid) {
+                continue;
+            }
+
+            let block = match self.load_block(txn, &cid).await {
+                Ok(block) => block,
+                Err(_) => continue,
+            };
+
+            if let Some(ref field_filter) = options.field_name {
+                let field_name = self.get_field_name(&block.delta);
+                if field_name.as_deref() != Some(field_filter.as_str()) {
+                    continue;
+                }
+            }
+
+            let commit_doc = self.block_to_commit_doc(txn, &cid, &block).await?;
+            commits.push(commit_doc);
+        }
+        iter.close().await.map_err(Error::Storage)?;
 
         self.sort_commits_go_order(&mut commits);
 

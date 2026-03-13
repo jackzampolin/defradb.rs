@@ -881,6 +881,9 @@ impl<'a> SdlParser<'a> {
         collection.fulltext_indexes = fulltext_indexes;
         collection.vector_embeddings = vector_embeddings;
         collection.is_materialized = type_def.directives.is_materialized;
+        collection.downsample_interval = type_def.directives.downsample_interval.clone();
+        collection.downsample_time_field = type_def.directives.downsample_time_field.clone();
+        collection.downsample_retention = type_def.directives.downsample_retention.clone();
         collection.is_branchable = type_def.directives.is_branchable;
         if let Some(ref policy_config) = type_def.directives.policy {
             collection.policy = Some(schema::PolicyDescription::new(

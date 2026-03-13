@@ -25,6 +25,7 @@ serde_json.workspace = true
 serde_cbor.workspace = true
 serde_bytes.workspace = true
 ciborium.workspace = true
+chrono = { version = "0.4", features = ["serde"] }
 
 # Memory zeroization for sensitive key material
 zeroize = "1"

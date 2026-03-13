@@ -8,6 +8,8 @@ mod unit_tests {
         assert!(opts.doc_id.is_none());
         assert!(opts.cid.is_none());
         assert!(opts.depth.is_none());
+        assert!(opts.height_start.is_none());
+        assert!(opts.height_end.is_none());
         assert!(opts.field_name.is_none());
     }
 }

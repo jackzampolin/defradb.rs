@@ -1,9 +1,9 @@
 /// Key hierarchy for DefraDB storage
 ///
-/// This module provides 27 key types organized across 6 stores:
+/// This module provides 29 key types organized across 6 stores:
 /// - Datastore (5 keys): Document and collection data
-/// - Headstore (5 keys): Merkle tree heads and definitions
-/// - Systemstore (10 keys): Metadata and configuration
+/// - Headstore (6 keys): Merkle tree heads, definitions, and priority indexes
+/// - Systemstore (11 keys): Metadata and configuration
 /// - Peerstore (4 keys): Peer and replication metadata
 /// - Blockstore (2 keys): IPLD blocks and merge tracking
 /// - Encstore (1 key): Encrypted blocks (shares implementation with Blockstore)
@@ -54,7 +54,7 @@ pub use datastore::{
 pub use encstore::EncstoreKey;
 pub use headstore::{
     HeadstoreColKey, HeadstoreCollectionDefinition, HeadstoreCollectionSetDefinition,
-    HeadstoreDocKey, HeadstoreFieldDefinition,
+    HeadstoreDocKey, HeadstoreFieldDefinition, HeadstorePriorityKey,
 };
 pub use peerstore::{
     PeerstoreSERetry, ReplicatorKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
@@ -92,6 +92,7 @@ mod tests {
         let _: Box<dyn Key> = Box::new(HeadstoreFieldDefinition::new("col", "field", cid));
         let _: Box<dyn Key> = Box::new(HeadstoreCollectionDefinition::new("col", cid));
         let _: Box<dyn Key> = Box::new(HeadstoreCollectionSetDefinition::new("col", cid));
+        let _: Box<dyn Key> = Box::new(HeadstorePriorityKey::new("doc", 1, cid));
 
         // Systemstore keys
         let _: Box<dyn Key> = Box::new(CollectionKey::new("col"));
@@ -122,7 +123,7 @@ mod tests {
 
     #[test]
     fn test_key_count() {
-        // Verify we have all 34 key types
+        // Verify we have all active key types.
         // This is a compile-time check that all types exist
 
         // Datastore: 5 keys
@@ -132,15 +133,16 @@ mod tests {
         let _d4 = DatastoreSE::new("c", "i", vec![], "d");
         let _d5 = ViewCacheKey::new(1, 5);
 
-        // Headstore: 5 keys
+        // Headstore: 6 keys
         let cid = test_cid();
         let _h1 = HeadstoreDocKey::new("d", "f", cid);
         let _h2 = HeadstoreColKey::new(1, cid);
         let _h3 = HeadstoreFieldDefinition::new("c", "f", cid);
         let _h4 = HeadstoreCollectionDefinition::new("c", cid);
         let _h5 = HeadstoreCollectionSetDefinition::new("c", cid);
+        let _h6 = HeadstorePriorityKey::new("d", 1, cid);
 
-        // Systemstore: 10 keys
+        // Systemstore: 11 keys
         let _s1 = CollectionKey::new("c");
         let _s2 = CollectionID::new("c");
         let _s3 = CollectionNameKey::new("n");
@@ -166,9 +168,6 @@ mod tests {
         // Encstore: 1 key
         let _e1 = EncstoreKey::new(cid);
 
-        // Total: 5 + 5 + 11 + 4 + 2 + 1 = 28... wait, that's not 34
-        // Let me recount: 5 + 5 + 10 + 4 + 2 + 1 = 27
-        // Hmm, the research found 34 but some were variants or deprecated
-        // The actual implemented count matches the active keys
+        // Total: 5 + 6 + 11 + 4 + 2 + 1 = 29 active key types.
     }
 }

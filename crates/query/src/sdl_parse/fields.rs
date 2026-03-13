@@ -335,6 +335,55 @@ impl<'a> SdlParser<'a> {
                         .get_bool_with_warning(directive, "if", &type_name, None)
                         .unwrap_or(true);
                 }
+                "downsample" => {
+                    let interval = match get_directive_arg(directive, "interval") {
+                        Some(graphql_parser::schema::Value::String(value))
+                        | Some(graphql_parser::schema::Value::Enum(value)) => value.clone(),
+                        Some(graphql_parser::schema::Value::Int(value)) => value
+                            .as_i64()
+                            .map(|value| value.to_string())
+                            .ok_or_else(|| {
+                                QueryError::parse(
+                                    "@downsample directive requires an interval within i64 range",
+                                )
+                            })?,
+                        Some(_) => {
+                            return Err(QueryError::parse(
+                                "@downsample directive requires a string or integer 'interval' argument",
+                            ));
+                        }
+                        None => {
+                            return Err(QueryError::parse(
+                                "@downsample directive requires an 'interval' argument",
+                            ));
+                        }
+                    };
+                    if interval.trim().is_empty() {
+                        return Err(QueryError::parse("@downsample interval must not be empty"));
+                    }
+                    let time_field = self
+                        .get_string_with_warning(directive, "timeField", &type_name, None)
+                        .ok_or_else(|| {
+                            QueryError::parse(
+                                "@downsample directive requires a string 'timeField' argument",
+                            )
+                        })?;
+                    if time_field.trim().is_empty() {
+                        return Err(QueryError::parse("@downsample timeField must not be empty"));
+                    }
+                    let retention =
+                        self.get_string_with_warning(directive, "retention", &type_name, None);
+                    if retention
+                        .as_ref()
+                        .is_some_and(|retention| retention.trim().is_empty())
+                    {
+                        return Err(QueryError::parse("@downsample retention must not be empty"));
+                    }
+                    result.is_materialized = true;
+                    result.downsample_interval = Some(interval);
+                    result.downsample_time_field = Some(time_field);
+                    result.downsample_retention = retention;
+                }
                 "branchable" => {
                     result.is_branchable = self
                         .get_bool_with_warning(directive, "if", &type_name, None)

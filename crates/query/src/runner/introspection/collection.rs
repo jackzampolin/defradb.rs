@@ -269,12 +269,36 @@ pub(super) fn build_commit_type() -> Object {
 
     Object::new("Commit")
         .field(
+            null_field!("AVG", TypeRef::named("Float")).argument(InputValue::new(
+                "field",
+                TypeRef::named("commitNumericFieldArg"),
+            )),
+        )
+        .field(
             null_field!("COUNT", TypeRef::named("Int")).argument(InputValue::new(
                 "field",
                 TypeRef::named("commitCountFieldArg"),
             )),
         )
         .field(null_field!("GROUP", TypeRef::named_list("Commit")))
+        .field(
+            null_field!("MAX", TypeRef::named("Float")).argument(InputValue::new(
+                "field",
+                TypeRef::named("commitNumericFieldArg"),
+            )),
+        )
+        .field(
+            null_field!("MIN", TypeRef::named("Float")).argument(InputValue::new(
+                "field",
+                TypeRef::named("commitNumericFieldArg"),
+            )),
+        )
+        .field(
+            null_field!("SUM", TypeRef::named("Float")).argument(InputValue::new(
+                "field",
+                TypeRef::named("commitNumericFieldArg"),
+            )),
+        )
         .field(null_field!("cid", TypeRef::named("String")))
         .field(null_field!("collectionVersionId", TypeRef::named("String")))
         .field(null_field!("delta", TypeRef::named("String")))

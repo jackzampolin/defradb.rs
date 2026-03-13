@@ -22,7 +22,13 @@ pub const KNOWN_FIELD_DIRECTIVES: &[&str] = &[
 ];
 
 /// Known type-level directives
-pub const KNOWN_TYPE_DIRECTIVES: &[&str] = &["index", "materialized", "branchable", "policy"];
+pub const KNOWN_TYPE_DIRECTIVES: &[&str] = &[
+    "index",
+    "materialized",
+    "downsample",
+    "branchable",
+    "policy",
+];
 
 /// Known arguments for each directive
 pub fn known_directive_arguments(directive_name: &str) -> &'static [&'static str] {
@@ -37,6 +43,7 @@ pub fn known_directive_arguments(directive_name: &str) -> &'static [&'static str
         ],
         "constraints" => &["size"],
         "materialized" => &["if"],
+        "downsample" => &["interval", "timeField", "retention"],
         "branchable" => &["if"],
         "policy" => &["id", "resource"],
         "embedding" => &["provider", "model", "url", "fields", "template"],

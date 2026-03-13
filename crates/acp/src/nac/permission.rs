@@ -1,11 +1,11 @@
 //! Node-level permission types for NAC.
 //!
-//! Defines the 48 node-level permissions that control access to
+//! Defines the node-level permissions that control access to
 //! database operations when Node Access Control is enabled.
 
 use serde::{Deserialize, Serialize};
 
-/// Node-level permissions (matches Go DefraDB's 48 node permissions).
+/// Node-level permissions.
 ///
 /// These permissions control access to node-level operations when NAC is enabled.
 /// By default (NAC disabled), all operations are allowed without authentication.
@@ -177,6 +177,9 @@ pub enum NodePermission {
     /// Refresh materialized views (used by POST /api/v0/views/refresh)
     ViewRefresh,
 
+    /// Run explicit downsample history GC (used by POST /api/v0/views/gc)
+    ViewGc,
+
     /// Add a view (used by POST /api/v0/views)
     ViewAdd,
 
@@ -254,6 +257,7 @@ impl NodePermission {
 
             // View
             Self::ViewRefresh => "view-refresh",
+            Self::ViewGc => "view-gc",
             Self::ViewAdd => "view-add",
 
             // Migration
@@ -261,7 +265,7 @@ impl NodePermission {
         }
     }
 
-    /// Returns all 48 node permissions.
+    /// Returns all node permissions.
     pub fn all() -> &'static [NodePermission] {
         &[
             // DAC
@@ -319,6 +323,7 @@ impl NodePermission {
             Self::LensList,
             // View
             Self::ViewRefresh,
+            Self::ViewGc,
             Self::ViewAdd,
             // Migration
             Self::MigrationSet,
@@ -383,6 +388,7 @@ impl NodePermission {
             "lens-list" => Self::LensList,
             // View
             "view-refresh" => Self::ViewRefresh,
+            "view-gc" => Self::ViewGc,
             "view-add" => Self::ViewAdd,
             // Migration
             "migration-set" => Self::MigrationSet,
@@ -392,7 +398,7 @@ impl NodePermission {
 
     /// Check if this permission is admin-only (requires owner or admin relation).
     ///
-    /// In Go DefraDB, all 48 node permissions are defined with `expr: owner + admin`,
+    /// In Go DefraDB, node permissions are defined with `expr: owner + admin`,
     /// meaning they all require either the owner or admin relation to be granted.
     pub fn is_admin_only(&self) -> bool {
         true
@@ -411,7 +417,7 @@ mod tests {
 
     #[test]
     fn test_all_permissions_count() {
-        assert_eq!(NodePermission::all().len(), 48);
+        assert_eq!(NodePermission::all().len(), 49);
     }
 
     #[test]

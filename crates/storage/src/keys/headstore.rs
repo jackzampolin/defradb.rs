@@ -1,6 +1,8 @@
 use crate::corekv::Key;
 use cid::Cid;
 
+const PRIORITY_HEX_WIDTH: usize = 16;
+
 /// HeadstoreDocKey: Links documents to their current block head CID
 ///
 /// Structure: /d/[DocID]/[FieldID]/[CID]
@@ -46,6 +48,72 @@ impl Key for HeadstoreDocKey {
 
     fn to_string(&self) -> String {
         format!("/d/{}/{}/{}", self.doc_id, self.field_id, self.cid)
+    }
+}
+
+/// HeadstorePriorityKey: Secondary index for document commit height lookups
+///
+/// Structure: /p/[DocID]/[PriorityHex16]/[CID bytes]
+/// Example: /p/docid123/0000000000000042/<cid-bytes>
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadstorePriorityKey {
+    /// Document identifier
+    pub doc_id: String,
+    /// Commit priority encoded in fixed-width hexadecimal
+    pub priority: u64,
+    /// IPFS Content Identifier
+    pub cid: Cid,
+}
+
+impl HeadstorePriorityKey {
+    /// Create a new HeadstorePriorityKey.
+    pub fn new(doc_id: impl Into<String>, priority: u64, cid: Cid) -> Self {
+        Self {
+            doc_id: doc_id.into(),
+            priority,
+            cid,
+        }
+    }
+
+    /// Create a prefix for all priority-indexed commits in a document.
+    pub fn document_prefix(doc_id: impl Into<String>) -> Vec<u8> {
+        let doc_id = doc_id.into();
+        format!("/p/{}/", doc_id).into_bytes()
+    }
+
+    /// Create a prefix for a specific priority in a document.
+    pub fn priority_prefix(doc_id: impl Into<String>, priority: u64) -> Vec<u8> {
+        let doc_id = doc_id.into();
+        format!(
+            "/p/{}/{:0width$x}/",
+            doc_id,
+            priority,
+            width = PRIORITY_HEX_WIDTH
+        )
+        .into_bytes()
+    }
+
+    /// Return the byte offset of the raw CID suffix within a serialized key.
+    pub fn cid_offset(doc_id: &str) -> usize {
+        Self::document_prefix(doc_id).len() + PRIORITY_HEX_WIDTH + 1
+    }
+}
+
+impl Key for HeadstorePriorityKey {
+    fn bytes(&self) -> Vec<u8> {
+        let mut bytes = Self::priority_prefix(&self.doc_id, self.priority);
+        bytes.extend_from_slice(&self.cid.to_bytes());
+        bytes
+    }
+
+    fn to_string(&self) -> String {
+        format!(
+            "/p/{}/{:0width$x}/{}",
+            self.doc_id,
+            self.priority,
+            self.cid,
+            width = PRIORITY_HEX_WIDTH
+        )
     }
 }
 
@@ -274,6 +342,25 @@ mod tests {
     }
 
     #[test]
+    fn test_headstore_priority_key() {
+        let cid = test_cid();
+        let key = HeadstorePriorityKey::new("docid123", 66, cid);
+
+        let string = key.to_string();
+        assert_eq!(string, format!("/p/docid123/0000000000000042/{}", cid));
+
+        let bytes = key.bytes();
+        assert_eq!(
+            &bytes[..HeadstorePriorityKey::cid_offset("docid123")],
+            b"/p/docid123/0000000000000042/"
+        );
+        assert_eq!(
+            &bytes[HeadstorePriorityKey::cid_offset("docid123")..],
+            cid.to_bytes()
+        );
+    }
+
+    #[test]
     fn test_headstore_field_definition() {
         let cid = test_cid();
         let key = HeadstoreFieldDefinition::new("users", "email", cid);
@@ -316,6 +403,12 @@ mod tests {
 
         let prefix = HeadstoreDocKey::field_prefix("docid", "field");
         assert_eq!(prefix, b"/d/docid/field/");
+
+        let prefix = HeadstorePriorityKey::document_prefix("docid");
+        assert_eq!(prefix, b"/p/docid/");
+
+        let prefix = HeadstorePriorityKey::priority_prefix("docid", 66);
+        assert_eq!(prefix, b"/p/docid/0000000000000042/");
 
         let prefix = HeadstoreColKey::collection_prefix(1);
         assert_eq!(prefix, b"/c/1/");

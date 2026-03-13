@@ -21,7 +21,7 @@ pub struct AddViewRequest {
 
 /// Request body for refreshing views (Go-compatible format).
 #[derive(Debug, serde::Deserialize)]
-pub struct RefreshViewsRequest {
+pub struct ViewNamesRequest {
     #[serde(rename = "Names", default)]
     pub names: Option<Vec<String>>,
 }
@@ -58,7 +58,7 @@ pub async fn add_view(
 pub async fn refresh_views(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Json(body): Json<RefreshViewsRequest>,
+    Json(body): Json<ViewNamesRequest>,
 ) -> Result<Json<serde_json::Value>, HttpError> {
     require_permission(&state, &identity, NodePermission::ViewRefresh).await?;
 
@@ -66,6 +66,28 @@ pub async fn refresh_views(
 
     view_ops
         .refresh_views(body.names)
+        .await
+        .map_err(HttpError::BadRequest)?;
+
+    Ok(Json(serde_json::json!({})))
+}
+
+/// Run explicit downsample history GC.
+///
+/// POST /api/v0/views/gc
+///
+/// Applies retention-based history cleanup for all or specific downsample views.
+pub async fn gc_downsample_histories(
+    State(state): State<AppState>,
+    identity: ExtractIdentity,
+    Json(body): Json<ViewNamesRequest>,
+) -> Result<Json<serde_json::Value>, HttpError> {
+    require_permission(&state, &identity, NodePermission::ViewGc).await?;
+
+    let view_ops = state.require_view()?;
+
+    view_ops
+        .gc_downsample_histories(body.names)
         .await
         .map_err(HttpError::BadRequest)?;
 

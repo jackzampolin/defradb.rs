@@ -28,7 +28,7 @@ impl Planner {
         let mut fetcher = CachedViewFetcher::new(collection.root_id, mapping.clone());
 
         // Attach the document fetcher if available (for loading cache entries)
-        if let Some(doc_fetcher) = self.fetcher() {
+        if let Some(doc_fetcher) = &self.fetcher {
             fetcher = fetcher.with_fetcher(doc_fetcher.clone());
         }
 

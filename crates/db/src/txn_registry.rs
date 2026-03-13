@@ -338,7 +338,12 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         // Use LensedDocFetcher to support lens migrations within transactions.
         let lens_store = self.db.lens_store().clone();
         let fetcher = Arc::new(LensedDocFetcher::new(db_txn, lens_store));
-        let ctx = Arc::new(DbTransactionContext::new(txn_id.clone(), readonly, fetcher));
+        let ctx = Arc::new(DbTransactionContext::new(
+            self.db.clone(),
+            txn_id.clone(),
+            readonly,
+            fetcher,
+        ));
 
         self.transactions
             .write()

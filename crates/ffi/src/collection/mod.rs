@@ -14,7 +14,7 @@ pub use purge::delete_documents;
 pub use read::{
     find_collection_by_id, get_collection_by_name, get_collection_by_version_id, has_collection,
 };
-pub use view::{add_view, refresh_views};
+pub use view::{add_view, gc_downsample_histories, refresh_views};
 pub use write::{
     delete_collection, patch_collection, set_active_collection_version, truncate_collection,
 };

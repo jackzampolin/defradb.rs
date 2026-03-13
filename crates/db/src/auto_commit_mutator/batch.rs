@@ -172,6 +172,11 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             query::error::QueryError::execution("document should have ID after generation")
         })?;
 
+        self.db
+            .validate_downsample_write(&datastore, collection.schema(), &doc, None)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
         collection
             .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
             .await
@@ -295,6 +300,16 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         for field in generated {
             modified_fields.insert(field);
         }
+
+        self.db
+            .validate_downsample_write(
+                &datastore,
+                collection.schema(),
+                &doc,
+                Some(&modified_fields),
+            )
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
         collection
             .update_with_indexes(&datastore, &doc, &index_manager)

@@ -45,6 +45,19 @@ impl DocID {
         }
     }
 
+    /// Create a deterministic DocID v0 from an arbitrary stable seed string.
+    ///
+    /// This is useful for system-managed documents that need a stable identity
+    /// across updates without deriving the ID from the document content itself.
+    pub fn new_v0_from_seed(seed: &str) -> Self {
+        let uuid = Uuid::new_v5(&SDN_NAMESPACE_V0, seed.as_bytes());
+        Self {
+            version: DOC_ID_V0,
+            uuid,
+            cid: None,
+        }
+    }
+
     /// Parse a DocID from its string representation.
     ///
     /// Format: `{base32(version)}-{uuid}`

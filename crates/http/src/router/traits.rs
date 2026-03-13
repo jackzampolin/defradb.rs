@@ -588,7 +588,7 @@ pub trait TransactionOperations: Send + Sync {
 /// Trait for view operations.
 ///
 /// Views are virtual collections backed by a GQL query. Materialized views
-/// cache their results and must be refreshed after data changes.
+/// cache their results and may also expose explicit maintenance operations.
 #[async_trait::async_trait]
 pub trait ViewOperations: Send + Sync {
     /// Add a view from a GQL query and SDL schema.
@@ -606,6 +606,12 @@ pub trait ViewOperations: Send + Sync {
     /// If `names` is provided, only those views are refreshed. Otherwise all
     /// materialized views are refreshed.
     async fn refresh_views(&self, names: Option<Vec<String>>) -> Result<(), String>;
+
+    /// Run manual downsample history GC.
+    ///
+    /// If `names` is provided, only those downsample targets are processed.
+    /// Otherwise all downsample targets are processed.
+    async fn gc_downsample_histories(&self, names: Option<Vec<String>>) -> Result<(), String>;
 }
 
 /// Trait for debug dump operations.

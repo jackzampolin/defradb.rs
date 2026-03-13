@@ -72,10 +72,22 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
         let view_collections: Vec<_> = collections
             .into_iter()
             .map(|mut col_version| {
-                col_version.query = Some(query_source.clone());
+                if col_version.downsample_interval.is_some() {
+                    col_version.downsample_source = Some(query_source.clone());
+                } else {
+                    col_version.query = Some(query_source.clone());
+                }
                 col_version
             })
             .collect();
+
+        for collection in &view_collections {
+            if collection.downsample_interval.is_some() {
+                self.database
+                    .validate_downsample_collection(collection)
+                    .map_err(|e| format!("invalid downsample definition: {}", e))?;
+            }
+        }
 
         let created_versions = self
             .database
@@ -85,7 +97,12 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
 
         let materialized_names: Vec<String> = created_versions
             .iter()
-            .filter(|col| col.is_materialized && !col.is_embedded_only)
+            .filter(|col| col.query.is_some() && col.is_materialized && !col.is_embedded_only)
+            .map(|col| col.name.clone())
+            .collect();
+        let downsample_names: Vec<String> = created_versions
+            .iter()
+            .filter(|col| col.downsample_interval.is_some())
             .map(|col| col.name.clone())
             .collect();
 
@@ -98,6 +115,13 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
                 .map_err(|e| format!("failed to refresh materialized views: {}", e))?;
         }
 
+        if !downsample_names.is_empty() {
+            self.database
+                .bootstrap_downsamples(Some(&downsample_names))
+                .await
+                .map_err(|e| format!("failed to bootstrap downsample collections: {}", e))?;
+        }
+
         Ok(created_versions)
     }
 
@@ -107,5 +131,13 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
             .refresh_views(options)
             .await
             .map_err(|e| format!("failed to refresh views: {}", e))
+    }
+
+    async fn gc_downsample_histories(&self, names: Option<Vec<String>>) -> Result<(), String> {
+        let options = names.map(db::downsample::GcDownsampleHistoriesOptions::with_names);
+        self.database
+            .gc_downsample_histories(options)
+            .await
+            .map_err(|e| format!("failed to GC downsample histories: {}", e))
     }
 }

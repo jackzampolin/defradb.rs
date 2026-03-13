@@ -10,14 +10,614 @@
 use document::Document;
 use identity::Did;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 
 use crate::error::Result;
-use crate::mapper::{Requestable, Select};
+use crate::mapper::{Aggregate, AggregateType, Requestable, Select};
 use crate::txn::TransactionRegistry;
 
 use super::{DocFetcher, QueryRunner};
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CommitsHeightRange {
+    start: u64,
+    end: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_filter(value: JsonValue) -> crate::mapper::Filter {
+        crate::mapper::Filter::from_conditions(serde_json::from_value(value).unwrap())
+    }
+
+    #[test]
+    fn test_extract_commits_height_range_simple_window() {
+        let filter = make_filter(json!({
+            "height": {
+                "_gte": 2,
+                "_lt": 5
+            }
+        }));
+
+        assert_eq!(
+            extract_commits_height_range(&filter),
+            HeightRangeExtraction::Range(CommitsHeightRange {
+                start: 2,
+                end: Some(5),
+            })
+        );
+    }
+
+    #[test]
+    fn test_extract_commits_height_range_merges_and_conditions() {
+        let filter = make_filter(json!({
+            "_and": [
+                { "height": { "_gte": 2 } },
+                { "height": { "_lt": 4 } },
+                { "fieldName": { "_eq": "_C" } }
+            ]
+        }));
+
+        assert_eq!(
+            extract_commits_height_range(&filter),
+            HeightRangeExtraction::Range(CommitsHeightRange {
+                start: 2,
+                end: Some(4),
+            })
+        );
+    }
+
+    #[test]
+    fn test_extract_commits_height_range_ignores_non_height_or_clauses() {
+        let filter = make_filter(json!({
+            "height": { "_gte": 2 },
+            "_or": [
+                { "fieldName": { "_eq": "_C" } },
+                { "fieldName": { "_eq": "age" } }
+            ]
+        }));
+
+        assert_eq!(
+            extract_commits_height_range(&filter),
+            HeightRangeExtraction::Range(CommitsHeightRange {
+                start: 2,
+                end: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_extract_commits_height_range_rejects_disjunctive_height_filters() {
+        let filter = make_filter(json!({
+            "_or": [
+                { "height": { "_eq": 1 } },
+                { "height": { "_eq": 3 } }
+            ]
+        }));
+
+        assert_eq!(
+            extract_commits_height_range(&filter),
+            HeightRangeExtraction::Unsupported
+        );
+    }
+
+    #[test]
+    fn test_extract_commits_height_range_detects_empty_window() {
+        let filter = make_filter(json!({
+            "height": {
+                "_gt": 10,
+                "_lt": 5
+            }
+        }));
+
+        assert_eq!(
+            extract_commits_height_range(&filter),
+            HeightRangeExtraction::Empty
+        );
+    }
+
+    #[test]
+    fn test_commit_sum_preserves_large_int_precision() {
+        let values = [
+            CommitNumericValue::Int(9_007_199_254_740_992),
+            CommitNumericValue::Int(1),
+        ];
+        let sum = sum_commit_numeric_values(&values);
+        assert_eq!(sum.as_i64(), Some(9_007_199_254_740_993));
+    }
+
+    #[test]
+    fn test_commit_min_max_preserve_large_int_precision() {
+        let values = [
+            CommitNumericValue::Int(9_007_199_254_740_993),
+            CommitNumericValue::Int(9_007_199_254_740_992),
+        ];
+        assert_eq!(
+            min_commit_numeric_values(&values).as_i64(),
+            Some(9_007_199_254_740_992)
+        );
+        assert_eq!(
+            max_commit_numeric_values(&values).as_i64(),
+            Some(9_007_199_254_740_993)
+        );
+    }
+}
+
+impl CommitsHeightRange {
+    fn merge(self, other: Self) -> HeightRangeExtraction {
+        let start = self.start.max(other.start);
+        let end = match (self.end, other.end) {
+            (Some(lhs), Some(rhs)) => Some(lhs.min(rhs)),
+            (Some(lhs), None) => Some(lhs),
+            (None, Some(rhs)) => Some(rhs),
+            (None, None) => None,
+        };
+
+        if end.is_some_and(|end| start >= end) {
+            HeightRangeExtraction::Empty
+        } else {
+            HeightRangeExtraction::Range(Self { start, end })
+        }
+    }
+
+    fn with_lower_bound(mut self, start: u64) -> HeightRangeExtraction {
+        self.start = self.start.max(start);
+        if self.end.is_some_and(|end| self.start >= end) {
+            HeightRangeExtraction::Empty
+        } else {
+            HeightRangeExtraction::Range(self)
+        }
+    }
+
+    fn with_upper_bound(mut self, end: Option<u64>) -> HeightRangeExtraction {
+        self.end = match (self.end, end) {
+            (Some(lhs), Some(rhs)) => Some(lhs.min(rhs)),
+            (Some(lhs), None) => Some(lhs),
+            (None, Some(rhs)) => Some(rhs),
+            (None, None) => None,
+        };
+
+        if self.end.is_some_and(|end| self.start >= end) {
+            HeightRangeExtraction::Empty
+        } else {
+            HeightRangeExtraction::Range(self)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HeightRangeExtraction {
+    None,
+    Range(CommitsHeightRange),
+    Empty,
+    Unsupported,
+}
+
+impl HeightRangeExtraction {
+    fn merge_and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unsupported, _) | (_, Self::Unsupported) => Self::Unsupported,
+            (Self::Empty, _) | (_, Self::Empty) => Self::Empty,
+            (Self::None, rhs) => rhs,
+            (lhs, Self::None) => lhs,
+            (Self::Range(lhs), Self::Range(rhs)) => lhs.merge(rhs),
+        }
+    }
+}
+
+fn extract_commits_height_range(filter: &crate::mapper::Filter) -> HeightRangeExtraction {
+    extract_commits_height_range_from_conditions(filter.conditions())
+}
+
+fn extract_commits_height_range_from_conditions(
+    conditions: &HashMap<String, JsonValue>,
+) -> HeightRangeExtraction {
+    let mut extracted = HeightRangeExtraction::None;
+
+    for (field_name, value) in conditions {
+        if field_name == "height" {
+            extracted = extracted.merge_and(parse_height_condition(value));
+            continue;
+        }
+
+        match crate::mapper::FilterOp::parse(field_name) {
+            Some(crate::mapper::FilterOp::And) => {
+                if value.is_null() {
+                    continue;
+                }
+                let Some(items) = value.as_array() else {
+                    return HeightRangeExtraction::Unsupported;
+                };
+                for item in items {
+                    let Ok(sub_conditions) =
+                        serde_json::from_value::<HashMap<String, JsonValue>>(item.clone())
+                    else {
+                        return HeightRangeExtraction::Unsupported;
+                    };
+                    extracted = extracted.merge_and(extract_commits_height_range_from_conditions(
+                        &sub_conditions,
+                    ));
+                }
+            }
+            Some(crate::mapper::FilterOp::Or | crate::mapper::FilterOp::Not) => {
+                if logical_value_contains_top_level_height(value) {
+                    return HeightRangeExtraction::Unsupported;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    extracted
+}
+
+fn logical_value_contains_top_level_height(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Array(items) => items.iter().any(logical_value_contains_top_level_height),
+        JsonValue::Object(obj) => logical_conditions_contain_top_level_height(
+            &obj.iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ),
+        _ => false,
+    }
+}
+
+fn logical_conditions_contain_top_level_height(conditions: &HashMap<String, JsonValue>) -> bool {
+    conditions.iter().any(|(field_name, value)| {
+        field_name == "height"
+            || matches!(
+                crate::mapper::FilterOp::parse(field_name),
+                Some(
+                    crate::mapper::FilterOp::And
+                        | crate::mapper::FilterOp::Or
+                        | crate::mapper::FilterOp::Not
+                )
+            ) && logical_value_contains_top_level_height(value)
+    })
+}
+
+fn parse_height_condition(value: &JsonValue) -> HeightRangeExtraction {
+    if value.is_null() {
+        return HeightRangeExtraction::Empty;
+    }
+
+    if let Some(height) = json_value_to_non_negative_u64(value) {
+        return HeightRangeExtraction::Range(CommitsHeightRange {
+            start: height,
+            end: height.checked_add(1),
+        });
+    }
+
+    let Some(ops) = value.as_object() else {
+        return HeightRangeExtraction::Unsupported;
+    };
+
+    let mut range = HeightRangeExtraction::Range(CommitsHeightRange::default());
+
+    for (op_str, expected) in ops {
+        let Some(op) = crate::mapper::FilterOp::parse(op_str) else {
+            return HeightRangeExtraction::Unsupported;
+        };
+        let Some(height) = json_value_to_non_negative_u64(expected) else {
+            return HeightRangeExtraction::Unsupported;
+        };
+
+        range = match (range, op) {
+            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Eq) => {
+                range.with_lower_bound(height).merge_and(
+                    CommitsHeightRange {
+                        start: height,
+                        end: height.checked_add(1),
+                    }
+                    .into(),
+                )
+            }
+            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Gt) => {
+                if let Some(start) = height.checked_add(1) {
+                    range.with_lower_bound(start)
+                } else {
+                    HeightRangeExtraction::Empty
+                }
+            }
+            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Gte) => {
+                range.with_lower_bound(height)
+            }
+            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Lt) => {
+                range.with_upper_bound(Some(height))
+            }
+            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Lte) => {
+                range.with_upper_bound(height.checked_add(1))
+            }
+            (_, _) => HeightRangeExtraction::Unsupported,
+        };
+
+        match range {
+            HeightRangeExtraction::Range(_) => {}
+            other => return other,
+        }
+    }
+
+    range
+}
+
+impl From<CommitsHeightRange> for HeightRangeExtraction {
+    fn from(range: CommitsHeightRange) -> Self {
+        Self::Range(range)
+    }
+}
+
+fn json_value_to_non_negative_u64(value: &JsonValue) -> Option<u64> {
+    value.as_i64().and_then(|height| u64::try_from(height).ok())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CommitNumericValue {
+    Int(i64),
+    Float(f64),
+}
+
+impl CommitNumericValue {
+    fn as_f64(self) -> f64 {
+        match self {
+            Self::Int(value) => value as f64,
+            Self::Float(value) => value,
+        }
+    }
+
+    fn is_float(self) -> bool {
+        matches!(self, Self::Float(_))
+    }
+}
+
+fn sum_commit_numeric_values(values: &[CommitNumericValue]) -> JsonValue {
+    if values.iter().any(|value| value.is_float()) {
+        let sum = values.iter().map(|value| value.as_f64()).sum::<f64>();
+        serde_json::Number::from_f64(sum)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null)
+    } else {
+        values
+            .iter()
+            .try_fold(0i64, |sum, value| match value {
+                CommitNumericValue::Int(value) => sum.checked_add(*value),
+                CommitNumericValue::Float(_) => None,
+            })
+            .map(|sum| JsonValue::Number(sum.into()))
+            .unwrap_or(JsonValue::Null)
+    }
+}
+
+fn min_commit_numeric_values(values: &[CommitNumericValue]) -> JsonValue {
+    if values.iter().any(|value| value.is_float()) {
+        let min = values
+            .iter()
+            .map(|value| value.as_f64())
+            .fold(None, |current: Option<f64>, value| {
+                Some(current.map_or(value, |min| min.min(value)))
+            });
+        min.and_then(serde_json::Number::from_f64)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null)
+    } else {
+        values
+            .iter()
+            .filter_map(|value| match value {
+                CommitNumericValue::Int(value) => Some(*value),
+                CommitNumericValue::Float(_) => None,
+            })
+            .min()
+            .map(|value| JsonValue::Number(value.into()))
+            .unwrap_or(JsonValue::Null)
+    }
+}
+
+fn max_commit_numeric_values(values: &[CommitNumericValue]) -> JsonValue {
+    if values.iter().any(|value| value.is_float()) {
+        let max = values
+            .iter()
+            .map(|value| value.as_f64())
+            .fold(None, |current: Option<f64>, value| {
+                Some(current.map_or(value, |max| max.max(value)))
+            });
+        max.and_then(serde_json::Number::from_f64)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null)
+    } else {
+        values
+            .iter()
+            .filter_map(|value| match value {
+                CommitNumericValue::Int(value) => Some(*value),
+                CommitNumericValue::Float(_) => None,
+            })
+            .max()
+            .map(|value| JsonValue::Number(value.into()))
+            .unwrap_or(JsonValue::Null)
+    }
+}
+
+fn is_commit_aggregate_only_selection(select: &Select) -> bool {
+    !select.fields.is_empty()
+        && select
+            .fields
+            .iter()
+            .all(|field| matches!(field, Requestable::Aggregate(_)))
+}
+
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
+    fn commit_aggregate_target_field<'a>(&self, agg: &'a Aggregate) -> Option<&'a str> {
+        agg.targets.first().and_then(|target| {
+            target
+                .field_name
+                .as_deref()
+                .filter(|field_name| !field_name.is_empty())
+                .or_else(|| {
+                    Some(target.host_name.as_str()).filter(|host_name| !host_name.is_empty())
+                })
+        })
+    }
+
+    fn normal_value_to_commit_numeric(
+        &self,
+        value: &document::NormalValue,
+    ) -> Option<CommitNumericValue> {
+        value.as_int().map(CommitNumericValue::Int).or_else(|| {
+            value
+                .as_float64()
+                .map(CommitNumericValue::Float)
+                .or_else(|| {
+                    value
+                        .as_float32()
+                        .map(|value| CommitNumericValue::Float(value as f64))
+                })
+        })
+    }
+
+    fn decode_commit_delta_numeric(&self, commit: &Document) -> Option<CommitNumericValue> {
+        use base64::Engine;
+
+        let delta_base64 = commit.get("delta")?.as_str()?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(delta_base64)
+            .ok()?;
+        let value = ciborium::from_reader::<document::NormalValue, _>(&bytes[..]).ok()?;
+        self.normal_value_to_commit_numeric(&value)
+    }
+
+    fn commit_numeric_value(
+        &self,
+        commit: &Document,
+        field_name: &str,
+    ) -> Option<CommitNumericValue> {
+        if field_name == "delta" {
+            self.decode_commit_delta_numeric(commit)
+        } else {
+            commit
+                .get(field_name)
+                .and_then(|value| self.normal_value_to_commit_numeric(value))
+        }
+    }
+
+    fn collect_commit_numeric_values(
+        &self,
+        commit: &Document,
+        group_docs: Option<&[Document]>,
+        field_name: &str,
+    ) -> Vec<CommitNumericValue> {
+        let mut values = Vec::new();
+
+        if let Some(group_docs) = group_docs {
+            for doc in group_docs {
+                if let Some(value) = self.commit_numeric_value(doc, field_name) {
+                    values.push(value);
+                }
+            }
+        } else if let Some(value) = self.commit_numeric_value(commit, field_name) {
+            values.push(value);
+        }
+
+        values
+    }
+
+    fn count_commit_aggregate_values(
+        &self,
+        commit: &Document,
+        group_docs: Option<&[Document]>,
+        field_name: Option<&str>,
+    ) -> i64 {
+        match field_name {
+            None => group_docs.map(|docs| docs.len()).unwrap_or(1) as i64,
+            Some(field_name) => {
+                let mut count = 0i64;
+
+                let mut count_doc = |doc: &Document| {
+                    if field_name == "delta" {
+                        if self.decode_commit_delta_numeric(doc).is_some() {
+                            count += 1;
+                        }
+                        return;
+                    }
+
+                    if let Some(value) = doc.get(field_name) {
+                        if let Ok(json_value) = crate::json_convert::normal_value_to_json(value) {
+                            if let Some(array) = json_value.as_array() {
+                                count += array.len() as i64;
+                            } else if !json_value.is_null() {
+                                count += 1;
+                            }
+                        }
+                    }
+                };
+
+                if let Some(group_docs) = group_docs {
+                    for doc in group_docs {
+                        count_doc(doc);
+                    }
+                } else {
+                    count_doc(commit);
+                }
+
+                count
+            }
+        }
+    }
+
+    fn compute_commit_aggregate(
+        &self,
+        agg: &Aggregate,
+        commit: &Document,
+        group_docs: Option<&[Document]>,
+    ) -> JsonValue {
+        match agg.aggregate_type {
+            AggregateType::Count => {
+                let count = self.count_commit_aggregate_values(
+                    commit,
+                    group_docs,
+                    self.commit_aggregate_target_field(agg),
+                );
+                JsonValue::Number(count.into())
+            }
+            AggregateType::Sum => {
+                let Some(field_name) = self.commit_aggregate_target_field(agg) else {
+                    return JsonValue::Number(0.into());
+                };
+                let values = self.collect_commit_numeric_values(commit, group_docs, field_name);
+                sum_commit_numeric_values(&values)
+            }
+            AggregateType::Average => {
+                let Some(field_name) = self.commit_aggregate_target_field(agg) else {
+                    return JsonValue::Number(0.into());
+                };
+                let values = self.collect_commit_numeric_values(commit, group_docs, field_name);
+                let avg = if values.is_empty() {
+                    0.0
+                } else {
+                    values.iter().map(|value| value.as_f64()).sum::<f64>() / values.len() as f64
+                };
+                serde_json::Number::from_f64(avg)
+                    .map(JsonValue::Number)
+                    .unwrap_or_else(|| JsonValue::Number(0.into()))
+            }
+            AggregateType::Min => {
+                let Some(field_name) = self.commit_aggregate_target_field(agg) else {
+                    return JsonValue::Null;
+                };
+                let values = self.collect_commit_numeric_values(commit, group_docs, field_name);
+                min_commit_numeric_values(&values)
+            }
+            AggregateType::Max => {
+                let Some(field_name) = self.commit_aggregate_target_field(agg) else {
+                    return JsonValue::Null;
+                };
+                let values = self.collect_commit_numeric_values(commit, group_docs, field_name);
+                max_commit_numeric_values(&values)
+            }
+        }
+    }
+
     /// Render a Document's fields as a JSON object using only the fields requested by a Select.
     pub(crate) fn render_document_fields(
         &self,
@@ -81,6 +681,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             doc_id: Some(doc_id.to_string()),
             cid: target_cid.map(|s| s.to_string()),
             depth,
+            height_start: None,
+            height_end: None,
             field_name: None,
         };
 
@@ -190,45 +792,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     }
                 }
                 Requestable::Aggregate(agg) => {
-                    // Handle aggregates on commit fields (e.g., _count(links: {}))
                     let output_name = agg.output_name();
-                    if let Some(target) = agg.targets.first() {
-                        let target_field = target
-                            .field_name
-                            .as_deref()
-                            .filter(|s| !s.is_empty())
-                            .or_else(|| Some(target.host_name.as_str()).filter(|s| !s.is_empty()));
-
-                        if let Some(field) = target_field {
-                            if let Some(val) = commit.get(field) {
-                                if let Ok(json_val) = crate::json_convert::normal_value_to_json(val)
-                                {
-                                    if let Some(arr) = json_val.as_array() {
-                                        obj.insert(
-                                            output_name.to_string(),
-                                            JsonValue::Number((arr.len() as i64).into()),
-                                        );
-                                    } else {
-                                        obj.insert(
-                                            output_name.to_string(),
-                                            JsonValue::Number(0.into()),
-                                        );
-                                    }
-                                } else {
-                                    obj.insert(
-                                        output_name.to_string(),
-                                        JsonValue::Number(0.into()),
-                                    );
-                                }
-                            } else {
-                                obj.insert(output_name.to_string(), JsonValue::Number(0.into()));
-                            }
-                        } else {
-                            obj.insert(output_name.to_string(), JsonValue::Number(1.into()));
-                        }
-                    } else {
-                        obj.insert(output_name.to_string(), JsonValue::Number(1.into()));
-                    }
+                    obj.insert(
+                        output_name.to_string(),
+                        self.compute_commit_aggregate(agg, commit, None),
+                    );
                 }
                 Requestable::Similarity(_) => {
                     // Similarity is not applicable in commit context
@@ -399,7 +967,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         caller_identity: Option<Did>,
     ) -> Result<JsonValue> {
         use crate::fetcher::CommitsQueryOptions;
-        use crate::mapper::{AggregateType, OrderDirection};
+        use crate::mapper::OrderDirection;
 
         // Validate docIDs: Go v1.0.0-rc1 accepts a list but only supports one element.
         if let Some(ref ids) = select.doc_ids {
@@ -413,11 +981,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        let height_range = select
+            .filter
+            .as_ref()
+            .map(extract_commits_height_range)
+            .unwrap_or(HeightRangeExtraction::None);
+
+        if matches!(height_range, HeightRangeExtraction::Empty) {
+            return Ok(JsonValue::Array(vec![]));
+        }
+
         // Build options from the select
         let options = CommitsQueryOptions {
             doc_id: select.doc_ids.as_ref().and_then(|ids| ids.first().cloned()),
             cid: select.cid.clone(),
             depth: select.depth,
+            height_start: match &height_range {
+                HeightRangeExtraction::Range(range) => Some(range.start),
+                _ => None,
+            },
+            height_end: match &height_range {
+                HeightRangeExtraction::Range(range) => range.end,
+                _ => None,
+            },
             field_name: None,
         };
 
@@ -596,6 +1182,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        if select.group_by.is_none() && is_commit_aggregate_only_selection(select) {
+            let aggregate_docs: Vec<document::Document> =
+                work_items.into_iter().map(|(commit, _)| commit).collect();
+            work_items = vec![(document::Document::new(), Some(aggregate_docs))];
+        }
+
         // Build results
         let mut results = Vec::new();
         for (commit, group_docs) in &work_items {
@@ -623,50 +1215,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         }
                     }
                     Requestable::Aggregate(agg) => {
-                        // Handle aggregates like _count on links/heads
                         let output_name = agg.output_name();
-                        let count = match agg.aggregate_type {
-                            AggregateType::Count => {
-                                // Count on a target field (e.g., links, heads)
-                                if let Some(target) = agg.targets.first() {
-                                    // Get the target field name - check field_name first (from
-                                    // `field:` arg), then host_name (from relation syntax)
-                                    let target_field = target
-                                        .field_name
-                                        .as_deref()
-                                        .filter(|s| !s.is_empty())
-                                        .or_else(|| {
-                                            Some(target.host_name.as_str())
-                                                .filter(|s| !s.is_empty())
-                                        });
-
-                                    if let Some(field) = target_field {
-                                        if let Some(val) = commit.get(field) {
-                                            // Convert NormalValue to JSON to check array
-                                            if let Ok(json_val) =
-                                                crate::json_convert::normal_value_to_json(val)
-                                            {
-                                                if let Some(arr) = json_val.as_array() {
-                                                    arr.len() as i64
-                                                } else {
-                                                    0
-                                                }
-                                            } else {
-                                                0
-                                            }
-                                        } else {
-                                            0
-                                        }
-                                    } else {
-                                        1 // Count without target = count this commit
-                                    }
-                                } else {
-                                    1 // Count without target = count this commit
-                                }
-                            }
-                            _ => 0, // Other aggregates not supported for commits
-                        };
-                        obj.insert(output_name.to_string(), JsonValue::Number(count.into()));
+                        obj.insert(
+                            output_name.to_string(),
+                            self.compute_commit_aggregate(agg, commit, group_docs.as_deref()),
+                        );
                     }
                     Requestable::Select(nested) => {
                         let field_name = &nested.field.name;
