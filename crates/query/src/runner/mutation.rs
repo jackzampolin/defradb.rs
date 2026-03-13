@@ -381,11 +381,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let current_signing_config = defra_core::signing::get_signing_config();
             match current_signing_config.clone() {
                 Some(mut config) if config.remote_signer.is_some() => {
+                    tracing::info!(
+                        collection = %mutation.collection_name,
+                        caller_identity = ?caller_identity.as_ref().map(|d| d.to_string()),
+                        policy_id = ?collection.policy.as_ref().map(|p| p.id.clone()),
+                        resource = ?collection.policy.as_ref().map(|p| p.resource_name.clone()),
+                        "create mutation entering remote signer authorization path"
+                    );
                     if let (Some(acp), Some(identity_did), Some(policy)) = (
                         self.acp.as_ref(),
                         caller_identity.as_ref(),
                         collection.policy.as_ref(),
                     ) {
+                        tracing::info!(
+                            actor_did = %identity_did,
+                            policy_id = %policy.id,
+                            resource = %policy.resource_name,
+                            object_id = %policy.resource_name,
+                            permission = "writer",
+                            "create mutation requesting access decision"
+                        );
                         let decision_id = acp
                             .create_access_decision(
                                 &Identity::from(identity_did.clone()),
@@ -402,6 +417,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 ))
                             })?;
 
+                        tracing::info!(
+                            actor_did = %identity_did,
+                            policy_id = %policy.id,
+                            resource = %policy.resource_name,
+                            object_id = %policy.resource_name,
+                            permission = "writer",
+                            decision_id = ?decision_id,
+                            "create mutation access decision result"
+                        );
                         if let Some(decision_id) = decision_id {
                             config.signing_authorization =
                                 Some(defra_core::signing::SigningAuthorization::Decision {
@@ -410,13 +434,37 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             defra_core::signing::set_signing_config(Some(config));
                             Some(SigningConfigReset(current_signing_config))
                         } else {
+                            tracing::warn!(
+                                collection = %mutation.collection_name,
+                                "create mutation received no access decision for remote signer"
+                            );
                             None
                         }
                     } else {
+                        tracing::warn!(
+                            collection = %mutation.collection_name,
+                            has_acp = self.acp.is_some(),
+                            has_caller_identity = caller_identity.is_some(),
+                            has_policy = collection.policy.is_some(),
+                            "create mutation skipped remote signer authorization due to missing prerequisites"
+                        );
                         None
                     }
                 }
-                _ => None,
+                Some(_) => {
+                    tracing::info!(
+                        collection = %mutation.collection_name,
+                        "create mutation using local signer; remote signer authorization skipped"
+                    );
+                    None
+                }
+                None => {
+                    tracing::warn!(
+                        collection = %mutation.collection_name,
+                        "create mutation has no signing config; remote signer authorization skipped"
+                    );
+                    None
+                }
             }
         } else {
             None

@@ -266,6 +266,40 @@ impl OrbisClient {
             "Orbis gRPC channel connected"
         );
 
+        match authorization.as_ref() {
+            Some(SigningAuthorization::Decision { decision_id }) => {
+                info!(
+                    ring_id = %self.ring_id,
+                    signer_did = %self.signer_did,
+                    decision_id = %decision_id,
+                    "Orbis sign request using access decision authorization"
+                );
+            }
+            Some(SigningAuthorization::Policy {
+                policy_id,
+                resource,
+                object_id,
+                permission,
+            }) => {
+                info!(
+                    ring_id = %self.ring_id,
+                    signer_did = %self.signer_did,
+                    policy_id = %policy_id,
+                    resource = %resource,
+                    object_id = %object_id,
+                    permission = %permission,
+                    "Orbis sign request using direct policy authorization"
+                );
+            }
+            None => {
+                info!(
+                    ring_id = %self.ring_id,
+                    signer_did = %self.signer_did,
+                    "Orbis sign request has no authorization context"
+                );
+            }
+        }
+
         let bearer_token = self.create_bearer_token(data.to_vec(), authorization.as_ref())?;
 
         #[allow(clippy::result_large_err)]

@@ -183,8 +183,19 @@ impl HubRsProvider {
             .guarded_eth_call(|| self.client.eth_call(ACP_ADDRESS, calldata.clone()))
             .await?;
 
-        IAcp::verifyAccessRequestCall::abi_decode_returns(&result)
-            .map_err(|e| ProviderError::Query(format!("ABI decode: {}", e)))
+        let allowed = IAcp::verifyAccessRequestCall::abi_decode_returns(&result)
+            .map_err(|e| ProviderError::Query(format!("ABI decode: {}", e)))?;
+        tracing::info!(
+            creator_did = %self.signer.did(),
+            policy_id = %policy_id,
+            resource = %resource,
+            object_id = %object_id,
+            permission = %permission,
+            actor_did = %actor_did,
+            allowed,
+            "hub.rs verifyAccessRequest result"
+        );
+        Ok(allowed)
     }
 }
 
@@ -584,10 +595,28 @@ impl SourceHubProvider for HubRsProvider {
         permission: &str,
         actor_did: &str,
     ) -> Result<Option<String>, ProviderError> {
+        tracing::info!(
+            creator_did = %self.signer.did(),
+            policy_id = %policy_id,
+            resource = %resource,
+            object_id = %object_id,
+            permission = %permission,
+            actor_did = %actor_did,
+            "hub.rs create_access_decision start"
+        );
         let currently_allowed = self
             .verify_access_request_live(policy_id, resource, object_id, permission, actor_did)
             .await?;
         if !currently_allowed {
+            tracing::warn!(
+                creator_did = %self.signer.did(),
+                policy_id = %policy_id,
+                resource = %resource,
+                object_id = %object_id,
+                permission = %permission,
+                actor_did = %actor_did,
+                "hub.rs create_access_decision denied by verifyAccessRequest"
+            );
             return Err(ProviderError::Query(format!(
                 "actor {} denied {} on {}:{}",
                 actor_did, permission, resource, object_id
@@ -611,6 +640,17 @@ impl SourceHubProvider for HubRsProvider {
             resource,
             object_id,
             permission,
+        );
+        tracing::info!(
+            creator_did = %self.signer.did(),
+            policy_id = %policy_id,
+            resource = %resource,
+            object_id = %object_id,
+            permission = %permission,
+            actor_did = %actor_did,
+            decision_id = %decision_id,
+            receipt_block_number = ?receipt["blockNumber"].as_str(),
+            "hub.rs checkAccess transaction confirmed"
         );
 
         if let Some(block_number_hex) = receipt["blockNumber"].as_str() {
@@ -639,6 +679,12 @@ impl SourceHubProvider for HubRsProvider {
             .check_access_decision(&decision_id)
             .await
             .map_err(|e| ProviderError::Query(format!("light client decision check: {}", e)))?;
+        tracing::info!(
+            decision_id = %decision_id,
+            allowed = decision.allowed,
+            verified_height = decision.verified_at_height,
+            "hub.rs light client access decision lookup result"
+        );
         if !decision.allowed {
             return Err(ProviderError::Query(format!(
                 "access decision {} not visible after confirmation",
