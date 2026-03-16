@@ -172,3 +172,45 @@ jobs:
           git checkout -- .
           git clean -fd
           pkill -f "target/.*defra" || true
+
+  artifacts:
+    name: Release Artifacts
+    runs-on: [self-hosted, macOS, ARM64, studio]
+    needs: [build]
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Configure private repo access
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+
+      - name: Build release binaries
+        run: |
+          cargo build --release -p cli
+          mkdir -p artifacts
+          cp target/release/defra artifacts/defra
+          cargo build --release -p cli --features iroh
+          cp target/release/defra artifacts/defra-iroh
+
+      - name: Upload defra
+        uses: actions/upload-artifact@v4
+        with:
+          name: defra-aarch64-apple-darwin
+          path: artifacts/defra
+          retention-days: 30
+
+      - name: Upload defra-iroh
+        uses: actions/upload-artifact@v4
+        with:
+          name: defra-iroh-aarch64-apple-darwin
+          path: artifacts/defra-iroh
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git checkout -- .
+          git clean -fd
