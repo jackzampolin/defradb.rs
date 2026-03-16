@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.variant }} (${{ matrix.platform }})
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
       matrix:
@@ -20,64 +20,64 @@ jobs:
           - variant: redb
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
-            runner: ubuntu-latest
+            runner: '["self-hosted", "Linux", "X64"]'
             features: ""
           - variant: redb
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
-            runner: ubuntu-24.04-arm
+            runner: '["self-hosted", "Linux", "ARM64"]'
             features: ""
           - variant: redb
             target: x86_64-apple-darwin
             platform: darwin_amd64
-            runner: macos-14
+            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: "--features vendored-openssl"
           - variant: redb
             target: aarch64-apple-darwin
             platform: darwin_arm64
-            runner: macos-latest
+            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: ""
           # fjall
           - variant: fjall
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
-            runner: ubuntu-latest
+            runner: '["self-hosted", "Linux", "X64"]'
             features: "--features fjall"
           - variant: fjall
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
-            runner: ubuntu-24.04-arm
+            runner: '["self-hosted", "Linux", "ARM64"]'
             features: "--features fjall"
           - variant: fjall
             target: x86_64-apple-darwin
             platform: darwin_amd64
-            runner: macos-14
+            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: "--features fjall,vendored-openssl"
           - variant: fjall
             target: aarch64-apple-darwin
             platform: darwin_arm64
-            runner: macos-latest
+            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: "--features fjall"
           # rocksdb
           - variant: rocksdb
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
-            runner: ubuntu-latest
+            runner: '["self-hosted", "Linux", "X64"]'
             features: "--features rocksdb"
           - variant: rocksdb
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
-            runner: ubuntu-24.04-arm
+            runner: '["self-hosted", "Linux", "ARM64"]'
             features: "--features rocksdb"
           - variant: rocksdb
             target: x86_64-apple-darwin
             platform: darwin_amd64
-            runner: macos-14
+            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: "--features rocksdb,vendored-openssl"
           - variant: rocksdb
             target: aarch64-apple-darwin
             platform: darwin_arm64
-            runner: macos-latest
+            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: "--features rocksdb"
     steps:
       - uses: actions/checkout@v4
@@ -135,9 +135,16 @@ jobs:
           name: defra-${{ matrix.variant }}-${{ matrix.platform }}
           path: ${{ env.ARCHIVE }}
 
+      - name: Cleanup
+        if: always()
+        run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git checkout -- .
+          git clean -fd
+
   build-wasm:
     name: Build WASM
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
 
@@ -177,9 +184,16 @@ jobs:
           name: defra-wasm
           path: ${{ env.ARCHIVE }}
 
+      - name: Cleanup
+        if: always()
+        run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git checkout -- .
+          git clean -fd
+
   build-ffi:
     name: FFI ${{ matrix.variant }} (${{ matrix.platform }})
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
       matrix:
@@ -188,64 +202,64 @@ jobs:
           - variant: redb
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
-            runner: ubuntu-latest
+            runner: '["self-hosted", "Linux", "X64"]'
             features: ""
           - variant: redb
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
-            runner: ubuntu-24.04-arm
+            runner: '["self-hosted", "Linux", "ARM64"]'
             features: ""
           - variant: redb
             target: x86_64-apple-darwin
             platform: darwin_amd64
-            runner: macos-14
+            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: ""
           - variant: redb
             target: aarch64-apple-darwin
             platform: darwin_arm64
-            runner: macos-latest
+            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: ""
           # fjall
           - variant: fjall
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
-            runner: ubuntu-latest
+            runner: '["self-hosted", "Linux", "X64"]'
             features: "--features fjall"
           - variant: fjall
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
-            runner: ubuntu-24.04-arm
+            runner: '["self-hosted", "Linux", "ARM64"]'
             features: "--features fjall"
           - variant: fjall
             target: x86_64-apple-darwin
             platform: darwin_amd64
-            runner: macos-14
+            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: "--features fjall"
           - variant: fjall
             target: aarch64-apple-darwin
             platform: darwin_arm64
-            runner: macos-latest
+            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: "--features fjall"
           # rocksdb
           - variant: rocksdb
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
-            runner: ubuntu-latest
+            runner: '["self-hosted", "Linux", "X64"]'
             features: "--features rocksdb"
           - variant: rocksdb
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
-            runner: ubuntu-24.04-arm
+            runner: '["self-hosted", "Linux", "ARM64"]'
             features: "--features rocksdb"
           - variant: rocksdb
             target: x86_64-apple-darwin
             platform: darwin_amd64
-            runner: macos-14
+            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: "--features rocksdb"
           - variant: rocksdb
             target: aarch64-apple-darwin
             platform: darwin_arm64
-            runner: macos-latest
+            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: "--features rocksdb"
     steps:
       - uses: actions/checkout@v4
@@ -307,10 +321,17 @@ jobs:
           name: defra-ffi-${{ matrix.variant }}-${{ matrix.platform }}
           path: ${{ env.ARCHIVE }}
 
+      - name: Cleanup
+        if: always()
+        run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git checkout -- .
+          git clean -fd
+
   docker:
     name: Docker
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@v4
 
@@ -353,7 +374,7 @@ jobs:
     name: Release
     needs: [build, build-ffi, build-wasm, docker]
     if: always() && needs.build.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/download-artifact@v4
         with:
