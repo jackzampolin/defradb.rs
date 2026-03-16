@@ -213,7 +213,7 @@ trait CollectionLookup: Send + Sync {
 }
 
 #[async_trait::async_trait]
-impl<S: storage::corekv::Store + 'static> SchemaOps for db::DB<S> {
+impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
     async fn add_schema(&self, sdl: &str) -> anyhow::Result<()> {
         let collections =
             query::parse_sdl(sdl).map_err(|e| anyhow::anyhow!("SDL parse error: {}", e))?;
@@ -230,43 +230,64 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for db::DB<S> {
     }
 
     async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()> {
-        // Parse the view SDL (unknown directives like @downsample are warned but ignored)
-        let mut collections = query::parse_sdl(target_sdl)
-            .map_err(|e| anyhow::anyhow!("view SDL parse error: {}", e))?;
-
-        // Parse the source query into a QuerySource Fields array.
-        // Expected format: "SourceType { field1 field2 field3 }"
-        let source_query = source_query.trim();
-        let (source_type, fields_block) = source_query.split_once('{').ok_or_else(|| {
-            anyhow::anyhow!("source_query must be 'TypeName {{ field1 field2 ... }}'")
-        })?;
-        let source_type = source_type.trim();
-        let fields_str = fields_block.trim_end_matches('}').trim();
-        let field_names: Vec<&str> = fields_str.split_whitespace().collect();
-
-        let fields_json: Vec<serde_json::Value> = field_names
-            .iter()
-            .map(|name| serde_json::json!({"Name": name}))
+        let known_types: std::collections::HashSet<String> = self
+            .list_collections()
+            .unwrap_or_default()
+            .into_iter()
             .collect();
 
-        let query_json = serde_json::json!({
-            "Name": source_type,
-            "Fields": fields_json,
-        });
+        let mut collections = query::parse_sdl_with_known_types(target_sdl, known_types)
+            .map_err(|e| anyhow::anyhow!("view SDL parse error: {}", e))?;
 
-        let query_source = schema::QuerySource::new(query_json);
+        let wrapped_query = format!("query {{ {} }}", source_query.trim());
+        let selects = query::parse_query(&wrapped_query)
+            .map_err(|e| anyhow::anyhow!("view query parse error: {}", e))?;
+        let select = selects
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("invalid view query: no selections found"))?;
+        let query_source = schema::QuerySource::new(query::select_to_go_json(&select));
 
-        // Mark each collection as a materialized view backed by the query source
+        let mut materialized_names = Vec::new();
+        let mut downsample_names = Vec::new();
+
         for collection in &mut collections {
-            collection.query = Some(query_source.clone());
-            collection.is_materialized = true;
+            if collection.downsample_interval.is_some() {
+                collection.downsample_source = Some(query_source.clone());
+                self.validate_downsample_collection(collection)
+                    .map_err(|e| anyhow::anyhow!("invalid downsample definition: {}", e))?;
+            } else {
+                collection.query = Some(query_source.clone());
+            }
+
+            if collection.query.is_some() && collection.is_materialized && !collection.is_embedded_only
+            {
+                materialized_names.push(collection.name.clone());
+            }
+
+            if collection.downsample_interval.is_some() {
+                downsample_names.push(collection.name.clone());
+            }
         }
 
-        for collection in collections {
-            self.create_collection(collection)
-                .await
-                .map_err(|e| anyhow::anyhow!("create view collection error: {}", e))?;
+        self.create_collections_atomic(collections)
+            .await
+            .map_err(|e| anyhow::anyhow!("create view collection error: {}", e))?;
+
+        if !materialized_names.is_empty() {
+            self.refresh_views(Some(db::RefreshViewsOptions::with_names(
+                materialized_names,
+            )))
+            .await
+            .map_err(|e| anyhow::anyhow!("refresh materialized views error: {}", e))?;
         }
+
+        if !downsample_names.is_empty() {
+            self.bootstrap_downsamples(Some(&downsample_names))
+                .await
+                .map_err(|e| anyhow::anyhow!("bootstrap downsample collections error: {}", e))?;
+        }
+
         Ok(())
     }
 }
@@ -661,7 +682,7 @@ impl NodeBuilder {
                 .with_lens_store(database.lens_store().clone());
 
         let runner: Arc<dyn QueryExecutor> = Arc::new(query_runner);
-        let schema_ops: Arc<dyn SchemaOps> = database;
+        let schema_ops: Arc<dyn SchemaOps> = Arc::new(database.clone());
 
         Ok(EmbeddedNode {
             runner,
