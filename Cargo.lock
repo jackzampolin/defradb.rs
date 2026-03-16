@@ -3689,6 +3689,7 @@ dependencies = [
  "acp",
  "anyhow",
  "async-trait",
+ "axum 0.7.9",
  "blockstore",
  "db",
  "defra-core",

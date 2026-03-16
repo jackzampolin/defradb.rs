@@ -7,7 +7,7 @@ description = "Reusable embedded DefraDB node builder"
 
 [features]
 default = []
-http = ["dep:defra-http"]
+http = ["dep:defra-http", "dep:axum"]
 p2p = ["dep:p2p", "dep:blockstore", "dep:iroh", "dep:rand"]
 
 [dependencies]
@@ -25,6 +25,7 @@ tracing.workspace = true
 async-trait = "0.1"
 serde.workspace = true
 serde_json.workspace = true
+axum = { workspace = true, optional = true }
 
 # Optional — HTTP server
 defra-http = { path = "../http", optional = true }

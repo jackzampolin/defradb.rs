@@ -137,6 +137,7 @@ impl defra_http::P2POperations for HttpP2PAdapter {
 #[cfg(feature = "http")]
 pub struct HttpConfig {
     pub address: std::net::SocketAddr,
+    extra_routes: Option<axum::Router>,
 }
 
 #[cfg(feature = "http")]
@@ -144,13 +145,20 @@ impl HttpConfig {
     pub fn new(port: u16) -> Self {
         Self {
             address: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            extra_routes: None,
         }
     }
 
     pub fn with_addr(addr: impl Into<std::net::SocketAddr>) -> Self {
         Self {
             address: addr.into(),
+            extra_routes: None,
         }
+    }
+
+    pub fn with_extra_routes(mut self, extra: axum::Router) -> Self {
+        self.extra_routes = Some(extra);
+        self
     }
 }
 
@@ -549,21 +557,52 @@ impl NodeBuilder {
                 address: http_cfg.address,
                 ..Default::default()
             };
-            let mut server =
+            let server =
                 defra_http::Server::from_arc_with_config(node.runner.clone(), server_config)
                     .with_event_bus_arc(node.event_bus.clone());
 
             #[cfg(feature = "p2p")]
-            if let Some(p2p) = node.p2p_ops.as_ref() {
-                server = server.with_p2p(HttpP2PAdapter {
+            let server = if let Some(p2p) = node.p2p_ops.as_ref() {
+                server.with_p2p(HttpP2PAdapter {
                     inner: Arc::clone(p2p),
-                });
-            }
+                })
+            } else {
+                server
+            };
 
             let addr = http_cfg.address;
+            let extra_routes = http_cfg.extra_routes;
             tokio::spawn(async move {
-                if let Err(e) = server.run().await {
-                    tracing::error!(error = %e, "HTTP server exited with error");
+                let router_result = server.router();
+                let run_result = async {
+                    let mut router = router_result?;
+                    if let Some(extra) = extra_routes {
+                        router = router.merge(extra);
+                    }
+
+                    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                        let hint = match e.kind() {
+                            std::io::ErrorKind::AddrInUse => "port is already in use",
+                            std::io::ErrorKind::PermissionDenied => {
+                                "permission denied (try port > 1024)"
+                            }
+                            std::io::ErrorKind::AddrNotAvailable => {
+                                "address not available on this host"
+                            }
+                            _ => "check network configuration",
+                        };
+                        anyhow::anyhow!("failed to bind to {}: {} ({})", addr, e, hint)
+                    })?;
+
+                    axum::serve(listener, router)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("server error: {}", e))?;
+                    Ok::<(), anyhow::Error>(())
+                }
+                .await;
+
+                if let Err(e) = run_result {
+                    tracing::error!(error = %e, address = %addr, "HTTP server exited with error");
                 }
             });
             tracing::info!(address = %addr, "HTTP server started");
@@ -793,4 +832,20 @@ fn load_or_generate_secret_key(path: Option<&std::path::Path>) -> anyhow::Result
 struct P2PSetupResult {
     ops: Arc<dyn P2POps>,
     mutator: Arc<dyn query::DocMutator>,
+}
+
+#[cfg(all(test, feature = "http"))]
+mod tests {
+    use axum::{routing::get, Router};
+
+    use super::HttpConfig;
+
+    #[test]
+    fn http_config_accepts_extra_routes() {
+        let config = HttpConfig::new(9182)
+            .with_extra_routes(Router::new().route("/healthz", get(|| async { "ok" })));
+
+        assert_eq!(config.address.port(), 9182);
+        assert!(config.extra_routes.is_some());
+    }
 }
