@@ -260,7 +260,9 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
                 collection.query = Some(query_source.clone());
             }
 
-            if collection.query.is_some() && collection.is_materialized && !collection.is_embedded_only
+            if collection.query.is_some()
+                && collection.is_materialized
+                && !collection.is_embedded_only
             {
                 materialized_names.push(collection.name.clone());
             }
