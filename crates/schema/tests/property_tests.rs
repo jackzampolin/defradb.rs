@@ -418,7 +418,7 @@ proptest! {
     #[test]
     fn non_array_relations_get_id_fields(
         collection_name in arb_valid_collection_name(),
-        field_name in "[a-z]{1,15}",
+        field_name in "[a-z]{1,15}".prop_filter("avoid _docID collision", |n| n != "doc"),
         target_collection in "[a-z]{1,15}",
     ) {
         let fields = vec![
@@ -444,7 +444,7 @@ proptest! {
     #[test]
     fn array_relations_no_id_fields(
         collection_name in arb_valid_collection_name(),
-        field_name in "[a-z]{1,15}",
+        field_name in "[a-z]{1,15}".prop_filter("avoid _docID collision", |n| n != "doc"),
         target_collection in "[a-z]{1,15}",
     ) {
         let fields = vec![
