@@ -66,7 +66,7 @@ jobs:
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- .
           git clean -fd
-          pkill -f "target/.*defra" || true
+          pkill -f "target/debug/defra" || true
 
   integration:
     name: Integration (${{ matrix.suite }})
@@ -171,7 +171,7 @@ jobs:
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- .
           git clean -fd
-          pkill -f "target/.*defra" || true
+          pkill -f "target/(debug|ci)/defra" || true
 
   artifacts:
     name: Release Artifacts
