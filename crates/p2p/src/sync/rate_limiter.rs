@@ -13,10 +13,17 @@ use parking_lot::Mutex;
 use crate::transport::PeerId;
 
 /// Default bucket capacity (burst allowance).
-const DEFAULT_CAPACITY: u32 = 100;
+///
+/// P2P sync is naturally bursty — a peer reconnecting after a restart will
+/// send many TwoStreamRequests in rapid succession to catch up.  The burst
+/// must be large enough to absorb that initial flood.
+const DEFAULT_CAPACITY: u32 = 500;
 
 /// Default refill rate: tokens per second.
-const DEFAULT_REFILL_RATE: f64 = 10.0;
+///
+/// Sustained request rate allowed per peer.  50/s is generous enough for
+/// normal sync traffic while still capping a misbehaving peer.
+const DEFAULT_REFILL_RATE: f64 = 50.0;
 
 /// Maximum number of peer buckets to retain.
 ///

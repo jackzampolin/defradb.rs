@@ -812,7 +812,11 @@ impl NodeBuilder {
             let coord = coordinator.clone();
             tokio::spawn(async move {
                 if let Err(e) = coord.handle_transport_event(event).await {
-                    tracing::error!(error = %e, "P2P event handler error");
+                    if e.to_string().contains("rate-limited") {
+                        tracing::debug!(error = %e, "P2P rate-limited");
+                    } else {
+                        tracing::error!(error = %e, "P2P event handler error");
+                    }
                 }
                 drop(permit);
             });
