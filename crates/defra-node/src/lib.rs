@@ -493,10 +493,25 @@ impl EmbeddedNode {
     }
 }
 
+/// Selects which persistent storage backend to use when `data_path` is set.
+///
+/// Defaults to `Redb` for backwards compatibility.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum StorageBackend {
+    /// Pure-Rust embedded database. Loads the full dataset into memory on open,
+    /// which can be slow for very large stores (10 GB+).
+    #[default]
+    Redb,
+    /// RocksDB LSM-tree backend. Constant-time open regardless of dataset size,
+    /// but requires the `rocksdb` feature to be enabled at compile time.
+    RocksDb,
+}
+
 /// Builder for constructing an `EmbeddedNode`.
 #[derive(Default)]
 pub struct NodeBuilder {
     data_path: Option<PathBuf>,
+    storage_backend: StorageBackend,
     #[cfg(feature = "http")]
     http_config: Option<HttpConfig>,
     #[cfg(feature = "p2p")]
@@ -504,10 +519,19 @@ pub struct NodeBuilder {
 }
 
 impl NodeBuilder {
-    /// Set the data directory for persistent storage (redb backend).
+    /// Set the data directory for persistent storage.
     /// If not set, uses in-memory storage.
     pub fn data_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.data_path = Some(path.into());
+        self
+    }
+
+    /// Select the persistent storage backend (default: `Redb`).
+    ///
+    /// Has no effect when `data_path` is not set (in-memory mode).
+    /// Using `StorageBackend::RocksDb` requires the `rocksdb` feature.
+    pub fn with_storage_backend(mut self, backend: StorageBackend) -> Self {
+        self.storage_backend = backend;
         self
     }
 
@@ -540,25 +564,56 @@ impl NodeBuilder {
         let node = if let Some(path) = self.data_path {
             std::fs::create_dir_all(&path)?;
 
-            let store = Arc::new(
-                storage::RedbStore::open(
-                    path.to_str()
-                        .ok_or_else(|| anyhow::anyhow!("data_path contains non-UTF8 characters"))?,
-                )
-                .map_err(|e| anyhow::anyhow!("failed to open redb store: {}", e))?,
-            );
+            match self.storage_backend {
+                StorageBackend::Redb => {
+                    let store = Arc::new(
+                        storage::RedbStore::open(
+                            path.to_str().ok_or_else(|| {
+                                anyhow::anyhow!("data_path contains non-UTF8 characters")
+                            })?,
+                        )
+                        .map_err(|e| anyhow::anyhow!("failed to open redb store: {}", e))?,
+                    );
 
-            let acp_store: Arc<dyn acp::AcpStore> =
-                Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
+                    let acp_store: Arc<dyn acp::AcpStore> =
+                        Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
 
-            Self::build_with_store(
-                store,
-                acp_store,
-                event_bus,
-                #[cfg(feature = "p2p")]
-                p2p_config,
-            )
-            .await?
+                    Self::build_with_store(
+                        store,
+                        acp_store,
+                        event_bus,
+                        #[cfg(feature = "p2p")]
+                        p2p_config,
+                    )
+                    .await?
+                }
+                #[cfg(feature = "rocksdb")]
+                StorageBackend::RocksDb => {
+                    let store = Arc::new(
+                        storage::RocksDbStore::open(&path)
+                            .map_err(|e| anyhow::anyhow!("failed to open rocksdb store: {}", e))?,
+                    );
+
+                    let acp_store: Arc<dyn acp::AcpStore> =
+                        Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
+
+                    Self::build_with_store(
+                        store,
+                        acp_store,
+                        event_bus,
+                        #[cfg(feature = "p2p")]
+                        p2p_config,
+                    )
+                    .await?
+                }
+                #[cfg(not(feature = "rocksdb"))]
+                StorageBackend::RocksDb => {
+                    return Err(anyhow::anyhow!(
+                        "RocksDB backend requested but the `rocksdb` feature is not enabled. \
+                         Rebuild with `--features rocksdb`."
+                    ));
+                }
+            }
         } else {
             let store = Arc::new(storage::MemoryStore::new());
             let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());

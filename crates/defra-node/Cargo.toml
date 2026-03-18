@@ -9,6 +9,7 @@ description = "Reusable embedded DefraDB node builder"
 default = []
 http = ["dep:defra-http", "dep:axum"]
 p2p = ["dep:p2p", "dep:blockstore", "dep:iroh", "dep:rand"]
+rocksdb = ["storage/rocksdb"]
 
 [dependencies]
 db = { path = "../db" }
