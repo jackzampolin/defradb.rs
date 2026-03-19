@@ -27,6 +27,7 @@
 //! WARNING: On round-trip, empty bytes become CBOR null which becomes empty bytes.
 
 mod branchable;
+mod car;
 mod cbor;
 mod docsync;
 mod metadata;
@@ -36,6 +37,7 @@ mod traits;
 
 // Re-export all public types
 pub use branchable::{BranchableSyncReply, BranchableSyncRequest};
+pub use car::CarFetchRequest;
 pub use docsync::{DocSyncItem, DocSyncReply, DocSyncRequest, MAX_DOC_IDS};
 pub use metadata::MetaData;
 pub use pushlog::{PushLogBroadcast, PushLogReply, PushLogRequest};

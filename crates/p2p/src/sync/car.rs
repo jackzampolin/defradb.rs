@@ -14,10 +14,24 @@ use crate::error::{Error, Result};
 ///
 /// Prevents a malicious or faulty peer from causing the server to collect and
 /// send an arbitrarily large DAG in a single response.
-pub const CAR_MAX_BLOCKS: usize = 1000;
+pub const CAR_MAX_BLOCKS: usize = 10_000;
 
 /// Maximum total byte size of a single CAR response (16 MiB).
 pub const CAR_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Result of collecting blocks for a CAR response.
+#[derive(Debug, Clone, Default)]
+pub struct CarCollectOutcome {
+    pub blocks: Vec<(Cid, Vec<u8>)>,
+    pub truncated_by_blocks: bool,
+    pub truncated_by_bytes: bool,
+}
+
+impl CarCollectOutcome {
+    pub fn truncated(&self) -> bool {
+        self.truncated_by_blocks || self.truncated_by_bytes
+    }
+}
 
 /// Encode blocks as a CARv1 byte stream.
 ///
@@ -86,25 +100,66 @@ pub fn decode_car(data: &[u8]) -> Result<CarContents> {
 pub async fn collect_dag_blocks<B: Blockstore>(
     blockstore: &B,
     root_cid: &Cid,
-) -> Result<Vec<(Cid, Vec<u8>)>> {
-    let mut blocks = Vec::new();
+) -> Result<CarCollectOutcome> {
+    let mut outcome = CarCollectOutcome::default();
     let mut visited = HashSet::new();
     let mut total_bytes: usize = 0;
     collect_recursive(
         blockstore,
         root_cid,
-        &mut blocks,
+        &mut outcome,
         &mut visited,
         &mut total_bytes,
     )
     .await?;
-    Ok(blocks)
+    Ok(outcome)
+}
+
+/// Collect the exact requested blocks without walking descendant links.
+pub async fn collect_exact_blocks<B: Blockstore>(
+    blockstore: &B,
+    cids: &[Cid],
+) -> Result<CarCollectOutcome> {
+    let mut outcome = CarCollectOutcome::default();
+    let mut visited = HashSet::new();
+    let mut total_bytes: usize = 0;
+
+    for cid in cids {
+        if !visited.insert(*cid) {
+            continue;
+        }
+        if outcome.blocks.len() >= CAR_MAX_BLOCKS {
+            outcome.truncated_by_blocks = true;
+            break;
+        }
+
+        let data = match blockstore.get(cid).await {
+            Ok(Some(d)) => d,
+            Ok(None) => continue,
+            Err(e) => {
+                return Err(Error::BlockstoreError(format!(
+                    "failed to get block {}: {}",
+                    cid, e
+                )));
+            }
+        };
+
+        if total_bytes + data.len() > CAR_MAX_BYTES {
+            outcome.truncated_by_bytes = true;
+            break;
+        }
+
+        total_bytes += data.len();
+        outcome.blocks.push((*cid, data));
+    }
+
+    Ok(outcome)
 }
 
 fn collect_recursive<'a, B: Blockstore + 'a>(
     blockstore: &'a B,
     cid: &'a Cid,
-    blocks: &'a mut Vec<(Cid, Vec<u8>)>,
+    outcome: &'a mut CarCollectOutcome,
     visited: &'a mut HashSet<Cid>,
     total_bytes: &'a mut usize,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
@@ -114,12 +169,8 @@ fn collect_recursive<'a, B: Blockstore + 'a>(
         }
 
         // Enforce limits before fetching each block.
-        if blocks.len() >= CAR_MAX_BLOCKS {
-            tracing::warn!(
-                cid = %cid,
-                limit = CAR_MAX_BLOCKS,
-                "CAR collection reached block limit, truncating"
-            );
+        if outcome.blocks.len() >= CAR_MAX_BLOCKS {
+            outcome.truncated_by_blocks = true;
             return Ok(());
         }
 
@@ -134,22 +185,18 @@ fn collect_recursive<'a, B: Blockstore + 'a>(
             }
         };
 
-        *total_bytes += data.len();
-        if *total_bytes > CAR_MAX_BYTES {
-            tracing::warn!(
-                cid = %cid,
-                limit_bytes = CAR_MAX_BYTES,
-                "CAR collection reached byte limit, truncating"
-            );
+        if *total_bytes + data.len() > CAR_MAX_BYTES {
+            outcome.truncated_by_bytes = true;
             return Ok(());
         }
+        *total_bytes += data.len();
 
         // Extract child links
         let refs = extract_links(&data);
-        blocks.push((*cid, data));
+        outcome.blocks.push((*cid, data));
 
         for child_cid in refs {
-            collect_recursive(blockstore, &child_cid, blocks, visited, total_bytes).await?;
+            collect_recursive(blockstore, &child_cid, outcome, visited, total_bytes).await?;
         }
 
         Ok(())
@@ -264,11 +311,19 @@ fn read_varint(cursor: &mut &[u8]) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blockstore::{Blockstore, DefraBlockstore};
     use libipld::multihash::{Code, MultihashDigest};
+    use libipld::{cbor::DagCborCodec, codec::Codec, ipld};
+    use std::sync::Arc;
+    use storage::backends::MemoryStore;
 
     fn make_cid(data: &[u8]) -> Cid {
         let hash = Code::Sha2_256.digest(data);
         Cid::new_v1(0x71, hash)
+    }
+
+    fn encode_ipld(ipld: libipld::Ipld) -> Vec<u8> {
+        DagCborCodec.encode(&ipld).unwrap()
     }
 
     #[test]
@@ -331,5 +386,35 @@ mod tests {
         let (roots, blocks) = decode_car(&encoded).unwrap();
         assert_eq!(roots, vec![cid1, cid2]);
         assert_eq!(blocks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn collect_exact_blocks_does_not_walk_descendants() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = DefraBlockstore::new(store, true);
+
+        let grandchild_data = encode_ipld(ipld!({ "kind": "grandchild" }));
+        let grandchild_cid = make_cid(&grandchild_data);
+        blockstore
+            .put(&grandchild_cid, &grandchild_data)
+            .await
+            .unwrap();
+
+        let child_data = encode_ipld(ipld!({ "child": grandchild_cid }));
+        let child_cid = make_cid(&child_data);
+        blockstore.put(&child_cid, &child_data).await.unwrap();
+
+        let root_data = encode_ipld(ipld!({ "children": [child_cid] }));
+        let root_cid = make_cid(&root_data);
+        blockstore.put(&root_cid, &root_data).await.unwrap();
+
+        let collected = collect_exact_blocks(&blockstore, &[root_cid])
+            .await
+            .unwrap();
+
+        assert_eq!(collected.blocks.len(), 1);
+        assert_eq!(collected.blocks[0].0, root_cid);
+        assert_eq!(collected.blocks[0].1, root_data);
+        assert!(!collected.truncated());
     }
 }

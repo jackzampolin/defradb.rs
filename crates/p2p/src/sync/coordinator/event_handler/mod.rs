@@ -158,7 +158,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
             TransportEvent::CarFetchRequest {
                 peer_id,
-                root_cid,
+                request,
                 token,
             } => {
                 if !self.rate_limiter.check(&peer_id) {
@@ -171,7 +171,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         collection_id: "rate-limited".into(),
                     });
                 }
-                self.handle_car_fetch_request(peer_id, root_cid, token)
+                self.handle_car_fetch_request(peer_id, request, token)
                     .await?;
             }
             TransportEvent::CarFetchResponse {

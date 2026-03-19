@@ -172,7 +172,8 @@ pub struct P2PConfig {
     /// prevent IROH from advertising unreachable LAN addresses across sites.
     /// None = 0.0.0.0 (all interfaces).
     pub bind_addr: Option<std::net::IpAddr>,
-    /// Optional relay URL for NAT traversal. None = direct connections only.
+    /// Optional custom relay URL for NAT traversal.
+    /// None = use iroh's default relay servers.
     pub relay_url: Option<String>,
     /// Enable DNS-based peer discovery.
     pub discovery: bool,
@@ -567,11 +568,9 @@ impl NodeBuilder {
             match self.storage_backend {
                 StorageBackend::Redb => {
                     let store = Arc::new(
-                        storage::RedbStore::open(
-                            path.to_str().ok_or_else(|| {
-                                anyhow::anyhow!("data_path contains non-UTF8 characters")
-                            })?,
-                        )
+                        storage::RedbStore::open(path.to_str().ok_or_else(|| {
+                            anyhow::anyhow!("data_path contains non-UTF8 characters")
+                        })?)
                         .map_err(|e| anyhow::anyhow!("failed to open redb store: {}", e))?,
                     );
 

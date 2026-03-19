@@ -13,8 +13,8 @@ use cid::Cid;
 
 use crate::error::Result;
 use crate::message::{
-    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogBroadcast,
-    PushLogReply, PushLogRequest, PushSEArtifactsRequest,
+    BranchableSyncReply, BranchableSyncRequest, CarFetchRequest, DocSyncReply, DocSyncRequest,
+    PushLogBroadcast, PushLogReply, PushLogRequest, PushSEArtifactsRequest,
 };
 use crate::replicator::ReplicatorInfo;
 use crate::topics::DefraTopic;
@@ -203,7 +203,7 @@ pub enum TransportEvent {
     },
     CarFetchRequest {
         peer_id: PeerId,
-        root_cid: Cid,
+        request: CarFetchRequest,
         token: Option<ResponseToken>,
     },
     CarFetchResponse {

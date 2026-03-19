@@ -368,7 +368,7 @@ pub fn convert_host_event(event: crate::host::HostEvent) -> TransportEvent {
         },
         HostEvent::CarFetchRequest { peer_id, root_cid } => TransportEvent::CarFetchRequest {
             peer_id: PeerId::from(peer_id),
-            root_cid,
+            request: crate::message::CarFetchRequest::full_dag(root_cid),
             token: None,
         },
         HostEvent::CarFetchResponse {

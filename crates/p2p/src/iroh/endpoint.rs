@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::message::CarFetchRequest;
 use crate::replicator::ReplicatorInfo;
 use crate::transport::{MessageId, PeerAddr, PeerId, TransportEvent};
 use crate::QueryId;
@@ -39,7 +40,8 @@ struct ActiveSync {
 /// Configuration for creating an `IrohEndpoint`.
 pub struct IrohEndpointConfig {
     pub secret_key: SecretKey,
-    /// Override the default N0 relay server with a custom URL (e.g. "https://relay.example.com").
+    /// Override iroh's default relay servers with a custom URL
+    /// (e.g. "https://relay.example.com"). `None` uses iroh's default relay mode.
     pub relay_url: Option<String>,
     /// Enable DNS-based peer discovery (default: true).
     pub discovery: bool,
@@ -84,13 +86,12 @@ pub async fn spawn_endpoint(
             .alpns(alpns)
             .relay_mode(iroh::RelayMode::Custom(relay_map))
     } else {
-        // No relay URL configured: disable relay entirely so bind() returns immediately
-        // without attempting to connect to public relay servers. Peers connect directly
-        // via IP. Configure a relay URL to enable relay-assisted NAT traversal.
+        // No custom relay configured: use iroh's default relay mode so mobile and
+        // other NATed peers still have a relay-assisted path when direct dialing fails.
         Endpoint::builder()
             .secret_key(config.secret_key.clone())
             .alpns(alpns)
-            .relay_mode(iroh::RelayMode::Disabled)
+            .relay_mode(iroh::endpoint::default_relay_mode())
     };
 
     if !config.discovery {
@@ -203,6 +204,8 @@ async fn handle_incoming(
     subscriptions: &HashMap<String, TopicSubscription>,
     event_tx: &mpsc::Sender<TransportEvent>,
 ) {
+    let remote_addr = incoming.remote_address();
+
     // Accept the connection
     let connection = match incoming.accept() {
         Ok(accepting) => match accepting.await {
@@ -230,7 +233,9 @@ async fn handle_incoming(
 
     let remote_id = connection.remote_id();
 
-    let is_new = peer_map.lock().increment_connections(remote_id, None);
+    let is_new = peer_map
+        .lock()
+        .increment_connections(remote_id, Some(remote_addr));
 
     if is_new
         && event_tx
@@ -364,14 +369,20 @@ async fn dispatch_stream(
             }
         }
         x if x == protocols::ALPN_CAR => {
-            debug!(peer_id = %peer_id, "CAR dispatch: reading request CID");
-            let root_cid: cid::Cid = protocols::read_message(recv).await?;
-            debug!(peer_id = %peer_id, root_cid = %root_cid, "CAR dispatch: emitting CarFetchRequest");
+            debug!(peer_id = %peer_id, "CAR dispatch: reading request");
+            let request: CarFetchRequest = protocols::read_message(recv).await?;
+            debug!(
+                peer_id = %peer_id,
+                root_cid = %request.root_cid,
+                recursive = request.recursive,
+                requested_count = request.wanted_cids.len(),
+                "CAR dispatch: emitting CarFetchRequest"
+            );
             let token = crate::transport::ResponseToken::new(send);
             if event_tx
                 .send(TransportEvent::CarFetchRequest {
                     peer_id: peer_id.clone(),
-                    root_cid,
+                    request,
                     token: Some(token),
                 })
                 .await
@@ -663,11 +674,12 @@ async fn handle_command(
             reply,
         } => {
             let direct_addr = peer_direct_addr(peer_map, &peer_id);
+            let request = CarFetchRequest::full_dag(root_cid);
             let result = handle_fire_and_forget(
                 endpoint,
                 &peer_id,
                 protocols::ALPN_CAR,
-                &root_cid,
+                &request,
                 direct_addr,
             )
             .await;
@@ -715,9 +727,13 @@ async fn handle_command(
             *next_query_id += 1;
 
             let endpoint = endpoint.clone();
+            let peer_map = Arc::clone(peer_map);
             let event_tx = event_tx.clone();
             let task = tokio::spawn(async move {
-                handle_block_sync(endpoint, query_id, root, providers, missing, event_tx).await;
+                handle_block_sync(
+                    endpoint, peer_map, query_id, root, providers, missing, event_tx,
+                )
+                .await;
             });
             active_syncs.insert(
                 query_id.0,
@@ -1098,7 +1114,8 @@ async fn handle_fire_and_forget<T: serde::Serialize>(
 async fn try_fetch_from_provider(
     endpoint: &Endpoint,
     provider: &PeerId,
-    root: cid::Cid,
+    request: CarFetchRequest,
+    direct_addr: Option<std::net::SocketAddr>,
     event_tx: &mpsc::Sender<TransportEvent>,
 ) -> bool {
     let endpoint_id = match parse_endpoint_id(provider) {
@@ -1109,11 +1126,21 @@ async fn try_fetch_from_provider(
         }
     };
 
-    let addr = EndpointAddr::from(endpoint_id);
+    let mut addr = EndpointAddr::from(endpoint_id);
+    if let Some(sa) = direct_addr {
+        addr = addr.with_ip_addr(sa);
+    }
     let connection = match endpoint.connect(addr, protocols::ALPN_CAR).await {
         Ok(conn) => conn,
         Err(e) => {
-            warn!(provider = %provider, root = %root, error = %e, "CAR fetch: connection failed");
+            warn!(
+                provider = %provider,
+                root = %request.root_cid,
+                recursive = request.recursive,
+                requested_count = request.wanted_cids.len(),
+                error = %e,
+                "CAR fetch: connection failed"
+            );
             return false;
         }
     };
@@ -1121,36 +1148,70 @@ async fn try_fetch_from_provider(
     let (mut send, mut recv) = match connection.open_bi().await {
         Ok(streams) => streams,
         Err(e) => {
-            warn!(provider = %provider, root = %root, error = %e, "CAR fetch: open_bi failed");
+            warn!(
+                provider = %provider,
+                root = %request.root_cid,
+                error = %e,
+                "CAR fetch: open_bi failed"
+            );
             return false;
         }
     };
 
-    if let Err(e) = protocols::write_message(&mut send, &root).await {
-        warn!(provider = %provider, root = %root, error = %e, "CAR fetch: write_message failed");
+    if let Err(e) = protocols::write_message(&mut send, &request).await {
+        warn!(
+            provider = %provider,
+            root = %request.root_cid,
+            error = %e,
+            "CAR fetch: write_message failed"
+        );
         return false;
     }
     let _ = send.finish();
 
-    info!(provider = %provider, root = %root, "CAR fetch: request sent, waiting for response");
+    info!(
+        provider = %provider,
+        root = %request.root_cid,
+        recursive = request.recursive,
+        requested_count = request.wanted_cids.len(),
+        "CAR fetch: request sent, waiting for response"
+    );
 
     let car_data = match recv.read_to_end(64 * 1024 * 1024).await {
         Ok(data) => data,
         Err(e) => {
-            warn!(provider = %provider, root = %root, error = %e, "CAR fetch: read response failed");
+            warn!(
+                provider = %provider,
+                root = %request.root_cid,
+                error = %e,
+                "CAR fetch: read response failed"
+            );
             return false;
         }
     };
 
     if car_data.is_empty() {
-        warn!(provider = %provider, root = %root, "CAR fetch: empty response");
+        warn!(
+            provider = %provider,
+            root = %request.root_cid,
+            "CAR fetch: empty response"
+        );
         return false;
     }
+
+    debug!(
+        provider = %provider,
+        root = %request.root_cid,
+        recursive = request.recursive,
+        requested_count = request.wanted_cids.len(),
+        car_bytes = car_data.len(),
+        "CAR fetch: response received"
+    );
 
     if event_tx
         .send(TransportEvent::CarFetchResponse {
             peer_id: provider.clone(),
-            root_cid: root,
+            root_cid: request.root_cid,
             car_data,
         })
         .await
@@ -1164,10 +1225,11 @@ async fn try_fetch_from_provider(
 
 /// CAR-based block sync: fetch blocks from providers concurrently.
 ///
-/// Tries all providers in parallel, completes on first success and cancels the rest.
-/// The `missing` CIDs are logged for diagnostics but the CAR fetch retrieves the full DAG.
+/// Full-DAG requests are recursive from `root`; partial recovery requests carry
+/// the exact missing CIDs and expect a selective CAR response.
 async fn handle_block_sync(
     endpoint: Endpoint,
+    peer_map: Arc<parking_lot::Mutex<PeerMap>>,
     query_id: QueryId,
     root: cid::Cid,
     providers: Vec<PeerId>,
@@ -1185,12 +1247,21 @@ async fn handle_block_sync(
 
     let mut tasks: Vec<JoinHandle<bool>> = Vec::with_capacity(providers.len());
 
+    let request = if missing.is_empty() {
+        CarFetchRequest::full_dag(root)
+    } else {
+        CarFetchRequest::selective_blocks(root, missing.clone())
+    };
+
     for provider in &providers {
         let endpoint = endpoint.clone();
+        let peer_map = Arc::clone(&peer_map);
         let event_tx = event_tx.clone();
         let provider = provider.clone();
+        let request = request.clone();
         tasks.push(tokio::spawn(async move {
-            try_fetch_from_provider(&endpoint, &provider, root, &event_tx).await
+            let direct_addr = peer_direct_addr(&peer_map, &provider);
+            try_fetch_from_provider(&endpoint, &provider, request, direct_addr, &event_tx).await
         }));
     }
 

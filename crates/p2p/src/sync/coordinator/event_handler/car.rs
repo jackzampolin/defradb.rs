@@ -4,7 +4,8 @@ use blockstore::{verify_block_cid, Blockstore};
 use cid::Cid;
 
 use crate::error::Result;
-use crate::sync::car::{collect_dag_blocks, decode_car, encode_car};
+use crate::message::CarFetchRequest;
+use crate::sync::car::{collect_dag_blocks, collect_exact_blocks, decode_car, encode_car};
 use crate::sync::coordinator::SyncCoordinator;
 use crate::transport::{P2PTransport, PeerId, ResponseToken};
 
@@ -13,39 +14,64 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub(crate) async fn handle_car_fetch_request(
         &self,
         peer_id: PeerId,
-        root_cid: Cid,
+        request: CarFetchRequest,
         token: Option<ResponseToken>,
     ) -> Result<()> {
         self.check_peer_is_replicator(&peer_id)?;
 
         tracing::debug!(
-            root_cid = %root_cid,
+            root_cid = %request.root_cid,
             peer_id = %peer_id,
+            recursive = request.recursive,
+            requested_count = request.wanted_cids.len(),
             has_token = token.is_some(),
-            "CAR handler: collecting DAG blocks"
+            "CAR handler: collecting blocks"
         );
-        let blocks = collect_dag_blocks(self.manager.blockstore().as_ref(), &root_cid).await?;
+        let response_roots = request.response_roots();
+        let collected = if request.recursive {
+            collect_dag_blocks(self.manager.blockstore().as_ref(), &request.root_cid).await?
+        } else {
+            collect_exact_blocks(self.manager.blockstore().as_ref(), &request.wanted_cids).await?
+        };
+        let truncated = collected.truncated();
+        let blocks = collected.blocks;
 
         if blocks.is_empty() {
             tracing::warn!(
-                root_cid = %root_cid,
+                root_cid = %request.root_cid,
                 peer_id = %peer_id,
-                "CAR handler: no blocks found for DAG"
+                recursive = request.recursive,
+                requested_count = request.wanted_cids.len(),
+                "CAR handler: no blocks found for request"
             );
             return Ok(());
         }
 
         let block_refs: Vec<(&Cid, &[u8])> =
             blocks.iter().map(|(c, d)| (c, d.as_slice())).collect();
-        let car_data = encode_car(&[root_cid], &block_refs)?;
+        let car_data = encode_car(&response_roots, &block_refs)?;
 
         tracing::debug!(
-            root_cid = %root_cid,
+            root_cid = %request.root_cid,
             peer_id = %peer_id,
+            recursive = request.recursive,
+            response_roots = response_roots.len(),
             blocks = blocks.len(),
             car_bytes = car_data.len(),
+            truncated,
             "Sending CAR response"
         );
+        if truncated {
+            tracing::warn!(
+                root_cid = %request.root_cid,
+                peer_id = %peer_id,
+                recursive = request.recursive,
+                response_roots = response_roots.len(),
+                blocks = blocks.len(),
+                car_bytes = car_data.len(),
+                "CAR response truncated by server-side limits"
+            );
+        }
 
         if let Some(token) = token {
             self.transport
@@ -103,6 +129,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             root_cid = %root_cid,
             peer_id = %peer_id,
             blocks_stored = blocks.len(),
+            car_bytes = car_data.len(),
             "Stored blocks from CAR response"
         );
 
