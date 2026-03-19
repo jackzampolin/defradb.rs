@@ -10,10 +10,9 @@ use async_trait::async_trait;
 use blockstore::Blockstore;
 
 use defra_http::router::{P2POperations, ReplicatorInfo};
-use p2p::iroh::IrohTransport;
+use p2p::iroh::{format_public_listen_addrs, parse_public_peer_addr, IrohTransport};
 use p2p::sync::IrohSyncCoordinator;
 use p2p::topics::DefraTopic;
-use p2p::transport::{PeerAddr, PeerId};
 use p2p::P2PTransport;
 
 use crate::transport_doc_pusher::TransportDocPusher;
@@ -82,7 +81,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         self.transport
             .listen_addresses()
             .await
-            .map(|addrs| addrs.into_iter().map(|a| a.to_string()).collect())
+            .map(|addrs| format_public_listen_addrs(self.transport.local_peer_id(), &addrs))
             .map_err(|e| e.to_string())
     }
 
@@ -108,12 +107,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
     }
 
     async fn connect_peer(&self, addr: &str) -> Result<(), String> {
-        // Parse compound address formats to extract endpoint ID and direct addresses:
-        // - "{socket_addr}/p2p/{endpoint_id}" → dial with direct address hint
-        // - "iroh://{endpoint_id}" → dial via relay/discovery
-        // - "{endpoint_id}" (raw hex) → dial via relay/discovery
-        let (endpoint_id, direct_addrs) = parse_iroh_address(addr);
-        let peer_id = PeerId::new(endpoint_id);
+        let (peer_id, direct_addrs) = parse_public_peer_addr(addr).map_err(|e| e.to_string())?;
 
         self.transport
             .dial(&peer_id, direct_addrs)
@@ -162,8 +156,8 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         _expected_authorizer_did: Option<&str>,
     ) -> Result<(), String> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
-        let (endpoint_id, direct_addrs) = parse_iroh_address(addr_str);
-        let peer_id = PeerId::new(endpoint_id);
+        let (peer_id, direct_addrs) =
+            parse_public_peer_addr(addr_str).map_err(|error| error.to_string())?;
 
         let effective_collections = if collections.is_empty() {
             if let Some(ref pusher) = self.doc_pusher {
@@ -250,8 +244,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         addr: Option<&str>,
     ) -> Result<(), String> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
-        let (endpoint_id, _direct_addrs) = parse_iroh_address(addr_str);
-        let peer_id = PeerId::new(endpoint_id);
+        let (peer_id, _) = parse_public_peer_addr(addr_str).map_err(|e| e.to_string())?;
 
         if let Some(ref coordinator) = self.sync_coordinator {
             coordinator
@@ -587,24 +580,5 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         });
 
         Ok(())
-    }
-}
-
-/// Parse an iroh address into (endpoint_id, direct_addresses).
-///
-/// Handles formats:
-/// - `"{socket_addr}/p2p/{endpoint_id}"` → endpoint_id + socket_addr as direct address
-/// - `"iroh://{endpoint_id}"` → endpoint_id only (relay/discovery)
-/// - `"{endpoint_id}"` → raw hex endpoint_id (relay/discovery)
-fn parse_iroh_address(addr: &str) -> (String, Vec<PeerAddr>) {
-    if let Some(pos) = addr.rfind("/p2p/") {
-        let addr_part = &addr[..pos];
-        let id_part = &addr[pos + 5..];
-        (
-            id_part.to_string(),
-            vec![PeerAddr::new(addr_part.to_string())],
-        )
-    } else {
-        (addr.to_string(), vec![])
     }
 }

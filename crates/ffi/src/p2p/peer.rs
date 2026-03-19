@@ -51,18 +51,7 @@ pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_c
                             .map(|addr| format!("{}/p2p/{}", addr, peer_id))
                             .collect::<Vec<_>>(),
                         #[cfg(feature = "iroh")]
-                        embedded::TransportKind::Iroh => {
-                            let mut result = vec![peer_id.clone()];
-                            for addr in addresses {
-                                if addr == format!("iroh://{}", peer_id) {
-                                    continue;
-                                }
-                                result.push(format!("{}@{}", peer_id, addr));
-                            }
-                            result.sort();
-                            result.dedup();
-                            result
-                        }
+                        embedded::TransportKind::Iroh => addresses,
                     };
 
                     serde_json::to_string(&full_addrs)
@@ -74,6 +63,45 @@ pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_c
 
         match result {
             Ok(json) => FfiResult::success(json),
+            Err(error) => FfiResult::error(error),
+        }
+    }
+}
+
+/// Notify the active P2P transport that the network may have changed.
+///
+/// # Safety
+///
+/// `identity_did` must be a valid null-terminated UTF-8 string when non-null.
+/// `node_ptr` must reference a live node handle created by this library.
+#[no_mangle]
+pub unsafe extern "C" fn p2p_notify_network_change(
+    node_ptr: usize,
+    identity_did: *const c_char,
+) -> FfiResult {
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::P2pPeerConnect
+        ));
+
+        let result = NODES
+            .get(node_ptr, |state| {
+                let p2p = match &state.p2p {
+                    Some(p2p) => p2p,
+                    None => return Err("no p2p system configured".to_string()),
+                };
+
+                rt.block_on(async { p2p.system.ops().notify_network_change().await })
+            })
+            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .and_then(|result| result);
+
+        match result {
+            Ok(()) => FfiResult::ok(),
             Err(error) => FfiResult::error(error),
         }
     }

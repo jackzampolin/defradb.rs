@@ -9,9 +9,11 @@ use crate::nac_guard::require_permission;
 use crate::router::{AppState, NodePermission};
 use crate::validation::validate_multiaddr;
 
-/// Response for P2P node info (Go-compatible format).
-/// Returns array of full multiaddrs with peer ID embedded.
-/// Example: ["/ip4/127.0.0.1/tcp/9181/p2p/12D3KooWxyz..."]
+/// Response for P2P node info.
+///
+/// For libp2p this returns multiaddrs with the peer id embedded.
+/// For iroh this returns already-connectable peer address strings such as
+/// endpoint tickets, raw endpoint ids, or `<endpoint-id>@<host>:<port>`.
 pub type P2pInfoResponse = Vec<String>;
 
 /// Response for listing peers.
@@ -32,8 +34,7 @@ pub struct ConnectPeerRequest {
 ///
 /// GET /api/v0/p2p/info
 ///
-/// Returns array of full multiaddrs with peer ID embedded.
-/// Example: ["/ip4/127.0.0.1/tcp/9181/p2p/12D3KooWxyz..."]
+/// Returns connectable peer addresses for the active transport.
 ///
 /// Requires `P2pPeerInfo` permission when NAC is enabled.
 pub async fn get_info(
@@ -48,10 +49,15 @@ pub async fn get_info(
 
     let addresses = p2p.listen_addresses().await.map_err(HttpError::Internal)?;
 
-    // Build full multiaddrs with peer ID embedded (Go-compatible format)
     let full_addrs: Vec<String> = addresses
         .into_iter()
-        .map(|addr| format!("{}/p2p/{}", addr, peer_id))
+        .map(|addr| {
+            if addr.starts_with('/') {
+                format!("{}/p2p/{}", addr, peer_id)
+            } else {
+                addr
+            }
+        })
         .collect();
 
     Ok(Json(full_addrs))

@@ -198,12 +198,20 @@ pub struct NodeInitOptions {
     pub p2p_transport: *const c_char,
     /// Optional iroh relay URL.
     pub iroh_relay_url: *const c_char,
+    /// Optional iroh relay mode string: "default", "disabled", or "custom".
+    pub iroh_relay_mode: *const c_char,
+    /// Optional JSON array of relay URLs for custom relay mode.
+    pub iroh_relay_urls_json: *const c_char,
     /// Optional iroh bind address (e.g. "127.0.0.1").
     pub iroh_bind_addr: *const c_char,
     /// Optional iroh bind UDP port. 0 means OS-assigned/unspecified.
     pub iroh_bind_port: u16,
     /// Enable iroh discovery (1=true, 0=false). Default true.
     pub iroh_discovery: c_int,
+    /// Optional custom DNS origin domain for iroh discovery.
+    pub iroh_discovery_origin_domain: *const c_char,
+    /// Optional custom pkarr relay URL for iroh discovery publishing.
+    pub iroh_pkarr_relay_url: *const c_char,
     /// Optional path to persist the iroh secret key.
     pub iroh_key_path: *const c_char,
 }
@@ -225,9 +233,13 @@ impl Default for NodeInitOptions {
             sourcehub_signer_key_len: 0,
             p2p_transport: ptr::null(),
             iroh_relay_url: ptr::null(),
+            iroh_relay_mode: ptr::null(),
+            iroh_relay_urls_json: ptr::null(),
             iroh_bind_addr: ptr::null(),
             iroh_bind_port: 0,
             iroh_discovery: 1,
+            iroh_discovery_origin_domain: ptr::null(),
+            iroh_pkarr_relay_url: ptr::null(),
             iroh_key_path: ptr::null(),
         }
     }

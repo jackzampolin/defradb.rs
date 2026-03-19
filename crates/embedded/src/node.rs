@@ -196,6 +196,7 @@ enum ShutdownKind {
     },
     #[cfg(feature = "iroh")]
     Iroh {
+        transport: p2p::iroh::IrohTransport,
         aborts: Vec<tokio::task::AbortHandle>,
     },
 }
@@ -211,9 +212,9 @@ impl ShutdownHandle {
     }
 
     #[cfg(feature = "iroh")]
-    fn iroh(aborts: Vec<tokio::task::AbortHandle>) -> Self {
+    fn iroh(transport: p2p::iroh::IrohTransport, aborts: Vec<tokio::task::AbortHandle>) -> Self {
         Self {
-            inner: ShutdownKind::Iroh { aborts },
+            inner: ShutdownKind::Iroh { transport, aborts },
         }
     }
 
@@ -226,7 +227,8 @@ impl ShutdownHandle {
                 let _ = handle.shutdown().await;
             }
             #[cfg(feature = "iroh")]
-            ShutdownKind::Iroh { aborts } => {
+            ShutdownKind::Iroh { transport, aborts } => {
+                let _ = transport.shutdown().await;
                 for abort in aborts {
                     abort.abort();
                 }
@@ -685,8 +687,8 @@ where
     let secret_key = load_or_generate_iroh_secret_key(config.secret_key_path.as_deref())?;
     let iroh_config = p2p::iroh::IrohEndpointConfig {
         secret_key: secret_key.clone(),
-        relay_url: config.relay_url.clone(),
-        discovery: config.discovery,
+        relay_mode: config.relay_mode.clone(),
+        discovery: config.discovery.clone(),
         bind_port: config.bind_port,
         bind_addr: config.bind_addr,
     };
@@ -767,13 +769,16 @@ where
     let system = Arc::new(ManagedP2PSystem::new(
         TransportKind::Iroh,
         Arc::new(adapter) as Arc<dyn P2POperations>,
-        ShutdownHandle::iroh(vec![
-            endpoint_task.abort_handle(),
-            event_handler_task.abort_handle(),
-            replication_task.abort_handle(),
-            failure_recorder_task.abort_handle(),
-            retry_loop_task.abort_handle(),
-        ]),
+        ShutdownHandle::iroh(
+            transport.clone(),
+            vec![
+                endpoint_task.abort_handle(),
+                event_handler_task.abort_handle(),
+                replication_task.abort_handle(),
+                failure_recorder_task.abort_handle(),
+                retry_loop_task.abort_handle(),
+            ],
+        ),
     ));
 
     Ok(P2PSetup {

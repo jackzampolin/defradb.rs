@@ -201,9 +201,21 @@ pub struct NetConfig {
     /// Custom relay URL for iroh transport (overrides default N0 relay).
     #[serde(default)]
     pub iroh_relay_url: Option<String>,
+    /// Relay mode for iroh transport: "default", "disabled", or "custom".
+    #[serde(default)]
+    pub iroh_relay_mode: Option<String>,
+    /// Custom relay URLs for iroh transport.
+    #[serde(default)]
+    pub iroh_relay_urls: Vec<String>,
     /// Enable DNS-based peer discovery for iroh transport (default: true).
     #[serde(default = "default_true")]
     pub iroh_discovery: bool,
+    /// Custom DNS origin domain for iroh discovery.
+    #[serde(default)]
+    pub iroh_discovery_origin_domain: Option<String>,
+    /// Custom pkarr relay URL for iroh discovery publishing.
+    #[serde(default)]
+    pub iroh_pkarr_relay_url: Option<String>,
     /// Fixed UDP bind port for iroh transport. None = ephemeral (OS-assigned).
     #[serde(default)]
     pub iroh_bind_port: Option<u16>,
@@ -255,7 +267,11 @@ impl Default for NetConfig {
             max_connections_per_peer: default_max_connections_per_peer(),
             transport: TransportType::default(),
             iroh_relay_url: None,
+            iroh_relay_mode: None,
+            iroh_relay_urls: Vec::new(),
             iroh_discovery: true,
+            iroh_discovery_origin_domain: None,
+            iroh_pkarr_relay_url: None,
             iroh_bind_port: None,
             iroh_bind_addr: None,
         }

@@ -335,6 +335,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         Ok(())
     }
 
+    async fn notify_network_change(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     async fn get_replicators(&self) -> Result<Vec<ReplicatorInfo>, String> {
         let p2p_infos = self
             .handle

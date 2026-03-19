@@ -62,11 +62,77 @@ fn resolve_transport(
             #[cfg(feature = "iroh")]
             {
                 let mut config = embedded::IrohConfig {
-                    relay_url: unsafe { c_str_to_string(options.iroh_relay_url) },
-                    discovery: options.iroh_discovery != 0,
                     secret_key_path: unsafe { c_str_to_string(options.iroh_key_path) }
                         .map(PathBuf::from),
                     ..Default::default()
+                };
+
+                let relay_mode = unsafe { c_str_to_string(options.iroh_relay_mode) };
+                let relay_url = unsafe { c_str_to_string(options.iroh_relay_url) };
+                let relay_urls_json = unsafe { c_str_to_string(options.iroh_relay_urls_json) };
+                let relay_urls = match relay_urls_json {
+                    Some(raw) if !raw.trim().is_empty() => {
+                        serde_json::from_str::<Vec<String>>(&raw)
+                            .map_err(|error| format!("invalid iroh_relay_urls_json: {}", error))?
+                    }
+                    _ => Vec::new(),
+                };
+
+                config.relay_mode = match relay_mode.as_deref() {
+                    Some("disabled") => p2p::iroh::IrohRelayModeConfig::Disabled,
+                    Some("default") => p2p::iroh::IrohRelayModeConfig::Default,
+                    Some("custom") => {
+                        let mut urls = relay_urls;
+                        if let Some(url) = relay_url {
+                            urls.push(url);
+                        }
+                        if urls.is_empty() {
+                            return Err("iroh_relay_mode=custom requires at least one relay URL"
+                                .to_string());
+                        }
+                        p2p::iroh::IrohRelayModeConfig::Custom(urls)
+                    }
+                    Some(other) => {
+                        return Err(format!(
+                            "unsupported iroh_relay_mode '{}'. Supported: default, disabled, custom",
+                            other
+                        ));
+                    }
+                    None => {
+                        let mut urls = relay_urls;
+                        if let Some(url) = relay_url {
+                            urls.push(url);
+                        }
+                        if urls.is_empty() {
+                            p2p::iroh::IrohRelayModeConfig::Default
+                        } else {
+                            p2p::iroh::IrohRelayModeConfig::Custom(urls)
+                        }
+                    }
+                };
+
+                let discovery_origin =
+                    unsafe { c_str_to_string(options.iroh_discovery_origin_domain) };
+                let pkarr_relay_url = unsafe { c_str_to_string(options.iroh_pkarr_relay_url) };
+                config.discovery = match (
+                    options.iroh_discovery != 0,
+                    discovery_origin,
+                    pkarr_relay_url,
+                ) {
+                    (_, Some(origin_domain), Some(pkarr_relay_url)) => {
+                        p2p::iroh::IrohDiscoveryConfig::CustomDns {
+                            origin_domain,
+                            pkarr_relay_url,
+                        }
+                    }
+                    (_, Some(_), None) | (_, None, Some(_)) => {
+                        return Err(
+                            "custom iroh discovery requires both iroh_discovery_origin_domain and iroh_pkarr_relay_url"
+                                .to_string(),
+                        );
+                    }
+                    (false, None, None) => p2p::iroh::IrohDiscoveryConfig::Disabled,
+                    (true, None, None) => p2p::iroh::IrohDiscoveryConfig::N0,
                 };
 
                 if !options.iroh_bind_addr.is_null() {

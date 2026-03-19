@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use iroh::address_lookup::{DnsAddressLookup, PkarrPublisher};
+use iroh::endpoint::BindOpts;
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use iroh_gossip::net::Gossip;
@@ -22,7 +24,9 @@ use crate::replicator::ReplicatorInfo;
 use crate::transport::{MessageId, PeerAddr, PeerId, TransportEvent};
 use crate::QueryId;
 
+use super::addr::{endpoint_addr_from_parts, endpoint_ticket_string};
 use super::command::IrohCommand;
+use super::config::{IrohDiscoveryConfig, IrohRelayModeConfig};
 use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, PeerMap};
 use super::protocols;
 
@@ -40,11 +44,10 @@ struct ActiveSync {
 /// Configuration for creating an `IrohEndpoint`.
 pub struct IrohEndpointConfig {
     pub secret_key: SecretKey,
-    /// Override iroh's default relay servers with a custom URL
-    /// (e.g. "https://relay.example.com"). `None` uses iroh's default relay mode.
-    pub relay_url: Option<String>,
-    /// Enable DNS-based peer discovery (default: true).
-    pub discovery: bool,
+    /// Relay behavior for this endpoint.
+    pub relay_mode: IrohRelayModeConfig,
+    /// Address publishing / lookup behavior for this endpoint.
+    pub discovery: IrohDiscoveryConfig,
     /// UDP port for the QUIC listener. `None` = ephemeral (OS-assigned).
     pub bind_port: Option<u16>,
     /// Bind to a specific IP address. When set, IROH only listens on this
@@ -57,8 +60,8 @@ impl Default for IrohEndpointConfig {
     fn default() -> Self {
         Self {
             secret_key: SecretKey::generate(&mut rand::rng()),
-            relay_url: None,
-            discovery: true,
+            relay_mode: IrohRelayModeConfig::default(),
+            discovery: IrohDiscoveryConfig::default(),
             bind_port: None,
             bind_addr: None,
         }
@@ -78,38 +81,13 @@ pub async fn spawn_endpoint(
     let mut alpns: Vec<Vec<u8>> = protocols::ALL_ALPNS.iter().map(|a| a.to_vec()).collect();
     alpns.push(iroh_gossip::net::GOSSIP_ALPN.to_vec());
 
-    let mut builder = if let Some(ref relay_url) = config.relay_url {
-        let relay_map = iroh::RelayMap::try_from_iter([relay_url.as_str()])
-            .map_err(|e| crate::error::Error::Transport(format!("invalid relay URL: {}", e)))?;
-        Endpoint::builder()
-            .secret_key(config.secret_key.clone())
-            .alpns(alpns)
-            .relay_mode(iroh::RelayMode::Custom(relay_map))
-    } else {
-        // No custom relay configured: use iroh's default relay mode so mobile and
-        // other NATed peers still have a relay-assisted path when direct dialing fails.
-        Endpoint::builder()
-            .secret_key(config.secret_key.clone())
-            .alpns(alpns)
-            .relay_mode(iroh::endpoint::default_relay_mode())
-    };
-
-    if !config.discovery {
-        builder = builder.clear_address_lookup();
-    }
-
-    if let Some(port) = config.bind_port {
-        let ip = config
-            .bind_addr
-            .and_then(|ip| match ip {
-                std::net::IpAddr::V4(v4) => Some(v4),
-                _ => None,
-            })
-            .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
-        builder = builder
-            .bind_addr(std::net::SocketAddrV4::new(ip, port))
-            .map_err(|e| crate::error::Error::Transport(format!("invalid bind addr: {}", e)))?;
-    }
+    let relay_mode = relay_mode_from_config(&config.relay_mode)?;
+    let mut builder = Endpoint::empty_builder()
+        .relay_mode(relay_mode)
+        .secret_key(config.secret_key.clone())
+        .alpns(alpns);
+    builder = apply_discovery_config(builder, &config.discovery)?;
+    builder = apply_bind_config(builder, config.bind_addr, config.bind_port)?;
 
     let endpoint = builder.bind().await.map_err(|e| {
         crate::error::Error::Transport(format!("failed to bind iroh endpoint: {}", e))
@@ -204,7 +182,10 @@ async fn handle_incoming(
     subscriptions: &HashMap<String, TopicSubscription>,
     event_tx: &mpsc::Sender<TransportEvent>,
 ) {
-    let remote_addr = incoming.remote_address();
+    let remote_addr = match incoming.remote_addr() {
+        iroh::endpoint::IncomingAddr::Ip(addr) => Some(addr),
+        _ => None,
+    };
 
     // Accept the connection
     let connection = match incoming.accept() {
@@ -235,7 +216,7 @@ async fn handle_incoming(
 
     let is_new = peer_map
         .lock()
-        .increment_connections(remote_id, Some(remote_addr));
+        .increment_connections(remote_id, remote_addr);
 
     if is_new
         && event_tx
@@ -466,20 +447,25 @@ async fn handle_command(
             let _ = reply.send(Ok(peer_map.lock().connected_peers()));
         }
         IrohCommand::ListenAddresses { reply } => {
-            let addr = endpoint.addr();
-            let mut addrs: Vec<PeerAddr> = addr
-                .ip_addrs()
-                .map(|a| PeerAddr::new(a.to_string()))
-                .collect();
-            if addrs.is_empty() {
-                // Before relay connection is established, fall back to endpoint ID.
-                // iroh can connect via relay using only the endpoint ID.
-                addrs.push(PeerAddr::new(format!("iroh://{}", endpoint.id())));
+            let endpoint_addr = endpoint.addr();
+            let mut addrs = vec![
+                PeerAddr::new(format!("iroh://{}", endpoint.id())),
+                PeerAddr::new(endpoint_ticket_string(&endpoint_addr)),
+            ];
+            for socket_addr in endpoint_addr.ip_addrs() {
+                let addr = PeerAddr::new(socket_addr.to_string());
+                if !addrs.contains(&addr) {
+                    addrs.push(addr);
+                }
             }
             let _ = reply.send(Ok(addrs));
         }
         IrohCommand::PeerAddresses { reply } => {
             let _ = reply.send(Ok(peer_map.lock().peer_addresses()));
+        }
+        IrohCommand::NetworkChange { reply } => {
+            endpoint.network_change().await;
+            let _ = reply.send(Ok(()));
         }
         IrohCommand::Subscribe { topic, reply } => {
             let result = handle_subscribe(gossip, subscriptions, peer_map, topic, event_tx).await;
@@ -809,20 +795,15 @@ async fn handle_dial(
     event_tx: &mpsc::Sender<TransportEvent>,
 ) -> crate::error::Result<()> {
     let endpoint_id = parse_endpoint_id(peer_id)?;
+    let endpoint_addr = endpoint_addr_from_parts(peer_id, &addrs)?;
 
-    // Build EndpointAddr from ID plus optional socket addresses
     let direct_addresses: Vec<std::net::SocketAddr> = addrs
         .iter()
         .filter_map(|a| a.as_str().parse().ok())
         .collect();
 
-    let mut addr = EndpointAddr::new(endpoint_id);
-    for sa in &direct_addresses {
-        addr = addr.with_ip_addr(*sa);
-    }
-
     let connection = endpoint
-        .connect(addr, protocols::ALPN_PUSHLOG)
+        .connect(endpoint_addr, protocols::ALPN_PUSHLOG)
         .await
         .map_err(|e| crate::error::Error::Dial(e.to_string()))?;
 
@@ -1295,6 +1276,86 @@ async fn handle_block_sync(
     {
         warn!("Event channel closed, cannot emit BitswapComplete");
     }
+}
+
+fn relay_mode_from_config(config: &IrohRelayModeConfig) -> crate::error::Result<iroh::RelayMode> {
+    match config {
+        IrohRelayModeConfig::Default => Ok(iroh::endpoint::default_relay_mode()),
+        IrohRelayModeConfig::Disabled => Ok(iroh::RelayMode::Disabled),
+        IrohRelayModeConfig::Custom(urls) => {
+            let relay_map = iroh::RelayMap::try_from_iter(urls.iter().map(String::as_str))
+                .map_err(|e| {
+                    crate::error::Error::Transport(format!("invalid relay URL list: {}", e))
+                })?;
+            Ok(iroh::RelayMode::Custom(relay_map))
+        }
+    }
+}
+
+fn apply_discovery_config(
+    mut builder: iroh::endpoint::Builder,
+    config: &IrohDiscoveryConfig,
+) -> crate::error::Result<iroh::endpoint::Builder> {
+    builder = match config {
+        IrohDiscoveryConfig::N0 => builder
+            .address_lookup(PkarrPublisher::n0_dns())
+            .address_lookup(DnsAddressLookup::n0_dns()),
+        IrohDiscoveryConfig::Disabled => builder.clear_address_lookup(),
+        IrohDiscoveryConfig::CustomDns {
+            origin_domain,
+            pkarr_relay_url,
+        } => {
+            let pkarr_relay = pkarr_relay_url.parse().map_err(|e| {
+                crate::error::Error::Transport(format!(
+                    "invalid pkarr relay URL '{}': {}",
+                    pkarr_relay_url, e
+                ))
+            })?;
+            builder
+                .address_lookup(PkarrPublisher::builder(pkarr_relay))
+                .address_lookup(DnsAddressLookup::builder(origin_domain.clone()))
+        }
+    };
+
+    Ok(builder)
+}
+
+fn apply_bind_config(
+    mut builder: iroh::endpoint::Builder,
+    bind_addr: Option<std::net::IpAddr>,
+    bind_port: Option<u16>,
+) -> crate::error::Result<iroh::endpoint::Builder> {
+    let bind_error =
+        |error| crate::error::Error::Transport(format!("invalid bind addr: {}", error));
+
+    match (bind_addr, bind_port) {
+        (Some(ip), port) => {
+            builder = builder
+                .bind_addr(std::net::SocketAddr::new(ip, port.unwrap_or(0)))
+                .map_err(bind_error)?;
+        }
+        (None, Some(port)) => {
+            builder = builder.clear_ip_transports();
+            builder = builder
+                .bind_addr(std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                    port,
+                ))
+                .map_err(bind_error)?;
+            builder = builder
+                .bind_addr_with_opts(
+                    std::net::SocketAddr::new(
+                        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                        port,
+                    ),
+                    BindOpts::default().set_is_required(false),
+                )
+                .map_err(bind_error)?;
+        }
+        (None, None) => {}
+    }
+
+    Ok(builder)
 }
 
 /// Hash a topic string to an iroh-gossip `TopicId`.

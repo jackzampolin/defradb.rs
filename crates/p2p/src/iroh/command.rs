@@ -32,6 +32,9 @@ pub enum IrohCommand {
     PeerAddresses {
         reply: oneshot::Sender<crate::error::Result<Vec<String>>>,
     },
+    NetworkChange {
+        reply: oneshot::Sender<crate::error::Result<()>>,
+    },
 
     // PubSub
     Subscribe {

@@ -31,8 +31,7 @@ async fn two_embedded_iroh_nodes_connect_and_replicate() -> Result<()> {
         .local_peer_id()
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
-    let direct_addr_a = wait_for_direct_iroh_addr(&p2p_a).await?;
-    let endpoint_addr = format!("{peer_a}@{direct_addr_a}");
+    let connect_addr_a = wait_for_connectable_iroh_addr(&p2p_a).await?;
 
     let create_response = node_a
         .execute(
@@ -44,7 +43,7 @@ async fn two_embedded_iroh_nodes_connect_and_replicate() -> Result<()> {
 
     p2p_b
         .ops()
-        .connect_peer(&endpoint_addr)
+        .connect_peer(&connect_addr_a)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
     wait_for_connected_peer(&p2p_b, &peer_a).await?;
@@ -69,13 +68,13 @@ fn test_iroh_config() -> IrohConfig {
     IrohConfig {
         bind_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
         bind_port: Some(0),
-        relay_url: None,
-        discovery: false,
+        relay_mode: p2p::iroh::IrohRelayModeConfig::Disabled,
+        discovery: p2p::iroh::IrohDiscoveryConfig::Disabled,
         secret_key_path: None,
     }
 }
 
-async fn wait_for_direct_iroh_addr(system: &embedded::ManagedP2PSystem) -> Result<String> {
+async fn wait_for_connectable_iroh_addr(system: &embedded::ManagedP2PSystem) -> Result<String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let addrs = system
@@ -83,7 +82,10 @@ async fn wait_for_direct_iroh_addr(system: &embedded::ManagedP2PSystem) -> Resul
             .listen_addresses()
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
-        if let Some(addr) = addrs.into_iter().find(|addr| !addr.starts_with("iroh://")) {
+        if let Some(addr) = addrs
+            .into_iter()
+            .find(|addr| addr.contains("/p2p/") || addr.starts_with("endpoint"))
+        {
             return Ok(addr);
         }
         if Instant::now() >= deadline {
@@ -101,7 +103,11 @@ async fn wait_for_connected_peer(system: &embedded::ManagedP2PSystem, peer_id: &
             .connected_peers()
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
-        if peers.iter().any(|peer| peer.contains(peer_id)) {
+        if peers.iter().any(|peer| {
+            p2p::iroh::parse_public_peer_addr(peer)
+                .map(|(parsed_peer_id, _)| parsed_peer_id.as_str() == peer_id)
+                .unwrap_or_else(|_| peer.contains(peer_id))
+        }) {
             return Ok(());
         }
         if Instant::now() >= deadline {

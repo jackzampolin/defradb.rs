@@ -172,11 +172,10 @@ pub struct P2PConfig {
     /// prevent IROH from advertising unreachable LAN addresses across sites.
     /// None = 0.0.0.0 (all interfaces).
     pub bind_addr: Option<std::net::IpAddr>,
-    /// Optional custom relay URL for NAT traversal.
-    /// None = use iroh's default relay servers.
-    pub relay_url: Option<String>,
-    /// Enable DNS-based peer discovery.
-    pub discovery: bool,
+    /// Relay behavior for NAT traversal.
+    pub relay_mode: p2p::iroh::IrohRelayModeConfig,
+    /// Address publishing / lookup behavior.
+    pub discovery: p2p::iroh::IrohDiscoveryConfig,
     /// Path to persist secret key. None = ephemeral (new identity each restart).
     pub secret_key_path: Option<std::path::PathBuf>,
     /// Reload collection subscriptions persisted in the local store on startup.
@@ -192,9 +191,11 @@ pub trait P2POps: Send + Sync {
     async fn listen_addresses(&self) -> Vec<String>;
     async fn connected_peers(&self) -> anyhow::Result<Vec<String>>;
     async fn connect_peer(&self, addr: &str) -> anyhow::Result<()>;
+    async fn notify_network_change(&self) -> anyhow::Result<()>;
     async fn subscribe_collection(&self, name: &str) -> anyhow::Result<()>;
     /// Set up push replication to a peer for the given collections.
-    /// The peer_addr format is `<node-id>@<ip>:<port>` or just `<node-id>`.
+    /// The peer address may be an endpoint ticket, `<node-id>@<ip>:<port>`,
+    /// or just `<node-id>`.
     async fn set_replicator(&self, peer_addr: &str, collections: Vec<String>)
         -> anyhow::Result<()>;
 }
@@ -328,13 +329,8 @@ impl<B: blockstore::Blockstore + Send + Sync + 'static> P2POps for P2PHandleImpl
     }
 
     async fn listen_addresses(&self) -> Vec<String> {
-        self.transport
-            .listen_addresses()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|a| a.to_string())
-            .collect()
+        let raw_addrs = self.transport.listen_addresses().await.unwrap_or_default();
+        p2p::iroh::format_public_listen_addrs(self.transport.local_peer_id(), &raw_addrs)
     }
 
     async fn connected_peers(&self) -> anyhow::Result<Vec<String>> {
@@ -346,20 +342,18 @@ impl<B: blockstore::Blockstore + Send + Sync + 'static> P2POps for P2PHandleImpl
     }
 
     async fn connect_peer(&self, addr: &str) -> anyhow::Result<()> {
-        // IROH peer address format:
-        //   <node-id>                  — discovery-only
-        //   <node-id>@<ip>:<port>      — explicit address
-        let (peer_id_str, addrs) = if let Some((id, host)) = addr.split_once('@') {
-            let peer_addr = p2p::transport::PeerAddr::new(host.to_string());
-            (id, vec![peer_addr])
-        } else {
-            (addr, vec![])
-        };
-        let peer_id = p2p::transport::PeerId::new(peer_id_str.to_string());
+        let (peer_id, addrs) = p2p::iroh::parse_public_peer_addr(addr)?;
         self.transport
             .dial(&peer_id, addrs)
             .await
             .map_err(|e| anyhow::anyhow!("dial failed: {}", e))
+    }
+
+    async fn notify_network_change(&self) -> anyhow::Result<()> {
+        self.transport
+            .network_change()
+            .await
+            .map_err(|e| anyhow::anyhow!("network_change failed: {}", e))
     }
 
     async fn subscribe_collection(&self, name: &str) -> anyhow::Result<()> {
@@ -390,16 +384,10 @@ impl<B: blockstore::Blockstore + Send + Sync + 'static> P2POps for P2PHandleImpl
         peer_addr: &str,
         collections: Vec<String>,
     ) -> anyhow::Result<()> {
-        if peer_addr.contains('@') {
+        let (peer_id, addrs) = p2p::iroh::parse_public_peer_addr(peer_addr)?;
+        if !addrs.is_empty() || p2p::iroh::is_ticket_string(peer_addr) {
             self.connect_peer(peer_addr).await?;
         }
-
-        let peer_id_str = if let Some((id, _host)) = peer_addr.split_once('@') {
-            id
-        } else {
-            peer_addr
-        };
-        let peer_id = p2p::transport::PeerId::new(peer_id_str.to_string());
 
         // Resolve collection names → CIDs
         let mut collection_cids = Vec::with_capacity(collections.len());
@@ -761,8 +749,8 @@ impl NodeBuilder {
         // 2. Configure and spawn IROH endpoint with pinned port + optional bind address
         let iroh_config = p2p::iroh::IrohEndpointConfig {
             secret_key: secret_key.clone(),
-            relay_url: config.relay_url.clone(),
-            discovery: config.discovery,
+            relay_mode: config.relay_mode.clone(),
+            discovery: config.discovery.clone(),
             bind_port: Some(config.port),
             bind_addr: config.bind_addr,
         };

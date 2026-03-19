@@ -96,7 +96,7 @@ optional = true
 
 [dependencies.iroh-net]
 package = "iroh"
-version = "0.96"
+version = "0.97"
 optional = true
 
 [dependencies.rand]

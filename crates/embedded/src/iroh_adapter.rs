@@ -10,10 +10,10 @@ use crate::{
     P2POperations, P2pDocumentInfo, P2pDocumentRequest, ReplicatorInfo, ReplicatorPushOptions,
 };
 
-use p2p::iroh::IrohTransport;
+use p2p::iroh::{format_public_listen_addrs, parse_public_peer_addr, IrohTransport};
 use p2p::sync::IrohSyncCoordinator;
 use p2p::topics::DefraTopic;
-use p2p::transport::{PeerAddr, PeerId};
+use p2p::transport::PeerId;
 use p2p::P2PTransport;
 
 /// P2P operations implementation for the iroh transport.
@@ -79,7 +79,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         self.transport
             .listen_addresses()
             .await
-            .map(|addrs| addrs.into_iter().map(|addr| addr.to_string()).collect())
+            .map(|addrs| format_public_listen_addrs(self.transport.local_peer_id(), &addrs))
             .map_err(|error| error.to_string())
     }
 
@@ -105,8 +105,8 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
     }
 
     async fn connect_peer(&self, addr: &str) -> Result<(), String> {
-        let (endpoint_id, direct_addrs) = parse_iroh_address(addr);
-        let peer_id = PeerId::new(endpoint_id);
+        let (peer_id, direct_addrs) =
+            parse_public_peer_addr(addr).map_err(|error| error.to_string())?;
         let dial_timeout = if direct_addrs.is_empty() {
             std::time::Duration::from_secs(10)
         } else {
@@ -127,6 +127,13 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         }
 
         Ok(())
+    }
+
+    async fn notify_network_change(&self) -> Result<(), String> {
+        self.transport
+            .network_change()
+            .await
+            .map_err(|error| error.to_string())
     }
 
     async fn get_replicators(&self) -> Result<Vec<ReplicatorInfo>, String> {
@@ -156,8 +163,8 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         push_options: ReplicatorPushOptions,
     ) -> Result<(), String> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
-        let (endpoint_id, direct_addrs) = parse_iroh_address(addr_str);
-        let peer_id = PeerId::new(endpoint_id);
+        let (peer_id, direct_addrs) =
+            parse_public_peer_addr(addr_str).map_err(|error| error.to_string())?;
 
         let effective_collections = if collections.is_empty() {
             if let Some(ref pusher) = self.doc_pusher {
@@ -242,8 +249,8 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         addr: Option<&str>,
     ) -> Result<(), String> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
-        let (endpoint_id, _direct_addrs) = parse_iroh_address(addr_str);
-        let peer_id = PeerId::new(endpoint_id);
+        let (peer_id, _direct_addrs) =
+            parse_public_peer_addr(addr_str).map_err(|error| error.to_string())?;
 
         let fully_deleted = if let Some(ref coordinator) = self.sync_coordinator {
             coordinator
@@ -626,31 +633,4 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
 
         Ok(())
     }
-}
-
-fn parse_iroh_address(addr: &str) -> (String, Vec<PeerAddr>) {
-    if let Some((endpoint_id, host_port)) = addr.split_once('@') {
-        return (
-            normalize_iroh_endpoint_id(endpoint_id),
-            vec![PeerAddr::new(host_port.to_string())],
-        );
-    }
-
-    if let Some(pos) = addr.rfind("/p2p/") {
-        let addr_part = &addr[..pos];
-        let id_part = &addr[pos + 5..];
-        return (
-            normalize_iroh_endpoint_id(id_part),
-            vec![PeerAddr::new(addr_part.to_string())],
-        );
-    }
-
-    (normalize_iroh_endpoint_id(addr), Vec::new())
-}
-
-fn normalize_iroh_endpoint_id(raw: &str) -> String {
-    raw.trim()
-        .strip_prefix("iroh://")
-        .unwrap_or(raw.trim())
-        .to_string()
 }

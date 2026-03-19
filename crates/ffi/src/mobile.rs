@@ -10,8 +10,8 @@ use crate::helpers::get_rt;
 use crate::nac_check::check_nac_for_node;
 use crate::node::{new_node, node_close};
 use crate::p2p::{
-    new_node_with_p2p, p2p_connect, p2p_peer_info, p2p_sync_branchable_collection,
-    p2p_sync_collection_versions, p2p_sync_documents,
+    new_node_with_p2p, p2p_connect, p2p_notify_network_change, p2p_peer_info,
+    p2p_sync_branchable_collection, p2p_sync_collection_versions, p2p_sync_documents,
 };
 use crate::query::exec_request;
 use crate::schema::validate_collection_policy;
@@ -59,10 +59,14 @@ struct MobileP2pConfig {
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MobileIrohConfig {
+    relay_mode: Option<String>,
     relay_url: Option<String>,
+    relay_urls: Option<Vec<String>>,
     bind_address: Option<String>,
     bind_port: Option<u16>,
     discovery: Option<bool>,
+    discovery_origin_domain: Option<String>,
+    pkarr_relay_url: Option<String>,
     key_path: Option<String>,
 }
 
@@ -249,6 +253,39 @@ pub extern "C" fn defra_mobile_open_node(config_json: *const c_char) -> NewNodeR
             Ok(value) => value,
             Err(error) => return NewNodeResult::error(error),
         };
+        let iroh_relay_mode = match maybe_cstring(
+            config
+                .p2p
+                .as_ref()
+                .and_then(|p2p| p2p.iroh.as_ref())
+                .and_then(|iroh| iroh.relay_mode.as_deref()),
+            "p2p.iroh.relayMode",
+        ) {
+            Ok(value) => value,
+            Err(error) => return NewNodeResult::error(error),
+        };
+        let iroh_relay_urls_json_string = match config
+            .p2p
+            .as_ref()
+            .and_then(|p2p| p2p.iroh.as_ref())
+            .and_then(|iroh| iroh.relay_urls.as_ref())
+        {
+            Some(urls) => match serde_json::to_string(urls) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    return NewNodeResult::error(format!(
+                        "failed to serialize p2p.iroh.relayUrls: {}",
+                        error
+                    ))
+                }
+            },
+            None => None,
+        };
+        let iroh_relay_urls_json =
+            match maybe_cstring(iroh_relay_urls_json_string.as_deref(), "p2p.iroh.relayUrls") {
+                Ok(value) => value,
+                Err(error) => return NewNodeResult::error(error),
+            };
         let iroh_bind_addr = match maybe_cstring(
             config
                 .p2p
@@ -256,6 +293,28 @@ pub extern "C" fn defra_mobile_open_node(config_json: *const c_char) -> NewNodeR
                 .and_then(|p2p| p2p.iroh.as_ref())
                 .and_then(|iroh| iroh.bind_address.as_deref()),
             "p2p.iroh.bindAddress",
+        ) {
+            Ok(value) => value,
+            Err(error) => return NewNodeResult::error(error),
+        };
+        let iroh_discovery_origin_domain = match maybe_cstring(
+            config
+                .p2p
+                .as_ref()
+                .and_then(|p2p| p2p.iroh.as_ref())
+                .and_then(|iroh| iroh.discovery_origin_domain.as_deref()),
+            "p2p.iroh.discoveryOriginDomain",
+        ) {
+            Ok(value) => value,
+            Err(error) => return NewNodeResult::error(error),
+        };
+        let iroh_pkarr_relay_url = match maybe_cstring(
+            config
+                .p2p
+                .as_ref()
+                .and_then(|p2p| p2p.iroh.as_ref())
+                .and_then(|iroh| iroh.pkarr_relay_url.as_deref()),
+            "p2p.iroh.pkarrRelayUrl",
         ) {
             Ok(value) => value,
             Err(error) => return NewNodeResult::error(error),
@@ -305,6 +364,8 @@ pub extern "C" fn defra_mobile_open_node(config_json: *const c_char) -> NewNodeR
             sourcehub_signer_key_len: sourcehub_signer_key.len(),
             p2p_transport: c_string_ptr(&p2p_transport),
             iroh_relay_url: c_string_ptr(&iroh_relay_url),
+            iroh_relay_mode: c_string_ptr(&iroh_relay_mode),
+            iroh_relay_urls_json: c_string_ptr(&iroh_relay_urls_json),
             iroh_bind_addr: c_string_ptr(&iroh_bind_addr),
             iroh_bind_port: config
                 .p2p
@@ -320,6 +381,8 @@ pub extern "C" fn defra_mobile_open_node(config_json: *const c_char) -> NewNodeR
                     .and_then(|iroh| iroh.discovery)
                     .unwrap_or(true),
             ),
+            iroh_discovery_origin_domain: c_string_ptr(&iroh_discovery_origin_domain),
+            iroh_pkarr_relay_url: c_string_ptr(&iroh_pkarr_relay_url),
             iroh_key_path: c_string_ptr(&iroh_key_path),
         };
 
@@ -524,6 +587,16 @@ pub extern "C" fn defra_mobile_connect(node_ptr: usize, addr: *const c_char) -> 
         Err(error) => return FfiResult::error(error),
     };
     unsafe { p2p_connect(node_ptr, c_string_ptr(&identity), addr) }
+}
+
+/// Notify the embedded iroh transport that network conditions may have changed.
+#[no_mangle]
+pub extern "C" fn defra_mobile_notify_network_change(node_ptr: usize) -> FfiResult {
+    let identity = match default_identity_cstring(node_ptr) {
+        Ok(value) => value,
+        Err(error) => return FfiResult::error(error),
+    };
+    unsafe { p2p_notify_network_change(node_ptr, c_string_ptr(&identity)) }
 }
 
 /// Sync branchable collections, schema versions, or specific documents.

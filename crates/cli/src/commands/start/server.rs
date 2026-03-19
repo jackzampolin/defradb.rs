@@ -212,10 +212,65 @@ impl Node {
                         iroh_net::SecretKey::generate(&mut rand::rng())
                     };
 
+                    let relay_mode = match config.net.iroh_relay_mode.as_deref() {
+                        Some("disabled") => p2p::iroh::IrohRelayModeConfig::Disabled,
+                        Some("default") => p2p::iroh::IrohRelayModeConfig::Default,
+                        Some("custom") => {
+                            let mut urls = config.net.iroh_relay_urls.clone();
+                            if let Some(url) = &config.net.iroh_relay_url {
+                                urls.push(url.clone());
+                            }
+                            if urls.is_empty() {
+                                return Err(Error::InvalidConfig(
+                                    "iroh_relay_mode=custom requires at least one relay URL".into(),
+                                ));
+                            }
+                            p2p::iroh::IrohRelayModeConfig::Custom(urls)
+                        }
+                        Some(other) => {
+                            return Err(Error::InvalidConfig(format!(
+                                "unsupported iroh_relay_mode '{}'",
+                                other
+                            )));
+                        }
+                        None => {
+                            let mut urls = config.net.iroh_relay_urls.clone();
+                            if let Some(url) = &config.net.iroh_relay_url {
+                                urls.push(url.clone());
+                            }
+                            if urls.is_empty() {
+                                p2p::iroh::IrohRelayModeConfig::Default
+                            } else {
+                                p2p::iroh::IrohRelayModeConfig::Custom(urls)
+                            }
+                        }
+                    };
+
+                    let discovery = match (
+                        config.net.iroh_discovery,
+                        config.net.iroh_discovery_origin_domain.clone(),
+                        config.net.iroh_pkarr_relay_url.clone(),
+                    ) {
+                        (_, Some(origin_domain), Some(pkarr_relay_url)) => {
+                            p2p::iroh::IrohDiscoveryConfig::CustomDns {
+                                origin_domain,
+                                pkarr_relay_url,
+                            }
+                        }
+                        (_, Some(_), None) | (_, None, Some(_)) => {
+                            return Err(Error::InvalidConfig(
+                                "custom iroh discovery requires both iroh_discovery_origin_domain and iroh_pkarr_relay_url"
+                                    .into(),
+                            ));
+                        }
+                        (false, None, None) => p2p::iroh::IrohDiscoveryConfig::Disabled,
+                        (true, None, None) => p2p::iroh::IrohDiscoveryConfig::N0,
+                    };
+
                     let iroh_config = p2p::iroh::IrohEndpointConfig {
                         secret_key: iroh_secret_key.clone(),
-                        relay_url: config.net.iroh_relay_url.clone(),
-                        discovery: config.net.iroh_discovery,
+                        relay_mode,
+                        discovery,
                         bind_port: config.net.iroh_bind_port,
                         bind_addr: config.net.iroh_bind_addr,
                     };

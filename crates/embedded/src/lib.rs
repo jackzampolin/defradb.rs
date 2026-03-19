@@ -29,6 +29,7 @@ pub trait P2POperations: Send + Sync {
     async fn listen_addresses(&self) -> Result<Vec<String>, String>;
     async fn connected_peers(&self) -> Result<Vec<String>, String>;
     async fn connect_peer(&self, addr: &str) -> Result<(), String>;
+    async fn notify_network_change(&self) -> Result<(), String>;
     async fn get_replicators(&self) -> Result<Vec<ReplicatorInfo>, String>;
     async fn add_replicator(
         &self,
@@ -120,8 +121,8 @@ pub struct Libp2pConfig {
 pub struct IrohConfig {
     pub bind_addr: Option<std::net::IpAddr>,
     pub bind_port: Option<u16>,
-    pub relay_url: Option<String>,
-    pub discovery: bool,
+    pub relay_mode: p2p::iroh::IrohRelayModeConfig,
+    pub discovery: p2p::iroh::IrohDiscoveryConfig,
     pub secret_key_path: Option<std::path::PathBuf>,
 }
 
@@ -131,8 +132,8 @@ impl Default for IrohConfig {
         Self {
             bind_addr: None,
             bind_port: None,
-            relay_url: None,
-            discovery: true,
+            relay_mode: p2p::iroh::IrohRelayModeConfig::default(),
+            discovery: p2p::iroh::IrohDiscoveryConfig::default(),
             secret_key_path: None,
         }
     }

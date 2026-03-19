@@ -63,6 +63,12 @@ impl IrohTransport {
             .map_err(|_| Error::ChannelSend)?;
         rx.await.map_err(|_| Error::ChannelReceive)?
     }
+
+    /// Notify iroh that the surrounding network may have changed.
+    pub async fn network_change(&self) -> Result<()> {
+        self.send_command(|reply| IrohCommand::NetworkChange { reply })
+            .await
+    }
 }
 
 #[async_trait]
