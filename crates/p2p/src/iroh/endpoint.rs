@@ -294,7 +294,8 @@ async fn dispatch_stream(
 ) -> crate::error::Result<()> {
     match alpn {
         x if x == protocols::ALPN_PUSHLOG => {
-            let request: crate::message::PushLogRequest = protocols::read_message(recv).await?;
+            let request: crate::message::PushLogRequest =
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
             let token = crate::transport::ResponseToken::new(send);
             if event_tx
                 .send(TransportEvent::PushLogRequest {
@@ -309,7 +310,8 @@ async fn dispatch_stream(
             }
         }
         x if x == protocols::ALPN_TWOSTREAM => {
-            let request: crate::message::PushLogRequest = protocols::read_message(recv).await?;
+            let request: crate::message::PushLogRequest =
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
             let token = crate::transport::ResponseToken::new(send);
             if event_tx
                 .send(TransportEvent::TwoStreamRequest {
@@ -326,7 +328,8 @@ async fn dispatch_stream(
             }
         }
         x if x == protocols::ALPN_DOCSYNC => {
-            let request: crate::message::DocSyncRequest = protocols::read_message(recv).await?;
+            let request: crate::message::DocSyncRequest =
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
             let token = crate::transport::ResponseToken::new(send);
             if event_tx
                 .send(TransportEvent::DocSyncRequest {
@@ -342,7 +345,7 @@ async fn dispatch_stream(
         }
         x if x == protocols::ALPN_BRANCHABLE => {
             let request: crate::message::BranchableSyncRequest =
-                protocols::read_message(recv).await?;
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
             let token = crate::transport::ResponseToken::new(send);
             if event_tx
                 .send(TransportEvent::BranchableSyncRequest {
@@ -358,7 +361,8 @@ async fn dispatch_stream(
         }
         x if x == protocols::ALPN_CAR => {
             debug!(peer_id = %peer_id, "CAR dispatch: reading request");
-            let request: CarFetchRequest = protocols::read_message(recv).await?;
+            let request: CarFetchRequest =
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
             debug!(
                 peer_id = %peer_id,
                 root_cid = %request.root_cid,
@@ -380,7 +384,7 @@ async fn dispatch_stream(
             }
         }
         x if x == protocols::ALPN_CAR_RESP => {
-            let car_data: Vec<u8> = protocols::read_message(recv).await?;
+            let car_data: Vec<u8> = protocols::read_message(recv, protocols::MAX_CAR_SIZE).await?;
             // Extract the root CID from the CAR headers for event correlation.
             let root_cid = match crate::sync::car::decode_car(&car_data) {
                 Ok((roots, _)) => roots.into_iter().next(),
@@ -433,7 +437,7 @@ async fn dispatch_stream(
         }
         x if x == protocols::ALPN_SE => {
             let request: crate::message::PushSEArtifactsRequest =
-                protocols::read_message(recv).await?;
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
             debug!(
                 peer_id = %peer_id,
                 collection_id = %request.collection_id,
@@ -1071,19 +1075,21 @@ where
     send.finish()
         .map_err(|e| crate::error::Error::Transport(e.to_string()))?;
 
-    let response: Resp =
-        tokio::time::timeout(REQUEST_RESPONSE_TIMEOUT, protocols::read_message(&mut recv))
-            .await
-            .map_err(|_| {
-                let alpn_str = String::from_utf8_lossy(alpn);
-                warn!(
-                    peer_id = %peer_id,
-                    alpn = %alpn_str,
-                    timeout_secs = REQUEST_RESPONSE_TIMEOUT.as_secs(),
-                    "request-response timed out waiting for peer"
-                );
-                crate::error::Error::ResponseTimeout
-            })??;
+    let response: Resp = tokio::time::timeout(
+        REQUEST_RESPONSE_TIMEOUT,
+        protocols::read_message(&mut recv, protocols::MAX_MESSAGE_SIZE),
+    )
+    .await
+    .map_err(|_| {
+        let alpn_str = String::from_utf8_lossy(alpn);
+        warn!(
+            peer_id = %peer_id,
+            alpn = %alpn_str,
+            timeout_secs = REQUEST_RESPONSE_TIMEOUT.as_secs(),
+            "request-response timed out waiting for peer"
+        );
+        crate::error::Error::ResponseTimeout
+    })??;
     Ok(response)
 }
 
