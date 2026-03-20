@@ -396,6 +396,35 @@ async fn dispatch_stream(
                 }
             }
         }
+        x if x == protocols::ALPN_DOCSYNC_RESP => {
+            let reply: crate::message::DocSyncReply = protocols::read_message(recv).await?;
+            debug!(peer_id = %peer_id, "Received doc sync response via fire-and-forget");
+            if event_tx
+                .send(TransportEvent::DocSyncReply {
+                    peer_id: peer_id.clone(),
+                    reply,
+                })
+                .await
+                .is_err()
+            {
+                warn!("Event channel closed, cannot emit DocSyncReply");
+            }
+        }
+        x if x == protocols::ALPN_BRANCHABLE_RESP => {
+            let reply: crate::message::BranchableSyncReply =
+                protocols::read_message(recv).await?;
+            debug!(peer_id = %peer_id, "Received branchable sync response via fire-and-forget");
+            if event_tx
+                .send(TransportEvent::BranchableSyncReply {
+                    peer_id: peer_id.clone(),
+                    reply,
+                })
+                .await
+                .is_err()
+            {
+                warn!("Event channel closed, cannot emit BranchableSyncReply");
+            }
+        }
         x if x == protocols::ALPN_SE => {
             let request: crate::message::PushSEArtifactsRequest =
                 protocols::read_message(recv).await?;
