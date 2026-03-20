@@ -36,4 +36,12 @@ impl TransactionOperations for MockTransactionOperations {
     ) -> Result<Vec<schema::CollectionVersion>, String> {
         Ok(vec![mock_collection_version("MockCollection")])
     }
+
+    async fn add_schema_in_txn(
+        &self,
+        _txn_id: &str,
+        _sdl: &str,
+    ) -> Result<Vec<schema::CollectionVersion>, String> {
+        Ok(vec![mock_collection_version("MockCollection")])
+    }
 }

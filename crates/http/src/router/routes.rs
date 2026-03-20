@@ -53,7 +53,8 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route(
             "/:id/collections",
             get(handlers::txn_ops::get_collections_in_txn),
-        );
+        )
+        .route("/:id/schema", post(handlers::txn_ops::add_schema_in_txn));
 
     // Collection routes (REST API)
     // Static routes must come before parametric `:name` routes

@@ -66,4 +66,26 @@ impl<S: Store + 'static> TransactionOperations for TxnRegistryAdapter<S> {
         .await
         .map_err(|e| format!("task join error: {}", e))?
     }
+
+    async fn add_schema_in_txn(
+        &self,
+        txn_id: &str,
+        sdl: &str,
+    ) -> Result<Vec<schema::CollectionVersion>, String> {
+        let registry = self.registry.clone();
+        let txn_id = txn_id.to_string();
+        let sdl = sdl.to_string();
+        let handle = tokio::runtime::Handle::current();
+
+        tokio::task::spawn_blocking(move || {
+            handle.block_on(async {
+                registry
+                    .add_schema_in_txn(&txn_id, &sdl)
+                    .await
+                    .map_err(|e| format!("{}", e))
+            })
+        })
+        .await
+        .map_err(|e| format!("task join error: {}", e))?
+    }
 }

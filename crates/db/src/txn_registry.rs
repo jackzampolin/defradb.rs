@@ -277,6 +277,57 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         self.db.set_migration_in_txn(txn, config).await
     }
 
+    /// Add a schema within an existing transaction.
+    ///
+    /// Parses the SDL and creates collections within the transaction.
+    /// The collections are only visible after the transaction is committed,
+    /// but can be used by queries within the same transaction.
+    pub async fn add_schema_in_txn(
+        &self,
+        txn_id: &str,
+        sdl: &str,
+    ) -> Result<Vec<schema::CollectionVersion>> {
+        let ctx = self
+            .get_ctx(txn_id)?
+            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+
+        let shared_txn = ctx.fetcher_shared_txn();
+        let mut txn_guard = shared_txn.lock().await;
+        let txn = txn_guard.as_mut().ok_or(Error::TxnNotActive)?;
+
+        let known_types: std::collections::HashSet<String> = self
+            .db
+            .list_collections()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        let collections = query::parse_sdl_with_known_types(sdl, known_types)
+            .map_err(|e| Error::Other(format!("failed to parse SDL: {}", e)))?;
+
+        crate::definition_validation::validate_new_collections(&collections)
+            .map_err(|e| Error::Other(format!("failed to validate schema: {}", e)))?;
+
+        let mut finalized = Vec::new();
+        for collection in collections {
+            let schema = self.db.create_collection_with_txn(txn, collection).await?;
+            finalized.push(schema);
+        }
+
+        // Register on_success callback to update the process-wide cache after commit
+        let db = self.db.clone();
+        let schemas_for_cache = finalized.clone();
+        txn.on_success(Box::new(move || {
+            if let Ok(mut cache) = db.collections.write() {
+                for schema in &schemas_for_cache {
+                    cache.insert(schema.name.clone(), Collection::new(schema.clone()));
+                }
+            }
+        }))?;
+
+        Ok(finalized)
+    }
+
     /// Get all collection versions visible within a transaction.
     ///
     /// This reads from the transaction's systemstore, which includes both

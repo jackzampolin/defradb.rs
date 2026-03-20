@@ -148,7 +148,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Get collection schema
         let collection = self
-            .collection_provider
+            .effective_provider()
             .get_collection(&select.collection_name)
             .await?
             .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;

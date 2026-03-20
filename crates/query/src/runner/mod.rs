@@ -48,6 +48,14 @@ use crate::mutator::DocMutator;
 use crate::planner::Doc;
 use crate::txn::{NoOpTransactionRegistry, TransactionRegistry};
 
+tokio::task_local! {
+    /// Per-request collection provider override for transaction-scoped schema resolution.
+    ///
+    /// When a query executes within a transaction that has uncommitted schema changes,
+    /// this is set to a transaction-aware provider so `get_collection()` sees the new schemas.
+    static TXN_COLLECTION_PROVIDER: Arc<dyn CollectionProvider>;
+}
+
 // Re-export for backwards compatibility
 pub use crate::fetcher::{DocFetcher, FetchByIdsResult, IndexScanResult};
 
@@ -259,11 +267,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         request_identity.or_else(|| self.default_identity.clone())
     }
 
+    /// Get the effective collection provider.
+    ///
+    /// Returns the transaction-scoped provider if set (via task-local storage),
+    /// otherwise returns the default process-wide provider.
+    fn effective_provider(&self) -> Arc<dyn CollectionProvider> {
+        TXN_COLLECTION_PROVIDER
+            .try_with(|p| p.clone())
+            .unwrap_or_else(|_| self.collection_provider.clone())
+    }
+
     /// Get the names of all collections.
     ///
     /// Returns a sorted list of collection names registered with this runner.
     pub async fn collection_names(&self) -> Result<Vec<String>> {
-        let mut names = self.collection_provider.list_collections().await?;
+        let mut names = self.effective_provider().list_collections().await?;
         names.sort();
         Ok(names)
     }
@@ -271,7 +289,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Check if a collection exists.
     pub async fn has_collection(&self, name: &str) -> Result<bool> {
         Ok(self
-            .collection_provider
+            .effective_provider()
             .get_collection(name)
             .await?
             .is_some())
@@ -281,7 +299,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ///
     /// Returns the collection schema or an error if not found.
     pub(crate) async fn get_collection(&self, name: &str) -> Result<Arc<CollectionVersion>> {
-        self.collection_provider
+        self.effective_provider()
             .get_collection(name)
             .await?
             .ok_or_else(|| QueryError::collection_not_found(name))
@@ -292,10 +310,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// This is used internally for plan building which requires access to multiple
     /// collection schemas simultaneously (e.g., for joins).
     pub(crate) async fn collections_map(&self) -> Result<HashMap<String, Arc<CollectionVersion>>> {
-        let names = self.collection_provider.list_collections().await?;
+        let provider = self.effective_provider();
+        let names = provider.list_collections().await?;
         let mut map = HashMap::new();
         for name in names {
-            if let Some(coll) = self.collection_provider.get_collection(&name).await? {
+            if let Some(coll) = provider.get_collection(&name).await? {
                 map.insert(name, coll);
             }
         }
@@ -312,11 +331,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Introspection queries are executed against a dynamically generated GraphQL
     /// schema based on the current collections, rather than against document storage.
     pub(crate) async fn execute_introspection(&self, query: &str) -> Result<JsonValue> {
-        // Get all collections for schema generation
-        let collections = self.collection_provider.list_collections().await?;
+        let provider = self.effective_provider();
+        let collections = provider.list_collections().await?;
         let mut collection_versions = Vec::new();
         for name in collections {
-            if let Some(coll) = self.collection_provider.get_collection(&name).await? {
+            if let Some(coll) = provider.get_collection(&name).await? {
                 collection_versions.push((*coll).clone());
             }
         }
