@@ -44,6 +44,8 @@ pub enum CollectionCommand {
     List(CollectionListArgs),
     /// Patch a collection schema
     Patch(CollectionPatchArgs),
+    /// Display the full GraphQL schema
+    Schema(CollectionSchemaArgs),
     /// Set a collection as active
     SetActive(SetActiveArgs),
     /// Truncate a collection
@@ -98,6 +100,10 @@ pub struct SetActiveArgs {
     pub version_id: Option<String>,
 }
 
+/// Arguments for displaying the full GraphQL schema
+#[derive(Args, Debug)]
+pub struct CollectionSchemaArgs {}
+
 /// Arguments for truncate command
 #[derive(Args, Debug)]
 pub struct TruncateArgs {}
@@ -136,6 +142,18 @@ impl CollectionAddArgs {
     }
 }
 
+impl CollectionSchemaArgs {
+    /// Execute the collection schema command
+    pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
+        let client = super::http_client::HttpClient::new(&ctx.url)?
+            .with_auth_token(ctx.auth_token.clone())
+            .with_verbose(ctx.verbose);
+        let schema = client.schema().await?;
+        println!("{schema}");
+        Ok(())
+    }
+}
+
 impl CollectionArgs {
     /// Execute the collection command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
@@ -144,6 +162,7 @@ impl CollectionArgs {
             CollectionCommand::Describe(args) => args.execute(ctx, self.name.as_deref()).await,
             CollectionCommand::List(args) => args.execute(ctx).await,
             CollectionCommand::Patch(args) => args.execute(ctx).await,
+            CollectionCommand::Schema(args) => args.execute(ctx).await,
             CollectionCommand::SetActive(args) => args.execute(ctx).await,
             CollectionCommand::Truncate(args) => args.execute(ctx, self.name.as_deref()).await,
         }

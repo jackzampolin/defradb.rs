@@ -14,7 +14,6 @@ mod node_identity;
 mod p2p;
 mod purge;
 mod query;
-mod schema;
 mod tx;
 mod validation;
 mod view;
@@ -36,7 +35,6 @@ pub use node_identity::NodeIdentityArgs;
 pub use p2p::P2pArgs;
 pub use purge::PurgeArgs;
 pub use query::QueryArgs;
-pub use schema::SchemaArgs;
 pub use tx::TxArgs;
 pub use view::ViewArgs;
 
@@ -111,6 +109,7 @@ pub enum ClientCommand {
     /// Interact with blocks
     Block(BlockArgs),
     /// Interact with collections
+    #[command(alias = "schema")]
     Collection(CollectionArgs),
     /// Interact with documents
     Document(DocumentArgs),
@@ -130,8 +129,6 @@ pub enum ClientCommand {
     Purge(PurgeArgs),
     /// Execute a GraphQL query
     Query(QueryArgs),
-    /// Interact with schema
-    Schema(SchemaArgs),
     /// Manage transactions
     Tx(TxArgs),
     /// Manage views
@@ -184,7 +181,6 @@ impl ClientArgs {
             ClientCommand::P2p(args) => args.execute(&ctx).await,
             ClientCommand::Purge(args) => args.execute(&ctx).await,
             ClientCommand::Query(args) => args.execute(&ctx).await,
-            ClientCommand::Schema(args) => args.execute(&ctx).await,
             ClientCommand::Tx(args) => args.execute(&ctx).await,
             ClientCommand::View(args) => args.execute(&ctx).await,
         }
