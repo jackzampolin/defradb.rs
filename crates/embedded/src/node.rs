@@ -268,15 +268,39 @@ where
         database.clone().start_downsample_task(),
     )));
 
+    let sync_config = SyncConfig {
+        max_concurrent_dag_fetches: config
+            .max_concurrent_dag_fetches
+            .unwrap_or(p2p::sync::DEFAULT_MAX_CONCURRENT_DAG_FETCHES),
+        max_concurrent_push_tasks: config
+            .max_concurrent_push_tasks
+            .unwrap_or(p2p::sync::DEFAULT_MAX_CONCURRENT_PUSH_TASKS),
+        ..Default::default()
+    };
+
     let mut p2p_setup = match &config.transport {
         TransportConfig::None => None,
-        TransportConfig::Libp2p(libp2p) => {
-            Some(setup_libp2p(store.clone(), database.clone(), event_bus.clone(), libp2p).await?)
-        }
+        TransportConfig::Libp2p(libp2p) => Some(
+            setup_libp2p(
+                store.clone(),
+                database.clone(),
+                event_bus.clone(),
+                libp2p,
+                sync_config.clone(),
+            )
+            .await?,
+        ),
         #[cfg(feature = "iroh")]
-        TransportConfig::Iroh(iroh) => {
-            Some(setup_iroh(store.clone(), database.clone(), event_bus.clone(), iroh).await?)
-        }
+        TransportConfig::Iroh(iroh) => Some(
+            setup_iroh(
+                store.clone(),
+                database.clone(),
+                event_bus.clone(),
+                iroh,
+                sync_config.clone(),
+            )
+            .await?,
+        ),
     };
 
     let (document_acp, sourcehub_acp) =
@@ -521,6 +545,7 @@ async fn setup_libp2p<S>(
     database: Arc<db::DB<S>>,
     event_bus: Arc<dyn events::Bus>,
     config: &Libp2pConfig,
+    sync_config: SyncConfig,
 ) -> Result<P2PSetup<S>>
 where
     S: storage::corekv::Store + 'static,
@@ -590,7 +615,7 @@ where
     let (mut coordinator, sync_events_rx) = p2p::sync::SyncCoordinator::with_head_provider(
         p2p::Libp2pTransport::new(handle.clone()),
         blockstore.clone(),
-        SyncConfig::default(),
+        sync_config,
         p2p::bitswap::AccessMode::Controlled,
         Arc::new(p2p::ReplicatorRegistry::new()),
         collection_store,
@@ -677,6 +702,7 @@ async fn setup_iroh<S>(
     database: Arc<db::DB<S>>,
     event_bus: Arc<dyn events::Bus>,
     config: &IrohConfig,
+    sync_config: SyncConfig,
 ) -> Result<P2PSetup<S>>
 where
     S: storage::corekv::Store + 'static,
@@ -705,7 +731,7 @@ where
     let (mut coordinator, sync_events_rx) = p2p::sync::SyncCoordinator::with_head_provider(
         transport.clone(),
         blockstore.clone(),
-        SyncConfig::default(),
+        sync_config,
         p2p::bitswap::AccessMode::Controlled,
         Arc::new(p2p::ReplicatorRegistry::new()),
         collection_store,

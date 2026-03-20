@@ -1,10 +1,13 @@
 //! Sync manager configuration.
 
 /// Default maximum number of concurrent DAG fetch tasks.
-pub const DEFAULT_MAX_CONCURRENT_DAG_FETCHES: usize = 16;
+///
+/// Lowered from 16 to 4 for mobile client compatibility — 16 concurrent
+/// fetchers exhaust rate limiters and crash QUIC on constrained networks.
+pub const DEFAULT_MAX_CONCURRENT_DAG_FETCHES: usize = 4;
 
 /// Default maximum number of concurrent push tasks.
-pub const DEFAULT_MAX_CONCURRENT_PUSH_TASKS: usize = 32;
+pub const DEFAULT_MAX_CONCURRENT_PUSH_TASKS: usize = 8;
 
 /// Configuration for the SyncManager.
 #[derive(Debug, Clone)]

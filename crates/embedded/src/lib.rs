@@ -185,6 +185,8 @@ pub struct EmbeddedNodeConfig {
     pub signing: SigningConfig,
     pub document_acp: DocumentAcpConfig,
     pub encryption_key: Option<Vec<u8>>,
+    pub max_concurrent_dag_fetches: Option<usize>,
+    pub max_concurrent_push_tasks: Option<usize>,
 }
 
 /// Runtime P2P transport kind.

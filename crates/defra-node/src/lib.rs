@@ -182,10 +182,10 @@ pub struct P2PConfig {
     /// When false, only explicit subscribe calls in the current process take effect.
     pub load_persisted_collections: bool,
     /// Maximum concurrent DAG fetch tasks. Lower values reduce resource pressure
-    /// on constrained clients (mobile, embedded). Default: 16.
+    /// on constrained clients (mobile, embedded). Default: 4.
     pub max_concurrent_dag_fetches: usize,
     /// Maximum concurrent push tasks for sending blocks to replicators.
-    /// Default: 32.
+    /// Default: 8.
     pub max_concurrent_push_tasks: usize,
 }
 
