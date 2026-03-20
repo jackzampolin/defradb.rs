@@ -62,7 +62,6 @@ See `tools/ffi-test/README.md` for full usage.
 
 - [DefraDB (Go)](https://github.com/sourcenetwork/defradb) — concepts, architecture, specifications
 - [DefraDB Docs](https://docs.source.network/defradb) — user documentation
-- [Iroh Integration Guide](docs/iroh-integration-guide.md) — app upgrade guide for iroh relay, discovery, bind, and mobile/network-change handling
 - `CLAUDE.md` — development workflow and conventions
 
 ## License
