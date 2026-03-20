@@ -305,6 +305,39 @@ pub(super) fn validate_indexes_not_modified(
     errs
 }
 
+/// Matches Go's validateEncryptedIndexesNotModified.
+pub(super) fn validate_encrypted_indexes_not_modified(
+    new_state: &DefinitionState,
+    old_state: &DefinitionState,
+) -> Vec<String> {
+    let mut errs = Vec::new();
+    for new_col in &new_state.collections {
+        let old_col = match old_state.collections_by_id.get(&new_col.version_id) {
+            Some(c) => c,
+            None => {
+                match old_state
+                    .active_by_collection_id
+                    .get(&new_col.collection_id)
+                {
+                    Some(c) => c,
+                    None => continue,
+                }
+            }
+        };
+        if old_col.is_placeholder {
+            continue;
+        }
+
+        if new_col.encrypted_indexes != old_col.encrypted_indexes {
+            errs.push(format!(
+                "collection encrypted indexes cannot be mutated. CollectionID: {}",
+                new_col.version_id
+            ));
+        }
+    }
+    errs
+}
+
 /// Matches Go's validateSourcesNotRedefined.
 /// Checks that PreviousVersion and Query sources are not added/removed/mutated.
 pub(super) fn validate_sources_not_redefined(
