@@ -159,6 +159,11 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
                 let sem = replay_semaphore.clone();
                 push_handles.push(tokio::spawn(async move {
                     let Ok(_permit) = sem.acquire().await else {
+                        tracing::error!(
+                            peer_id = %pid,
+                            request_count = requests.len(),
+                            "Replay semaphore closed; document push requests abandoned"
+                        );
                         return;
                     };
                     for req in requests {
@@ -190,7 +195,9 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
 
     tracing::debug!(task_count = push_handles.len(), "awaiting push tasks");
     for jh in push_handles {
-        let _ = jh.await;
+        if let Err(e) = jh.await {
+            tracing::error!(error = %e, "Replay push task panicked or was cancelled");
+        }
     }
     tracing::debug!("all push tasks completed");
 

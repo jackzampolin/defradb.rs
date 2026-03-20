@@ -185,18 +185,31 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         // Check existing replicator state before creating/updating so we can
         // skip the expensive initial replay when the replicator already exists
         // with the same collections (idempotent reconnect path).
-        let existing_collection_ids: HashSet<String> =
-            if let Some(ref coordinator) = self.sync_coordinator {
-                coordinator.get_replicator(&peer_id).await.ok().flatten()
+        let existing_collection_ids: HashSet<String> = {
+            let result = if let Some(ref coordinator) = self.sync_coordinator {
+                coordinator
+                    .get_replicator(&peer_id)
+                    .await
+                    .map_err(|e| e.to_string())
             } else {
                 self.transport
                     .get_replicator(&peer_id)
                     .await
-                    .ok()
-                    .flatten()
+                    .map_err(|e| e.to_string())
+            };
+            match result {
+                Ok(Some(info)) => info.collections.into_iter().collect(),
+                Ok(None) => HashSet::new(),
+                Err(e) => {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Failed to check existing replicator state; falling back to full replay"
+                    );
+                    HashSet::new()
+                }
             }
-            .map(|info| info.collections.into_iter().collect())
-            .unwrap_or_default();
+        };
 
         self.transport
             .dial(&peer_id, direct_addrs)
