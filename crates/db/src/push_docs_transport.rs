@@ -7,14 +7,10 @@ use p2p::transport::PeerId;
 use p2p::P2PTransport;
 use storage::corekv::{IterOptions, Reader, Store};
 
-/// Maximum concurrent per-document push tasks during initial replay.
-///
-/// Lower than the coordinator's live push limit (32) because initial replay
-/// is background work that shouldn't starve real-time sync traffic.
-const MAX_CONCURRENT_REPLAY_TASKS: usize = 8;
-
 use crate::database::DB;
-use crate::push_docs_common::{load_push_dag_blocks, resolve_push_creator};
+use crate::push_docs_common::{
+    load_push_dag_blocks, resolve_push_creator, MAX_CONCURRENT_REPLAY_TASKS,
+};
 
 /// Push existing documents to a replicator peer via a generic transport.
 ///
@@ -170,16 +166,13 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
             if !requests.is_empty() {
                 let t = transport.clone();
                 let pid = peer_id.clone();
-                let sem = replay_semaphore.clone();
+                let permit = replay_semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| "replay semaphore closed before scheduling push".to_string())?;
                 push_handles.push(tokio::spawn(async move {
-                    let Ok(_permit) = sem.acquire().await else {
-                        tracing::error!(
-                            peer_id = %pid,
-                            request_count = requests.len(),
-                            "Replay semaphore closed; document push requests abandoned"
-                        );
-                        return;
-                    };
+                    let _permit = permit;
                     for req in requests {
                         let cid = req.cid.clone();
                         match t.send_two_stream_request(&pid, req).await {

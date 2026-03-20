@@ -1,11 +1,14 @@
 use std::str::FromStr;
+use std::sync::Arc;
 
 use acp::DocumentACP;
 use p2p::message::PushLogRequest;
 use storage::corekv::{IterOptions, Reader, Store};
 
 use crate::database::DB;
-use crate::push_docs_common::{load_push_dag_blocks, resolve_push_creator};
+use crate::push_docs_common::{
+    load_push_dag_blocks, resolve_push_creator, MAX_CONCURRENT_REPLAY_TASKS,
+};
 
 /// Push existing documents to a replicator peer.
 ///
@@ -62,6 +65,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
 
     // Collect JoinHandles so we can await all pushes before signaling completion.
     let mut push_handles = Vec::new();
+    let replay_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REPLAY_TASKS));
 
     for col_name in collections {
         let collection = match db
@@ -169,7 +173,13 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
 
             if !requests.is_empty() {
                 let push_h = handle.clone();
+                let permit = replay_semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| "replay semaphore closed before scheduling push".to_string())?;
                 push_handles.push(tokio::spawn(async move {
+                    let _permit = permit;
                     for req in requests {
                         let cid = req.cid.clone();
                         match push_h.send_two_stream_request(peer_id, req).await {

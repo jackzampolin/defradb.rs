@@ -6,6 +6,12 @@ use storage::corekv::Reader;
 
 use crate::Collection;
 
+/// Maximum concurrent per-document push tasks during initial replay.
+///
+/// Lower than the coordinator's live push limit (32) because initial replay
+/// is background work that shouldn't starve real-time sync traffic.
+pub(crate) const MAX_CONCURRENT_REPLAY_TASKS: usize = 8;
+
 pub(crate) async fn resolve_push_creator(
     document_acp: Option<&dyn DocumentACP>,
     collection: &Collection,
