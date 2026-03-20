@@ -1,10 +1,17 @@
 use std::str::FromStr;
+use std::sync::Arc;
 
 use acp::DocumentACP;
 use p2p::message::PushLogRequest;
 use p2p::transport::PeerId;
 use p2p::P2PTransport;
 use storage::corekv::{IterOptions, Reader, Store};
+
+/// Maximum concurrent per-document push tasks during initial replay.
+///
+/// Lower than the coordinator's live push limit (32) because initial replay
+/// is background work that shouldn't starve real-time sync traffic.
+const MAX_CONCURRENT_REPLAY_TASKS: usize = 8;
 
 use crate::database::DB;
 use crate::push_docs_common::{load_push_dag_blocks, resolve_push_creator};
@@ -23,8 +30,22 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
 ) -> Result<(), String> {
     let conn_timeout = std::time::Duration::from_secs(15);
     let conn_start = std::time::Instant::now();
+    let mut logged_conn_error = false;
     loop {
-        let peers = transport.connected_peers().await.unwrap_or_default();
+        let peers = match transport.connected_peers().await {
+            Ok(peers) => peers,
+            Err(e) => {
+                if !logged_conn_error {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "connected_peers check failed during replay wait"
+                    );
+                    logged_conn_error = true;
+                }
+                Vec::new()
+            }
+        };
         if peers.iter().any(|p| p == peer_id) {
             break;
         }
@@ -52,6 +73,7 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
         .map_err(|e| format!("failed to get datastore: {}", e))?;
 
     let mut push_handles = Vec::new();
+    let replay_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REPLAY_TASKS));
 
     for col_name in collections {
         let collection = match db
@@ -148,7 +170,16 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
             if !requests.is_empty() {
                 let t = transport.clone();
                 let pid = peer_id.clone();
+                let sem = replay_semaphore.clone();
                 push_handles.push(tokio::spawn(async move {
+                    let Ok(_permit) = sem.acquire().await else {
+                        tracing::error!(
+                            peer_id = %pid,
+                            request_count = requests.len(),
+                            "Replay semaphore closed; document push requests abandoned"
+                        );
+                        return;
+                    };
                     for req in requests {
                         let cid = req.cid.clone();
                         match t.send_two_stream_request(&pid, req).await {
@@ -178,7 +209,9 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
 
     tracing::debug!(task_count = push_handles.len(), "awaiting push tasks");
     for jh in push_handles {
-        let _ = jh.await;
+        if let Err(e) = jh.await {
+            tracing::error!(error = %e, "Replay push task panicked or was cancelled");
+        }
     }
     tracing::debug!("all push tasks completed");
 
