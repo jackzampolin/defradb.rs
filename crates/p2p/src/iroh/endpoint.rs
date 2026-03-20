@@ -411,8 +411,7 @@ async fn dispatch_stream(
             }
         }
         x if x == protocols::ALPN_BRANCHABLE_RESP => {
-            let reply: crate::message::BranchableSyncReply =
-                protocols::read_message(recv).await?;
+            let reply: crate::message::BranchableSyncReply = protocols::read_message(recv).await?;
             debug!(peer_id = %peer_id, "Received branchable sync response via fire-and-forget");
             if event_tx
                 .send(TransportEvent::BranchableSyncReply {
