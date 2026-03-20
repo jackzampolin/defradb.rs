@@ -784,7 +784,7 @@ impl NodeBuilder {
             transport.clone(),
             sync_blockstore.clone(),
             sync_config,
-            p2p::AccessMode::Open,
+            p2p::AccessMode::Controlled,
             collection_store,
         )
         .await
