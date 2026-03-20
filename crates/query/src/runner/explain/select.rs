@@ -37,7 +37,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Get collection schema
         let collection = self
-            .collection_provider
+            .effective_provider()
             .get_collection(&select.collection_name)
             .await?
             .ok_or_else(|| QueryError::collection_not_found(&select.collection_name))?;
@@ -147,10 +147,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         explain_type: ExplainType,
     ) -> Result<JsonValue> {
         // Build the plan using the Planner
-        let collection_names = self.collection_provider.list_collections().await?;
+        let provider = self.effective_provider();
+        let collection_names = provider.list_collections().await?;
         let mut collections = Vec::new();
         for name in collection_names {
-            if let Some(coll) = self.collection_provider.get_collection(&name).await? {
+            if let Some(coll) = provider.get_collection(&name).await? {
                 collections.push((*coll).clone());
             }
         }

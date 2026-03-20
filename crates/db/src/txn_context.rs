@@ -1,5 +1,6 @@
 //! Transaction context for query execution.
 
+use query::fetcher::CollectionProvider;
 use query::mutator::DocMutator;
 use query::runner::DocFetcher;
 use query::txn::TransactionContext;
@@ -7,6 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use storage::corekv::Store;
 
+use crate::collection_provider::TxnCollectionProvider;
 use crate::database::DB;
 use crate::doc_mutator::DbDocMutator;
 use crate::lensed_fetcher::LensedDocFetcher;
@@ -111,5 +113,12 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
         } else {
             Some(self.doc_mutator())
         }
+    }
+
+    fn collection_provider(&self) -> Option<Arc<dyn CollectionProvider>> {
+        Some(Arc::new(TxnCollectionProvider::new(
+            self.db.clone(),
+            self.fetcher.shared_txn(),
+        )))
     }
 }

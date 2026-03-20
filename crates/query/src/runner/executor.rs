@@ -278,6 +278,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         // Resolve effective identity: request identity takes precedence over default
         let identity = self.resolve_identity(request.identity);
 
+        // Get transaction-scoped collection provider if available
+        let txn_provider = txn_ctx.collection_provider();
+
         // Route to appropriate handler based on operation type
         let execution = async {
             match parsed {
@@ -346,7 +349,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
-        let result = await_with_timeout(execution, self.query_timeout).await;
+        // If the transaction provides a collection provider, set it as the task-local
+        // override so all collection resolution within this execution uses the
+        // transaction's uncommitted state.
+        let result = if let Some(provider) = txn_provider {
+            super::TXN_COLLECTION_PROVIDER
+                .scope(provider, await_with_timeout(execution, self.query_timeout))
+                .await
+        } else {
+            await_with_timeout(execution, self.query_timeout).await
+        };
 
         match result {
             Ok(data) => QueryResponse {

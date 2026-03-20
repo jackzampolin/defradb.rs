@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use storage::corekv::MaybeSendSync;
 
+use crate::fetcher::CollectionProvider;
 use crate::mutator::DocMutator;
 use crate::runner::DocFetcher;
 
@@ -28,6 +29,15 @@ pub trait TransactionContext: MaybeSendSync {
     /// The mutator shares the same underlying transaction as the fetcher,
     /// so all read and write operations are within the same transaction context.
     fn doc_mutator(&self) -> Option<Arc<dyn DocMutator>> {
+        None
+    }
+
+    /// Get a collection provider scoped to this transaction.
+    ///
+    /// Returns `None` by default. Implementations that support transaction-scoped
+    /// schema resolution should override this to return a provider that reads
+    /// from the transaction's uncommitted state (falling back to the process-wide cache).
+    fn collection_provider(&self) -> Option<Arc<dyn CollectionProvider>> {
         None
     }
 

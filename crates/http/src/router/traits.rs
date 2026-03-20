@@ -574,7 +574,8 @@ pub trait BackupOperations: Send + Sync {
 /// Trait for transaction-scoped operations.
 ///
 /// Provides access to operations that must execute within an existing transaction,
-/// such as setting migrations or reading collection versions including uncommitted writes.
+/// such as setting migrations, adding schemas, or reading collection versions
+/// including uncommitted writes.
 #[async_trait::async_trait]
 pub trait TransactionOperations: Send + Sync {
     /// Set a migration within an existing transaction.
@@ -591,6 +592,17 @@ pub trait TransactionOperations: Send + Sync {
     async fn get_collections_in_txn(
         &self,
         txn_id: &str,
+    ) -> Result<Vec<schema::CollectionVersion>, String>;
+
+    /// Add a schema within an existing transaction.
+    ///
+    /// Parses the SDL and creates collections within the transaction.
+    /// The collections are only visible after the transaction is committed,
+    /// but can be used by queries within the same transaction.
+    async fn add_schema_in_txn(
+        &self,
+        txn_id: &str,
+        sdl: &str,
     ) -> Result<Vec<schema::CollectionVersion>, String>;
 }
 

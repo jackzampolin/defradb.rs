@@ -377,15 +377,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let field = parent_collection.field_by_name(relation_field_name)?;
         let target_id = field.kind.relation_collection_id()?;
 
+        let provider = self.effective_provider();
+
         // For Named fields, target_id is the collection name directly
-        if let Ok(Some(coll)) = self.collection_provider.get_collection(target_id).await {
+        if let Ok(Some(coll)) = provider.get_collection(target_id).await {
             return Some(coll.name.clone());
         }
 
         // For Relation fields, target_id is a collection_id/version_id — search by ID
-        if let Ok(names) = self.collection_provider.list_collections().await {
+        if let Ok(names) = provider.list_collections().await {
             for name in names {
-                if let Ok(Some(coll)) = self.collection_provider.get_collection(&name).await {
+                if let Ok(Some(coll)) = provider.get_collection(&name).await {
                     if coll.collection_id == target_id || coll.version_id == target_id {
                         return Some(coll.name.clone());
                     }

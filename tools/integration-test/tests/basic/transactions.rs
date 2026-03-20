@@ -1,5 +1,80 @@
 use integration_test::{for_each_runtime, TestCluster};
 
+async fn txn_schema_add_and_mutate(cluster: TestCluster) {
+    let client = cluster.client(0);
+    let api_url = cluster.api_url(0);
+
+    // 1. Create a transaction
+    let tx_id = client.tx_create().expect("tx_create failed");
+
+    // 2. Add a schema within the transaction via HTTP
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(format!("{}/api/v0/tx/{}/schema", api_url, tx_id))
+        .body("type Widget { name: String  weight: Int }")
+        .send()
+        .await
+        .expect("schema add in txn request failed");
+    assert!(
+        resp.status().is_success(),
+        "schema add in txn failed with status: {} body: {}",
+        resp.status(),
+        resp.text().await.unwrap_or_default()
+    );
+
+    // 3. Run a mutation on the new collection within the same transaction
+    let create_result = client
+        .query_with_tx(
+            r#"mutation { add_Widget(input: {name: "Sprocket", weight: 42}) { _docID name weight } }"#,
+            &tx_id,
+        )
+        .expect("create Widget in tx");
+    let widget_id = create_result["add_Widget"][0]["_docID"]
+        .as_str()
+        .expect("missing Widget _docID");
+    assert!(!widget_id.is_empty(), "Widget _docID should be non-empty");
+    assert_eq!(create_result["add_Widget"][0]["name"], "Sprocket");
+    assert_eq!(create_result["add_Widget"][0]["weight"], 42);
+
+    // 4. Query within the same transaction to verify the data is visible
+    let query_result = client
+        .query_with_tx("query { Widget { name weight } }", &tx_id)
+        .expect("query Widget in tx");
+    let widgets = query_result["Widget"]
+        .as_array()
+        .expect("Widget result not array");
+    assert_eq!(widgets.len(), 1, "expected 1 Widget in tx");
+    assert_eq!(widgets[0]["name"], "Sprocket");
+
+    // 5. Query outside the transaction - Widget collection should not exist yet
+    let outside = client.query("query { Widget { name weight } }");
+    assert!(
+        outside.is_err(),
+        "Widget should not be visible outside uncommitted transaction"
+    );
+
+    // 6. Commit the transaction
+    client.tx_commit(&tx_id).expect("tx_commit failed");
+
+    // 7. Verify the data persists after commit
+    let after_commit = client
+        .query("query { Widget { name weight } }")
+        .expect("query Widget after commit");
+    let committed_widgets = after_commit["Widget"]
+        .as_array()
+        .expect("committed Widget result not array");
+    assert_eq!(committed_widgets.len(), 1, "expected 1 Widget after commit");
+    assert_eq!(committed_widgets[0]["name"], "Sprocket");
+    assert_eq!(committed_widgets[0]["weight"], 42);
+}
+
+#[tokio::test]
+async fn rust_txn_schema_add_and_mutate() {
+    let _root = integration_test::workspace_root();
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    txn_schema_add_and_mutate(cluster).await;
+}
+
 async fn transactions_test(cluster: TestCluster) {
     let client = cluster.client(0);
 

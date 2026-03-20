@@ -62,6 +62,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         "/api/v0/tx/:id" => RoutePermission::IdentityOnly,
         "/api/v0/tx/:id/lens" => RoutePermission::Required(NodePermission::CollectionPatch),
         "/api/v0/tx/:id/collections" => RoutePermission::Required(NodePermission::CollectionGet),
+        "/api/v0/tx/:id/schema" => RoutePermission::Required(NodePermission::CollectionPatch),
 
         // =====================================================================
         // Collections
@@ -497,6 +498,11 @@ mod tests {
                 "/api/v0/tx/:id/collections",
                 Method::GET,
                 RoutePermission::Required(NodePermission::CollectionGet),
+            ),
+            (
+                "/api/v0/tx/:id/schema",
+                Method::POST,
+                RoutePermission::Required(NodePermission::CollectionPatch),
             ),
             // Collections
             (
