@@ -1,10 +1,17 @@
 use std::str::FromStr;
+use std::sync::Arc;
 
 use acp::DocumentACP;
 use p2p::message::PushLogRequest;
 use p2p::transport::PeerId;
 use p2p::P2PTransport;
 use storage::corekv::{IterOptions, Reader, Store};
+
+/// Maximum concurrent per-document push tasks during initial replay.
+///
+/// Lower than the coordinator's live push limit (32) because initial replay
+/// is background work that shouldn't starve real-time sync traffic.
+const MAX_CONCURRENT_REPLAY_TASKS: usize = 8;
 
 use crate::database::DB;
 use crate::push_docs_common::{load_push_dag_blocks, resolve_push_creator};
@@ -52,6 +59,7 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
         .map_err(|e| format!("failed to get datastore: {}", e))?;
 
     let mut push_handles = Vec::new();
+    let replay_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REPLAY_TASKS));
 
     for col_name in collections {
         let collection = match db
@@ -148,7 +156,9 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
             if !requests.is_empty() {
                 let t = transport.clone();
                 let pid = peer_id.clone();
+                let sem = replay_semaphore.clone();
                 push_handles.push(tokio::spawn(async move {
+                    let _permit = sem.acquire().await;
                     for req in requests {
                         let cid = req.cid.clone();
                         match t.send_two_stream_request(&pid, req).await {
