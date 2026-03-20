@@ -298,7 +298,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let known_types: std::collections::HashSet<String> = self
             .db
             .list_collections()
-            .unwrap_or_default()
+            .map_err(|e| Error::Other(format!("failed to list collections: {}", e)))?
             .into_iter()
             .collect();
 
