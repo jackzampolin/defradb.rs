@@ -30,13 +30,6 @@ use super::config::{IrohDiscoveryConfig, IrohRelayModeConfig};
 use super::peer_map::{endpoint_id_to_peer_id, parse_endpoint_id, PeerMap};
 use super::protocols;
 
-/// Timeout for request-response round trips.
-///
-/// Covers the time from sending the request to receiving the full response.
-/// Longer than the fire-and-forget timeout (5 s) because the remote peer
-/// needs time to process the request before replying.
-const REQUEST_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// Handle to a gossip topic subscription.
 struct TopicSubscription {
     sender: iroh_gossip::api::GossipSender,
@@ -1047,21 +1040,7 @@ where
     send.finish()
         .map_err(|e| crate::error::Error::Transport(e.to_string()))?;
 
-    let response: Resp = tokio::time::timeout(
-        REQUEST_RESPONSE_TIMEOUT,
-        protocols::read_message(&mut recv, protocols::MAX_MESSAGE_SIZE),
-    )
-    .await
-    .map_err(|_| {
-        let alpn_str = String::from_utf8_lossy(alpn);
-        warn!(
-            peer_id = %peer_id,
-            alpn = %alpn_str,
-            timeout_secs = REQUEST_RESPONSE_TIMEOUT.as_secs(),
-            "request-response timed out waiting for peer"
-        );
-        crate::error::Error::ResponseTimeout
-    })??;
+    let response: Resp = protocols::read_message(&mut recv, protocols::MAX_MESSAGE_SIZE).await?;
     Ok(response)
 }
 
