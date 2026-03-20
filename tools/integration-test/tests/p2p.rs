@@ -1,5 +1,7 @@
 #[path = "p2p/document.rs"]
 mod document;
+#[path = "p2p/idempotent_replay.rs"]
+mod idempotent_replay;
 #[path = "p2p/management.rs"]
 mod management;
 #[path = "p2p/replication.rs"]
