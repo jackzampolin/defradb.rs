@@ -5,7 +5,7 @@ use std::sync::Arc;
 use blockstore::Blockstore;
 use tokio::sync::mpsc;
 
-use super::{SyncCoordinator, MAX_CONCURRENT_DAG_FETCHES, MAX_CONCURRENT_PUSH_TASKS};
+use super::SyncCoordinator;
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Result;
 use crate::sync::broadcaster::Broadcaster;
@@ -95,6 +95,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let local_peer_id = transport.local_peer_id().to_string();
         let broadcaster = Broadcaster::new(transport.clone());
         let peer_state = Arc::new(PeerStateTracker::new());
+        let max_dag_fetches = config.max_concurrent_dag_fetches;
+        let max_push_tasks = config.max_concurrent_push_tasks;
         let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), config);
 
         Ok((
@@ -112,10 +114,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 collection_store,
                 head_provider,
                 failure_tx: None,
-                dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(
-                    MAX_CONCURRENT_DAG_FETCHES,
-                )),
-                push_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PUSH_TASKS)),
+                dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(max_dag_fetches)),
+                push_semaphore: Arc::new(tokio::sync::Semaphore::new(max_push_tasks)),
                 rate_limiter: Arc::new(PeerRateLimiter::default()),
             },
             events,

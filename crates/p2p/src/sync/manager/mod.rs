@@ -18,6 +18,8 @@ pub(crate) mod links;
 mod pending;
 mod process;
 
-pub use config::SyncConfig;
+pub use config::{
+    SyncConfig, DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+};
 pub use events::SyncEvent;
 pub use process::SyncManager;

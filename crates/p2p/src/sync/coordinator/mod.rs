@@ -68,17 +68,10 @@ use super::manager::SyncManager;
 use super::peer_state::PeerStateTracker;
 use super::rate_limiter::PeerRateLimiter;
 
-/// Maximum number of concurrent DAG fetch tasks spawned by the coordinator.
-///
-/// Caps fan-out from DocSync and BranchableSync replies to prevent resource
-/// exhaustion from a peer advertising a large number of head CIDs.
-pub(crate) const MAX_CONCURRENT_DAG_FETCHES: usize = 16;
-
-/// Maximum number of concurrent push tasks for sending blocks to replicators.
-///
-/// Caps fan-out from `push_dag_to_replicators` and `push_to_replicators` to
-/// prevent resource exhaustion when many documents are created in a burst.
-pub(crate) const MAX_CONCURRENT_PUSH_TASKS: usize = 32;
+#[cfg(test)]
+pub(crate) use super::manager::{
+    DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+};
 
 /// A push failure notification sent when a PushLog to a replicator peer fails.
 ///
