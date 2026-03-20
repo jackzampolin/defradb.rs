@@ -4,6 +4,7 @@
 //! - Export database to JSON
 //! - Import database from JSON
 //!
+//! Both import and export require development mode to be enabled.
 //! All endpoints enforce NAC permissions when NAC is enabled.
 //! Export requires `DocumentRead` permission.
 //! Import requires `DocumentUpdate` permission.
@@ -84,6 +85,12 @@ pub async fn export(
 ) -> Result<Response, HttpError> {
     require_permission(&state, &identity, NodePermission::DocumentRead).await?;
 
+    if !state.dev_mode {
+        return Err(HttpError::BadRequest(
+            "backup export is not permitted when development mode is disabled".into(),
+        ));
+    }
+
     let backup = state.require_backup()?;
 
     // Log warning if filepath was provided (Go-compatibility note)
@@ -162,6 +169,12 @@ pub async fn import(
     body: Bytes,
 ) -> Result<StatusCode, HttpError> {
     require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
+
+    if !state.dev_mode {
+        return Err(HttpError::BadRequest(
+            "backup import is not permitted when development mode is disabled".into(),
+        ));
+    }
 
     let backup = state.require_backup()?;
 
