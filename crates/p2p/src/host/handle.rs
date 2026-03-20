@@ -367,6 +367,19 @@ impl P2PHostHandle {
         self.clear_explicit_replay_capability_inner(&peer_id, collections);
     }
 
+    /// Check whether the cached explicit replay capability matches the provided value.
+    pub fn explicit_replay_capability_matches(
+        &self,
+        peer_id: PeerId,
+        collection: &str,
+        capability: &str,
+    ) -> bool {
+        self.explicit_replay_capabilities
+            .read()
+            .get(&(peer_id.to_string(), collection.to_string()))
+            .is_some_and(|existing| existing == capability)
+    }
+
     /// Delete a replicator.
     ///
     /// Removes the peer from all collections they were replicating.

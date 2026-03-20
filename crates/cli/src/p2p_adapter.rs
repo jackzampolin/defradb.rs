@@ -247,6 +247,23 @@ pub trait VersionSyncer: Send + Sync {
     ) -> Result<(), String>;
 }
 
+fn collections_requiring_replay(
+    effective_collections: &[String],
+    collection_cids: &[String],
+    existing_collection_ids: &HashSet<String>,
+    collections_with_changed_capabilities: &HashSet<String>,
+) -> Vec<String> {
+    effective_collections
+        .iter()
+        .zip(collection_cids.iter())
+        .filter(|(_, cid)| {
+            !existing_collection_ids.contains(*cid)
+                || collections_with_changed_capabilities.contains(*cid)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// Adapter that implements P2POperations using P2PHostHandle.
 ///
 /// Optionally uses a SyncCoordinator for replicator operations,
@@ -610,6 +627,22 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             }
         }
 
+        let collections_with_changed_capabilities: HashSet<String> = validated_capabilities
+            .iter()
+            .filter_map(|(collection_id, capability)| {
+                let matches_existing = self.handle.explicit_replay_capability_matches(
+                    peer_id,
+                    collection_id.as_str(),
+                    capability,
+                );
+                if matches_existing {
+                    None
+                } else {
+                    Some(collection_id.clone())
+                }
+            })
+            .collect();
+
         self.handle
             .clear_explicit_replay_capability(peer_id, &collection_cids);
         for (collection_id, capability) in validated_capabilities {
@@ -622,7 +655,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
         // Check existing replicator state before creating/updating so we can
         // skip the expensive initial replay when the replicator already exists
-        // with the same collections (idempotent reconnect path).
+        // with the same collections and replay capability.
         let existing_collection_ids: HashSet<String> = {
             let result = if let Some(ref coordinator) = self.sync_coordinator {
                 let transport_pid = p2p::transport::PeerId::from(peer_id);
@@ -685,15 +718,18 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             }
         }
 
-        // Only replay collections that weren't already replicated by this peer.
-        let new_collection_names: Vec<String> = effective_collections
-            .iter()
-            .zip(collection_cids.iter())
-            .filter(|(_, cid)| !existing_collection_ids.contains(*cid))
-            .map(|(name, _)| name.clone())
-            .collect();
+        // Replay new collections, plus collections whose explicit replay
+        // capability changed. The latter case matters for encrypted ACP
+        // replay where a previous configuration may have carried an invalid
+        // authorizer capability and therefore skipped storing the document.
+        let collection_names_requiring_replay = collections_requiring_replay(
+            &effective_collections,
+            &collection_cids,
+            &existing_collection_ids,
+            &collections_with_changed_capabilities,
+        );
 
-        if !new_collection_names.is_empty() {
+        if !collection_names_requiring_replay.is_empty() {
             if let Some(ref pusher) = self.doc_pusher {
                 let push_handle = self.handle.clone();
                 let push_pusher = Arc::clone(pusher);
@@ -701,8 +737,8 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
                 tracing::info!(
                     peer_id = %peer_id,
-                    new_collections = ?new_collection_names,
-                    "Replaying existing docs for new collections only"
+                    replay_collections = ?collection_names_requiring_replay,
+                    "Replaying existing docs for collections requiring replay"
                 );
 
                 tokio::spawn(async move {
@@ -710,7 +746,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                         .push_existing_docs(
                             &push_handle,
                             peer_id,
-                            &new_collection_names,
+                            &collection_names_requiring_replay,
                             None,
                             None,
                         )
@@ -730,7 +766,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         } else {
             tracing::debug!(
                 peer_id = %peer_id,
-                "Replicator already exists with same collections, skipping initial replay"
+                "Replicator already exists with same collections and replay capability, skipping initial replay"
             );
             if let Some(ref bus) = self.event_bus {
                 bus.publish(events::Message::replicator_completed());
@@ -1133,5 +1169,46 @@ impl<S: storage::corekv::Store + 'static> CollectionLookup for DbCollectionLooku
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::collections_requiring_replay;
+
+    #[test]
+    fn collections_requiring_replay_replays_existing_collection_when_capability_changes() {
+        let effective_collections = vec!["User".to_string()];
+        let collection_cids = vec!["cid-user".to_string()];
+        let existing_collection_ids = HashSet::from(["cid-user".to_string()]);
+        let changed_capabilities = HashSet::from(["cid-user".to_string()]);
+
+        let replay_collections = collections_requiring_replay(
+            &effective_collections,
+            &collection_cids,
+            &existing_collection_ids,
+            &changed_capabilities,
+        );
+
+        assert_eq!(replay_collections, vec!["User".to_string()]);
+    }
+
+    #[test]
+    fn collections_requiring_replay_skips_existing_collection_when_capability_matches() {
+        let effective_collections = vec!["User".to_string()];
+        let collection_cids = vec!["cid-user".to_string()];
+        let existing_collection_ids = HashSet::from(["cid-user".to_string()]);
+        let changed_capabilities = HashSet::new();
+
+        let replay_collections = collections_requiring_replay(
+            &effective_collections,
+            &collection_cids,
+            &existing_collection_ids,
+            &changed_capabilities,
+        );
+
+        assert!(replay_collections.is_empty());
     }
 }
