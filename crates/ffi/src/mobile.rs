@@ -54,6 +54,8 @@ struct MobileP2pConfig {
     transport: Option<String>,
     listen_address: Option<String>,
     iroh: Option<MobileIrohConfig>,
+    max_concurrent_dag_fetches: Option<usize>,
+    max_concurrent_push_tasks: Option<usize>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -384,6 +386,16 @@ pub extern "C" fn defra_mobile_open_node(config_json: *const c_char) -> NewNodeR
             iroh_discovery_origin_domain: c_string_ptr(&iroh_discovery_origin_domain),
             iroh_pkarr_relay_url: c_string_ptr(&iroh_pkarr_relay_url),
             iroh_key_path: c_string_ptr(&iroh_key_path),
+            max_concurrent_dag_fetches: config
+                .p2p
+                .as_ref()
+                .and_then(|p2p| p2p.max_concurrent_dag_fetches)
+                .unwrap_or(0),
+            max_concurrent_push_tasks: config
+                .p2p
+                .as_ref()
+                .and_then(|p2p| p2p.max_concurrent_push_tasks)
+                .unwrap_or(0),
         };
 
         let mut result = if config.p2p.is_some() {

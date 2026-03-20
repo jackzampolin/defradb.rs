@@ -214,6 +214,10 @@ pub struct NodeInitOptions {
     pub iroh_pkarr_relay_url: *const c_char,
     /// Optional path to persist the iroh secret key.
     pub iroh_key_path: *const c_char,
+    /// Maximum concurrent DAG fetch tasks. 0 means use default.
+    pub max_concurrent_dag_fetches: usize,
+    /// Maximum concurrent push tasks. 0 means use default.
+    pub max_concurrent_push_tasks: usize,
 }
 
 impl Default for NodeInitOptions {
@@ -241,6 +245,8 @@ impl Default for NodeInitOptions {
             iroh_discovery_origin_domain: ptr::null(),
             iroh_pkarr_relay_url: ptr::null(),
             iroh_key_path: ptr::null(),
+            max_concurrent_dag_fetches: 0,
+            max_concurrent_push_tasks: 0,
         }
     }
 }
