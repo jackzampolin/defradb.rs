@@ -53,7 +53,7 @@ pub async fn import_database<S: Store>(
             .map_err(|e| format!("failed to get collection: {}", e))?
             .ok_or_else(|| {
                 format!(
-                    "failed to get collection: key not found. Name: {}",
+                    "failed to get collection: collection not found. Name: {}",
                     collection_name
                 )
             })?;
