@@ -1199,6 +1199,7 @@ fn parse_cid_value(
 }
 
 /// Resolve a string value, handling variables.
+#[allow(dead_code)]
 fn resolve_string_value(
     value: &Value<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
