@@ -11,7 +11,9 @@ use identity::Did;
 
 use crate::error::{Result, TransactionError};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
-use crate::query_parse::{parse_request_with_variables, ParsedOperation};
+use crate::query_parse::{
+    parse_request_with_variables, validate_parsed_operation, ParsedOperation,
+};
 use crate::txn::{GetTransactionResult, TransactionHandle, TransactionRegistry};
 
 use super::{DocFetcher, QueryRunner};
@@ -128,6 +130,19 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 };
             }
         };
+
+        // Validate that all referenced collections exist before execution
+        if let Err(e) = validate_parsed_operation(&parsed, self.effective_provider().as_ref()).await
+        {
+            return QueryResponse {
+                data: None,
+                errors: vec![QueryResponseError {
+                    message: e.to_string(),
+                    path: None,
+                    locations: None,
+                }],
+            };
+        }
 
         // NAC check uses the raw request identity (not default fallback).
         // The default_identity is for document ACP, not node access control.
@@ -270,6 +285,30 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
+        // Get transaction-scoped collection provider if available
+        let txn_provider = txn_ctx.collection_provider();
+
+        // Validate that all referenced collections exist before execution.
+        // Use the transaction-scoped provider if available so uncommitted schemas are visible.
+        {
+            let validation_provider: &dyn crate::fetcher::CollectionProvider =
+                if let Some(ref p) = txn_provider {
+                    p.as_ref()
+                } else {
+                    self.collection_provider.as_ref()
+                };
+            if let Err(e) = validate_parsed_operation(&parsed, validation_provider).await {
+                return QueryResponse {
+                    data: None,
+                    errors: vec![QueryResponseError {
+                        message: e.to_string(),
+                        path: None,
+                        locations: None,
+                    }],
+                };
+            }
+        }
+
         // NAC check uses the raw request identity (not default fallback).
         if let Some(denial) = check_nac(self, &request.identity, &parsed).await {
             return denial;
@@ -277,9 +316,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
 
         // Resolve effective identity: request identity takes precedence over default
         let identity = self.resolve_identity(request.identity);
-
-        // Get transaction-scoped collection provider if available
-        let txn_provider = txn_ctx.collection_provider();
 
         // Route to appropriate handler based on operation type
         let execution = async {
