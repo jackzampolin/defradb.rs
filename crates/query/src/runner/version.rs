@@ -35,8 +35,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         caller_identity: Option<Did>,
         version_selection: Option<&Select>,
     ) -> Result<JsonValue> {
-        let cid = select.cid.as_ref().ok_or_else(|| {
+        let cids = select.cid.as_ref().ok_or_else(|| {
             QueryError::internal("execute_cid_query called without CID - this is a bug")
+        })?;
+        let cid = cids.first().ok_or_else(|| {
+            QueryError::internal("execute_cid_query called with empty CID array - this is a bug")
         })?;
 
         // Get expected docID from select.doc_ids (optional validation)

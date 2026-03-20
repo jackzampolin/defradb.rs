@@ -99,7 +99,7 @@ pub fn is_commits_subscription(query: &str) -> bool {
 /// Convert a _commits subscription to a query scoped to a specific CID.
 ///
 /// Transforms: `subscription { _commits(docID: "...") { fields } }`
-/// Into: `{ _commits(cid: "bafyrei-xxx") { fields } }`
+/// Into: `{ _commits(cid: ["bafyrei-xxx"]) { fields } }`
 pub fn subscription_to_commits_query_with_cid(subscription_query: &str, cid: &str) -> String {
     // Step 1: Remove "subscription" keyword
     let trimmed = subscription_query.trim_start();
@@ -152,14 +152,14 @@ pub fn subscription_to_commits_query_with_cid(subscription_query: &str, cid: &st
             }
         }
         format!(
-            "{}(cid: \"{}\"){}",
+            "{}(cid: [\"{}\"]){}",
             &query[..paren_start_abs],
             cid,
             &query[close_paren_abs + 1..]
         )
     } else {
         format!(
-            "{}(cid: \"{}\"){}",
+            "{}(cid: [\"{}\"]){}",
             &query[..after_field],
             cid,
             &query[after_field..]

@@ -424,7 +424,7 @@ pub struct Select {
     /// Document ID filter
     pub doc_ids: Option<Vec<String>>,
     /// CID filter (for versioned queries)
-    pub cid: Option<String>,
+    pub cid: Option<Vec<String>>,
     /// Depth for commits queries (how deep to traverse the DAG)
     pub depth: Option<u64>,
     /// Whether to include deleted documents
@@ -533,7 +533,7 @@ impl Select {
 
     /// Set CID filter
     pub fn with_cid(mut self, cid: String) -> Self {
-        self.cid = Some(cid);
+        self.cid = Some(vec![cid]);
         self
     }
 

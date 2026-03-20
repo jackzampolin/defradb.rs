@@ -405,7 +405,7 @@ fn test_parse_cid_wrong_type_returns_error() {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("cid argument must be a string"));
+        .contains("cid must be a string or list"));
 }
 
 #[test]
