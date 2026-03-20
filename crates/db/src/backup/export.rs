@@ -34,7 +34,7 @@ pub async fn export_database<S: Store>(
         for name in collections {
             if !all_names.contains(name) {
                 return Err(format!(
-                    "failed to get collection: key not found. Name: {}",
+                    "failed to get collection: collection not found. Name: {}",
                     name
                 ));
             }
@@ -48,7 +48,12 @@ pub async fn export_database<S: Store>(
         let col = database
             .get_collection(name)
             .map_err(|e| format!("failed to get collection '{}': {}", name, e))?
-            .ok_or_else(|| format!("failed to get collection: key not found. Name: {}", name))?;
+            .ok_or_else(|| {
+                format!(
+                    "failed to get collection: collection not found. Name: {}",
+                    name
+                )
+            })?;
         name_cid_pairs.push((name.clone(), col.schema().collection_id.clone()));
     }
     name_cid_pairs.sort_by(|a, b| a.1.cmp(&b.1));
@@ -75,7 +80,12 @@ pub async fn export_database<S: Store>(
         let collection = database
             .get_collection(name)
             .map_err(|e| format!("failed to get collection '{}': {}", name, e))?
-            .ok_or_else(|| format!("failed to get collection: key not found. Name: {}", name))?;
+            .ok_or_else(|| {
+                format!(
+                    "failed to get collection: collection not found. Name: {}",
+                    name
+                )
+            })?;
 
         let schema = collection.schema().clone();
         let fields = classify_schema_fields(&schema);
