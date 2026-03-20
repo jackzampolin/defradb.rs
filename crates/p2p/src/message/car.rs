@@ -42,9 +42,7 @@ impl CarFetchRequest {
     }
 
     pub fn response_roots(&self) -> Vec<Cid> {
-        if self.recursive {
-            vec![self.root_cid]
-        } else if self.wanted_cids.is_empty() {
+        if self.recursive || self.wanted_cids.is_empty() {
             vec![self.root_cid]
         } else {
             self.wanted_cids.clone()

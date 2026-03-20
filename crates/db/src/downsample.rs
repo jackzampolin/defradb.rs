@@ -15,7 +15,9 @@ use std::str;
 use std::sync::Arc;
 use storage::corekv::{IterOptions, Store};
 use storage::keys::headstore::{HeadstoreDocKey, HeadstorePriorityKey};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::time::{self, MissedTickBehavior};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1966,6 +1968,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start_downsample_task(self: Arc<Self>) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut ticker = time::interval(std::time::Duration::from_millis(250));

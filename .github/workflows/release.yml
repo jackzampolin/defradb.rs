@@ -97,6 +97,24 @@ jobs:
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
+          NEEDS_APT=0
+          if ! command -v pkg-config >/dev/null 2>&1; then
+            NEEDS_APT=1
+          elif ! pkg-config --exists openssl dbus-1; then
+            NEEDS_APT=1
+          fi
+          if ! command -v protoc >/dev/null 2>&1; then
+            NEEDS_APT=1
+          fi
+          if [ "${{ matrix.variant }}" = "rocksdb" ] && ! command -v clang >/dev/null 2>&1; then
+            NEEDS_APT=1
+          fi
+
+          if [ "$NEEDS_APT" -eq 0 ]; then
+            echo "Linux build dependencies already installed; skipping apt."
+            exit 0
+          fi
+
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
           if [ "${{ matrix.variant }}" = "rocksdb" ]; then
@@ -279,6 +297,24 @@ jobs:
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
+          NEEDS_APT=0
+          if ! command -v pkg-config >/dev/null 2>&1; then
+            NEEDS_APT=1
+          elif ! pkg-config --exists openssl dbus-1; then
+            NEEDS_APT=1
+          fi
+          if ! command -v protoc >/dev/null 2>&1; then
+            NEEDS_APT=1
+          fi
+          if [ "${{ matrix.variant }}" = "rocksdb" ] && ! command -v clang >/dev/null 2>&1; then
+            NEEDS_APT=1
+          fi
+
+          if [ "$NEEDS_APT" -eq 0 ]; then
+            echo "Linux build dependencies already installed; skipping apt."
+            exit 0
+          fi
+
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
           if [ "${{ matrix.variant }}" = "rocksdb" ]; then

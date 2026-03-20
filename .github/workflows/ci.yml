@@ -22,6 +22,8 @@ jobs:
       - name: Configure private repo access
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - run: cargo fmt --all -- --check
 
       - run: cargo clippy --all -- -D warnings
@@ -41,6 +43,8 @@ jobs:
 
       - name: Configure private repo access
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - run: cargo test --workspace --exclude integration-test --exclude ffi-test
 
@@ -92,6 +96,8 @@ jobs:
 
       - name: Configure private repo access
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Restore or build binaries
         run: |
@@ -185,6 +191,8 @@ jobs:
 
       - name: Configure private repo access
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Build release binaries
         run: |

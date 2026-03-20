@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::datastore::ViewCacheKey;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::task::JoinHandle;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::time::{self, Instant, MissedTickBehavior};
 
 /// Options for refreshing materialized views.
@@ -40,6 +42,7 @@ pub struct ScheduledViewRefresh {
     pub interval: Duration,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 struct ScheduledViewState {
     interval: Duration,
@@ -130,6 +133,7 @@ impl<S: Store> crate::database::DB<S> {
     }
 
     /// Spawn a background task that periodically refreshes downsampled materialized views.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start_scheduled_view_refresh_task(self: Arc<Self>) -> JoinHandle<()>
     where
         S: 'static,
