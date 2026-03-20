@@ -291,12 +291,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         // Validate that all referenced collections exist before execution.
         // Use the transaction-scoped provider if available so uncommitted schemas are visible.
         {
+            #[cfg(not(target_arch = "wasm32"))]
             let validation_provider: &dyn crate::fetcher::CollectionProvider =
                 if let Some(ref p) = txn_provider {
                     p.as_ref()
                 } else {
                     self.collection_provider.as_ref()
                 };
+
+            #[cfg(target_arch = "wasm32")]
+            let validation_provider: &dyn crate::fetcher::CollectionProvider =
+                self.collection_provider.as_ref();
+
             if let Err(e) = validate_parsed_operation(&parsed, validation_provider).await {
                 return QueryResponse {
                     data: None,
