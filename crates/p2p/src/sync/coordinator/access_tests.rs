@@ -25,7 +25,9 @@ use crate::sync::peer_state::PeerStateTracker;
 use crate::sync::rate_limiter::PeerRateLimiter;
 use crate::transport::{PeerId, ResponseToken, TransportEvent};
 
-use super::{SyncCoordinator, MAX_CONCURRENT_DAG_FETCHES, MAX_CONCURRENT_PUSH_TASKS};
+use super::{
+    SyncCoordinator, DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+};
 
 type TestBlockstore = DefraBlockstore<MemoryStore>;
 const BLOCK_DATA: &[u8] = b"block data";
@@ -60,8 +62,12 @@ fn create_test_coordinator(
         collection_store: Arc::new(NoOpCollectionStorage),
         head_provider: Arc::new(NoOpHeadProvider),
         failure_tx: None,
-        dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DAG_FETCHES)),
-        push_semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PUSH_TASKS)),
+        dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
+        )),
+        push_semaphore: Arc::new(tokio::sync::Semaphore::new(
+            DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+        )),
         rate_limiter: Arc::new(PeerRateLimiter::default()),
     };
 

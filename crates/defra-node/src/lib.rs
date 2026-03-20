@@ -181,6 +181,12 @@ pub struct P2PConfig {
     /// Reload collection subscriptions persisted in the local store on startup.
     /// When false, only explicit subscribe calls in the current process take effect.
     pub load_persisted_collections: bool,
+    /// Maximum concurrent DAG fetch tasks. Lower values reduce resource pressure
+    /// on constrained clients (mobile, embedded). Default: 16.
+    pub max_concurrent_dag_fetches: usize,
+    /// Maximum concurrent push tasks for sending blocks to replicators.
+    /// Default: 32.
+    pub max_concurrent_push_tasks: usize,
 }
 
 /// Type-erased P2P operations exposed on EmbeddedNode.
@@ -769,10 +775,15 @@ impl NodeBuilder {
             Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
 
         // 7. SyncCoordinator (transport-generic — same constructor, different type param)
+        let sync_config = p2p::sync::SyncConfig {
+            max_concurrent_dag_fetches: config.max_concurrent_dag_fetches,
+            max_concurrent_push_tasks: config.max_concurrent_push_tasks,
+            ..Default::default()
+        };
         let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_collection_store(
             transport.clone(),
             sync_blockstore.clone(),
-            p2p::sync::SyncConfig::default(),
+            sync_config,
             p2p::AccessMode::Open,
             collection_store,
         )
