@@ -245,8 +245,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mut dag_scan_attrs = serde_json::Map::new();
 
         // cid: the specific commit CID if provided, else null
-        if let Some(ref cid) = select.cid {
-            dag_scan_attrs.insert("cid".to_string(), serde_json::json!(cid));
+        if let Some(ref cids) = select.cid {
+            dag_scan_attrs.insert("cid".to_string(), serde_json::json!(cids));
         } else {
             dag_scan_attrs.insert("cid".to_string(), serde_json::Value::Null);
         }

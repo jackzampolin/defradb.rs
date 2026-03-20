@@ -101,7 +101,7 @@ async fn cid_time_travel_acp_bypass_test(cluster: TestCluster) {
     let alice_cid_result = node
         .query_with_identity(
             &format!(
-                r#"query {{ User(cid: "{}") {{ _docID name age }} }}"#,
+                r#"query {{ User(cid: ["{}"])  {{ _docID name age }} }}"#,
                 historical_cid
             ),
             &alice.private_key_hex,
@@ -120,7 +120,7 @@ async fn cid_time_travel_acp_bypass_test(cluster: TestCluster) {
     let bob_cid_result = node
         .query_with_identity(
             &format!(
-                r#"query {{ User(cid: "{}") {{ _docID name age }} }}"#,
+                r#"query {{ User(cid: ["{}"])  {{ _docID name age }} }}"#,
                 historical_cid
             ),
             &bob.private_key_hex,
@@ -161,7 +161,7 @@ async fn cid_time_travel_acp_bypass_test(cluster: TestCluster) {
     let bob_cid_after_grant = node
         .query_with_identity(
             &format!(
-                r#"query {{ User(cid: "{}") {{ _docID name age }} }}"#,
+                r#"query {{ User(cid: ["{}"])  {{ _docID name age }} }}"#,
                 historical_cid
             ),
             &bob.private_key_hex,

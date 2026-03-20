@@ -122,7 +122,7 @@ pub fn build_introspection_schema(
                 TypeRef::named_nn_list_nn(&collection.name),
                 move |_ctx| FieldFuture::new(async move { Ok(Some(GqlValue::List(vec![]))) }),
             )
-            .argument(InputValue::new("cid", TypeRef::named("String")))
+            .argument(InputValue::new("cid", TypeRef::named_nn_list("ID")))
             .argument(InputValue::new("docID", TypeRef::named_nn_list("ID")))
             .argument(InputValue::new(
                 "filter",
@@ -159,7 +159,7 @@ pub fn build_introspection_schema(
         Field::new("_commits", TypeRef::named_list("Commit"), |_| {
             FieldFuture::new(async { Ok(Some(GqlValue::List(vec![]))) })
         })
-        .argument(InputValue::new("cid", TypeRef::named("ID")))
+        .argument(InputValue::new("cid", TypeRef::named_nn_list("ID")))
         .argument(InputValue::new("depth", TypeRef::named("Int")))
         .argument(InputValue::new("docID", TypeRef::named_nn_list("ID")))
         .argument(InputValue::new(

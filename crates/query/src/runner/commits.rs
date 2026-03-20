@@ -985,7 +985,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Build options from the select
         let options = CommitsQueryOptions {
             doc_id: select.doc_ids.as_ref().and_then(|ids| ids.first().cloned()),
-            cid: select.cid.clone(),
+            cid: select.cid.as_ref().and_then(|cids| cids.first().cloned()),
             depth: select.depth,
             height_start: match &height_range {
                 HeightRangeExtraction::Range(range) => Some(range.start),

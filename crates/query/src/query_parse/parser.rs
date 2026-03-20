@@ -606,8 +606,13 @@ fn parse_field_to_select(
             "cid" => {
                 // null means "no cid filter" (skip setting it)
                 if !matches!(arg_value, Value::Null) {
-                    let cid_val = resolve_string_value(arg_value, variables, "cid")?;
-                    select.cid = Some(cid_val);
+                    let cids = parse_cid_value(arg_value, variables)?;
+                    if cids.len() > 1 {
+                        return Err(QueryError::parse(
+                            "querying by multiple cids is not yet supported",
+                        ));
+                    }
+                    select.cid = Some(cids);
                 }
             }
             "showDeleted" => {
@@ -1123,6 +1128,73 @@ pub(super) fn parse_doc_ids_value(
             }
         }
         _ => Err(QueryError::parse("docIDs must be a string or list")),
+    }
+}
+
+/// Parse cid argument into vector of strings.
+///
+/// Accepts `[String!]` (array) or a single `String` (wrapped into a vec).
+fn parse_cid_value(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Vec<String>> {
+    match value {
+        Value::List(items) => {
+            let cids: Result<Vec<String>> = items
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) => Ok(s.clone()),
+                    Value::Variable(name) => {
+                        let vars = variables.ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "variable '{}' used but no variables provided",
+                                name
+                            ))
+                        })?;
+                        let json_val = vars.get(name).ok_or_else(|| {
+                            QueryError::parse(format!("Variable \"${}\" was not provided", name))
+                        })?;
+                        json_val.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "Variable \"${}\" must be of type String",
+                                name
+                            ))
+                        })
+                    }
+                    _ => Err(QueryError::parse("cid items must be strings")),
+                })
+                .collect();
+            cids
+        }
+        Value::String(s) => Ok(vec![s.clone()]),
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            let json_val = vars.get(name).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })?;
+            if let Some(s) = json_val.as_str() {
+                Ok(vec![s.to_string()])
+            } else if let Some(arr) = json_val.as_array() {
+                arr.iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(|s| s.to_string())
+                            .ok_or_else(|| QueryError::parse("cid items must be strings"))
+                    })
+                    .collect()
+            } else {
+                Err(QueryError::parse(format!(
+                    "Variable \"${}\" must be of type String or [String]",
+                    name
+                )))
+            }
+        }
+        _ => Err(QueryError::parse("cid must be a string or list")),
     }
 }
 
