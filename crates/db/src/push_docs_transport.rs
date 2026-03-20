@@ -158,7 +158,9 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
                 let pid = peer_id.clone();
                 let sem = replay_semaphore.clone();
                 push_handles.push(tokio::spawn(async move {
-                    let _permit = sem.acquire().await;
+                    let Ok(_permit) = sem.acquire().await else {
+                        return;
+                    };
                     for req in requests {
                         let cid = req.cid.clone();
                         match t.send_two_stream_request(&pid, req).await {
