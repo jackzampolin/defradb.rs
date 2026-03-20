@@ -48,6 +48,7 @@ use crate::mutator::DocMutator;
 use crate::planner::Doc;
 use crate::txn::{NoOpTransactionRegistry, TransactionRegistry};
 
+#[cfg(not(target_arch = "wasm32"))]
 tokio::task_local! {
     /// Per-request collection provider override for transaction-scoped schema resolution.
     ///
@@ -271,10 +272,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ///
     /// Returns the transaction-scoped provider if set (via task-local storage),
     /// otherwise returns the default process-wide provider.
+    #[cfg(not(target_arch = "wasm32"))]
     fn effective_provider(&self) -> Arc<dyn CollectionProvider> {
         TXN_COLLECTION_PROVIDER
             .try_with(|p| p.clone())
             .unwrap_or_else(|_| self.collection_provider.clone())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn effective_provider(&self) -> Arc<dyn CollectionProvider> {
+        self.collection_provider.clone()
     }
 
     /// Get the names of all collections.

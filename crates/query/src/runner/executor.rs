@@ -285,7 +285,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
-        // Get transaction-scoped collection provider if available
+        #[cfg(not(target_arch = "wasm32"))]
         let txn_provider = txn_ctx.collection_provider();
 
         // Validate that all referenced collections exist before execution.
@@ -388,6 +388,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         // If the transaction provides a collection provider, set it as the task-local
         // override so all collection resolution within this execution uses the
         // transaction's uncommitted state.
+        #[cfg(not(target_arch = "wasm32"))]
         let result = if let Some(provider) = txn_provider {
             super::TXN_COLLECTION_PROVIDER
                 .scope(provider, await_with_timeout(execution, self.query_timeout))
@@ -395,6 +396,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         } else {
             await_with_timeout(execution, self.query_timeout).await
         };
+
+        #[cfg(target_arch = "wasm32")]
+        let result = await_with_timeout(execution, self.query_timeout).await;
 
         match result {
             Ok(data) => QueryResponse {

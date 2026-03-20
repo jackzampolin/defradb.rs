@@ -37,27 +37,6 @@ jobs:
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: ""
-          # fjall
-          - variant: fjall
-            target: x86_64-unknown-linux-gnu
-            platform: linux_amd64
-            runner: '["self-hosted", "Linux", "X64"]'
-            features: "--features fjall"
-          - variant: fjall
-            target: aarch64-unknown-linux-gnu
-            platform: linux_arm64
-            runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--features fjall"
-          - variant: fjall
-            target: x86_64-apple-darwin
-            platform: darwin_amd64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--features fjall,vendored-openssl"
-          - variant: fjall
-            target: aarch64-apple-darwin
-            platform: darwin_arm64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--features fjall"
           # rocksdb
           - variant: rocksdb
             target: x86_64-unknown-linux-gnu
@@ -115,10 +94,15 @@ jobs:
             exit 0
           fi
 
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
+          APT_ARGS=()
+          if [ "$(dpkg --print-architecture)" = "arm64" ]; then
+            APT_ARGS=(-o APT::Architecture=arm64 -o APT::Architectures=arm64)
+          fi
+
+          sudo apt-get "${APT_ARGS[@]}" update
+          sudo apt-get "${APT_ARGS[@]}" install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
           if [ "${{ matrix.variant }}" = "rocksdb" ]; then
-            sudo apt-get install -y libclang-dev
+            sudo apt-get "${APT_ARGS[@]}" install -y libclang-dev
           fi
 
       - name: Install system dependencies (macOS)
@@ -237,27 +221,6 @@ jobs:
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: ""
-          # fjall
-          - variant: fjall
-            target: x86_64-unknown-linux-gnu
-            platform: linux_amd64
-            runner: '["self-hosted", "Linux", "X64"]'
-            features: "--features fjall"
-          - variant: fjall
-            target: aarch64-unknown-linux-gnu
-            platform: linux_arm64
-            runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--features fjall"
-          - variant: fjall
-            target: x86_64-apple-darwin
-            platform: darwin_amd64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--features fjall"
-          - variant: fjall
-            target: aarch64-apple-darwin
-            platform: darwin_arm64
-            runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--features fjall"
           # rocksdb
           - variant: rocksdb
             target: x86_64-unknown-linux-gnu
@@ -315,10 +278,15 @@ jobs:
             exit 0
           fi
 
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
+          APT_ARGS=()
+          if [ "$(dpkg --print-architecture)" = "arm64" ]; then
+            APT_ARGS=(-o APT::Architecture=arm64 -o APT::Architectures=arm64)
+          fi
+
+          sudo apt-get "${APT_ARGS[@]}" update
+          sudo apt-get "${APT_ARGS[@]}" install -y libssl-dev pkg-config protobuf-compiler libdbus-1-dev
           if [ "${{ matrix.variant }}" = "rocksdb" ]; then
-            sudo apt-get install -y libclang-dev
+            sudo apt-get "${APT_ARGS[@]}" install -y libclang-dev
           fi
 
       - name: Install system dependencies (macOS)
@@ -416,12 +384,6 @@ jobs:
         with:
           path: artifacts
           pattern: defra-redb-*
-          merge-multiple: true
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          pattern: defra-fjall-*
           merge-multiple: true
 
       - uses: actions/download-artifact@v4
