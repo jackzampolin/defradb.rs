@@ -36,8 +36,12 @@ async fn idempotent_reconnect_test(cluster: TestCluster) {
 
     // Set up replicator (first time)
     node0.p2p_connect(&[&addr1]).expect("p2p_connect");
-    node0.p2p_collection_add(&["User"]).expect("collection add node0");
-    node1.p2p_collection_add(&["User"]).expect("collection add node1");
+    node0
+        .p2p_collection_add(&["User"])
+        .expect("collection add node0");
+    node1
+        .p2p_collection_add(&["User"])
+        .expect("collection add node1");
     node0
         .p2p_replicator_set(&["User"], &addr1)
         .expect("first replicator_set");
@@ -94,10 +98,7 @@ async fn idempotent_reconnect_test(cluster: TestCluster) {
     let users = final_result["User"].as_array().expect("User not array");
     assert_eq!(users.len(), 2, "expected 2 users on node1");
 
-    let names: Vec<&str> = users
-        .iter()
-        .map(|u| u["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = users.iter().map(|u| u["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"Alice"), "Alice missing from node1");
     assert!(names.contains(&"Bob"), "Bob missing from node1");
 }
