@@ -44,28 +44,35 @@ use super::TX_HEADER_NAME;
 /// Go DefraDB only generates `encrypted_<Collection>` GraphQL fields when P2P
 /// is enabled. Returns a schema validation error matching Go's format if the
 /// query references encrypted fields but P2P is not available.
+///
+/// Parses the query into an AST to avoid false positives from `encrypted_`
+/// appearing inside string literals (e.g. filter values).
 fn check_encrypted_fields(state: &AppState, query: &str) -> Result<(), HttpError> {
-    if !query.contains("encrypted_") {
-        return Ok(());
-    }
     if state.p2p.is_some() {
         return Ok(());
     }
-    // Extract field name for Go-compatible error message
-    if let Some(start) = query.find("encrypted_") {
-        let rest = &query[start..];
-        let end = rest
-            .find(|c: char| !c.is_alphanumeric() && c != '_')
-            .unwrap_or(rest.len());
-        let field_name = &rest[..end];
+    let parsed = match parse_request(query) {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
+    let encrypted_select = match &parsed {
+        ParsedOperation::Query { selects, .. } => selects.iter().find(|s| s.is_encrypted),
+        ParsedOperation::Subscription { select, .. } => {
+            if select.is_encrypted {
+                Some(select.as_ref())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    if let Some(select) = encrypted_select {
         return Err(HttpError::BadRequest(format!(
-            "Cannot query field \"{}\" on type \"Query\".",
-            field_name
+            "Cannot query field \"encrypted_{}\" on type \"Query\".",
+            select.collection_name
         )));
     }
-    Err(HttpError::BadRequest(
-        "Cannot query encrypted fields when P2P is disabled.".to_string(),
-    ))
+    Ok(())
 }
 
 /// Fast check for whether a query could be a subscription.
