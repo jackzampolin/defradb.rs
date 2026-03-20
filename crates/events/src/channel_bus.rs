@@ -26,7 +26,7 @@ pub struct ChannelBusConfig {
 impl Default for ChannelBusConfig {
     fn default() -> Self {
         Self {
-            event_buffer_size: 100,
+            event_buffer_size: 4096,
             signal_resync_on_overflow: true,
         }
     }
