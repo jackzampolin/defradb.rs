@@ -121,10 +121,10 @@ pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
     /// Channel for reporting push failures to the FFI layer for retry tracking.
     pub(super) failure_tx: Option<tokio::sync::mpsc::UnboundedSender<PushFailure>>,
 
-    /// Semaphore limiting concurrent DAG fetch tasks (capped at MAX_CONCURRENT_DAG_FETCHES).
+    /// Semaphore limiting concurrent DAG fetch tasks (configurable via SyncConfig).
     pub(super) dag_fetch_semaphore: Arc<tokio::sync::Semaphore>,
 
-    /// Semaphore limiting concurrent push tasks (capped at MAX_CONCURRENT_PUSH_TASKS).
+    /// Semaphore limiting concurrent push tasks (configurable via SyncConfig).
     pub(super) push_semaphore: Arc<tokio::sync::Semaphore>,
 
     /// Per-peer rate limiter applied at event dispatch to throttle abusive peers.

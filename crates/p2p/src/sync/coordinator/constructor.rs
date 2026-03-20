@@ -95,8 +95,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let local_peer_id = transport.local_peer_id().to_string();
         let broadcaster = Broadcaster::new(transport.clone());
         let peer_state = Arc::new(PeerStateTracker::new());
-        let max_dag_fetches = config.max_concurrent_dag_fetches;
-        let max_push_tasks = config.max_concurrent_push_tasks;
+        let max_dag_fetches = config.max_concurrent_dag_fetches.max(1);
+        let max_push_tasks = config.max_concurrent_push_tasks.max(1);
         let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), config);
 
         Ok((
