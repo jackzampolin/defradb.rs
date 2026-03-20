@@ -408,7 +408,8 @@ async fn dispatch_stream(
             }
         }
         x if x == protocols::ALPN_DOCSYNC_RESP => {
-            let reply: crate::message::DocSyncReply = protocols::read_message(recv).await?;
+            let reply: crate::message::DocSyncReply =
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
             debug!(peer_id = %peer_id, "Received doc sync response via fire-and-forget");
             if event_tx
                 .send(TransportEvent::DocSyncReply {
@@ -422,7 +423,8 @@ async fn dispatch_stream(
             }
         }
         x if x == protocols::ALPN_BRANCHABLE_RESP => {
-            let reply: crate::message::BranchableSyncReply = protocols::read_message(recv).await?;
+            let reply: crate::message::BranchableSyncReply =
+                protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
             debug!(peer_id = %peer_id, "Received branchable sync response via fire-and-forget");
             if event_tx
                 .send(TransportEvent::BranchableSyncReply {
