@@ -189,6 +189,35 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             collection_cids.clone_from(&effective_collections);
         }
 
+        // Check existing replicator state before creating/updating so we can
+        // skip the expensive initial replay when the replicator already exists
+        // with the same collections (idempotent reconnect path).
+        let existing_collection_ids: HashSet<String> = {
+            let result = if let Some(ref coordinator) = self.sync_coordinator {
+                coordinator
+                    .get_replicator(&peer_id)
+                    .await
+                    .map_err(|e| e.to_string())
+            } else {
+                self.transport
+                    .get_replicator(&peer_id)
+                    .await
+                    .map_err(|e| e.to_string())
+            };
+            match result {
+                Ok(Some(info)) => info.collections.into_iter().collect(),
+                Ok(None) => HashSet::new(),
+                Err(e) => {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "Failed to check existing replicator state; falling back to full replay"
+                    );
+                    HashSet::new()
+                }
+            }
+        };
+
         self.transport
             .dial(&peer_id, direct_addrs)
             .await
@@ -219,25 +248,53 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             }
         }
 
-        if let Some(ref pusher) = self.doc_pusher {
-            let push_pusher = Arc::clone(pusher);
-            let push_event_bus = self.event_bus.clone();
-            let push_collections = effective_collections;
-            let push_peer = peer_id;
-            let push_se_key = push_options.se_encryption_key;
-            tokio::spawn(async move {
-                if let Err(error) = push_pusher
-                    .push_existing_docs(&push_peer, &push_collections, push_se_key.as_deref())
-                    .await
-                {
-                    tracing::error!(error = %error, "Failed to push existing docs to replicator");
-                }
-                if let Some(bus) = push_event_bus {
-                    bus.publish(events::Message::replicator_completed());
-                }
-            });
-        } else if let Some(ref bus) = self.event_bus {
-            bus.publish(events::Message::replicator_completed());
+        // Only replay collections that weren't already replicated by this peer.
+        let new_collection_names: Vec<String> = effective_collections
+            .iter()
+            .zip(collection_cids.iter())
+            .filter(|(_, cid)| !existing_collection_ids.contains(*cid))
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        if !new_collection_names.is_empty() {
+            if let Some(ref pusher) = self.doc_pusher {
+                let push_pusher = Arc::clone(pusher);
+                let push_event_bus = self.event_bus.clone();
+                let push_peer = peer_id;
+                let push_se_key = push_options.se_encryption_key;
+
+                tracing::info!(
+                    peer_id = %push_peer,
+                    new_collections = ?new_collection_names,
+                    "Replaying existing docs for new collections only"
+                );
+
+                tokio::spawn(async move {
+                    if let Err(error) = push_pusher
+                        .push_existing_docs(
+                            &push_peer,
+                            &new_collection_names,
+                            push_se_key.as_deref(),
+                        )
+                        .await
+                    {
+                        tracing::error!(error = %error, "Failed to push existing docs to replicator");
+                    }
+                    if let Some(bus) = push_event_bus {
+                        bus.publish(events::Message::replicator_completed());
+                    }
+                });
+            } else if let Some(ref bus) = self.event_bus {
+                bus.publish(events::Message::replicator_completed());
+            }
+        } else {
+            tracing::debug!(
+                peer_id = %peer_id,
+                "Replicator already exists with same collections, skipping initial replay"
+            );
+            if let Some(ref bus) = self.event_bus {
+                bus.publish(events::Message::replicator_completed());
+            }
         }
 
         Ok(())

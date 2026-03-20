@@ -30,8 +30,22 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
 ) -> Result<(), String> {
     let conn_timeout = std::time::Duration::from_secs(15);
     let conn_start = std::time::Instant::now();
+    let mut logged_conn_error = false;
     loop {
-        let peers = transport.connected_peers().await.unwrap_or_default();
+        let peers = match transport.connected_peers().await {
+            Ok(peers) => peers,
+            Err(e) => {
+                if !logged_conn_error {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "connected_peers check failed during replay wait"
+                    );
+                    logged_conn_error = true;
+                }
+                Vec::new()
+            }
+        };
         if peers.iter().any(|p| p == peer_id) {
             break;
         }
