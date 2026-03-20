@@ -33,7 +33,9 @@ pub const ALPN_TWOSTREAM: &[u8] = b"/defra-iroh/twostream/0.1";
 pub const ALL_ALPNS: &[&[u8]] = &[
     ALPN_PUSHLOG,
     ALPN_DOCSYNC,
+    ALPN_DOCSYNC_RESP,
     ALPN_BRANCHABLE,
+    ALPN_BRANCHABLE_RESP,
     ALPN_CAR,
     ALPN_CAR_RESP,
     ALPN_SE,
