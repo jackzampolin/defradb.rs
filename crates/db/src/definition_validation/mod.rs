@@ -58,6 +58,7 @@ const UPDATE_VALIDATORS: &[Validator] = &[
     validate_field_not_mutated,
     validate_policy_not_modified,
     validate_indexes_not_modified,
+    validate_encrypted_indexes_not_modified,
     validate_sources_not_redefined,
     validate_source_belongs_to_host,
     validate_branchable_not_mutated,
