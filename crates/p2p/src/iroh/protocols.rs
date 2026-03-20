@@ -40,15 +40,32 @@ pub const ALL_ALPNS: &[&[u8]] = &[
     ALPN_TWOSTREAM,
 ];
 
+/// Maximum size for general messages (matches libp2p default).
+pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
+
+/// Maximum size for CAR block transfers (matches libp2p default).
+pub const MAX_CAR_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
+
 /// Read a length-prefixed CBOR message from a QUIC recv stream.
+///
+/// The `max_size` parameter caps the allocation to prevent a malicious peer
+/// from sending a large length prefix and causing an OOM.
 pub async fn read_message<T: serde::de::DeserializeOwned>(
     recv: &mut RecvStream,
+    max_size: usize,
 ) -> crate::error::Result<T> {
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf)
         .await
         .map_err(|e| crate::error::Error::Codec(format!("failed to read length: {}", e)))?;
     let len = u32::from_be_bytes(len_buf) as usize;
+
+    if len > max_size {
+        return Err(crate::error::Error::Codec(format!(
+            "message too large: {} bytes exceeds limit of {} bytes",
+            len, max_size
+        )));
+    }
 
     let mut payload = vec![0u8; len];
     recv.read_exact(&mut payload)
