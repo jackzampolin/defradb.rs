@@ -118,16 +118,32 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             "Processing DocSync reply"
         );
         let mut cids_to_fetch: Vec<(Cid, String)> = Vec::new();
+        let mut cids_to_remerge: Vec<(Cid, String)> = Vec::new();
         for item in &reply.results {
             for head_bytes in &item.heads {
                 match Cid::try_from(head_bytes.as_slice()) {
                     Ok(cid) => match self.manager.blockstore().has(&cid).await {
                         Ok(true) => {
-                            tracing::debug!(
-                                cid = %cid,
-                                doc_id = %item.doc_id,
-                                "Already have block, skipping fetch"
-                            );
+                            // Block exists locally — but it may not have been merged.
+                            // Check merge status and re-trigger merge if needed,
+                            // otherwise stranded docs remain invisible to queries.
+                            match self.manager.blockstore().is_merged(&cid).await {
+                                Ok(true) => {
+                                    tracing::debug!(
+                                        cid = %cid,
+                                        doc_id = %item.doc_id,
+                                        "Already have and merged block, skipping"
+                                    );
+                                }
+                                _ => {
+                                    tracing::info!(
+                                        cid = %cid,
+                                        doc_id = %item.doc_id,
+                                        "Block exists but not merged, scheduling re-merge"
+                                    );
+                                    cids_to_remerge.push((cid, item.doc_id.clone()));
+                                }
+                            }
                         }
                         Ok(false) => {
                             tracing::debug!(
@@ -152,6 +168,56 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                             error = %e,
                             "Failed to parse CID from DocSync reply"
                         );
+                    }
+                }
+            }
+        }
+
+        // Re-merge locally-present but unmerged blocks. Check if the full DAG
+        // is available; if so, emit BlockReceived directly. If the DAG is
+        // incomplete, fall through to the DAG fetcher so missing blocks are
+        // retrieved from the source peer.
+        if !cids_to_remerge.is_empty() {
+            let event_tx = self.manager.event_sender();
+            for (cid, doc_id) in cids_to_remerge {
+                match self.manager.blockstore().get(&cid).await {
+                    Ok(Some(data)) => {
+                        let missing = crate::sync::manager::links::find_all_missing_links(
+                            self.manager.blockstore().as_ref(),
+                            &data,
+                        )
+                        .await
+                        .unwrap_or_default();
+
+                        if missing.is_empty() {
+                            tracing::info!(
+                                cid = %cid,
+                                doc_id = %doc_id,
+                                "DAG complete locally, emitting BlockReceived for re-merge"
+                            );
+                            let _ = event_tx
+                                .send(crate::sync::manager::SyncEvent::BlockReceived {
+                                    cid,
+                                    doc_id: doc_id.clone(),
+                                    collection_id: String::new(),
+                                    creator: String::new(),
+                                    sender_peer: Some(peer_id.to_string()),
+                                    is_explicit_replicator: false,
+                                    explicit_replay_authorization: None,
+                                })
+                                .await;
+                        } else {
+                            tracing::info!(
+                                cid = %cid,
+                                doc_id = %doc_id,
+                                missing_count = missing.len(),
+                                "Unmerged block has incomplete DAG, adding to fetch list"
+                            );
+                            cids_to_fetch.push((cid, doc_id));
+                        }
+                    }
+                    _ => {
+                        cids_to_fetch.push((cid, doc_id));
                     }
                 }
             }
