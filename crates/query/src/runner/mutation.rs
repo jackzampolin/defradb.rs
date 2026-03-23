@@ -166,7 +166,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
 
                 batch.commit().await?;
-                self.scoped_fulltext_cache.clear();
                 return Ok(JsonValue::Object(results));
             }
         }
@@ -188,7 +187,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             results.insert(key, result);
         }
 
-        self.scoped_fulltext_cache.clear();
         Ok(JsonValue::Object(results))
     }
 

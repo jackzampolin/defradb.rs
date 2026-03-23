@@ -40,12 +40,9 @@ thiserror.workspace = true
 
 # Logging
 tracing.workspace = true
-parking_lot.workspace = true
-lru.workspace = true
 
 # Full-text search
 bm25.workspace = true
-bm25_turbo = { git = "https://github.com/TheSauceSuite/BM25-Turbo-Rust-Python-WASM-CLI", rev = "01ef1864c6ea5224c7c4711f8973c3c4f8f68b00", package = "bm25_turbo", default-features = false }
 
 # GraphQL parsing
 graphql-parser.workspace = true

@@ -1,5 +1,6 @@
 //! Planner orchestration and post-processing for nested queries.
 
+use bm25::{Document as Bm25Document, Language, SearchEngineBuilder};
 use identity::Did;
 use schema::{CollectionVersion, FieldDescription};
 use serde_json::Value as JsonValue;
@@ -100,7 +101,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // For nested relation-local BM25, score the already-joined relation scope instead of
         // precomputing against the full leaf collection. This preserves correct nested ordering
         // while avoiding a full-corpus BM25 pass for session-scoped child queries.
-        let results = self.apply_scoped_relation_fulltext(results, select);
+        let results = Self::apply_scoped_relation_fulltext(results, select);
 
         // Strip fields from relation data that were added for filter evaluation
         // but not explicitly requested in the selection set.
@@ -428,18 +429,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// high-cardinality child collections while preserving the existing planner path for
     /// top-level and dotted relation BM25 fields.
     fn apply_scoped_relation_fulltext(
-        &self,
         mut results: Vec<JsonValue>,
         select: &Select,
     ) -> Vec<JsonValue> {
         for result in &mut results {
-            self.apply_scoped_relation_fulltext_to_value(result, select);
+            Self::apply_scoped_relation_fulltext_to_value(result, select);
         }
 
         results
     }
 
-    fn apply_scoped_relation_fulltext_to_value(&self, value: &mut JsonValue, select: &Select) {
+    fn apply_scoped_relation_fulltext_to_value(value: &mut JsonValue, select: &Select) {
         let JsonValue::Object(obj) = value else {
             return;
         };
@@ -453,34 +453,30 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
 
             if let Some(relation_value) = obj.get_mut(nested_select.field.output_name()) {
-                self.apply_scoped_relation_fulltext_to_relation(relation_value, nested_select);
+                Self::apply_scoped_relation_fulltext_to_relation(relation_value, nested_select);
             }
         }
     }
 
-    fn apply_scoped_relation_fulltext_to_relation(&self, value: &mut JsonValue, select: &Select) {
+    fn apply_scoped_relation_fulltext_to_relation(value: &mut JsonValue, select: &Select) {
         match value {
             JsonValue::Array(items) => {
-                if !self.apply_scoped_relation_fulltext_top_k(items, select) {
-                    self.score_scoped_relation_items(items, select);
+                if !Self::apply_scoped_relation_fulltext_top_k(items, select) {
+                    Self::score_scoped_relation_items(items, select);
                 }
                 for item in items.iter_mut() {
-                    self.apply_scoped_relation_fulltext_to_value(item, select);
+                    Self::apply_scoped_relation_fulltext_to_value(item, select);
                 }
             }
             JsonValue::Object(_) => {
-                self.score_scoped_relation_items(std::slice::from_mut(value), select);
-                self.apply_scoped_relation_fulltext_to_value(value, select);
+                Self::score_scoped_relation_items(std::slice::from_mut(value), select);
+                Self::apply_scoped_relation_fulltext_to_value(value, select);
             }
             _ => {}
         }
     }
 
-    fn apply_scoped_relation_fulltext_top_k(
-        &self,
-        items: &mut Vec<JsonValue>,
-        select: &Select,
-    ) -> bool {
+    fn apply_scoped_relation_fulltext_top_k(items: &mut Vec<JsonValue>, select: &Select) -> bool {
         if items.is_empty() || select.group_by.is_some() {
             return false;
         }
@@ -507,7 +503,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             return false;
         };
 
-        let scores = self.compute_scoped_fulltext_scores(items, ranked_fts);
+        let scores = Self::compute_scoped_fulltext_scores(items, ranked_fts);
         Self::retain_relation_top_k_by_score(items, order_field.as_str(), &scores, keep_count);
 
         for fts in scoped_fulltext {
@@ -515,7 +511,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 continue;
             }
 
-            let scores = self.compute_scoped_fulltext_scores(items, fts);
+            let scores = Self::compute_scoped_fulltext_scores(items, fts);
             Self::inject_scoped_fulltext_scores(items, fts.output_name(), &scores);
         }
 
@@ -650,7 +646,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
     }
 
-    fn score_scoped_relation_items(&self, items: &mut [JsonValue], select: &Select) {
+    fn score_scoped_relation_items(items: &mut [JsonValue], select: &Select) {
         if items.is_empty() || select.group_by.is_some() {
             return;
         }
@@ -670,7 +666,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         for fts in &scoped_fulltext {
-            let scores = self.compute_scoped_fulltext_scores(items, fts);
+            let scores = Self::compute_scoped_fulltext_scores(items, fts);
             Self::inject_scoped_fulltext_scores(items, fts.output_name(), &scores);
         }
 
@@ -690,7 +686,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     fn compute_scoped_fulltext_scores(
-        &self,
         items: &[JsonValue],
         fts: &FullTextSearch,
     ) -> HashMap<String, f64> {
@@ -701,11 +696,28 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mut combined_scores = HashMap::new();
 
         for target_field in &fts.target_fields {
-            for (doc_id, score) in
-                self.scoped_fulltext_cache
-                    .search(items, target_field, &fts.query)
-            {
-                *combined_scores.entry(doc_id).or_insert(0.0) += score;
+            let documents: Vec<Bm25Document<String>> = items
+                .iter()
+                .filter_map(|item| {
+                    let obj = item.as_object()?;
+                    let doc_id = obj.get("_docID")?.as_str()?.to_string();
+                    let contents = obj.get(target_field)?.as_str()?;
+                    if contents.trim().is_empty() {
+                        return None;
+                    }
+                    Some(Bm25Document::new(doc_id, contents))
+                })
+                .collect();
+
+            if documents.is_empty() {
+                continue;
+            }
+
+            let search_engine =
+                SearchEngineBuilder::<String>::with_documents(Language::English, documents).build();
+
+            for result in search_engine.search(&fts.query, None) {
+                *combined_scores.entry(result.document.id).or_insert(0.0) += result.score as f64;
             }
         }
 
@@ -1479,8 +1491,8 @@ mod tests {
             ]
         })];
 
-        let runner = QueryRunner::new(FullTextTestFetcher::default(), Vec::new());
-        let scored = runner.apply_scoped_relation_fulltext(results, &select);
+        let scored =
+            QueryRunner::<FullTextTestFetcher>::apply_scoped_relation_fulltext(results, &select);
         let messages = scored[0]["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["_docID"], "msg-2");
@@ -1516,8 +1528,8 @@ mod tests {
             ]
         })];
 
-        let runner = QueryRunner::new(FullTextTestFetcher::default(), Vec::new());
-        let scored = runner.apply_scoped_relation_fulltext(results, &select);
+        let scored =
+            QueryRunner::<FullTextTestFetcher>::apply_scoped_relation_fulltext(results, &select);
         let prelimited_messages = scored[0]["messages"].as_array().unwrap();
 
         assert_eq!(prelimited_messages.len(), 2);
@@ -1557,8 +1569,8 @@ mod tests {
             ]
         })];
 
-        let runner = QueryRunner::new(FullTextTestFetcher::default(), Vec::new());
-        let scored = runner.apply_scoped_relation_fulltext(results, &select);
+        let scored =
+            QueryRunner::<FullTextTestFetcher>::apply_scoped_relation_fulltext(results, &select);
         let messages = scored[0]["messages"].as_array().unwrap();
 
         assert_eq!(messages.len(), 2);
@@ -1566,44 +1578,5 @@ mod tests {
         assert_eq!(messages[1]["_docID"], "msg-2");
         assert_eq!(messages[0]["score"].as_f64(), Some(0.0));
         assert_eq!(messages[1]["score"].as_f64(), Some(0.0));
-    }
-
-    #[test]
-    fn apply_scoped_relation_fulltext_reuses_cached_turbo_index() {
-        let select = crate::parse_query(
-            r#"query {
-                Session {
-                    messages(order: {_alias: {score: DESC}}) {
-                        _docID
-                        score: BM25(query: "cargo", fields: ["content"])
-                    }
-                }
-            }"#,
-        )
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
-
-        let results = vec![serde_json::json!({
-            "_docID": "session-1",
-            "messages": [
-                {"_docID": "msg-1", "content": "cargo fmt"},
-                {"_docID": "msg-2", "content": "cargo test"},
-                {"_docID": "msg-3", "content": "database tuning"}
-            ]
-        })];
-
-        let runner = QueryRunner::new(FullTextTestFetcher::default(), Vec::new());
-
-        assert_eq!(runner.scoped_fulltext_cache.len(), 0);
-
-        let scored_once = runner.apply_scoped_relation_fulltext(results.clone(), &select);
-        assert_eq!(runner.scoped_fulltext_cache.len(), 1);
-
-        let scored_twice = runner.apply_scoped_relation_fulltext(results, &select);
-        assert_eq!(runner.scoped_fulltext_cache.len(), 1);
-
-        assert_eq!(scored_once, scored_twice);
     }
 }

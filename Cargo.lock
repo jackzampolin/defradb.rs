@@ -1531,15 +1531,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "597bb81c80a54b6a4381b23faba8d7774b144c94cbd1d6fe3f1329bd776554ab"
 
 [[package]]
-name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "bindgen"
 version = "0.69.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1808,24 +1799,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bm25_turbo"
-version = "0.1.0"
-source = "git+https://github.com/TheSauceSuite/BM25-Turbo-Rust-Python-WASM-CLI?rev=01ef1864c6ea5224c7c4711f8973c3c4f8f68b00#01ef1864c6ea5224c7c4711f8973c3c4f8f68b00"
-dependencies = [
- "bincode",
- "linked-hash-map",
- "parking_lot 0.12.5",
- "regex",
- "roaring",
- "rust-stemmers",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tonic-build 0.14.5",
- "tracing",
-]
-
-[[package]]
 name = "borsh"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1894,12 +1867,6 @@ dependencies = [
  "quote",
  "syn 1.0.109",
 ]
-
-[[package]]
-name = "bytemuck"
-version = "1.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
 
 [[package]]
 name = "byteorder"
@@ -9799,7 +9766,6 @@ dependencies = [
  "base64 0.22.1",
  "blockstore",
  "bm25",
- "bm25_turbo",
  "chrono",
  "ciborium",
  "cid 0.10.1",
@@ -9813,8 +9779,6 @@ dependencies = [
  "graphql-parser",
  "identity",
  "lens",
- "lru 0.12.5",
- "parking_lot 0.12.5",
  "proptest",
  "regex",
  "schema",
@@ -10497,16 +10461,6 @@ checksum = "bb919243f34364b6bd2fc10ef797edbfa75f33c252e7998527479c6d6b47e1ec"
 dependencies = [
  "bytes",
  "rustc-hex",
-]
-
-[[package]]
-name = "roaring"
-version = "0.10.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19e8d2cfa184d94d0726d650a9f4a1be7f9b76ac9fdb954219878dc00c1c1e7b"
-dependencies = [
- "bytemuck",
- "byteorder",
 ]
 
 [[package]]
@@ -12678,18 +12632,6 @@ dependencies = [
  "proc-macro2",
  "prost-build 0.13.5",
  "prost-types 0.13.5",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "tonic-build"
-version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1882ac3bf5ef12877d7ed57aad87e75154c11931c2ba7e6cde5e22d63522c734"
-dependencies = [
- "prettyplease 0.2.37",
- "proc-macro2",
  "quote",
  "syn 2.0.117",
 ]
