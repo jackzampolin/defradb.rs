@@ -461,7 +461,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     fn apply_scoped_relation_fulltext_to_relation(value: &mut JsonValue, select: &Select) {
         match value {
             JsonValue::Array(items) => {
-                Self::score_scoped_relation_items(items, select);
+                if !Self::apply_scoped_relation_fulltext_top_k(items, select) {
+                    Self::score_scoped_relation_items(items, select);
+                }
                 for item in items.iter_mut() {
                     Self::apply_scoped_relation_fulltext_to_value(item, select);
                 }
@@ -471,6 +473,176 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 Self::apply_scoped_relation_fulltext_to_value(value, select);
             }
             _ => {}
+        }
+    }
+
+    fn apply_scoped_relation_fulltext_top_k(items: &mut Vec<JsonValue>, select: &Select) -> bool {
+        if items.is_empty() || select.group_by.is_some() {
+            return false;
+        }
+        if select
+            .filter
+            .as_ref()
+            .map(|filter| filter.has_alias_filter())
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
+        let scoped_fulltext = Self::collect_scoped_relation_fulltext(select);
+        let Some((order_field, keep_count)) =
+            Self::scoped_relation_fulltext_top_k(select, &scoped_fulltext, items.len())
+        else {
+            return false;
+        };
+
+        let Some(ranked_fts) = scoped_fulltext
+            .iter()
+            .find(|fts| fts.output_name() == order_field)
+        else {
+            return false;
+        };
+
+        let scores = Self::compute_scoped_fulltext_scores(items, ranked_fts);
+        Self::retain_relation_top_k_by_score(items, order_field.as_str(), &scores, keep_count);
+
+        for fts in scoped_fulltext {
+            if fts.output_name() == order_field {
+                continue;
+            }
+
+            let scores = Self::compute_scoped_fulltext_scores(items, fts);
+            Self::inject_scoped_fulltext_scores(items, fts.output_name(), &scores);
+        }
+
+        true
+    }
+
+    fn collect_scoped_relation_fulltext(select: &Select) -> Vec<&FullTextSearch> {
+        select
+            .fields
+            .iter()
+            .filter_map(|requestable| match requestable {
+                Requestable::FullTextSearch(fts)
+                    if fts.target_fields.iter().all(|field| !field.contains('.')) =>
+                {
+                    Some(fts)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn scoped_relation_fulltext_top_k(
+        select: &Select,
+        scoped_fulltext: &[&FullTextSearch],
+        item_count: usize,
+    ) -> Option<(String, usize)> {
+        let limit = select.limit.as_ref()?;
+        let limit_count = limit.limit? as usize;
+        if limit_count == 0 {
+            return None;
+        }
+
+        let keep_count = limit_count + limit.offset as usize;
+        if keep_count == 0 || keep_count >= item_count {
+            return None;
+        }
+
+        let order_by = select.order_by.as_ref()?;
+        if order_by.conditions.len() != 1 {
+            return None;
+        }
+
+        let condition = order_by.conditions.first()?;
+        if condition.direction != crate::mapper::OrderDirection::Desc || condition.fields.len() != 1
+        {
+            return None;
+        }
+
+        let order_field = condition.fields.first()?;
+        scoped_fulltext
+            .iter()
+            .find(|fts| fts.output_name() == order_field)
+            .map(|_| (order_field.clone(), keep_count))
+    }
+
+    fn retain_relation_top_k_by_score(
+        items: &mut Vec<JsonValue>,
+        output_name: &str,
+        scores: &HashMap<String, f64>,
+        keep_count: usize,
+    ) {
+        if keep_count == 0 || items.len() <= keep_count {
+            Self::inject_scoped_fulltext_scores(items, output_name, scores);
+            return;
+        }
+
+        let mut selected: Vec<(usize, JsonValue)> = Vec::with_capacity(keep_count);
+
+        for (original_index, mut item) in std::mem::take(items).into_iter().enumerate() {
+            let score = item
+                .as_object()
+                .and_then(|obj| obj.get("_docID"))
+                .and_then(|value| value.as_str())
+                .and_then(|doc_id| scores.get(doc_id))
+                .copied()
+                .unwrap_or(0.0);
+            Self::inject_scoped_fulltext_score(&mut item, output_name, score);
+
+            if selected.len() < keep_count {
+                selected.push((original_index, item));
+                continue;
+            }
+
+            let worst_index = selected
+                .iter()
+                .enumerate()
+                .max_by(|(_, (index_a, item_a)), (_, (index_b, item_b))| {
+                    Self::compare_top_k_scored_items(
+                        item_a,
+                        *index_a,
+                        item_b,
+                        *index_b,
+                        output_name,
+                    )
+                })
+                .map(|(index, _)| index)
+                .expect("selected is non-empty when searching for the worst top-k candidate");
+
+            if Self::compare_top_k_scored_items(
+                &item,
+                original_index,
+                &selected[worst_index].1,
+                selected[worst_index].0,
+                output_name,
+            ) == Ordering::Less
+            {
+                selected[worst_index] = (original_index, item);
+            }
+        }
+
+        selected.sort_by(|(index_a, item_a), (index_b, item_b)| {
+            Self::compare_top_k_scored_items(item_a, *index_a, item_b, *index_b, output_name)
+        });
+
+        *items = selected.into_iter().map(|(_, item)| item).collect();
+    }
+
+    fn compare_top_k_scored_items(
+        item_a: &JsonValue,
+        index_a: usize,
+        item_b: &JsonValue,
+        index_b: usize,
+        output_name: &str,
+    ) -> Ordering {
+        let value_a = item_a.as_object().and_then(|obj| obj.get(output_name));
+        let value_b = item_b.as_object().and_then(|obj| obj.get(output_name));
+        let cmp = compare_json_values(value_a, value_b).reverse();
+        if cmp == Ordering::Equal {
+            index_a.cmp(&index_b)
+        } else {
+            cmp
         }
     }
 
@@ -487,18 +659,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             return;
         }
 
-        let scoped_fulltext: Vec<&FullTextSearch> = select
-            .fields
-            .iter()
-            .filter_map(|requestable| match requestable {
-                Requestable::FullTextSearch(fts)
-                    if fts.target_fields.iter().all(|field| !field.contains('.')) =>
-                {
-                    Some(fts)
-                }
-                _ => None,
-            })
-            .collect();
+        let scoped_fulltext = Self::collect_scoped_relation_fulltext(select);
 
         if scoped_fulltext.is_empty() {
             return;
@@ -569,22 +730,27 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         scores: &HashMap<String, f64>,
     ) {
         for item in items {
-            let JsonValue::Object(obj) = item else {
-                continue;
-            };
-
-            let score = obj
-                .get("_docID")
+            let score = item
+                .as_object()
+                .and_then(|obj| obj.get("_docID"))
                 .and_then(|value| value.as_str())
                 .and_then(|doc_id| scores.get(doc_id))
                 .copied()
                 .unwrap_or(0.0);
 
-            let json_score = serde_json::Number::from_f64(score)
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null);
-            obj.insert(output_name.to_string(), json_score);
+            Self::inject_scoped_fulltext_score(item, output_name, score);
         }
+    }
+
+    fn inject_scoped_fulltext_score(item: &mut JsonValue, output_name: &str, score: f64) {
+        let JsonValue::Object(obj) = item else {
+            return;
+        };
+
+        let json_score = serde_json::Number::from_f64(score)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null);
+        obj.insert(output_name.to_string(), json_score);
     }
 
     fn sort_relation_items(items: &mut [JsonValue], order_by: &crate::mapper::OrderBy) {
@@ -1333,5 +1499,84 @@ mod tests {
         assert_eq!(messages[2]["_docID"], "msg-3");
         assert!(messages[0]["score"].as_f64().unwrap() > messages[1]["score"].as_f64().unwrap());
         assert_eq!(messages[2]["score"].as_f64(), Some(0.0));
+    }
+
+    #[test]
+    fn apply_scoped_relation_fulltext_top_k_preserves_offset_window() {
+        let select = crate::parse_query(
+            r#"query {
+                Session {
+                    messages(limit: 1, offset: 1, order: {_alias: {score: DESC}}) {
+                        _docID
+                        score: BM25(query: "rust", fields: ["content"])
+                    }
+                }
+            }"#,
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+        let results = vec![serde_json::json!({
+            "_docID": "session-1",
+            "messages": [
+                {"_docID": "msg-1", "content": "rust search"},
+                {"_docID": "msg-2", "content": "rust rust rust rust rust"},
+                {"_docID": "msg-3", "content": "database tuning"},
+                {"_docID": "msg-4", "content": "distributed systems"}
+            ]
+        })];
+
+        let scored =
+            QueryRunner::<FullTextTestFetcher>::apply_scoped_relation_fulltext(results, &select);
+        let prelimited_messages = scored[0]["messages"].as_array().unwrap();
+
+        assert_eq!(prelimited_messages.len(), 2);
+        assert_eq!(prelimited_messages[0]["_docID"], "msg-2");
+        assert_eq!(prelimited_messages[1]["_docID"], "msg-1");
+
+        let limited = QueryRunner::<FullTextTestFetcher>::apply_relation_limits(scored, &select);
+        let messages = limited[0]["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["_docID"], "msg-1");
+    }
+
+    #[test]
+    fn apply_scoped_relation_fulltext_top_k_preserves_original_zero_score_order() {
+        let select = crate::parse_query(
+            r#"query {
+                Session {
+                    messages(limit: 2, order: {_alias: {score: DESC}}) {
+                        _docID
+                        score: BM25(query: "missing", fields: ["content"])
+                    }
+                }
+            }"#,
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+        let results = vec![serde_json::json!({
+            "_docID": "session-1",
+            "messages": [
+                {"_docID": "msg-1", "content": "rust search"},
+                {"_docID": "msg-2", "content": "rust rust rust rust rust"},
+                {"_docID": "msg-3", "content": "database tuning"}
+            ]
+        })];
+
+        let scored =
+            QueryRunner::<FullTextTestFetcher>::apply_scoped_relation_fulltext(results, &select);
+        let messages = scored[0]["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["_docID"], "msg-1");
+        assert_eq!(messages[1]["_docID"], "msg-2");
+        assert_eq!(messages[0]["score"].as_f64(), Some(0.0));
+        assert_eq!(messages[1]["score"].as_f64(), Some(0.0));
     }
 }

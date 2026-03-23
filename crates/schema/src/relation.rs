@@ -88,6 +88,32 @@ impl CollectionVersion {
         Ok(Some(index))
     }
 
+    /// Ensure a non-unique index exists for a primary one-to-many relation's _id field.
+    ///
+    /// Returns `Ok(Some(index))` if a new index should be added.
+    /// Returns `Ok(None)` if an existing index already covers the relation field.
+    pub fn ensure_one_to_many_index(
+        &self,
+        relation_field_name: &str,
+        next_index_id: &mut impl FnMut() -> u32,
+    ) -> Result<Option<IndexDescription>> {
+        let id_field_name = Self::relation_id_field_name(relation_field_name);
+
+        if self
+            .has_unique_index_on_relation_field(&id_field_name, relation_field_name)
+            .is_some()
+        {
+            return Ok(None);
+        }
+
+        let field_for_name = id_field_name.trim_start_matches('_');
+        let index_name = format!("{}__{}_ASC", self.name, field_for_name);
+        let mut index = IndexDescription::new(index_name).with_field(id_field_name, false);
+        index.id = next_index_id();
+
+        Ok(Some(index))
+    }
+
     /// Add `_id` fields for all non-array relation fields that don't already have one
     ///
     /// This matches Go's behavior in `fieldsFromAST()` and `finalizeRelations()`.
@@ -168,7 +194,7 @@ impl CollectionVersion {
     /// This is called after all collections are parsed to:
     /// 1. Auto-generate missing `_id` fields for non-array relations
     /// 2. Auto-determine which side is primary for one-to-many relations
-    /// 3. Auto-create unique indexes for one-to-one relations
+    /// 3. Auto-create FK indexes for primary relations
     ///
     /// Uses `BTreeMap` for deterministic processing order.
     /// Matches Go's `finalizeRelations()` function.
@@ -191,6 +217,7 @@ impl CollectionVersion {
             // Find fields that need _id and/or auto-primary, and track one-to-one relations
             let mut updates = Vec::new();
             let mut one_to_one_fields = Vec::new();
+            let mut one_to_many_fields = Vec::new();
 
             for (idx, field) in collection.fields.iter().enumerate() {
                 if !field.kind.is_relation() {
@@ -234,6 +261,7 @@ impl CollectionVersion {
                     // If other side doesn't exist or is an array, this side is primary
                     if other_field.is_none() || other_is_array {
                         updates.push((idx, true)); // Mark as primary
+                        one_to_many_fields.push(field.name.clone());
                     } else {
                         // Other side exists and is non-array: this is a one-to-one relation
                         // Don't auto-mark as primary - rely on @primary directive from schema
@@ -248,6 +276,15 @@ impl CollectionVersion {
             // Apply primary updates
             for (idx, is_primary) in updates {
                 collection.fields[idx].is_primary = is_primary;
+            }
+
+            one_to_many_fields.sort();
+            for field_name in one_to_many_fields {
+                if let Some(index) =
+                    collection.ensure_one_to_many_index(&field_name, &mut next_index_id)?
+                {
+                    collection.indexes.push(index);
+                }
             }
 
             // Add unique indexes for one-to-one relations

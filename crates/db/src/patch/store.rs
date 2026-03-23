@@ -58,7 +58,7 @@ impl<S: Store> crate::database::DB<S> {
             false,
         )?;
 
-        // Auto-create unique indexes for one-to-one relations added via patch.
+        // Auto-create missing FK indexes for primary relations added via patch.
         // This runs AFTER validation (which rejects index mutations on existing schemas)
         // but BEFORE CID generation (since indexes are part of the schema content).
         {
@@ -84,27 +84,37 @@ impl<S: Store> crate::database::DB<S> {
                     Some(id) => id,
                     None => continue,
                 };
-                // Look up the other collection (may be the same collection for self-ref)
-                let other_col = all_existing.iter().find(|c| {
-                    (c.name == other_col_id || c.collection_id == other_col_id) && c.is_active
-                });
-                if let Some(other_col) = other_col {
-                    let other_field =
-                        other_col.field_by_relation(rel_name, &new_schema.name, &field.name);
-                    // One-to-one: other side explicitly exists, is non-array, and this field is primary.
-                    // When other_field is None (other collection not yet patched), skip creating a
-                    // unique index — matches finalize_relations() which treats missing other side
-                    // as one-to-many.
-                    let is_one_to_one = other_field.map(|f| !f.kind.is_array()).unwrap_or(false);
-                    if is_one_to_one && field.is_primary {
-                        match new_schema.ensure_one_to_one_unique_index(&field.name, &mut || {
+                let other_col = if other_col_id == new_schema.name
+                    || other_col_id == new_schema.collection_id
+                {
+                    Some(&new_schema)
+                } else {
+                    all_existing.iter().find(|c| {
+                        (c.name == other_col_id || c.collection_id == other_col_id) && c.is_active
+                    })
+                };
+
+                let other_field = other_col
+                    .and_then(|col| col.field_by_relation(rel_name, &new_schema.name, &field.name));
+                let other_is_array = other_field.map(|f| f.kind.is_array()).unwrap_or(false);
+
+                if field.is_primary {
+                    let ensure_index = if other_field.is_some() && !other_is_array {
+                        new_schema.ensure_one_to_one_unique_index(&field.name, &mut || {
                             next_index_id += 1;
                             next_index_id
-                        }) {
-                            Ok(Some(index)) => indexes_to_add.push(index),
-                            Ok(None) => {} // existing unique index is fine
-                            Err(e) => return Err(Error::InvalidPatch(e.to_string())),
-                        }
+                        })
+                    } else {
+                        new_schema.ensure_one_to_many_index(&field.name, &mut || {
+                            next_index_id += 1;
+                            next_index_id
+                        })
+                    };
+
+                    match ensure_index {
+                        Ok(Some(index)) => indexes_to_add.push(index),
+                        Ok(None) => {}
+                        Err(e) => return Err(Error::InvalidPatch(e.to_string())),
                     }
                 }
             }

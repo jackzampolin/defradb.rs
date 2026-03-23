@@ -124,6 +124,20 @@ fn test_parse_relation() {
     let author_field = post.field_by_name("author").unwrap();
     assert!(author_field.kind.is_relation());
     assert!(!author_field.kind.is_array());
+
+    let author_idx = post
+        .indexes
+        .iter()
+        .find(|idx| {
+            idx.fields
+                .first()
+                .is_some_and(|field| field.name == "_authorID")
+        })
+        .expect("expected auto-created FK index on _authorID");
+    assert!(
+        !author_idx.unique,
+        "one-to-many relation should auto-create a non-unique FK index"
+    );
 }
 
 #[test]
@@ -1781,5 +1795,19 @@ fn test_secondary_relation_is_primary_false() {
     assert!(
         published_field.is_primary,
         "Author.published should be primary (has @primary directive)"
+    );
+
+    let published_idx = author
+        .indexes
+        .iter()
+        .find(|idx| {
+            idx.fields
+                .first()
+                .is_some_and(|field| field.name == "_publishedID")
+        })
+        .expect("expected auto-created unique FK index on _publishedID");
+    assert!(
+        published_idx.unique,
+        "one-to-one primary relation should auto-create a unique FK index"
     );
 }

@@ -3,10 +3,11 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use tracing::warn;
 
-use crate::document::DocumentMapping;
+use crate::document::{documents_to_plan_docs, DocumentMapping};
 use crate::error::Result;
 use crate::mapper::{GroupBy, OrderDirection};
-use crate::planner::Doc;
+use crate::planner::{Doc, IndexScanParams, IndexScanType};
+use document::NormalValue;
 
 use super::super::RelationFilter;
 use super::compare::{compare_json_values, resolve_nested_field};
@@ -84,6 +85,17 @@ impl TypeJoinMany {
     ) -> Result<()> {
         self.child_cache.clear();
         self.child_scan_order.clear();
+
+        if let (Some(parent_scope), Some(indexed_child_fetch)) =
+            (parent_scope, self.indexed_child_fetch.clone())
+        {
+            if !parent_scope.is_empty() {
+                return self
+                    .build_child_cache_from_index(parent_scope, &indexed_child_fetch)
+                    .await;
+            }
+        }
+
         self.child_plan.init().await?;
         self.child_plan.start().await?;
 
@@ -151,6 +163,115 @@ impl TypeJoinMany {
             cache_keys = ?self.child_cache.keys().collect::<Vec<_>>(),
             total_children = self.child_cache.values().map(|v| v.len()).sum::<usize>(),
             "TypeJoinMany::build_child_cache complete"
+        );
+
+        Ok(())
+    }
+
+    async fn build_child_cache_from_index(
+        &mut self,
+        parent_scope: &HashSet<String>,
+        indexed_child_fetch: &super::node::IndexedChildFetch,
+    ) -> Result<()> {
+        let mut parent_ids: Vec<String> = parent_scope.iter().cloned().collect();
+        parent_ids.sort();
+
+        let scan_type = if parent_ids.len() == 1 {
+            IndexScanType::ExactMatch {
+                values: vec![NormalValue::String(parent_ids[0].clone())],
+            }
+        } else {
+            IndexScanType::InScan {
+                values: parent_ids.into_iter().map(NormalValue::String).collect(),
+                suffix_values: Vec::new(),
+            }
+        };
+
+        let scan_result = indexed_child_fetch
+            .fetcher
+            .get_by_index_scan(
+                &indexed_child_fetch.collection_name,
+                &IndexScanParams {
+                    index_name: indexed_child_fetch.index_name.clone(),
+                    scan_type,
+                    limit: None,
+                    offset: 0,
+                    value_filter: None,
+                },
+            )
+            .await?;
+        let raw_fetches = scan_result.raw_fetches();
+        let fetched_docs = indexed_child_fetch
+            .fetcher
+            .get_by_ids(&indexed_child_fetch.collection_name, scan_result.doc_ids())
+            .await?
+            .into_docs();
+
+        let child_docs = documents_to_plan_docs(&fetched_docs, self.child_plan.document_map())?;
+        let total_fields = child_docs
+            .iter()
+            .map(|doc| doc.stored_field_count as u64)
+            .sum::<u64>();
+
+        for child_doc in child_docs {
+            let child_fk_value = child_doc.get(self.child_fk_index);
+            let fk_str = child_fk_value
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            self.child_scan_order
+                .push((fk_str, child_doc.stored_field_count as u64));
+
+            if let Some(v) = child_fk_value {
+                if !v.is_null() && !v.is_string() {
+                    warn!(
+                        child_collection = %self.child_side.collection().name,
+                        relation_field = %self.child_side.relation_field().name,
+                        fk_index = self.child_fk_index,
+                        actual_type = ?v,
+                        "Child FK field has unexpected type, expected string or null"
+                    );
+                }
+            }
+
+            if let Some(fk) = child_fk_value.and_then(|v| v.as_str()) {
+                if parent_scope.contains(fk) {
+                    self.child_cache
+                        .entry(fk.to_string())
+                        .or_default()
+                        .push(child_doc);
+                }
+            } else {
+                warn!(
+                    child_collection = %self.child_side.collection().name,
+                    doc_id = ?child_doc.doc_id(),
+                    fk_index = self.child_fk_index,
+                    fk_value = ?child_fk_value,
+                    "Child document skipped - FK field is null or not a string"
+                );
+            }
+        }
+
+        self.child_exec_info = crate::planner::ExecInfo {
+            indexes_fetched: raw_fetches,
+            docs_fetched: self
+                .child_cache
+                .values()
+                .map(|docs| docs.len() as u64)
+                .sum(),
+            fields_fetched: total_fields,
+            ..Default::default()
+        };
+        self.go_child_metrics.index_fetches = raw_fetches;
+        self.total_children_in_cache = self.child_cache.values().map(|v| v.len() as u64).sum();
+        self.total_fields_per_scan = total_fields;
+
+        tracing::debug!(
+            parent_side_index = self.parent_side.relation_field_index(),
+            cache_keys = ?self.child_cache.keys().collect::<Vec<_>>(),
+            total_children = self.child_cache.values().map(|v| v.len()).sum::<usize>(),
+            fk_field = %indexed_child_fetch.fk_field_name,
+            "TypeJoinMany::build_child_cache_from_index complete"
         );
 
         Ok(())

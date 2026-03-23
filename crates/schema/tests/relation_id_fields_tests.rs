@@ -169,6 +169,20 @@ fn test_finalize_relations_adds_id_fields() {
 
     // Posts.author should be marked as primary (other side is array)
     assert!(posts.field_by_name("author").unwrap().is_primary);
+
+    let author_idx = posts
+        .indexes
+        .iter()
+        .find(|idx| {
+            idx.fields
+                .first()
+                .is_some_and(|field| field.name == "_authorID")
+        })
+        .expect("expected auto-created FK index on _authorID");
+    assert!(
+        !author_idx.unique,
+        "one-to-many FK index should be non-unique"
+    );
 }
 
 #[test]
@@ -248,6 +262,20 @@ fn test_finalize_relations_hashmap() {
     assert!(
         posts.field_by_name("author").unwrap().is_primary,
         "author should be marked as primary"
+    );
+
+    let author_idx = posts
+        .indexes
+        .iter()
+        .find(|idx| {
+            idx.fields
+                .first()
+                .is_some_and(|field| field.name == "_authorID")
+        })
+        .expect("expected auto-created FK index on _authorID");
+    assert!(
+        !author_idx.unique,
+        "one-to-many FK index should be non-unique"
     );
 
     // Verify users collection is also in the HashMap

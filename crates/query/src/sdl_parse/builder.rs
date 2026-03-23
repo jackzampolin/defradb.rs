@@ -433,10 +433,11 @@ impl<'a> SdlParser<'a> {
         let mut existing_index_names: Vec<String> = Vec::new();
         let mut index_id_counter = 0u32;
 
-        // Track one-to-one FK fields that may need auto-created unique indexes.
-        // We defer auto-index creation until after type-level indexes are processed
-        // so we can check if the user defined a covering index.
-        let mut one_to_one_fk_fields: Vec<String> = Vec::new();
+        // Track primary relation FK fields that may need auto-created indexes.
+        // The bool indicates whether the FK index must be unique (one-to-one) or not
+        // (one-to-many / unidirectional). We defer auto-index creation until after
+        // type-level indexes are processed so user-defined covering indexes win.
+        let mut auto_fk_indexes: Vec<(String, bool)> = Vec::new();
 
         // Add implicit _docID field
         // NOTE: Go uses CType::None (0) for _docID, not LwwRegister (1)
@@ -583,43 +584,36 @@ impl<'a> SdlParser<'a> {
                     if is_primary {
                         id_field = id_field.as_primary();
 
-                        // Only create a unique index for true one-to-one relations.
-                        // One-to-one means the counterpart type has a non-array field
-                        // pointing back to this type. No back-reference (join tables)
-                        // or array back-reference (one-to-many) means no unique index.
-                        // See Go's ensureOneToOneUniqueIndex() in collection_define.go
-                        //
-                        // Skip auto-index creation if the user has defined their own @index
-                        // directive on this field - they take responsibility for the index.
-                        let has_user_index = parsed_field.directives.index.is_some();
-
-                        let is_one_to_one = self
+                        // Match finalize_relations(): find the counterpart relation by
+                        // relation name, excluding this field for self-references.
+                        let counterpart_field = self
                             .type_defs
                             .get(&parsed_field.field_type.base_type)
-                            .map(|target_def| {
-                                target_def.fields.iter().any(|f| {
-                                    f.field_type.base_type == type_def.name && !f.field_type.is_list
+                            .and_then(|target_def| {
+                                target_def.fields.iter().find(|candidate| {
+                                    let candidate_relation_name =
+                                        candidate.directives.relation_name.clone().unwrap_or_else(
+                                            || {
+                                                generate_relation_name(
+                                                    &target_def.name,
+                                                    &candidate.name,
+                                                    &candidate.field_type.base_type,
+                                                )
+                                            },
+                                        );
+
+                                    candidate_relation_name == relation_name
+                                        && !(target_def.name == type_def.name
+                                            && candidate.name == parsed_field.name)
                                 })
-                            })
+                            });
+                        let is_one_to_one = counterpart_field
+                            .map(|f| !f.field_type.is_list)
                             .unwrap_or(false);
 
-                        // Validate user-defined index on one-to-one relation must be unique
-                        if is_one_to_one {
-                            if let Some(ref idx) = parsed_field.directives.index {
-                                if !idx.unique {
-                                    return Err(QueryError::parse(
-                                        "one-to-one relation must have a unique index",
-                                    ));
-                                }
-                            }
-                        }
-
-                        // Track one-to-one FK fields for potential auto-index creation.
-                        // We defer until after type-level indexes are processed.
-                        // Don't add if user has field-level @index (they take responsibility).
-                        if is_one_to_one && !has_user_index {
-                            one_to_one_fk_fields.push(id_field_name.clone());
-                        }
+                        // Track primary FK fields for potential auto-index creation.
+                        // We defer coverage checks until all user-defined indexes exist.
+                        auto_fk_indexes.push((id_field_name.clone(), is_one_to_one));
                     }
                     fields.push(id_field);
                 }
@@ -754,44 +748,32 @@ impl<'a> SdlParser<'a> {
             });
         }
 
-        // Create auto-indexes for one-to-one FK fields that aren't covered by user indexes.
+        // Create auto-indexes for primary FK fields that aren't covered by user indexes.
         // We deferred this until after type-level indexes so we can check coverage.
-        // Go's behavior: if user defines ANY index with FK field as first field (unique or not),
-        // that determines uniqueness - auto-index isn't created.
+        // Go's behavior: if user defines ANY index with FK field as first field,
+        // that determines uniqueness and suppresses auto-creation.
         // Sort alphabetically to match Go's deterministic index ID assignment.
-        one_to_one_fk_fields.sort();
-        for fk_field_name in &one_to_one_fk_fields {
+        auto_fk_indexes.sort_by(|a, b| a.0.cmp(&b.0));
+        auto_fk_indexes.dedup_by(|a, b| a.0 == b.0);
+        for (fk_field_name, requires_unique) in &auto_fk_indexes {
             // Check if any existing index has this FK field as its first field
-            let has_covering_index = indexes.iter().any(|idx| {
+            let covering_index = indexes.iter().find(|idx| {
                 idx.fields
                     .first()
                     .map(|f| f.name == *fk_field_name)
                     .unwrap_or(false)
             });
 
-            if has_covering_index {
-                // User defined an index - validate it's unique for one-to-one
-                let user_index_is_unique = indexes
-                    .iter()
-                    .find(|idx| {
-                        idx.fields
-                            .first()
-                            .map(|f| f.name == *fk_field_name)
-                            .unwrap_or(false)
-                    })
-                    .map(|idx| idx.unique)
-                    .unwrap_or(false);
-
-                if !user_index_is_unique {
+            if let Some(existing_index) = covering_index {
+                if *requires_unique && !existing_index.unique {
                     return Err(QueryError::parse(
                         "one-to-one relation must have a unique index",
                     ));
                 }
-                // User's unique index is sufficient, skip auto-creation
                 continue;
             }
 
-            // No user index - create auto unique index
+            // No user index - create auto FK index with the required uniqueness.
             let idx_name =
                 generate_index_name(&type_def.name, fk_field_name, &existing_index_names);
             existing_index_names.push(idx_name.clone());
@@ -803,7 +785,7 @@ impl<'a> SdlParser<'a> {
                     name: fk_field_name.clone(),
                     descending: false,
                 }],
-                unique: true,
+                unique: *requires_unique,
             });
         }
 

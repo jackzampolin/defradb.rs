@@ -49,6 +49,23 @@ pub(super) struct SelectionJoinInfo {
 }
 
 impl Planner {
+    fn can_use_direct_indexed_child_cache(nested_select: &Select) -> bool {
+        nested_select.filter.is_none()
+            && nested_select.group_by.is_none()
+            && nested_select
+                .order_by
+                .as_ref()
+                .map(|order_by| !order_by.has_relation_order())
+                .unwrap_or(true)
+            && nested_select.fields.iter().all(|field| match field {
+                Requestable::Field(_) => true,
+                Requestable::FullTextSearch(fts) => {
+                    fts.target_fields.iter().all(|field| !field.contains('.'))
+                }
+                _ => false,
+            })
+    }
+
     /// Apply join nodes for nested selects (relation fields)
     ///
     /// The `depth` parameter tracks recursion depth to prevent stack overflow
@@ -1126,24 +1143,24 @@ impl Planner {
                 // Check if child has an index on its FK field for this relation.
                 // When FK is indexed, a global child scan can efficiently map children
                 // to parents, so per-parent scanning is not needed for ordering.
-                let has_child_fk_index = target_relation_field
-                    .and_then(|trf| {
-                        let rel_name = trf.relation_name.as_deref()?;
-                        // Find the FK ID field (same relation, kind Scalar(DocID))
-                        let fk_field = target_collection.fields.iter().find(|f| {
-                            f.relation_name.as_deref() == Some(rel_name)
-                                && matches!(
-                                    f.kind,
-                                    schema::FieldKind::Scalar(schema::ScalarKind::DocID)
-                                )
-                        })?;
-                        // Check if any index covers this FK field
-                        target_collection
-                            .indexes
-                            .iter()
-                            .find(|idx| idx.fields.first().is_some_and(|f| f.name == fk_field.name))
-                    })
-                    .is_some();
+                let child_fk_index_info = target_relation_field.and_then(|trf| {
+                    let rel_name = trf.relation_name.as_deref()?;
+                    // Find the FK ID field (same relation, kind Scalar(DocID))
+                    let fk_field = target_collection.fields.iter().find(|f| {
+                        f.relation_name.as_deref() == Some(rel_name)
+                            && matches!(
+                                f.kind,
+                                schema::FieldKind::Scalar(schema::ScalarKind::DocID)
+                            )
+                    })?;
+                    // Check if any index covers this FK field
+                    let index = target_collection
+                        .indexes
+                        .iter()
+                        .find(|idx| idx.fields.first().is_some_and(|f| f.name == fk_field.name))?;
+                    Some((fk_field.name.clone(), index.name.clone()))
+                });
+                let has_child_fk_index = child_fk_index_info.is_some();
 
                 // Determine per-parent mode before moving filter_child_plan.
                 // Per-parent scanning re-inits the child plan for each parent:
@@ -1158,6 +1175,7 @@ impl Planner {
                         || (filter_child_plan.is_none()
                             && nested_order_by.is_some()
                             && !has_child_fk_index));
+                let has_filter_child_plan = filter_child_plan.is_some();
 
                 // Apply filter child plan for indexed relation filter evaluation
                 if let Some(fcp) = filter_child_plan {
@@ -1176,6 +1194,19 @@ impl Planner {
                 }
                 if use_per_parent {
                     join_many = join_many.with_per_parent_child_scan();
+                } else if let (Some(fetcher), Some((fk_field_name, index_name))) =
+                    (self.fetcher.clone(), child_fk_index_info.clone())
+                {
+                    if Self::can_use_direct_indexed_child_cache(nested_select)
+                        && !has_filter_child_plan
+                    {
+                        join_many = join_many.with_indexed_child_fetch(
+                            fetcher,
+                            target_collection.name.clone(),
+                            fk_field_name,
+                            index_name,
+                        );
+                    }
                 }
 
                 // Apply nested groupBy if present
