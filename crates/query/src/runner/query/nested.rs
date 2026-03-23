@@ -1,13 +1,16 @@
 //! Planner orchestration and post-processing for nested queries.
 
+use bm25::{Document as Bm25Document, Language, SearchEngineBuilder};
 use identity::Did;
 use schema::{CollectionVersion, FieldDescription};
 use serde_json::Value as JsonValue;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::error::{QueryError, Result};
-use crate::mapper::{Requestable, Select};
+use crate::mapper::{FullTextSearch, Requestable, Select};
+use crate::plan::{compare_json_values, resolve_nested_field};
 use crate::planner::Planner;
 use crate::txn::TransactionRegistry;
 use std::collections::HashMap;
@@ -95,6 +98,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let results =
             self.compute_relation_aggregates(results, select, &aggregate_internal_keys)?;
 
+        // For nested relation-local BM25, score the already-joined relation scope instead of
+        // precomputing against the full leaf collection. This preserves correct nested ordering
+        // while avoiding a full-corpus BM25 pass for session-scoped child queries.
+        let results = Self::apply_scoped_relation_fulltext(results, select);
+
         // Strip fields from relation data that were added for filter evaluation
         // but not explicitly requested in the selection set.
         let results = Self::clean_filter_only_relation_fields(results, select);
@@ -129,6 +137,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             for field in &current_select.fields {
                 match field {
                     Requestable::FullTextSearch(fts) => {
+                        if Self::should_defer_relation_scoped_fulltext(
+                            current_select,
+                            current_collection.as_ref(),
+                            fts,
+                            scope_path.len(),
+                        ) {
+                            continue;
+                        }
+
                         let mut combined_scores: HashMap<String, f64> = HashMap::new();
                         for target_field in &fts.target_fields {
                             if let Ok(scores) = self
@@ -267,6 +284,25 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         Ok(scores)
     }
 
+    fn should_defer_relation_scoped_fulltext(
+        select: &Select,
+        collection: &CollectionVersion,
+        fts: &FullTextSearch,
+        scope_depth: usize,
+    ) -> bool {
+        scope_depth > 1
+            && select.group_by.is_none()
+            && select
+                .filter
+                .as_ref()
+                .map(|filter| !filter.has_alias_filter())
+                .unwrap_or(true)
+            && fts
+                .target_fields
+                .iter()
+                .all(|field| !field.contains('.') && collection.field_by_name(field).is_some())
+    }
+
     fn resolve_relation_target_collection(
         current_collection: &Arc<CollectionVersion>,
         relation_field: &FieldDescription,
@@ -384,6 +420,191 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         Ok(parent_scores)
+    }
+
+    /// Apply scoped BM25 scoring to already-joined nested relation data.
+    ///
+    /// This is intentionally a post-processing step over rendered nested relation objects,
+    /// limited to relation-local BM25 fields. It avoids the full-corpus precompute path for
+    /// high-cardinality child collections while preserving the existing planner path for
+    /// top-level and dotted relation BM25 fields.
+    fn apply_scoped_relation_fulltext(
+        mut results: Vec<JsonValue>,
+        select: &Select,
+    ) -> Vec<JsonValue> {
+        for result in &mut results {
+            Self::apply_scoped_relation_fulltext_to_value(result, select);
+        }
+
+        results
+    }
+
+    fn apply_scoped_relation_fulltext_to_value(value: &mut JsonValue, select: &Select) {
+        let JsonValue::Object(obj) = value else {
+            return;
+        };
+
+        for requestable in &select.fields {
+            let Requestable::Select(nested_select) = requestable else {
+                continue;
+            };
+            if nested_select.field.name == "GROUP" {
+                continue;
+            }
+
+            if let Some(relation_value) = obj.get_mut(nested_select.field.output_name()) {
+                Self::apply_scoped_relation_fulltext_to_relation(relation_value, nested_select);
+            }
+        }
+    }
+
+    fn apply_scoped_relation_fulltext_to_relation(value: &mut JsonValue, select: &Select) {
+        match value {
+            JsonValue::Array(items) => {
+                Self::score_scoped_relation_items(items, select);
+                for item in items.iter_mut() {
+                    Self::apply_scoped_relation_fulltext_to_value(item, select);
+                }
+            }
+            JsonValue::Object(_) => {
+                Self::score_scoped_relation_items(std::slice::from_mut(value), select);
+                Self::apply_scoped_relation_fulltext_to_value(value, select);
+            }
+            _ => {}
+        }
+    }
+
+    fn score_scoped_relation_items(items: &mut [JsonValue], select: &Select) {
+        if items.is_empty() || select.group_by.is_some() {
+            return;
+        }
+        if select
+            .filter
+            .as_ref()
+            .map(|filter| filter.has_alias_filter())
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        let scoped_fulltext: Vec<&FullTextSearch> = select
+            .fields
+            .iter()
+            .filter_map(|requestable| match requestable {
+                Requestable::FullTextSearch(fts)
+                    if fts.target_fields.iter().all(|field| !field.contains('.')) =>
+                {
+                    Some(fts)
+                }
+                _ => None,
+            })
+            .collect();
+
+        if scoped_fulltext.is_empty() {
+            return;
+        }
+
+        for fts in &scoped_fulltext {
+            let scores = Self::compute_scoped_fulltext_scores(items, fts);
+            Self::inject_scoped_fulltext_scores(items, fts.output_name(), &scores);
+        }
+
+        if let Some(order_by) = &select.order_by {
+            if scoped_fulltext.iter().any(|fts| {
+                order_by.conditions.iter().any(|condition| {
+                    condition
+                        .fields
+                        .first()
+                        .map(|field| field == fts.output_name())
+                        .unwrap_or(false)
+                })
+            }) {
+                Self::sort_relation_items(items, order_by);
+            }
+        }
+    }
+
+    fn compute_scoped_fulltext_scores(
+        items: &[JsonValue],
+        fts: &FullTextSearch,
+    ) -> HashMap<String, f64> {
+        if fts.query.trim().is_empty() {
+            return HashMap::new();
+        }
+
+        let mut combined_scores = HashMap::new();
+
+        for target_field in &fts.target_fields {
+            let documents: Vec<Bm25Document<String>> = items
+                .iter()
+                .filter_map(|item| {
+                    let obj = item.as_object()?;
+                    let doc_id = obj.get("_docID")?.as_str()?.to_string();
+                    let contents = obj.get(target_field)?.as_str()?;
+                    if contents.trim().is_empty() {
+                        return None;
+                    }
+                    Some(Bm25Document::new(doc_id, contents))
+                })
+                .collect();
+
+            if documents.is_empty() {
+                continue;
+            }
+
+            let search_engine =
+                SearchEngineBuilder::<String>::with_documents(Language::English, documents).build();
+
+            for result in search_engine.search(&fts.query, None) {
+                *combined_scores.entry(result.document.id).or_insert(0.0) += result.score as f64;
+            }
+        }
+
+        combined_scores
+    }
+
+    fn inject_scoped_fulltext_scores(
+        items: &mut [JsonValue],
+        output_name: &str,
+        scores: &HashMap<String, f64>,
+    ) {
+        for item in items {
+            let JsonValue::Object(obj) = item else {
+                continue;
+            };
+
+            let score = obj
+                .get("_docID")
+                .and_then(|value| value.as_str())
+                .and_then(|doc_id| scores.get(doc_id))
+                .copied()
+                .unwrap_or(0.0);
+
+            let json_score = serde_json::Number::from_f64(score)
+                .map(JsonValue::Number)
+                .unwrap_or(JsonValue::Null);
+            obj.insert(output_name.to_string(), json_score);
+        }
+    }
+
+    fn sort_relation_items(items: &mut [JsonValue], order_by: &crate::mapper::OrderBy) {
+        items.sort_by(|a, b| {
+            for condition in &order_by.conditions {
+                let value_a = resolve_nested_field(Some(a), &condition.fields);
+                let value_b = resolve_nested_field(Some(b), &condition.fields);
+                let cmp = compare_json_values(value_a.as_ref(), value_b.as_ref());
+                let cmp = match condition.direction {
+                    crate::mapper::OrderDirection::Asc => cmp,
+                    crate::mapper::OrderDirection::Desc => cmp.reverse(),
+                };
+
+                if cmp != Ordering::Equal {
+                    return cmp;
+                }
+            }
+
+            Ordering::Equal
+        });
     }
 
     /// Strip filter-only fields from relation data in query results.
@@ -1033,5 +1254,84 @@ mod tests {
             Some(&1.0)
         );
         assert_eq!(scores.get(&child_key).and_then(|m| m.get(fn_1)), Some(&1.0));
+    }
+
+    #[tokio::test]
+    async fn precompute_fulltext_scores_skips_nested_local_bm25_fields() {
+        let (_file_collection, _function_collection, collections_map) =
+            parsed_relation_collections();
+        let fetcher = FullTextTestFetcher::default();
+        let fn_1 = "bae-bdeed30f-a5e4-5952-93df-27eccec5a5b9";
+
+        fetcher.set_scores(
+            "Function",
+            "name",
+            "handle",
+            HashMap::from([(fn_1.to_string(), 1.75)]),
+        );
+
+        let select = crate::parse_query(
+            r#"query {
+                File {
+                    functions(order: {_alias: {score: DESC}}) {
+                        score: BM25(query: "handle", fields: ["name"])
+                    }
+                }
+            }"#,
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+        let runner = QueryRunner::new(fetcher, vec![]);
+        let scores = runner
+            .precompute_fulltext_scores(&select, runner.fetcher.as_ref(), &collections_map)
+            .await
+            .unwrap();
+
+        let child_scope = vec![
+            select.field.output_name().to_string(),
+            "functions".to_string(),
+        ];
+        let child_key = Planner::fts_score_key(&child_scope, "score");
+
+        assert!(!scores.contains_key(&child_key));
+    }
+
+    #[test]
+    fn apply_scoped_relation_fulltext_scores_and_orders_nested_items() {
+        let select = crate::parse_query(
+            r#"query {
+                Session {
+                    messages(order: {_alias: {score: DESC}}) {
+                        _docID
+                        score: BM25(query: "rust", fields: ["content"])
+                    }
+                }
+            }"#,
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+        let results = vec![serde_json::json!({
+            "_docID": "session-1",
+            "messages": [
+                {"_docID": "msg-1", "content": "rust search"},
+                {"_docID": "msg-2", "content": "rust rust rust rust rust"},
+                {"_docID": "msg-3", "content": "database tuning"}
+            ]
+        })];
+
+        let scored =
+            QueryRunner::<FullTextTestFetcher>::apply_scoped_relation_fulltext(results, &select);
+        let messages = scored[0]["messages"].as_array().unwrap();
+
+        assert_eq!(messages[0]["_docID"], "msg-2");
+        assert_eq!(messages[2]["_docID"], "msg-3");
+        assert!(messages[0]["score"].as_f64().unwrap() > messages[1]["score"].as_f64().unwrap());
+        assert_eq!(messages[2]["score"].as_f64(), Some(0.0));
     }
 }

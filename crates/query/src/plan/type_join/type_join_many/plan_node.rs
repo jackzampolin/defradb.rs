@@ -22,6 +22,12 @@ impl PlanNode for TypeJoinMany {
         self.child_scan_order.clear();
         self.filter_child_cache.clear();
 
+        let parent_scope = if self.parent_scoped_child_cache && !self.per_parent_child_scan {
+            Some(self.collect_parent_doc_ids().await?)
+        } else {
+            None
+        };
+
         // Build filter child cache if present (indexed relation filter evaluation)
         let filter_index_fetches = if let Some(ref mut filter_plan) = self.filter_child_plan {
             filter_plan.init().await?;
@@ -30,10 +36,16 @@ impl PlanNode for TypeJoinMany {
                 let doc = filter_plan.value();
                 if let Some(fk_idx) = self.filter_child_fk_index {
                     if let Some(fk) = doc.get(fk_idx).and_then(|v| v.as_str()) {
-                        self.filter_child_cache
-                            .entry(fk.to_string())
-                            .or_default()
-                            .push(doc.deep_clone());
+                        if parent_scope
+                            .as_ref()
+                            .map(|parent_doc_ids| parent_doc_ids.contains(fk))
+                            .unwrap_or(true)
+                        {
+                            self.filter_child_cache
+                                .entry(fk.to_string())
+                                .or_default()
+                                .push(doc.deep_clone());
+                        }
                     }
                 }
             }
@@ -49,7 +61,7 @@ impl PlanNode for TypeJoinMany {
             self.parent_plan.init().await?;
         } else {
             // Build child cache first (scans child_plan once)
-            self.build_child_cache().await?;
+            self.build_child_cache(parent_scope.as_ref()).await?;
             // Then init parent plan
             self.parent_plan.init().await?;
         }
@@ -480,5 +492,221 @@ impl PlanNode for TypeJoinMany {
         );
 
         serde_json::Value::Object(obj)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use serde_json::json;
+
+    use crate::document::DocumentMapping;
+    use crate::error::Result;
+    use crate::plan::{JoinSide, TypeJoinMany};
+    use crate::planner::{Doc, PlanNode};
+
+    #[derive(Debug)]
+    struct MockPlanNode {
+        docs: Vec<Doc>,
+        mapping: DocumentMapping,
+        current: Doc,
+        position: usize,
+    }
+
+    impl MockPlanNode {
+        fn new(docs: Vec<Doc>, mapping: DocumentMapping) -> Self {
+            Self {
+                docs,
+                mapping,
+                current: Doc::default(),
+                position: 0,
+            }
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl PlanNode for MockPlanNode {
+        async fn init(&mut self) -> Result<()> {
+            self.position = 0;
+            self.current = Doc::default();
+            Ok(())
+        }
+
+        async fn start(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn next(&mut self) -> Result<bool> {
+            if self.position >= self.docs.len() {
+                return Ok(false);
+            }
+
+            self.current = self.docs[self.position].deep_clone();
+            self.position += 1;
+            Ok(true)
+        }
+
+        fn value(&self) -> &Doc {
+            &self.current
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn source(&self) -> Option<&dyn PlanNode> {
+            None
+        }
+
+        fn document_map(&self) -> &DocumentMapping {
+            &self.mapping
+        }
+
+        fn kind(&self) -> &'static str {
+            "mockPlan"
+        }
+    }
+
+    fn make_parent_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "users",
+            "v1",
+            "users-v1",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "posts", FieldKind::relation("posts", true))
+                    .with_relation_name("author_posts"),
+            ],
+        )
+    }
+
+    fn make_child_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "posts",
+            "v1",
+            "posts-v1",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "title", FieldKind::string()),
+                FieldDescription::new("3", "author", FieldKind::relation("users", false))
+                    .with_relation_name("author_posts")
+                    .as_primary(),
+                FieldDescription::new("4", "_authorID", FieldKind::doc_id())
+                    .with_relation_name("author_posts")
+                    .as_primary(),
+            ],
+        )
+    }
+
+    fn make_parent_mapping() -> DocumentMapping {
+        let mut mapping = DocumentMapping::new();
+        mapping.add(0, "_docID");
+        mapping.add(1, "posts");
+        mapping
+    }
+
+    fn make_child_mapping() -> DocumentMapping {
+        let mut mapping = DocumentMapping::new();
+        mapping.add(0, "_docID");
+        mapping.add(1, "title");
+        mapping.add(2, "author");
+        mapping.add(3, "_authorID");
+        mapping.add_render_key(0, "_docID");
+        mapping.add_render_key(1, "title");
+        mapping
+    }
+
+    fn make_parent_doc(doc_id: &str) -> Doc {
+        let mut doc = Doc::new(2);
+        doc.set_doc_id(doc_id);
+        doc.stored_field_count = 1;
+        doc
+    }
+
+    fn make_child_doc(doc_id: &str, title: &str, parent_id: &str) -> Doc {
+        let mut doc = Doc::new(4);
+        doc.set_doc_id(doc_id);
+        doc.set(1, json!(title));
+        doc.set(3, json!(parent_id));
+        doc.stored_field_count = 3;
+        doc
+    }
+
+    async fn build_join(parent_scoped: bool) -> TypeJoinMany {
+        let parent_collection = make_parent_collection();
+        let child_collection = make_child_collection();
+
+        let parent_mapping = make_parent_mapping();
+        let child_mapping = make_child_mapping();
+
+        let parent_docs = vec![make_parent_doc("user-1"), make_parent_doc("user-3")];
+        let child_docs = vec![
+            make_child_doc("post-1", "hello", "user-1"),
+            make_child_doc("post-2", "skip", "user-2"),
+            make_child_doc("post-3", "world", "user-3"),
+        ];
+
+        let parent_plan: Box<dyn PlanNode> =
+            Box::new(MockPlanNode::new(parent_docs, parent_mapping));
+        let child_plan: Box<dyn PlanNode> = Box::new(MockPlanNode::new(child_docs, child_mapping));
+
+        let mut join_mapping = make_parent_mapping();
+        join_mapping.set_child_at(1, make_child_mapping());
+
+        let parent_side = JoinSide::new(
+            parent_collection.clone(),
+            parent_collection.field_by_name("posts").unwrap().clone(),
+            1,
+        )
+        .unwrap();
+        let child_side = JoinSide::new(
+            child_collection.clone(),
+            child_collection.field_by_name("author").unwrap().clone(),
+            2,
+        )
+        .unwrap();
+
+        let join = TypeJoinMany::new(
+            parent_plan,
+            child_plan,
+            parent_side,
+            child_side,
+            join_mapping,
+        )
+        .unwrap();
+
+        if parent_scoped {
+            join.with_parent_scoped_child_cache()
+        } else {
+            join
+        }
+    }
+
+    #[tokio::test]
+    async fn init_restricts_child_cache_to_parent_scope_when_enabled() {
+        let mut join = build_join(true).await;
+
+        join.init().await.unwrap();
+
+        assert_eq!(join.child_cache.len(), 2);
+        assert!(join.child_cache.contains_key("user-1"));
+        assert!(join.child_cache.contains_key("user-3"));
+        assert!(!join.child_cache.contains_key("user-2"));
+        assert_eq!(join.total_children_in_cache, 2);
+    }
+
+    #[tokio::test]
+    async fn init_keeps_all_children_without_parent_scope_restriction() {
+        let mut join = build_join(false).await;
+
+        join.init().await.unwrap();
+
+        assert_eq!(join.child_cache.len(), 3);
+        assert!(join.child_cache.contains_key("user-1"));
+        assert!(join.child_cache.contains_key("user-2"));
+        assert!(join.child_cache.contains_key("user-3"));
+        assert_eq!(join.total_children_in_cache, 3);
     }
 }

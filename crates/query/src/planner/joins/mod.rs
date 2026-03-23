@@ -692,6 +692,65 @@ impl Planner {
                 }
             }
 
+            // Nested relation-local BM25 rescoring runs after joins over the rendered child JSON.
+            // Ensure the BM25 target fields, and any local order fields used with them, are
+            // temporarily rendered so the runner can rescore and reorder the relation scope.
+            let has_deferred_scoped_fulltext = nested_select.group_by.is_none()
+                && nested_select
+                    .filter
+                    .as_ref()
+                    .map(|filter| !filter.has_alias_filter())
+                    .unwrap_or(true)
+                && nested_select.fields.iter().any(|requestable| {
+                    matches!(
+                        requestable,
+                        Requestable::FullTextSearch(fts)
+                            if fts.target_fields.iter().all(|field| !field.contains('.'))
+                    )
+                });
+
+            if has_deferred_scoped_fulltext {
+                for requestable in &nested_select.fields {
+                    let Requestable::FullTextSearch(fts) = requestable else {
+                        continue;
+                    };
+                    if !fts.target_fields.iter().all(|field| !field.contains('.')) {
+                        continue;
+                    }
+
+                    for target_field in &fts.target_fields {
+                        if let Some(idx) = child_scan_mapping.first_index_of_name(target_field) {
+                            if !child_scan_mapping
+                                .render_keys
+                                .iter()
+                                .any(|rk| rk.key == *target_field)
+                            {
+                                child_scan_mapping.add_render_key(idx, target_field);
+                            }
+                        }
+                    }
+                }
+
+                if let Some(order_by) = &nested_select.order_by {
+                    for condition in &order_by.conditions {
+                        if condition.fields.len() != 1 {
+                            continue;
+                        }
+
+                        let field_name = &condition.fields[0];
+                        if let Some(idx) = child_scan_mapping.first_index_of_name(field_name) {
+                            if !child_scan_mapping
+                                .render_keys
+                                .iter()
+                                .any(|rk| rk.key == *field_name)
+                            {
+                                child_scan_mapping.add_render_key(idx, field_name);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Recursively apply joins for any nested selections within this nested select.
             // This handles multi-level nesting like Users -> Posts -> Comments.
             // Note: We pass None for parent_filter since relation filters only apply at the top level.
@@ -1058,6 +1117,10 @@ impl Planner {
                 // Apply relation filter (filters parents by children)
                 if let Some(rel_filter) = relation_filter {
                     join_many = join_many.with_relation_filter(rel_filter);
+                }
+
+                if has_deferred_scoped_fulltext {
+                    join_many = join_many.with_parent_scoped_child_cache();
                 }
 
                 // Check if child has an index on its FK field for this relation.

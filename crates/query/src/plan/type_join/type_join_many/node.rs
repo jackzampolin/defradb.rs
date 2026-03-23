@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -89,6 +89,10 @@ pub struct TypeJoinMany {
     pub(super) filter_child_cache: HashMap<String, Vec<Doc>>,
     /// FK field index in the filter child plan's documents.
     pub(super) filter_child_fk_index: Option<usize>,
+    /// When true, pre-scan parent doc IDs and only retain matching children in caches.
+    /// This narrows high-cardinality child scopes like `session -> messages` before
+    /// downstream nested ordering/BM25 work without changing query results.
+    pub(super) parent_scoped_child_cache: bool,
 }
 
 impl std::fmt::Debug for TypeJoinMany {
@@ -165,6 +169,7 @@ impl TypeJoinMany {
             filter_child_plan: None,
             filter_child_cache: HashMap::new(),
             filter_child_fk_index: None,
+            parent_scoped_child_cache: false,
         })
     }
 
@@ -244,5 +249,31 @@ impl TypeJoinMany {
         self.filter_child_fk_index = fk_idx;
         self.filter_child_plan = Some(plan);
         self
+    }
+
+    /// Restrict child cache construction to the parent scope collected from parent_plan.
+    ///
+    /// This is a targeted optimization for nested one-to-many queries where the parent
+    /// side is already narrow but the child collection is large.
+    pub fn with_parent_scoped_child_cache(mut self) -> Self {
+        self.parent_scoped_child_cache = true;
+        self
+    }
+
+    pub(super) async fn collect_parent_doc_ids(&mut self) -> Result<HashSet<String>> {
+        let mut parent_doc_ids = HashSet::new();
+
+        self.parent_plan.init().await?;
+        self.parent_plan.start().await?;
+
+        while self.parent_plan.next().await? {
+            if let Some(doc_id) = self.parent_plan.value().doc_id() {
+                parent_doc_ids.insert(doc_id.to_string());
+            }
+        }
+
+        self.parent_plan.close().await?;
+
+        Ok(parent_doc_ids)
     }
 }

@@ -1,6 +1,6 @@
 use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::warn;
 
 use crate::document::DocumentMapping;
@@ -78,7 +78,10 @@ impl TypeJoinMany {
 
     /// Build the child cache by scanning child_plan once.
     /// Indexes children by their FK field value.
-    pub(super) async fn build_child_cache(&mut self) -> Result<()> {
+    pub(super) async fn build_child_cache(
+        &mut self,
+        parent_scope: Option<&HashSet<String>>,
+    ) -> Result<()> {
         self.child_cache.clear();
         self.child_scan_order.clear();
         self.child_plan.init().await?;
@@ -111,10 +114,15 @@ impl TypeJoinMany {
 
             // Index by FK value for O(1) lookup
             if let Some(fk) = child_fk_value.and_then(|v| v.as_str()) {
-                self.child_cache
-                    .entry(fk.to_string())
-                    .or_default()
-                    .push(child_doc.deep_clone());
+                if parent_scope
+                    .map(|parent_doc_ids| parent_doc_ids.contains(fk))
+                    .unwrap_or(true)
+                {
+                    self.child_cache
+                        .entry(fk.to_string())
+                        .or_default()
+                        .push(child_doc.deep_clone());
+                }
             } else {
                 warn!(
                     child_collection = %self.child_side.collection().name,
