@@ -30,6 +30,7 @@ mod introspection;
 mod mutation;
 mod plan;
 mod query;
+mod scoped_fulltext_cache;
 mod version;
 
 use acp::nac::NodePermission;
@@ -47,6 +48,7 @@ use crate::fetcher::{CollectionProvider, StaticCollectionProvider};
 use crate::mutator::DocMutator;
 use crate::planner::Doc;
 use crate::txn::{NoOpTransactionRegistry, TransactionRegistry};
+use scoped_fulltext_cache::ScopedFulltextCache;
 
 #[cfg(not(target_arch = "wasm32"))]
 tokio::task_local! {
@@ -92,6 +94,8 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     pub(crate) nac: Option<Arc<dyn NacChecker>>,
     /// Query execution timeout in seconds (0 = no timeout). Default: 30.
     pub(crate) query_timeout: u64,
+    /// Cached BM25 Turbo indexes for scoped nested relation search.
+    pub(crate) scoped_fulltext_cache: Arc<ScopedFulltextCache>,
 }
 
 impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
@@ -111,6 +115,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             lens_store: None,
             nac: None,
             query_timeout: 30,
+            scoped_fulltext_cache: Arc::new(ScopedFulltextCache::new()),
         }
     }
 
@@ -130,6 +135,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             lens_store: None,
             nac: None,
             query_timeout: 30,
+            scoped_fulltext_cache: Arc::new(ScopedFulltextCache::new()),
         }
     }
 }
@@ -151,6 +157,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             lens_store: None,
             nac: None,
             query_timeout: 30,
+            scoped_fulltext_cache: Arc::new(ScopedFulltextCache::new()),
         }
     }
 
@@ -175,6 +182,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             lens_store: None,
             nac: None,
             query_timeout: 30,
+            scoped_fulltext_cache: Arc::new(ScopedFulltextCache::new()),
         }
     }
 
@@ -198,6 +206,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             lens_store: None,
             nac: None,
             query_timeout: 30,
+            scoped_fulltext_cache: Arc::new(ScopedFulltextCache::new()),
         }
     }
 
