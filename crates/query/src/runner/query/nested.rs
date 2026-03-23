@@ -7,6 +7,8 @@ use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tracing::{debug, instrument};
 
 use crate::error::{QueryError, Result};
 use crate::mapper::{FullTextSearch, Requestable, Select};
@@ -18,18 +20,57 @@ use std::collections::HashMap;
 use super::super::fetcher::FetcherWrapper;
 use super::super::{DocFetcher, QueryRunner};
 
+#[derive(Debug, Default)]
+struct ScopedFulltextProfile {
+    scoring_calls: usize,
+    sort_calls: usize,
+    top_k_calls: usize,
+    items_seen: usize,
+    target_fields_seen: usize,
+    docs_indexed: usize,
+    scoring_elapsed: Duration,
+    sort_elapsed: Duration,
+    top_k_elapsed: Duration,
+}
+
+#[derive(Debug, Default)]
+struct NestedQueryProfile {
+    precompute_fulltext_elapsed: Duration,
+    plan_build_elapsed: Duration,
+    plan_init_elapsed: Duration,
+    plan_start_elapsed: Duration,
+    plan_iteration_elapsed: Duration,
+    doc_render_elapsed: Duration,
+    ordering_only_strip_elapsed: Duration,
+    plan_close_elapsed: Duration,
+    relation_aggregate_elapsed: Duration,
+    scoped_fulltext_elapsed: Duration,
+    clean_filter_only_fields_elapsed: Duration,
+    relation_limits_elapsed: Duration,
+    result_count: usize,
+    scoped_fulltext: ScopedFulltextProfile,
+}
+
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Execute a query with nested selections using the Planner.
     ///
     /// The Planner builds a proper join plan with TypeJoinOne/TypeJoinMany nodes.
     /// ScanNodes fetch their own data via the attached fetcher.
     /// ACP permission filtering is applied per-collection via PermissionFilterNode in the plan.
+    #[instrument(
+        name = "query.execute_nested_select",
+        level = "debug",
+        skip(self, select, fetcher, identity),
+        fields(collection = %select.collection_name, field = %select.field.output_name())
+    )]
     pub(crate) async fn execute_nested_select_with_planner(
         &self,
         select: &Select,
         fetcher: &dyn DocFetcher,
         identity: Option<Did>,
     ) -> Result<JsonValue> {
+        let mut profile = NestedQueryProfile::default();
+
         // Create a fetcher wrapper that can be shared across plan nodes
         // We need to wrap the reference in an Arc-compatible struct
         let fetcher_arc = FetcherWrapper::new(fetcher);
@@ -44,10 +85,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Supports dotted relation paths like `file.name` and `functions.content`
         // by querying the leaf collection's BM25 index and lifting scores back
         // onto the root collection through relation foreign keys.
+        let precompute_fulltext_start = Instant::now();
         let fts_scores = self
             .precompute_fulltext_scores(select, fetcher, &collections_map)
             .await?;
+        profile.precompute_fulltext_elapsed = precompute_fulltext_start.elapsed();
 
+        let plan_build_start = Instant::now();
         let mut planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
         if !fts_scores.is_empty() {
             planner = planner.with_fts_scores(fts_scores);
@@ -59,6 +103,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             planner = planner.with_lens_store(lens_store.clone());
         }
         let plan_result = planner.plan_with_index_info(select)?;
+        profile.plan_build_elapsed = plan_build_start.elapsed();
         let mut plan = plan_result.plan;
         let ordering_only_fields = plan_result.ordering_only_fields;
         let aggregate_internal_keys = plan_result.aggregate_internal_keys;
@@ -67,17 +112,32 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mapping = plan.document_map().clone();
 
         // Execute the plan and collect results
+        let plan_init_start = Instant::now();
         plan.init().await?;
+        profile.plan_init_elapsed = plan_init_start.elapsed();
+        let plan_start_start = Instant::now();
         plan.start().await?;
+        profile.plan_start_elapsed = plan_start_start.elapsed();
 
         let mut results = Vec::new();
 
-        while plan.next().await? {
+        loop {
+            let plan_iteration_start = Instant::now();
+            let has_next = plan.next().await?;
+            profile.plan_iteration_elapsed += plan_iteration_start.elapsed();
+            if !has_next {
+                break;
+            }
+
             let doc = plan.value();
+
+            let doc_render_start = Instant::now();
             let mut json = self.doc_to_json(doc, &mapping)?;
+            profile.doc_render_elapsed += doc_render_start.elapsed();
 
             // Strip ordering-only fields from nested objects.
             // These fields were added for ORDER BY but shouldn't appear in output.
+            let ordering_only_strip_start = Instant::now();
             for (relation_field, nested_field) in &ordering_only_fields {
                 if let Some(obj) = json.as_object_mut() {
                     if let Some(relation_value) = obj.get_mut(relation_field) {
@@ -87,30 +147,79 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     }
                 }
             }
+            profile.ordering_only_strip_elapsed += ordering_only_strip_start.elapsed();
 
             results.push(json);
         }
 
+        let plan_exec_info = plan.exec_info();
+        let plan_close_start = Instant::now();
         plan.close().await?;
+        profile.plan_close_elapsed = plan_close_start.elapsed();
 
         // Post-process relation-based aggregates
         // For aggregates like _count(books: {}), compute the value from joined data
+        let relation_aggregate_start = Instant::now();
         let results =
             self.compute_relation_aggregates(results, select, &aggregate_internal_keys)?;
+        profile.relation_aggregate_elapsed = relation_aggregate_start.elapsed();
 
         // For nested relation-local BM25, score the already-joined relation scope instead of
         // precomputing against the full leaf collection. This preserves correct nested ordering
         // while avoiding a full-corpus BM25 pass for session-scoped child queries.
-        let results = Self::apply_scoped_relation_fulltext(results, select);
+        let mut scoped_fulltext = ScopedFulltextProfile::default();
+        let scoped_fulltext_start = Instant::now();
+        let results = Self::apply_scoped_relation_fulltext_with_profile(
+            results,
+            select,
+            &mut scoped_fulltext,
+        );
+        profile.scoped_fulltext_elapsed = scoped_fulltext_start.elapsed();
+        profile.scoped_fulltext = scoped_fulltext;
 
         // Strip fields from relation data that were added for filter evaluation
         // but not explicitly requested in the selection set.
+        let clean_filter_only_fields_start = Instant::now();
         let results = Self::clean_filter_only_relation_fields(results, select);
+        profile.clean_filter_only_fields_elapsed = clean_filter_only_fields_start.elapsed();
 
         // Apply deferred limit/offset to relation fields.
         // TypeJoinMany stores ALL children (for aggregates to count), so we apply
         // the select's limit/offset here after aggregates have been computed.
+        let relation_limits_start = Instant::now();
         let results = Self::apply_relation_limits(results, select);
+        profile.relation_limits_elapsed = relation_limits_start.elapsed();
+        profile.result_count = results.len();
+
+        debug!(
+            plan_docs_fetched = plan_exec_info.docs_fetched,
+            plan_fields_fetched = plan_exec_info.fields_fetched,
+            plan_indexes_fetched = plan_exec_info.indexes_fetched,
+            plan_iterations = plan_exec_info.iterations,
+            precompute_fulltext = ?profile.precompute_fulltext_elapsed,
+            plan_build = ?profile.plan_build_elapsed,
+            plan_init = ?profile.plan_init_elapsed,
+            plan_start = ?profile.plan_start_elapsed,
+            plan_iteration = ?profile.plan_iteration_elapsed,
+            doc_render = ?profile.doc_render_elapsed,
+            ordering_only_strip = ?profile.ordering_only_strip_elapsed,
+            plan_close = ?profile.plan_close_elapsed,
+            relation_aggregates = ?profile.relation_aggregate_elapsed,
+            scoped_fulltext = ?profile.scoped_fulltext_elapsed,
+            clean_filter_only_fields = ?profile.clean_filter_only_fields_elapsed,
+            relation_limits = ?profile.relation_limits_elapsed,
+            scoped_fulltext_calls = profile.scoped_fulltext.scoring_calls,
+            scoped_fulltext_sort_calls = profile.scoped_fulltext.sort_calls,
+            scoped_fulltext_top_k_calls = profile.scoped_fulltext.top_k_calls,
+            scoped_fulltext_items_seen = profile.scoped_fulltext.items_seen,
+            scoped_fulltext_target_fields_seen = profile.scoped_fulltext.target_fields_seen,
+            scoped_fulltext_docs_indexed = profile.scoped_fulltext.docs_indexed,
+            scoped_fulltext_scoring = ?profile.scoped_fulltext.scoring_elapsed,
+            scoped_fulltext_sort = ?profile.scoped_fulltext.sort_elapsed,
+            scoped_fulltext_top_k = ?profile.scoped_fulltext.top_k_elapsed,
+            result_count = profile.result_count,
+            "nested query profile"
+        );
 
         Ok(JsonValue::Array(results))
     }
@@ -428,18 +537,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// limited to relation-local BM25 fields. It avoids the full-corpus precompute path for
     /// high-cardinality child collections while preserving the existing planner path for
     /// top-level and dotted relation BM25 fields.
-    fn apply_scoped_relation_fulltext(
+    #[cfg(test)]
+    fn apply_scoped_relation_fulltext(results: Vec<JsonValue>, select: &Select) -> Vec<JsonValue> {
+        let mut profile = ScopedFulltextProfile::default();
+        Self::apply_scoped_relation_fulltext_with_profile(results, select, &mut profile)
+    }
+
+    fn apply_scoped_relation_fulltext_with_profile(
         mut results: Vec<JsonValue>,
         select: &Select,
+        profile: &mut ScopedFulltextProfile,
     ) -> Vec<JsonValue> {
         for result in &mut results {
-            Self::apply_scoped_relation_fulltext_to_value(result, select);
+            Self::apply_scoped_relation_fulltext_to_value(result, select, profile);
         }
 
         results
     }
 
-    fn apply_scoped_relation_fulltext_to_value(value: &mut JsonValue, select: &Select) {
+    fn apply_scoped_relation_fulltext_to_value(
+        value: &mut JsonValue,
+        select: &Select,
+        profile: &mut ScopedFulltextProfile,
+    ) {
         let JsonValue::Object(obj) = value else {
             return;
         };
@@ -453,30 +573,42 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
 
             if let Some(relation_value) = obj.get_mut(nested_select.field.output_name()) {
-                Self::apply_scoped_relation_fulltext_to_relation(relation_value, nested_select);
+                Self::apply_scoped_relation_fulltext_to_relation(
+                    relation_value,
+                    nested_select,
+                    profile,
+                );
             }
         }
     }
 
-    fn apply_scoped_relation_fulltext_to_relation(value: &mut JsonValue, select: &Select) {
+    fn apply_scoped_relation_fulltext_to_relation(
+        value: &mut JsonValue,
+        select: &Select,
+        profile: &mut ScopedFulltextProfile,
+    ) {
         match value {
             JsonValue::Array(items) => {
-                if !Self::apply_scoped_relation_fulltext_top_k(items, select) {
-                    Self::score_scoped_relation_items(items, select);
+                if !Self::apply_scoped_relation_fulltext_top_k(items, select, profile) {
+                    Self::score_scoped_relation_items(items, select, profile);
                 }
                 for item in items.iter_mut() {
-                    Self::apply_scoped_relation_fulltext_to_value(item, select);
+                    Self::apply_scoped_relation_fulltext_to_value(item, select, profile);
                 }
             }
             JsonValue::Object(_) => {
-                Self::score_scoped_relation_items(std::slice::from_mut(value), select);
-                Self::apply_scoped_relation_fulltext_to_value(value, select);
+                Self::score_scoped_relation_items(std::slice::from_mut(value), select, profile);
+                Self::apply_scoped_relation_fulltext_to_value(value, select, profile);
             }
             _ => {}
         }
     }
 
-    fn apply_scoped_relation_fulltext_top_k(items: &mut Vec<JsonValue>, select: &Select) -> bool {
+    fn apply_scoped_relation_fulltext_top_k(
+        items: &mut Vec<JsonValue>,
+        select: &Select,
+        profile: &mut ScopedFulltextProfile,
+    ) -> bool {
         if items.is_empty() || select.group_by.is_some() {
             return false;
         }
@@ -503,7 +635,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             return false;
         };
 
-        let scores = Self::compute_scoped_fulltext_scores(items, ranked_fts);
+        let top_k_start = Instant::now();
+        let scores = Self::compute_scoped_fulltext_scores(items, ranked_fts, profile);
         Self::retain_relation_top_k_by_score(items, order_field.as_str(), &scores, keep_count);
 
         for fts in scoped_fulltext {
@@ -511,10 +644,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 continue;
             }
 
-            let scores = Self::compute_scoped_fulltext_scores(items, fts);
+            let scores = Self::compute_scoped_fulltext_scores(items, fts, profile);
             Self::inject_scoped_fulltext_scores(items, fts.output_name(), &scores);
         }
 
+        profile.top_k_calls += 1;
+        profile.top_k_elapsed += top_k_start.elapsed();
         true
     }
 
@@ -646,7 +781,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
     }
 
-    fn score_scoped_relation_items(items: &mut [JsonValue], select: &Select) {
+    fn score_scoped_relation_items(
+        items: &mut [JsonValue],
+        select: &Select,
+        profile: &mut ScopedFulltextProfile,
+    ) {
         if items.is_empty() || select.group_by.is_some() {
             return;
         }
@@ -666,7 +805,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         for fts in &scoped_fulltext {
-            let scores = Self::compute_scoped_fulltext_scores(items, fts);
+            let scores = Self::compute_scoped_fulltext_scores(items, fts, profile);
             Self::inject_scoped_fulltext_scores(items, fts.output_name(), &scores);
         }
 
@@ -680,7 +819,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         .unwrap_or(false)
                 })
             }) {
+                let sort_start = Instant::now();
                 Self::sort_relation_items(items, order_by);
+                profile.sort_calls += 1;
+                profile.sort_elapsed += sort_start.elapsed();
             }
         }
     }
@@ -688,12 +830,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     fn compute_scoped_fulltext_scores(
         items: &[JsonValue],
         fts: &FullTextSearch,
+        profile: &mut ScopedFulltextProfile,
     ) -> HashMap<String, f64> {
         if fts.query.trim().is_empty() {
             return HashMap::new();
         }
 
+        let scoring_start = Instant::now();
         let mut combined_scores = HashMap::new();
+        profile.scoring_calls += 1;
+        profile.items_seen += items.len();
+        profile.target_fields_seen += fts.target_fields.len();
 
         for target_field in &fts.target_fields {
             let documents: Vec<Bm25Document<String>> = items
@@ -713,6 +860,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 continue;
             }
 
+            profile.docs_indexed += documents.len();
+
             let search_engine =
                 SearchEngineBuilder::<String>::with_documents(Language::English, documents).build();
 
@@ -721,6 +870,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        profile.scoring_elapsed += scoring_start.elapsed();
         combined_scores
     }
 

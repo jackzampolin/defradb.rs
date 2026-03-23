@@ -1,7 +1,8 @@
 use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use tracing::warn;
+use std::time::Instant;
+use tracing::{debug, warn};
 
 use crate::document::{documents_to_plan_docs, DocumentMapping};
 use crate::error::Result;
@@ -83,6 +84,7 @@ impl TypeJoinMany {
         &mut self,
         parent_scope: Option<&HashSet<String>>,
     ) -> Result<()> {
+        let build_start = Instant::now();
         self.child_cache.clear();
         self.child_scan_order.clear();
 
@@ -162,6 +164,11 @@ impl TypeJoinMany {
             parent_side_index = self.parent_side.relation_field_index(),
             cache_keys = ?self.child_cache.keys().collect::<Vec<_>>(),
             total_children = self.child_cache.values().map(|v| v.len()).sum::<usize>(),
+            parent_scope_size = parent_scope.map(|scope| scope.len()).unwrap_or(0),
+            docs_fetched = self.child_exec_info.docs_fetched,
+            fields_fetched = self.child_exec_info.fields_fetched,
+            index_fetches = self.child_exec_info.indexes_fetched,
+            elapsed = ?build_start.elapsed(),
             "TypeJoinMany::build_child_cache complete"
         );
 
@@ -173,6 +180,7 @@ impl TypeJoinMany {
         parent_scope: &HashSet<String>,
         indexed_child_fetch: &super::node::IndexedChildFetch,
     ) -> Result<()> {
+        let build_start = Instant::now();
         let mut parent_ids: Vec<String> = parent_scope.iter().cloned().collect();
         parent_ids.sort();
 
@@ -266,11 +274,16 @@ impl TypeJoinMany {
         self.total_children_in_cache = self.child_cache.values().map(|v| v.len() as u64).sum();
         self.total_fields_per_scan = total_fields;
 
-        tracing::debug!(
+        debug!(
             parent_side_index = self.parent_side.relation_field_index(),
             cache_keys = ?self.child_cache.keys().collect::<Vec<_>>(),
             total_children = self.child_cache.values().map(|v| v.len()).sum::<usize>(),
             fk_field = %indexed_child_fetch.fk_field_name,
+            parent_scope_size = parent_scope.len(),
+            docs_fetched = self.child_exec_info.docs_fetched,
+            fields_fetched = self.child_exec_info.fields_fetched,
+            index_fetches = self.child_exec_info.indexes_fetched,
+            elapsed = ?build_start.elapsed(),
             "TypeJoinMany::build_child_cache_from_index complete"
         );
 

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
-use tracing::warn;
+use std::time::Instant;
+use tracing::{debug, warn};
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
@@ -13,6 +14,7 @@ use super::node::TypeJoinMany;
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl PlanNode for TypeJoinMany {
     async fn init(&mut self) -> Result<()> {
+        let init_start = Instant::now();
         // Reset execution stats
         self.exec_info = ExecInfo::default();
         self.child_exec_info = ExecInfo::default();
@@ -22,6 +24,7 @@ impl PlanNode for TypeJoinMany {
         self.child_scan_order.clear();
         self.filter_child_cache.clear();
 
+        let parent_scope_start = Instant::now();
         let parent_scope = if (self.parent_scoped_child_cache || self.indexed_child_fetch.is_some())
             && !self.per_parent_child_scan
         {
@@ -29,8 +32,10 @@ impl PlanNode for TypeJoinMany {
         } else {
             None
         };
+        let parent_scope_elapsed = parent_scope_start.elapsed();
 
         // Build filter child cache if present (indexed relation filter evaluation)
+        let filter_child_cache_start = Instant::now();
         let filter_index_fetches = if let Some(ref mut filter_plan) = self.filter_child_plan {
             filter_plan.init().await?;
             filter_plan.start().await?;
@@ -57,15 +62,61 @@ impl PlanNode for TypeJoinMany {
         } else {
             None
         };
+        let filter_child_cache_elapsed = filter_child_cache_start.elapsed();
 
         if self.per_parent_child_scan {
             // Per-parent mode: don't cache, we'll re-scan per parent in next()
+            let parent_plan_init_start = Instant::now();
             self.parent_plan.init().await?;
+            let parent_plan_init_elapsed = parent_plan_init_start.elapsed();
+
+            debug!(
+                parent_collection = %self.parent_side.collection().name,
+                child_collection = %self.child_side.collection().name,
+                relation_field = %self.parent_side.relation_field().name,
+                parent_scope_size = parent_scope.as_ref().map(|scope| scope.len()).unwrap_or(0),
+                parent_scope = ?parent_scope_elapsed,
+                filter_child_cache = ?filter_child_cache_elapsed,
+                filter_child_keys = self.filter_child_cache.len(),
+                filter_child_docs = self.filter_child_cache.values().map(|docs| docs.len()).sum::<usize>(),
+                parent_plan_init = ?parent_plan_init_elapsed,
+                total = ?init_start.elapsed(),
+                per_parent_child_scan = self.per_parent_child_scan,
+                parent_scoped_child_cache = self.parent_scoped_child_cache,
+                indexed_child_fetch = self.indexed_child_fetch.is_some(),
+                "TypeJoinMany init profile"
+            );
         } else {
             // Build child cache first (scans child_plan once)
+            let child_cache_start = Instant::now();
             self.build_child_cache(parent_scope.as_ref()).await?;
+            let child_cache_elapsed = child_cache_start.elapsed();
             // Then init parent plan
+            let parent_plan_init_start = Instant::now();
             self.parent_plan.init().await?;
+            let parent_plan_init_elapsed = parent_plan_init_start.elapsed();
+
+            debug!(
+                parent_collection = %self.parent_side.collection().name,
+                child_collection = %self.child_side.collection().name,
+                relation_field = %self.parent_side.relation_field().name,
+                parent_scope_size = parent_scope.as_ref().map(|scope| scope.len()).unwrap_or(0),
+                parent_scope = ?parent_scope_elapsed,
+                filter_child_cache = ?filter_child_cache_elapsed,
+                filter_child_keys = self.filter_child_cache.len(),
+                filter_child_docs = self.filter_child_cache.values().map(|docs| docs.len()).sum::<usize>(),
+                child_cache = ?child_cache_elapsed,
+                child_cache_keys = self.child_cache.len(),
+                child_cache_docs = self.total_children_in_cache,
+                child_cache_fields = self.total_fields_per_scan,
+                child_cache_indexes = self.child_exec_info.indexes_fetched,
+                parent_plan_init = ?parent_plan_init_elapsed,
+                total = ?init_start.elapsed(),
+                per_parent_child_scan = self.per_parent_child_scan,
+                parent_scoped_child_cache = self.parent_scoped_child_cache,
+                indexed_child_fetch = self.indexed_child_fetch.is_some(),
+                "TypeJoinMany init profile"
+            );
         }
 
         // Add filter child plan's index_fetches to the display child's
