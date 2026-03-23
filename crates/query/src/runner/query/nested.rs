@@ -5,7 +5,7 @@ use identity::Did;
 use schema::{CollectionVersion, FieldDescription};
 use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, instrument};
@@ -15,7 +15,6 @@ use crate::mapper::{FullTextSearch, Requestable, Select};
 use crate::plan::{compare_json_values, resolve_nested_field};
 use crate::planner::Planner;
 use crate::txn::TransactionRegistry;
-use std::collections::HashMap;
 
 use super::super::fetcher::FetcherWrapper;
 use super::super::{DocFetcher, QueryRunner};
@@ -636,7 +635,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         let top_k_start = Instant::now();
-        let scores = Self::compute_scoped_fulltext_scores(items, ranked_fts, profile);
+        let scores =
+            Self::compute_scoped_fulltext_scores(items, ranked_fts, profile, Some(keep_count));
         Self::retain_relation_top_k_by_score(items, order_field.as_str(), &scores, keep_count);
 
         for fts in scoped_fulltext {
@@ -644,7 +644,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 continue;
             }
 
-            let scores = Self::compute_scoped_fulltext_scores(items, fts, profile);
+            let scores = Self::compute_scoped_fulltext_scores(items, fts, profile, None);
             Self::inject_scoped_fulltext_scores(items, fts.output_name(), &scores);
         }
 
@@ -705,7 +705,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     fn retain_relation_top_k_by_score(
         items: &mut Vec<JsonValue>,
         output_name: &str,
-        scores: &HashMap<String, f64>,
+        scores: &[f64],
         keep_count: usize,
     ) {
         if keep_count == 0 || items.len() <= keep_count {
@@ -716,13 +716,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mut selected: Vec<(usize, JsonValue)> = Vec::with_capacity(keep_count);
 
         for (original_index, mut item) in std::mem::take(items).into_iter().enumerate() {
-            let score = item
-                .as_object()
-                .and_then(|obj| obj.get("_docID"))
-                .and_then(|value| value.as_str())
-                .and_then(|doc_id| scores.get(doc_id))
-                .copied()
-                .unwrap_or(0.0);
+            let score = scores.get(original_index).copied().unwrap_or(0.0);
             Self::inject_scoped_fulltext_score(&mut item, output_name, score);
 
             if selected.len() < keep_count {
@@ -805,7 +799,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         for fts in &scoped_fulltext {
-            let scores = Self::compute_scoped_fulltext_scores(items, fts, profile);
+            let scores = Self::compute_scoped_fulltext_scores(items, fts, profile, None);
             Self::inject_scoped_fulltext_scores(items, fts.output_name(), &scores);
         }
 
@@ -831,16 +825,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         items: &[JsonValue],
         fts: &FullTextSearch,
         profile: &mut ScopedFulltextProfile,
-    ) -> HashMap<String, f64> {
+        limit: Option<usize>,
+    ) -> Vec<f64> {
         if fts.query.trim().is_empty() {
-            return HashMap::new();
+            return vec![0.0; items.len()];
         }
 
         let scoring_start = Instant::now();
-        let mut combined_scores = HashMap::new();
+        let mut combined_scores = vec![0.0; items.len()];
         profile.scoring_calls += 1;
         profile.items_seen += items.len();
         profile.target_fields_seen += fts.target_fields.len();
+        let doc_positions = items
+            .iter()
+            .enumerate()
+            .filter_map(|(item_index, item)| {
+                let obj = item.as_object()?;
+                let doc_id = obj.get("_docID")?.as_str()?;
+                Some((doc_id, item_index))
+            })
+            .collect::<HashMap<_, _>>();
 
         for target_field in &fts.target_fields {
             let documents: Vec<Bm25Document<String>> = items
@@ -852,6 +856,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     if contents.trim().is_empty() {
                         return None;
                     }
+
                     Some(Bm25Document::new(doc_id, contents))
                 })
                 .collect();
@@ -861,12 +866,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
 
             profile.docs_indexed += documents.len();
-
             let search_engine =
                 SearchEngineBuilder::<String>::with_documents(Language::English, documents).build();
-
-            for result in search_engine.search(&fts.query, None) {
-                *combined_scores.entry(result.document.id).or_insert(0.0) += result.score as f64;
+            for result in search_engine.search(&fts.query, limit) {
+                if let Some(item_index) = doc_positions.get(result.document.id.as_str()).copied() {
+                    combined_scores[item_index] += result.score as f64;
+                }
             }
         }
 
@@ -874,20 +879,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         combined_scores
     }
 
-    fn inject_scoped_fulltext_scores(
-        items: &mut [JsonValue],
-        output_name: &str,
-        scores: &HashMap<String, f64>,
-    ) {
-        for item in items {
-            let score = item
-                .as_object()
-                .and_then(|obj| obj.get("_docID"))
-                .and_then(|value| value.as_str())
-                .and_then(|doc_id| scores.get(doc_id))
-                .copied()
-                .unwrap_or(0.0);
-
+    fn inject_scoped_fulltext_scores(items: &mut [JsonValue], output_name: &str, scores: &[f64]) {
+        for (index, item) in items.iter_mut().enumerate() {
+            let score = scores.get(index).copied().unwrap_or(0.0);
             Self::inject_scoped_fulltext_score(item, output_name, score);
         }
     }
@@ -1058,6 +1052,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use bm25::{Document as Bm25Document, SearchEngineBuilder};
     use document::Document;
     use schema::FieldKind;
     use std::sync::Mutex;
@@ -1649,6 +1644,100 @@ mod tests {
         assert_eq!(messages[2]["_docID"], "msg-3");
         assert!(messages[0]["score"].as_f64().unwrap() > messages[1]["score"].as_f64().unwrap());
         assert_eq!(messages[2]["score"].as_f64(), Some(0.0));
+    }
+
+    #[test]
+    fn compute_scoped_fulltext_scores_matches_bm25_crate_scores() {
+        let select = crate::parse_query(
+            r#"query {
+                Session {
+                    messages {
+                        _docID
+                        score: BM25(query: "cargo cargo bm25", fields: ["content"])
+                    }
+                }
+            }"#,
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+        let items = vec![
+            serde_json::json!({
+                "_docID": "msg-1",
+                "content": "cargo test keeps bm25 search relevant for rust queries"
+            }),
+            serde_json::json!({
+                "_docID": "msg-2",
+                "content": "cargo cargo fmt and cargo bench help benchmark bm25 tuning"
+            }),
+            serde_json::json!({
+                "_docID": "msg-3",
+                "content": "graph joins and filters dominate this query path"
+            }),
+        ];
+
+        let nested_select = select
+            .fields
+            .iter()
+            .find_map(|requestable| match requestable {
+                Requestable::Select(nested_select) => Some(nested_select),
+                _ => None,
+            })
+            .expect("messages selection should be present");
+        let fts = nested_select
+            .fields
+            .iter()
+            .find_map(|requestable| match requestable {
+                Requestable::FullTextSearch(fts) => Some(fts),
+                _ => None,
+            })
+            .expect("BM25 selection should be present");
+
+        let mut profile = ScopedFulltextProfile::default();
+        let scoped_scores = QueryRunner::<FullTextTestFetcher>::compute_scoped_fulltext_scores(
+            &items,
+            fts,
+            &mut profile,
+            None,
+        );
+
+        let documents = items
+            .iter()
+            .map(|item| {
+                Bm25Document::new(
+                    item["_docID"].as_str().unwrap().to_string(),
+                    item["content"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let engine =
+            SearchEngineBuilder::<String>::with_documents(Language::English, documents).build();
+        let expected_scores = engine
+            .search("cargo cargo bm25", None)
+            .into_iter()
+            .map(|result| (result.document.id, result.score as f64))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(scoped_scores.len(), items.len());
+        for (doc_id, expected_score) in expected_scores {
+            let item_index = items
+                .iter()
+                .position(|item| item["_docID"].as_str() == Some(doc_id.as_str()))
+                .unwrap_or_else(|| panic!("missing item for {doc_id}"));
+            let actual_score = scoped_scores[item_index];
+            assert!(
+                (actual_score - expected_score).abs() < 1e-6,
+                "score mismatch for {doc_id}: expected {expected_score}, got {actual_score}"
+            );
+        }
+
+        let zero_score_index = items
+            .iter()
+            .position(|item| item["_docID"].as_str() == Some("msg-3"))
+            .unwrap();
+        assert_eq!(scoped_scores[zero_score_index], 0.0);
     }
 
     #[test]

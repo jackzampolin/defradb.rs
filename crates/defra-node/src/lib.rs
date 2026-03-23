@@ -6,6 +6,8 @@
 //!
 //! P2P uses IROH (QUIC-native) transport for peer-to-peer replication.
 
+#[doc(hidden)]
+pub mod benchmark_support;
 pub mod version;
 
 use std::path::PathBuf;

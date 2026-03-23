@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "Reusable embedded DefraDB node builder"
 
+[[bin]]
+name = "coding-session-bench"
+path = "src/bin/coding-session-bench.rs"
+required-features = ["rocksdb"]
+test = false
+
 [features]
 default = []
 http = ["dep:defra-http", "dep:axum"]
@@ -27,6 +33,7 @@ async-trait = "0.1"
 serde.workspace = true
 serde_json.workspace = true
 axum = { workspace = true, optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Optional — HTTP server
 defra-http = { path = "../http", optional = true }
