@@ -580,7 +580,7 @@ impl<'a> SdlParser<'a> {
                     let mut id_field =
                         FieldDescription::new(&id_field_id, &id_field_name, id_field_kind)
                             .with_crdt_type(id_field_crdt)
-                            .with_relation_name(relation_name);
+                            .with_relation_name(relation_name.clone());
                     if is_primary {
                         id_field = id_field.as_primary();
 
