@@ -18,7 +18,9 @@ use crate::cli::Cli;
 use crate::error::{Error, Result};
 
 // Re-export types and sections for external use
-pub use sections::{AcpConfig, ApiConfig, DatastoreConfig, KeyringConfig, LogConfig, NetConfig};
+pub use sections::{
+    AcpConfig, ApiConfig, DatastoreConfig, EmbeddingConfig, KeyringConfig, LogConfig, NetConfig,
+};
 pub use types::{AcpDocumentType, DatastoreType, LogFormat, LogLevel, LogOutput, TransportType};
 // KeyringBackend is available but not currently used externally
 #[allow(unused_imports)]
@@ -31,6 +33,8 @@ pub struct Config {
     pub rootdir: PathBuf,
     pub log: LogConfig,
     pub api: ApiConfig,
+    #[serde(default)]
+    pub embedding: EmbeddingConfig,
     pub datastore: DatastoreConfig,
     pub net: NetConfig,
     pub keyring: KeyringConfig,
@@ -49,6 +53,7 @@ impl Default for Config {
             rootdir: PathBuf::new(),
             log: LogConfig::default(),
             api: ApiConfig::default(),
+            embedding: EmbeddingConfig::default(),
             datastore: DatastoreConfig::default(),
             net: NetConfig::default(),
             keyring: KeyringConfig::default(),

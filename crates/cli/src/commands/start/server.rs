@@ -82,6 +82,33 @@ impl Node {
             db_options = db_options.with_node_identity_arc(identity);
             info!("Database configured with user identity");
         }
+        let embedding_api_key = if config.embedding.api_key_env.is_empty() {
+            String::new()
+        } else {
+            match std::env::var(&config.embedding.api_key_env) {
+                Ok(value) => value,
+                Err(std::env::VarError::NotPresent) => {
+                    if !config.embedding.url.is_empty() || !config.embedding.model.is_empty() {
+                        warn!(
+                            env_var = %config.embedding.api_key_env,
+                            "embedding API key env var is not set; requests will be sent without Authorization header"
+                        );
+                    }
+                    String::new()
+                }
+                Err(std::env::VarError::NotUnicode(_)) => {
+                    warn!(
+                        env_var = %config.embedding.api_key_env,
+                        "embedding API key env var is not valid Unicode; requests will be sent without Authorization header"
+                    );
+                    String::new()
+                }
+            }
+        };
+        db_options = db_options
+            .with_embedding_url(config.embedding.url.clone())
+            .with_embedding_model(config.embedding.model.clone())
+            .with_embedding_api_key(embedding_api_key);
 
         // Open database and load collections from storage
         let mut database = db::DB::open_from_arc_with_options(store.clone(), db_options)

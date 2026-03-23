@@ -101,6 +101,9 @@ fn test_config_defaults() {
     let config = Config::default();
     assert!(config.rootdir.as_os_str().is_empty());
     assert_eq!(config.api.address, "127.0.0.1:9181");
+    assert_eq!(config.embedding.url, "");
+    assert_eq!(config.embedding.model, "");
+    assert_eq!(config.embedding.api_key_env, "OPENAI_API_KEY");
     assert_eq!(config.datastore.store, DatastoreType::Redb);
     assert!(!config.development);
     assert_eq!(config.secret_file, ".env");
@@ -176,5 +179,11 @@ fn test_config_serialization_roundtrip() {
     assert_eq!(original.log.level, deserialized.log.level);
     assert_eq!(original.datastore.store, deserialized.datastore.store);
     assert_eq!(original.api.address, deserialized.api.address);
+    assert_eq!(original.embedding.url, deserialized.embedding.url);
+    assert_eq!(original.embedding.model, deserialized.embedding.model);
+    assert_eq!(
+        original.embedding.api_key_env,
+        deserialized.embedding.api_key_env
+    );
     assert_eq!(original.keyring.backend, deserialized.keyring.backend);
 }

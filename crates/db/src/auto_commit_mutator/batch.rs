@@ -151,12 +151,14 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
     ) -> query::error::Result<CreateResult> {
         let (collection, datastore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        let embedding_config = self.db.options().embedding_config();
 
         crate::embedding::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
             true,
             None,
+            &embedding_config,
         )
         .await
         .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
@@ -287,12 +289,14 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
     ) -> query::error::Result<UpdateResult> {
         let (collection, datastore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        let embedding_config = self.db.options().embedding_config();
 
         let generated = crate::embedding::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
             false,
             Some(&modified_fields),
+            &embedding_config,
         )
         .await
         .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;

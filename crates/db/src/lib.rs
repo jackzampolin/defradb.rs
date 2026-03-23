@@ -118,7 +118,7 @@ pub use collection_name::CollectionName;
 pub use collection_provider::DbCollectionProvider;
 pub use collection_snapshot::CollectionSnapshot;
 pub use commits_fetcher::{CommitsFetcher, CommitsQueryOptions};
-pub use database::{DbOptions, DB};
+pub use database::{DbOptions, EmbeddingClientConfig, DB};
 pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
 pub use doc_fetcher::DbDocFetcher;
 pub use doc_mutator::DbDocMutator;

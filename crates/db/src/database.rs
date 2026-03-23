@@ -20,6 +20,45 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use storage::corekv::Store;
 
+/// Embedding client configuration for OpenAI-compatible endpoints.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct EmbeddingClientConfig {
+    pub url: String,
+    pub model: String,
+    pub api_key: String,
+}
+
+impl std::fmt::Debug for EmbeddingClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbeddingClientConfig")
+            .field("url", &self.url)
+            .field("model", &self.model)
+            .field("api_key_configured", &!self.api_key.is_empty())
+            .finish()
+    }
+}
+
+impl EmbeddingClientConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_url(mut self, url: impl Into<String>) -> Self {
+        self.url = url.into();
+        self
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = model.into();
+        self
+    }
+
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.api_key = api_key.into();
+        self
+    }
+}
+
 /// Database options.
 #[derive(Clone, Default)]
 pub struct DbOptions {
@@ -34,6 +73,12 @@ pub struct DbOptions {
     /// - Authenticating with the ACP (Access Control Policy) system
     /// - Identifying this node in P2P interactions
     pub node_identity: Option<Arc<RawIdentity>>,
+    /// Fallback OpenAI-compatible embedding base URL.
+    pub embedding_url: String,
+    /// Fallback embedding model name.
+    pub embedding_model: String,
+    /// Resolved embedding API key value.
+    pub embedding_api_key: String,
 }
 
 impl std::fmt::Debug for DbOptions {
@@ -48,6 +93,12 @@ impl std::fmt::Debug for DbOptions {
                         .map(|d| d.to_string())
                         .unwrap_or_else(|_| "<invalid>".to_string())
                 }),
+            )
+            .field("embedding_url", &self.embedding_url)
+            .field("embedding_model", &self.embedding_model)
+            .field(
+                "embedding_api_key_configured",
+                &!self.embedding_api_key.is_empty(),
             )
             .finish()
     }
@@ -81,6 +132,32 @@ impl DbOptions {
     pub fn with_chunk_size(mut self, size: usize) -> Self {
         self.chunk_size = Some(size);
         self
+    }
+
+    /// Sets the fallback embedding base URL.
+    pub fn with_embedding_url(mut self, url: impl Into<String>) -> Self {
+        self.embedding_url = url.into();
+        self
+    }
+
+    /// Sets the fallback embedding model name.
+    pub fn with_embedding_model(mut self, model: impl Into<String>) -> Self {
+        self.embedding_model = model.into();
+        self
+    }
+
+    /// Sets the resolved embedding API key value.
+    pub fn with_embedding_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.embedding_api_key = api_key.into();
+        self
+    }
+
+    /// Returns the embedding client configuration for this database.
+    pub fn embedding_config(&self) -> EmbeddingClientConfig {
+        EmbeddingClientConfig::new()
+            .with_url(self.embedding_url.clone())
+            .with_model(self.embedding_model.clone())
+            .with_api_key(self.embedding_api_key.clone())
     }
 }
 
