@@ -83,7 +83,7 @@ impl ScopedFulltextCache {
         results
             .doc_ids
             .into_iter()
-            .zip(results.scores.into_iter())
+            .zip(results.scores)
             .filter_map(|(doc_index, score)| {
                 entry
                     .doc_ids
