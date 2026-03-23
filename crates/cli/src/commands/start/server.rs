@@ -299,11 +299,16 @@ impl Node {
                     let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
                         Arc::new(db::DbHeadProvider::new(database.clone()));
 
+                    let sync_config = p2p::sync::SyncConfig {
+                        rate_limit_burst: config.net.p2p_rate_limit_burst,
+                        rate_limit_rate: config.net.p2p_rate_limit_rate,
+                        ..Default::default()
+                    };
                     let (mut coordinator, sync_events) =
                         p2p::sync::SyncCoordinator::with_head_provider(
                             iroh_transport,
                             sync_blockstore,
-                            p2p::sync::SyncConfig::default(),
+                            sync_config,
                             access_mode,
                             Arc::new(p2p::ReplicatorRegistry::new()),
                             collection_store,
@@ -635,11 +640,16 @@ impl Node {
                 let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
                     Arc::new(db::DbHeadProvider::new(database.clone()));
 
+                let sync_config = p2p::sync::SyncConfig {
+                    rate_limit_burst: config.net.p2p_rate_limit_burst,
+                    rate_limit_rate: config.net.p2p_rate_limit_rate,
+                    ..Default::default()
+                };
                 let (mut coordinator, sync_events) =
                     p2p::sync::SyncCoordinator::with_head_provider(
                         libp2p_transport,
                         sync_blockstore,
-                        p2p::sync::SyncConfig::default(),
+                        sync_config,
                         access_mode,
                         Arc::new(p2p::ReplicatorRegistry::new()),
                         collection_store,

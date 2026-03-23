@@ -20,6 +20,7 @@ mod process;
 
 pub use config::{
     SyncConfig, DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+    DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RATE,
 };
 pub use events::SyncEvent;
 pub use process::SyncManager;

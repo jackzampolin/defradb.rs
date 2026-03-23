@@ -275,6 +275,12 @@ where
         max_concurrent_push_tasks: config
             .max_concurrent_push_tasks
             .unwrap_or(p2p::sync::DEFAULT_MAX_CONCURRENT_PUSH_TASKS),
+        rate_limit_burst: config
+            .rate_limit_burst
+            .unwrap_or(p2p::sync::DEFAULT_RATE_LIMIT_BURST),
+        rate_limit_rate: config
+            .rate_limit_rate
+            .unwrap_or(p2p::sync::DEFAULT_RATE_LIMIT_RATE),
         ..Default::default()
     };
 

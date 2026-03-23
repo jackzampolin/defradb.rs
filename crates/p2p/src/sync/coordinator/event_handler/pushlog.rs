@@ -226,7 +226,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
     /// Send a two-stream reply using the response token if available,
     /// falling back to the transport's send_two_stream_response.
-    async fn send_two_stream_reply(
+    pub(in crate::sync::coordinator) async fn send_two_stream_reply(
         &self,
         peer_id: &PeerId,
         reply: PushLogReply,

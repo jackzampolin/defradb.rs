@@ -223,6 +223,12 @@ pub struct NetConfig {
     /// LAN addresses to peers on different networks. None = 0.0.0.0 (all interfaces).
     #[serde(default)]
     pub iroh_bind_addr: Option<std::net::IpAddr>,
+    /// Per-peer rate limit burst capacity (max tokens in bucket). Default: 500.
+    #[serde(default = "default_rate_limit_burst")]
+    pub p2p_rate_limit_burst: u32,
+    /// Per-peer rate limit refill rate (tokens per second). Default: 50.
+    #[serde(default = "default_rate_limit_rate")]
+    pub p2p_rate_limit_rate: f64,
 }
 
 fn default_max_msg_size() -> u64 {
@@ -245,6 +251,12 @@ fn default_max_connections_out() -> u32 {
 }
 fn default_max_connections_per_peer() -> u32 {
     4
+}
+fn default_rate_limit_burst() -> u32 {
+    500
+}
+fn default_rate_limit_rate() -> f64 {
+    50.0
 }
 fn default_true() -> bool {
     true
@@ -274,6 +286,8 @@ impl Default for NetConfig {
             iroh_pkarr_relay_url: None,
             iroh_bind_port: None,
             iroh_bind_addr: None,
+            p2p_rate_limit_burst: default_rate_limit_burst(),
+            p2p_rate_limit_rate: default_rate_limit_rate(),
         }
     }
 }

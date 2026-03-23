@@ -56,6 +56,8 @@ struct MobileP2pConfig {
     iroh: Option<MobileIrohConfig>,
     max_concurrent_dag_fetches: Option<usize>,
     max_concurrent_push_tasks: Option<usize>,
+    rate_limit_burst: Option<u32>,
+    rate_limit_rate: Option<f64>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -396,6 +398,16 @@ pub extern "C" fn defra_mobile_open_node(config_json: *const c_char) -> NewNodeR
                 .as_ref()
                 .and_then(|p2p| p2p.max_concurrent_push_tasks)
                 .unwrap_or(0),
+            rate_limit_burst: config
+                .p2p
+                .as_ref()
+                .and_then(|p2p| p2p.rate_limit_burst)
+                .unwrap_or(0),
+            rate_limit_rate: config
+                .p2p
+                .as_ref()
+                .and_then(|p2p| p2p.rate_limit_rate)
+                .unwrap_or(0.0),
         };
 
         let mut result = if config.p2p.is_some() {
