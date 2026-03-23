@@ -145,8 +145,7 @@ fn scope_fingerprint(items: &[JsonValue]) -> [u8; 32] {
     let mut doc_ids = items
         .iter()
         .filter_map(|item| {
-            item
-                .as_object()
+            item.as_object()
                 .and_then(|obj| obj.get("_docID"))
                 .and_then(|value| value.as_str())
                 .map(str::to_string)

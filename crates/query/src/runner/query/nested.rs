@@ -427,7 +427,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// limited to relation-local BM25 fields. It avoids the full-corpus precompute path for
     /// high-cardinality child collections while preserving the existing planner path for
     /// top-level and dotted relation BM25 fields.
-    fn apply_scoped_relation_fulltext(&self, mut results: Vec<JsonValue>, select: &Select) -> Vec<JsonValue> {
+    fn apply_scoped_relation_fulltext(
+        &self,
+        mut results: Vec<JsonValue>,
+        select: &Select,
+    ) -> Vec<JsonValue> {
         for result in &mut results {
             self.apply_scoped_relation_fulltext_to_value(result, select);
         }
@@ -685,7 +689,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
     }
 
-    fn compute_scoped_fulltext_scores(&self, items: &[JsonValue], fts: &FullTextSearch) -> HashMap<String, f64> {
+    fn compute_scoped_fulltext_scores(
+        &self,
+        items: &[JsonValue],
+        fts: &FullTextSearch,
+    ) -> HashMap<String, f64> {
         if fts.query.trim().is_empty() {
             return HashMap::new();
         }
@@ -693,9 +701,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mut combined_scores = HashMap::new();
 
         for target_field in &fts.target_fields {
-            for (doc_id, score) in self
-                .scoped_fulltext_cache
-                .search(items, target_field, &fts.query)
+            for (doc_id, score) in
+                self.scoped_fulltext_cache
+                    .search(items, target_field, &fts.query)
             {
                 *combined_scores.entry(doc_id).or_insert(0.0) += score;
             }
