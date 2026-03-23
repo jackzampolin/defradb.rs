@@ -35,11 +35,6 @@ pub(super) fn is_valid_embedding_generation_kind(kind: &FieldKind) -> bool {
     )
 }
 
-/// Known embedding providers (matches Go's supportedEmbeddingProviders).
-pub(super) fn is_known_embedding_provider(provider: &str) -> bool {
-    matches!(provider, "openai" | "ollama" | "custom")
-}
-
 /// Format a CType for error messages (matches Go's CType.String()).
 pub(super) fn format_crdt_type(crdt: CType) -> String {
     match crdt {

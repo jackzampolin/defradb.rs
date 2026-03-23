@@ -207,6 +207,18 @@ pub struct StartArgs {
     /// ACP receipt polling timeout in seconds for hub.rs transactions (default: 30)
     #[arg(long, env = "DEFRA_ACP_RECEIPT_TIMEOUT")]
     pub acp_receipt_timeout: Option<u64>,
+
+    /// OpenAI-compatible embedding base URL (without /embeddings suffix)
+    #[arg(long, env = "DEFRA_EMBEDDING_URL")]
+    pub embedding_url: Option<String>,
+
+    /// Embedding model name used when schema model is empty
+    #[arg(long, env = "DEFRA_EMBEDDING_MODEL")]
+    pub embedding_model: Option<String>,
+
+    /// Environment variable name containing the embedding API key
+    #[arg(long, env = "DEFRA_EMBEDDING_API_KEY_ENV")]
+    pub embedding_api_key_env: Option<String>,
 }
 
 impl StartArgs {
@@ -462,6 +474,15 @@ impl StartArgs {
         }
         if let Some(timeout) = self.acp_receipt_timeout {
             config.acp.receipt_timeout = timeout;
+        }
+        if let Some(ref url) = self.embedding_url {
+            config.embedding.url = url.clone();
+        }
+        if let Some(ref model) = self.embedding_model {
+            config.embedding.model = model.clone();
+        }
+        if let Some(ref api_key_env) = self.embedding_api_key_env {
+            config.embedding.api_key_env = api_key_env.clone();
         }
         Ok(())
     }

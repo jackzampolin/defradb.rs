@@ -15,11 +15,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         })?;
 
         // Generate embeddings before doc ID (embedding values affect content hash)
+        let embedding_config = self.db.options().embedding_config();
         crate::embedding::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
             true,
             None,
+            &embedding_config,
         )
         .await
         .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;

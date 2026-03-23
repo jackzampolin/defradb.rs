@@ -13,12 +13,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // Generate embeddings if source fields were modified
         let mut doc = doc;
         let mut modified_fields = modified_fields;
+        let embedding_config = self.db.options().embedding_config();
 
         let generated = crate::embedding::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
             false,
             Some(&modified_fields),
+            &embedding_config,
         )
         .await
         .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;

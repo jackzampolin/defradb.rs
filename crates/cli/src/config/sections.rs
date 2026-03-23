@@ -123,6 +123,31 @@ impl ApiConfig {
     }
 }
 
+/// Embedding configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingConfig {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default = "default_embedding_api_key_env")]
+    pub api_key_env: String,
+}
+
+fn default_embedding_api_key_env() -> String {
+    "OPENAI_API_KEY".to_string()
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            model: String::new(),
+            api_key_env: default_embedding_api_key_env(),
+        }
+    }
+}
+
 /// Datastore configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatastoreConfig {

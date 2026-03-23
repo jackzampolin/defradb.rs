@@ -234,33 +234,6 @@ pub(super) fn validate_embedding_fields_for_generation(
     errs
 }
 
-/// Matches Go's validateEmbeddingProviderAndModel.
-pub(super) fn validate_embedding_provider_and_model(
-    new_state: &DefinitionState,
-    _old_state: &DefinitionState,
-) -> Vec<String> {
-    let mut errs = Vec::new();
-    for col in &new_state.collections {
-        for embedding in &col.vector_embeddings {
-            if embedding.provider.is_empty() {
-                errs.push("embedding Provider cannot be empty".to_string());
-            }
-
-            if !is_known_embedding_provider(&embedding.provider) {
-                errs.push(format!(
-                    "unknown embedding provider. Provider: {}",
-                    embedding.provider
-                ));
-            }
-
-            if embedding.model.is_empty() {
-                errs.push("embedding Model cannot be empty".to_string());
-            }
-        }
-    }
-    errs
-}
-
 /// Validates that no index references a CRDT counter field.
 /// Matches Go's check in NewCollectionIndex: counter fields cannot be indexed.
 pub(super) fn validate_index_fields_not_counter(
