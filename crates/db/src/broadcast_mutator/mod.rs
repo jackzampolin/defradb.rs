@@ -10,17 +10,23 @@
 //! Callers should check this status to determine if data synchronization
 //! may be incomplete.
 
+mod batch;
+
 use async_trait::async_trait;
 use blockstore::Blockstore;
 use document::{DocID, Document};
 use p2p::sync::{BroadcastResult, SyncCoordinator};
 use p2p::transport::P2PTransport;
-use query::mutator::{BroadcastStatus, CreateResult, DeleteResult, DocMutator, UpdateResult};
+use query::mutator::{
+    BroadcastStatus, CreateResult, DeleteResult, DocMutator, MutationBatch,
+    MutationBatchController, UpdateResult,
+};
 use std::sync::Arc;
 use storage::corekv::Store;
 
+use self::batch::BroadcastBatchMutator;
 use crate::auto_commit_mutator::AutoCommitMutator;
-use crate::block_builder::{build_blocks_from_document, read_latest_composite_block};
+use crate::block_builder::{build_blocks_from_document, read_latest_composite_block, BlockResult};
 use crate::database::DB;
 
 /// Document mutator that broadcasts changes to P2P network.
@@ -63,6 +69,20 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, 
 impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
     for BroadcastMutator<S, B, T>
 {
+    async fn begin_batch(&self) -> query::error::Result<Option<MutationBatch>> {
+        let (inner_batch, fetcher) = self.inner.new_batch_components().await?;
+        let inner_controller: Arc<dyn MutationBatchController> = inner_batch.clone();
+        let broadcast_batch = Arc::new(BroadcastBatchMutator::new(
+            inner_batch,
+            inner_controller,
+            self.sync.clone(),
+            self.db.clone(),
+        ));
+        let mutator: Arc<dyn DocMutator> = broadcast_batch.clone();
+        let controller: Arc<dyn MutationBatchController> = broadcast_batch;
+        Ok(Some(MutationBatch::new(mutator, fetcher, controller)))
+    }
+
     async fn create(
         &self,
         collection_name: &str,
@@ -500,8 +520,6 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         self.inner.get_for_update(collection_name, doc_id).await
     }
 }
-
-use crate::block_builder::BlockResult;
 
 const BROADCAST_MAX_RETRIES: u32 = 10;
 
