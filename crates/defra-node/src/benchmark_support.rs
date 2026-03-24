@@ -795,9 +795,9 @@ fn action_command(config: &CodingSessionFixtureConfig, kind: SessionKind, index:
         _ => "cargo test -p query type_join_many:: -- --nocapture",
     };
     let suffix = match kind {
-        SessionKind::Hot if index % 7 == 0 => " -- candidate pushdown cargo",
-        SessionKind::Medium if index % 5 == 0 => " -- bench rocksdb",
-        SessionKind::Background if index % 11 == 0 => " -- rg noise",
+        SessionKind::Hot if index.is_multiple_of(7) => " -- candidate pushdown cargo",
+        SessionKind::Medium if index.is_multiple_of(5) => " -- bench rocksdb",
+        SessionKind::Background if index.is_multiple_of(11) => " -- rg noise",
         _ => "",
     };
     let mut command = format!("bash -lc '{}{}'", base, suffix);
@@ -833,7 +833,7 @@ fn rare_terms(index: usize) -> String {
         (47, "bm25"),
     ]
     .into_iter()
-    .filter_map(|(divisor, term)| (index % divisor == 0).then_some(term))
+    .filter_map(|(divisor, term)| index.is_multiple_of(divisor).then_some(term))
     .collect::<Vec<_>>()
     .join(" ")
 }
@@ -855,9 +855,7 @@ fn pad_message_payload(
             ("user", 0) => format!(
                 "\n```text\nerror[E0277]: relation narrowing failed for session scope {index}\nhelp: inspect typeJoinMany cache, _sessionID filter, and rocksdb index path\n```\n"
             ),
-            ("user", 1) => format!(
-                "Paths:\n- crates/query/src/plan/type_join/type_join_many/children.rs\n- crates/query/src/plan/type_join/type_join_many/plan_node.rs\n- crates/query/src/runner/query/nested.rs\n"
-            ),
+            ("user", 1) => "Paths:\n- crates/query/src/plan/type_join/type_join_many/children.rs\n- crates/query/src/plan/type_join/type_join_many/plan_node.rs\n- crates/query/src/runner/query/nested.rs\n".to_string(),
             ("user", 2) => format!(
                 "Expected outcome: fewer bm25 iterations, better top-k behavior, stable relevance for {} {}.\n",
                 focus, rare_terms
