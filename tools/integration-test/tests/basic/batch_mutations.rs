@@ -1,4 +1,5 @@
 use integration_test::{for_each_runtime, TestCluster};
+use std::time::Duration;
 
 async fn batched_mutation_aliases_test(cluster: TestCluster) {
     let client = cluster.client(0);
@@ -101,5 +102,67 @@ async fn batched_mutation_rollback_test(cluster: TestCluster) {
     );
 }
 
+async fn batched_mutation_aliases_p2p_regression_test(cluster: TestCluster) {
+    let client = cluster.client(0);
+
+    cluster
+        .wait_for_log(0, "p2p_listening", Duration::from_secs(15))
+        .await
+        .expect("P2P listener did not start");
+
+    client
+        .schema_add("type TestDoc @branchable { name: String }")
+        .expect("failed to add schema");
+    client
+        .p2p_collection_add(&["TestDoc"])
+        .expect("failed to subscribe collection to P2P");
+
+    let data = client
+        .query(
+            r#"mutation {
+                first: add_TestDoc(input: {name: "first"}) { _docID name }
+                second: add_TestDoc(input: {name: "second"}) { _docID name }
+                third: add_TestDoc(input: {name: "third"}) { _docID name }
+            }"#,
+        )
+        .expect("batched aliased P2P mutation should succeed");
+
+    assert_eq!(data["first"][0]["name"], "first");
+    assert_eq!(data["second"][0]["name"], "second");
+    assert_eq!(data["third"][0]["name"], "third");
+
+    let query = client
+        .query("query { TestDoc { name } }")
+        .expect("query documents after batched P2P create");
+    let docs = query["TestDoc"]
+        .as_array()
+        .expect("documents result not array");
+    assert_eq!(
+        docs.len(),
+        3,
+        "expected 3 committed documents, got {:?}",
+        query
+    );
+
+    let names: Vec<&str> = docs.iter().filter_map(|doc| doc["name"].as_str()).collect();
+    assert!(
+        names.contains(&"first"),
+        "first missing after batched create"
+    );
+    assert!(
+        names.contains(&"second"),
+        "second missing after batched create"
+    );
+    assert!(
+        names.contains(&"third"),
+        "third missing after batched create"
+    );
+}
+
 for_each_runtime!(batched_mutation_aliases, batched_mutation_aliases_test);
 for_each_runtime!(batched_mutation_rollback, batched_mutation_rollback_test);
+for_each_runtime!(
+    batched_mutation_aliases_p2p_regression,
+    batched_mutation_aliases_p2p_regression_test,
+    .with_p2p()
+);

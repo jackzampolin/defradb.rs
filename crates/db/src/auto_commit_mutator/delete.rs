@@ -125,7 +125,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 let cid = commit_result.as_ref().map(|(c, _)| *c).unwrap_or_default();
                 self.emit_update_events(&collection, &doc_id.to_string(), cid);
 
-                Ok(DeleteResult::new(doc_id.clone(), existed))
+                match commit_result {
+                    Some((cid, block)) => Ok(DeleteResult::with_commit(
+                        doc_id.clone(),
+                        existed,
+                        cid,
+                        block,
+                    )),
+                    None => Ok(DeleteResult::new(doc_id.clone(), existed)),
+                }
             }
             Err(e) => {
                 // Discard the transaction on error

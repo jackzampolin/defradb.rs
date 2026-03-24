@@ -213,6 +213,10 @@ pub struct DeleteResult {
     pub existed: bool,
     /// Status of P2P broadcast (if applicable)
     pub broadcast_status: BroadcastStatus,
+    /// The CID of the committed composite delete block (for P2P broadcast)
+    pub commit_cid: Option<Cid>,
+    /// The raw bytes of the committed composite delete block (for P2P broadcast)
+    pub commit_block: Option<Vec<u8>>,
 }
 
 impl DeleteResult {
@@ -222,6 +226,24 @@ impl DeleteResult {
             doc_id,
             existed,
             broadcast_status: BroadcastStatus::NotAttempted,
+            commit_cid: None,
+            commit_block: None,
+        }
+    }
+
+    /// Create a result with committed block data (for P2P broadcast).
+    pub fn with_commit(
+        doc_id: DocID,
+        existed: bool,
+        commit_cid: Cid,
+        commit_block: Vec<u8>,
+    ) -> Self {
+        Self {
+            doc_id,
+            existed,
+            broadcast_status: BroadcastStatus::NotAttempted,
+            commit_cid: Some(commit_cid),
+            commit_block: Some(commit_block),
         }
     }
 
@@ -231,6 +253,8 @@ impl DeleteResult {
             doc_id,
             existed,
             broadcast_status,
+            commit_cid: None,
+            commit_block: None,
         }
     }
 }

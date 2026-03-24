@@ -97,6 +97,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let peer_state = Arc::new(PeerStateTracker::new());
         let max_dag_fetches = config.max_concurrent_dag_fetches.max(1);
         let max_push_tasks = config.max_concurrent_push_tasks.max(1);
+        let rate_limit_burst = config.rate_limit_burst;
+        let rate_limit_rate = config.rate_limit_rate;
         let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), config);
 
         Ok((
@@ -116,7 +118,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 failure_tx: None,
                 dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(max_dag_fetches)),
                 push_semaphore: Arc::new(tokio::sync::Semaphore::new(max_push_tasks)),
-                rate_limiter: Arc::new(PeerRateLimiter::default()),
+                rate_limiter: Arc::new(PeerRateLimiter::new(rate_limit_burst, rate_limit_rate)),
             },
             events,
         ))

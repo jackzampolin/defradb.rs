@@ -49,6 +49,23 @@ pub(super) struct SelectionJoinInfo {
 }
 
 impl Planner {
+    fn can_use_direct_indexed_child_cache(nested_select: &Select) -> bool {
+        nested_select.filter.is_none()
+            && nested_select.group_by.is_none()
+            && nested_select
+                .order_by
+                .as_ref()
+                .map(|order_by| !order_by.has_relation_order())
+                .unwrap_or(true)
+            && nested_select.fields.iter().all(|field| match field {
+                Requestable::Field(_) => true,
+                Requestable::FullTextSearch(fts) => {
+                    fts.target_fields.iter().all(|field| !field.contains('.'))
+                }
+                _ => false,
+            })
+    }
+
     /// Apply join nodes for nested selects (relation fields)
     ///
     /// The `depth` parameter tracks recursion depth to prevent stack overflow
@@ -692,6 +709,65 @@ impl Planner {
                 }
             }
 
+            // Nested relation-local BM25 rescoring runs after joins over the rendered child JSON.
+            // Ensure the BM25 target fields, and any local order fields used with them, are
+            // temporarily rendered so the runner can rescore and reorder the relation scope.
+            let has_deferred_scoped_fulltext = nested_select.group_by.is_none()
+                && nested_select
+                    .filter
+                    .as_ref()
+                    .map(|filter| !filter.has_alias_filter())
+                    .unwrap_or(true)
+                && nested_select.fields.iter().any(|requestable| {
+                    matches!(
+                        requestable,
+                        Requestable::FullTextSearch(fts)
+                            if fts.target_fields.iter().all(|field| !field.contains('.'))
+                    )
+                });
+
+            if has_deferred_scoped_fulltext {
+                for requestable in &nested_select.fields {
+                    let Requestable::FullTextSearch(fts) = requestable else {
+                        continue;
+                    };
+                    if !fts.target_fields.iter().all(|field| !field.contains('.')) {
+                        continue;
+                    }
+
+                    for target_field in &fts.target_fields {
+                        if let Some(idx) = child_scan_mapping.first_index_of_name(target_field) {
+                            if !child_scan_mapping
+                                .render_keys
+                                .iter()
+                                .any(|rk| rk.key == *target_field)
+                            {
+                                child_scan_mapping.add_render_key(idx, target_field);
+                            }
+                        }
+                    }
+                }
+
+                if let Some(order_by) = &nested_select.order_by {
+                    for condition in &order_by.conditions {
+                        if condition.fields.len() != 1 {
+                            continue;
+                        }
+
+                        let field_name = &condition.fields[0];
+                        if let Some(idx) = child_scan_mapping.first_index_of_name(field_name) {
+                            if !child_scan_mapping
+                                .render_keys
+                                .iter()
+                                .any(|rk| rk.key == *field_name)
+                            {
+                                child_scan_mapping.add_render_key(idx, field_name);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Recursively apply joins for any nested selections within this nested select.
             // This handles multi-level nesting like Users -> Posts -> Comments.
             // Note: We pass None for parent_filter since relation filters only apply at the top level.
@@ -1060,27 +1136,31 @@ impl Planner {
                     join_many = join_many.with_relation_filter(rel_filter);
                 }
 
+                if has_deferred_scoped_fulltext {
+                    join_many = join_many.with_parent_scoped_child_cache();
+                }
+
                 // Check if child has an index on its FK field for this relation.
                 // When FK is indexed, a global child scan can efficiently map children
                 // to parents, so per-parent scanning is not needed for ordering.
-                let has_child_fk_index = target_relation_field
-                    .and_then(|trf| {
-                        let rel_name = trf.relation_name.as_deref()?;
-                        // Find the FK ID field (same relation, kind Scalar(DocID))
-                        let fk_field = target_collection.fields.iter().find(|f| {
-                            f.relation_name.as_deref() == Some(rel_name)
-                                && matches!(
-                                    f.kind,
-                                    schema::FieldKind::Scalar(schema::ScalarKind::DocID)
-                                )
-                        })?;
-                        // Check if any index covers this FK field
-                        target_collection
-                            .indexes
-                            .iter()
-                            .find(|idx| idx.fields.first().is_some_and(|f| f.name == fk_field.name))
-                    })
-                    .is_some();
+                let child_fk_index_info = target_relation_field.and_then(|trf| {
+                    let rel_name = trf.relation_name.as_deref()?;
+                    // Find the FK ID field (same relation, kind Scalar(DocID))
+                    let fk_field = target_collection.fields.iter().find(|f| {
+                        f.relation_name.as_deref() == Some(rel_name)
+                            && matches!(
+                                f.kind,
+                                schema::FieldKind::Scalar(schema::ScalarKind::DocID)
+                            )
+                    })?;
+                    // Check if any index covers this FK field
+                    let index = target_collection
+                        .indexes
+                        .iter()
+                        .find(|idx| idx.fields.first().is_some_and(|f| f.name == fk_field.name))?;
+                    Some((fk_field.name.clone(), index.name.clone()))
+                });
+                let has_child_fk_index = child_fk_index_info.is_some();
 
                 // Determine per-parent mode before moving filter_child_plan.
                 // Per-parent scanning re-inits the child plan for each parent:
@@ -1095,6 +1175,7 @@ impl Planner {
                         || (filter_child_plan.is_none()
                             && nested_order_by.is_some()
                             && !has_child_fk_index));
+                let has_filter_child_plan = filter_child_plan.is_some();
 
                 // Apply filter child plan for indexed relation filter evaluation
                 if let Some(fcp) = filter_child_plan {
@@ -1113,6 +1194,19 @@ impl Planner {
                 }
                 if use_per_parent {
                     join_many = join_many.with_per_parent_child_scan();
+                } else if let (Some(fetcher), Some((fk_field_name, index_name))) =
+                    (self.fetcher.clone(), child_fk_index_info.clone())
+                {
+                    if Self::can_use_direct_indexed_child_cache(nested_select)
+                        && !has_filter_child_plan
+                    {
+                        join_many = join_many.with_indexed_child_fetch(
+                            fetcher,
+                            target_collection.name.clone(),
+                            fk_field_name,
+                            index_name,
+                        );
+                    }
                 }
 
                 // Apply nested groupBy if present

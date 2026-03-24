@@ -501,7 +501,15 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         )
         .await;
 
-        Ok(DeleteResult::new(doc_id.clone(), existed))
+        match commit_result {
+            Some((cid, block)) => Ok(DeleteResult::with_commit(
+                doc_id.clone(),
+                existed,
+                cid,
+                block,
+            )),
+            None => Ok(DeleteResult::new(doc_id.clone(), existed)),
+        }
     }
 
     async fn exists(&self, collection_name: &str, doc_id: &DocID) -> query::error::Result<bool> {

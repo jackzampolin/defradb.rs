@@ -180,6 +180,14 @@ pub struct StartArgs {
     #[arg(long)]
     pub query_timeout: Option<u64>,
 
+    /// Per-peer rate limit burst capacity (max tokens). Default: 500.
+    #[arg(long)]
+    pub p2p_rate_limit_burst: Option<u32>,
+
+    /// Per-peer rate limit refill rate (tokens per second). Default: 50.
+    #[arg(long)]
+    pub p2p_rate_limit_rate: Option<f64>,
+
     /// P2P transport backend: "libp2p" (default) or "iroh"
     #[arg(long)]
     pub p2p_transport: Option<String>,
@@ -399,6 +407,12 @@ impl StartArgs {
         }
         if let Some(ref intervals) = self.replicator_retry_intervals {
             config.replicator_retry_intervals = intervals.clone();
+        }
+        if let Some(burst) = self.p2p_rate_limit_burst {
+            config.net.p2p_rate_limit_burst = burst;
+        }
+        if let Some(rate) = self.p2p_rate_limit_rate {
+            config.net.p2p_rate_limit_rate = rate;
         }
         if let Some(ref transport) = self.p2p_transport {
             config.net.transport = transport.parse()?;

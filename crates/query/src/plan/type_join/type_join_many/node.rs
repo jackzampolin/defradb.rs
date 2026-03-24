@@ -1,11 +1,21 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
+use crate::fetcher::DocFetcher;
 use crate::mapper::{GroupBy, OrderBy};
 use crate::planner::{Doc, ExecInfo, PlanNode};
 
 use super::super::{JoinChildMetrics, JoinSide, RelationFilter};
+
+#[derive(Clone)]
+pub(super) struct IndexedChildFetch {
+    pub fetcher: Arc<dyn DocFetcher>,
+    pub collection_name: String,
+    pub fk_field_name: String,
+    pub index_name: String,
+}
 
 /// TypeJoinMany implements one-to-many relation joins.
 ///
@@ -89,6 +99,13 @@ pub struct TypeJoinMany {
     pub(super) filter_child_cache: HashMap<String, Vec<Doc>>,
     /// FK field index in the filter child plan's documents.
     pub(super) filter_child_fk_index: Option<usize>,
+    /// When true, pre-scan parent doc IDs and only retain matching children in caches.
+    /// This narrows high-cardinality child scopes like `session -> messages` before
+    /// downstream nested ordering/BM25 work without changing query results.
+    pub(super) parent_scoped_child_cache: bool,
+    /// Optional direct indexed child-fetch path used to build child_cache from FK lookups
+    /// instead of scanning the entire child plan.
+    pub(super) indexed_child_fetch: Option<IndexedChildFetch>,
 }
 
 impl std::fmt::Debug for TypeJoinMany {
@@ -165,6 +182,8 @@ impl TypeJoinMany {
             filter_child_plan: None,
             filter_child_cache: HashMap::new(),
             filter_child_fk_index: None,
+            parent_scoped_child_cache: false,
+            indexed_child_fetch: None,
         })
     }
 
@@ -244,5 +263,51 @@ impl TypeJoinMany {
         self.filter_child_fk_index = fk_idx;
         self.filter_child_plan = Some(plan);
         self
+    }
+
+    /// Restrict child cache construction to the parent scope collected from parent_plan.
+    ///
+    /// This is a targeted optimization for nested one-to-many queries where the parent
+    /// side is already narrow but the child collection is large.
+    pub fn with_parent_scoped_child_cache(mut self) -> Self {
+        self.parent_scoped_child_cache = true;
+        self
+    }
+
+    /// Build child_cache from direct FK index lookups instead of scanning child_plan.
+    ///
+    /// This is intentionally narrow: the planner only enables it for simple child shapes
+    /// where raw child docs can be converted with the current child scan mapping.
+    pub fn with_indexed_child_fetch(
+        mut self,
+        fetcher: Arc<dyn DocFetcher>,
+        collection_name: impl Into<String>,
+        fk_field_name: impl Into<String>,
+        index_name: impl Into<String>,
+    ) -> Self {
+        self.indexed_child_fetch = Some(IndexedChildFetch {
+            fetcher,
+            collection_name: collection_name.into(),
+            fk_field_name: fk_field_name.into(),
+            index_name: index_name.into(),
+        });
+        self
+    }
+
+    pub(super) async fn collect_parent_doc_ids(&mut self) -> Result<HashSet<String>> {
+        let mut parent_doc_ids = HashSet::new();
+
+        self.parent_plan.init().await?;
+        self.parent_plan.start().await?;
+
+        while self.parent_plan.next().await? {
+            if let Some(doc_id) = self.parent_plan.value().doc_id() {
+                parent_doc_ids.insert(doc_id.to_string());
+            }
+        }
+
+        self.parent_plan.close().await?;
+
+        Ok(parent_doc_ids)
     }
 }

@@ -212,6 +212,16 @@ fn resolve_embedded_config(
         } else {
             None
         },
+        rate_limit_burst: if options.rate_limit_burst > 0 {
+            Some(options.rate_limit_burst)
+        } else {
+            None
+        },
+        rate_limit_rate: if options.rate_limit_rate > 0.0 {
+            Some(options.rate_limit_rate)
+        } else {
+            None
+        },
     })
 }
 

@@ -178,7 +178,7 @@ pub struct SourceHubConfig {
 }
 
 /// Node assembly configuration used by `build_with_store`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct EmbeddedNodeConfig {
     pub persistence: Persistence,
     pub transport: TransportConfig,
@@ -187,6 +187,8 @@ pub struct EmbeddedNodeConfig {
     pub encryption_key: Option<Vec<u8>>,
     pub max_concurrent_dag_fetches: Option<usize>,
     pub max_concurrent_push_tasks: Option<usize>,
+    pub rate_limit_burst: Option<u32>,
+    pub rate_limit_rate: Option<f64>,
 }
 
 /// Runtime P2P transport kind.

@@ -6,6 +6,8 @@
 //!
 //! P2P uses IROH (QUIC-native) transport for peer-to-peer replication.
 
+#[doc(hidden)]
+pub mod benchmark_support;
 pub mod version;
 
 use std::path::PathBuf;
@@ -187,6 +189,10 @@ pub struct P2PConfig {
     /// Maximum concurrent push tasks for sending blocks to replicators.
     /// Default: 8.
     pub max_concurrent_push_tasks: usize,
+    /// Per-peer rate limit burst capacity (max tokens in bucket). Default: 500.
+    pub rate_limit_burst: u32,
+    /// Per-peer rate limit refill rate (tokens per second). Default: 50.
+    pub rate_limit_rate: f64,
 }
 
 /// Type-erased P2P operations exposed on EmbeddedNode.
@@ -778,6 +784,8 @@ impl NodeBuilder {
         let sync_config = p2p::sync::SyncConfig {
             max_concurrent_dag_fetches: config.max_concurrent_dag_fetches,
             max_concurrent_push_tasks: config.max_concurrent_push_tasks,
+            rate_limit_burst: config.rate_limit_burst,
+            rate_limit_rate: config.rate_limit_rate,
             ..Default::default()
         };
         let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_collection_store(

@@ -41,6 +41,8 @@ fn default_start_args() -> StartArgs {
         max_connections_in: None,
         max_connections_out: None,
         max_connections_per_peer: None,
+        p2p_rate_limit_burst: None,
+        p2p_rate_limit_rate: None,
         max_merge_depth: None,
         query_timeout: None,
         p2p_transport: None,
@@ -128,6 +130,8 @@ fn test_apply_to_config_all_flags() {
         max_connections_in: Some(200),
         max_connections_out: Some(800),
         max_connections_per_peer: Some(8),
+        p2p_rate_limit_burst: Some(32),
+        p2p_rate_limit_rate: Some(4.5),
         max_merge_depth: Some(2048),
         query_timeout: Some(45),
         p2p_transport: None,
@@ -152,6 +156,8 @@ fn test_apply_to_config_all_flags() {
     assert_eq!(config.net.max_connections_in, 200);
     assert_eq!(config.net.max_connections_out, 800);
     assert_eq!(config.net.max_connections_per_peer, 8);
+    assert_eq!(config.net.p2p_rate_limit_burst, 32);
+    assert_eq!(config.net.p2p_rate_limit_rate, 4.5);
     assert_eq!(config.datastore.max_merge_depth, 2048);
     assert_eq!(config.api.max_body_size, 1024);
     assert_eq!(config.api.max_schema_size, 2048);
