@@ -69,7 +69,7 @@ pub(crate) struct RedbTxn {
 impl Drop for RedbTxn {
     fn drop(&mut self) {
         // Always decrement the active transaction count
-        self.active_txn_count.fetch_sub(1, Ordering::SeqCst);
+        self.active_txn_count.fetch_sub(1, Ordering::AcqRel);
 
         // Log warning if dropped without explicit commit/discard
         let was_committed = self.committed.load(Ordering::Acquire);

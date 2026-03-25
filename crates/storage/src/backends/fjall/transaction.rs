@@ -31,7 +31,7 @@ pub(crate) struct FjallTxn {
 
 impl Drop for FjallTxn {
     fn drop(&mut self) {
-        self.active_txn_count.fetch_sub(1, Ordering::SeqCst);
+        self.active_txn_count.fetch_sub(1, Ordering::AcqRel);
 
         let was_committed = *self.committed.lock();
         let was_discarded = *self.discarded.lock();

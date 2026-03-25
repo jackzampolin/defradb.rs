@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -16,7 +17,7 @@ use crate::corekv::{Dropable, Error, Result, Store, Txn};
 #[derive(Clone)]
 pub struct MemoryStore {
     data: Arc<RwLock<BTreeMap<Vec<u8>, Vec<u8>>>>,
-    closed: Arc<RwLock<bool>>,
+    closed: Arc<AtomicBool>,
     conflict_tracker: Arc<ConflictTracker>,
 }
 
@@ -25,14 +26,14 @@ impl MemoryStore {
     pub fn new() -> Self {
         Self {
             data: Arc::new(RwLock::new(BTreeMap::new())),
-            closed: Arc::new(RwLock::new(false)),
+            closed: Arc::new(AtomicBool::new(false)),
             conflict_tracker: Arc::new(ConflictTracker::new()),
         }
     }
 
     /// Check if the store is closed.
-    pub(crate) async fn is_closed(&self) -> bool {
-        *self.closed.read().await
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 }
 
@@ -45,7 +46,7 @@ impl Default for MemoryStore {
 #[async_trait]
 impl Store for MemoryStore {
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
-        if self.is_closed().await {
+        if self.is_closed() {
             return Err(Error::DBClosed);
         }
 
@@ -69,8 +70,7 @@ impl Store for MemoryStore {
     }
 
     async fn close(&self) -> Result<()> {
-        let mut closed = self.closed.write().await;
-        *closed = true;
+        self.closed.store(true, Ordering::Release);
         Ok(())
     }
 }
@@ -78,7 +78,7 @@ impl Store for MemoryStore {
 #[async_trait]
 impl Dropable for MemoryStore {
     async fn drop_all(&self) -> Result<()> {
-        if self.is_closed().await {
+        if self.is_closed() {
             return Err(Error::DBClosed);
         }
 

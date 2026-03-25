@@ -11728,7 +11728,6 @@ dependencies = [
 name = "storage"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "bm25",
  "chrono",
