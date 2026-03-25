@@ -1758,6 +1758,7 @@ name = "blockstore"
 version = "0.5.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "cid 0.10.1",
  "criterion 0.5.1",
  "crypto",

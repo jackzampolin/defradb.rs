@@ -29,7 +29,7 @@ pub fn verify_block_cid(cid: &Cid, data: &[u8]) -> Result<()> {
 
     let mut hasher = Sha256::new();
     hasher.update(data);
-    let computed: Vec<u8> = hasher.finalize().to_vec();
+    let computed = hasher.finalize();
 
     if mh.digest() != computed.as_slice() {
         return Err(Error::CidVerificationFailed {
