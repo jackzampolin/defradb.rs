@@ -31,6 +31,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 # Caching
+bytes = { workspace = true }
 lru = { workspace = true }
 parking_lot = { workspace = true }
 
