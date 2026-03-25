@@ -3602,7 +3602,6 @@ dependencies = [
 name = "defra-core"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "cid 0.10.1",
  "criterion 0.5.1",

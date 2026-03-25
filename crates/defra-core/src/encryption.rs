@@ -7,6 +7,60 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// Wrapper for encryption key bytes with zeroization on drop.
+///
+/// Ensures key material is cleared from memory when no longer needed.
+#[derive(Clone)]
+pub struct EncryptionKey(Vec<u8>);
+
+impl EncryptionKey {
+    /// Create a new encryption key from raw bytes.
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// Access the raw key bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for EncryptionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EncryptionKey([REDACTED; {} bytes])", self.0.len())
+    }
+}
+
+impl Drop for EncryptionKey {
+    fn drop(&mut self) {
+        for byte in self.0.iter_mut() {
+            // Use write_volatile to prevent the compiler from optimizing away the zeroing.
+            // SAFETY: We are writing to a valid, properly aligned mutable reference.
+            unsafe {
+                std::ptr::write_volatile(byte, 0);
+            }
+        }
+    }
+}
+
+impl From<Vec<u8>> for EncryptionKey {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl From<EncryptionKey> for Vec<u8> {
+    fn from(key: EncryptionKey) -> Self {
+        key.0.clone()
+    }
+}
+
+impl AsRef<[u8]> for EncryptionKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 /// Encryption configuration for CRDT delta encryption.
 #[derive(Debug, Clone)]
 pub struct EncryptionConfig {

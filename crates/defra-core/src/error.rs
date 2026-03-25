@@ -7,6 +7,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Main error type for DefraDB operations
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Storage-related errors
     #[error("storage error: {0}")]

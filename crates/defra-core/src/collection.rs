@@ -17,7 +17,11 @@ pub struct Collection {
 
 impl Collection {
     /// Create a new collection
-    pub fn new(id: CollectionId, name: String, version: u32) -> Self {
-        Self { id, name, version }
+    pub fn new(id: CollectionId, name: impl Into<String>, version: u32) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            version,
+        }
     }
 }

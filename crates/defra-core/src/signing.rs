@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 /// Remote signing delegate (e.g. Orbis, Secure Enclave host callbacks).
@@ -39,9 +40,100 @@ pub enum SigningAuthorization {
     },
 }
 
+/// Key type for signing operations.
+///
+/// Replaces raw string matching with a type-safe enum. Serializes to/from
+/// lowercase strings ("ed25519", "secp256k1", "secp256r1", "bls") for
+/// backward compatibility with JSON/FFI boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SigningKeyType {
+    Ed25519,
+    Secp256k1,
+    Secp256r1,
+    Bls,
+}
+
+impl SigningKeyType {
+    /// Return the string representation for backward compatibility.
+    ///
+    /// Callers that previously used `.key_type.as_str()` on the old String
+    /// field can use this method without changes.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SigningKeyType::Ed25519 => "ed25519",
+            SigningKeyType::Secp256k1 => "secp256k1",
+            SigningKeyType::Secp256r1 => "secp256r1",
+            SigningKeyType::Bls => "bls",
+        }
+    }
+
+    /// Infallible conversion to the block-level `SignatureType`.
+    pub fn to_signature_type(self) -> crate::block::SignatureType {
+        match self {
+            SigningKeyType::Ed25519 => crate::block::SignatureType::EdDSA,
+            SigningKeyType::Secp256k1 => crate::block::SignatureType::ES256K,
+            SigningKeyType::Secp256r1 => crate::block::SignatureType::ES256,
+            SigningKeyType::Bls => crate::block::SignatureType::BLS,
+        }
+    }
+}
+
+impl fmt::Display for SigningKeyType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SigningKeyType::Ed25519 => write!(f, "ed25519"),
+            SigningKeyType::Secp256k1 => write!(f, "secp256k1"),
+            SigningKeyType::Secp256r1 => write!(f, "secp256r1"),
+            SigningKeyType::Bls => write!(f, "bls"),
+        }
+    }
+}
+
+impl std::str::FromStr for SigningKeyType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ed25519" => Ok(SigningKeyType::Ed25519),
+            "secp256k1" => Ok(SigningKeyType::Secp256k1),
+            "secp256r1" => Ok(SigningKeyType::Secp256r1),
+            "bls" => Ok(SigningKeyType::Bls),
+            other => Err(format!("unsupported signing key type: {other}")),
+        }
+    }
+}
+
+/// Backward-compat: allow `key_type == "secp256k1"` comparisons.
+impl PartialEq<&str> for SigningKeyType {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+/// Backward-compat: allow constructing from a `String` (panics on invalid).
+impl From<String> for SigningKeyType {
+    fn from(s: String) -> Self {
+        s.parse().unwrap_or_else(|e: String| panic!("{e}"))
+    }
+}
+
+/// Backward-compat: allow converting to String for callers that need it.
+impl From<SigningKeyType> for String {
+    fn from(kt: SigningKeyType) -> Self {
+        kt.to_string()
+    }
+}
+
+impl From<SigningKeyType> for crate::block::SignatureType {
+    fn from(kt: SigningKeyType) -> Self {
+        kt.to_signature_type()
+    }
+}
+
 /// Signing configuration containing key material for block signing.
 pub struct SigningConfig {
-    /// Key type: "ed25519", "secp256k1", or "bls"
+    /// Key type: "ed25519", "secp256k1", "secp256r1", or "bls"
     pub key_type: String,
     /// Raw private key bytes (empty for remote signers like Orbis)
     pub private_key_bytes: Vec<u8>,
@@ -88,6 +180,11 @@ impl SigningConfig {
             "bls" => Ok(crate::block::SignatureType::BLS),
             other => Err(format!("unsupported signing key type: {}", other)),
         }
+    }
+
+    /// Parse the key type string into a `SigningKeyType` enum.
+    pub fn signing_key_type(&self) -> Result<SigningKeyType, String> {
+        self.key_type.parse()
     }
 }
 
@@ -191,9 +288,9 @@ fn request_token_store() -> &'static Mutex<HashMap<String, String>> {
 /// and can't create new bearer tokens for them. Instead, we pass through the
 /// original JWT — which IS signed by the user's key — to hub.rs/SourceHub
 /// for ACP operations like register_object.
-pub fn set_request_bearer_token(did: &str, token: String) {
+pub fn set_request_bearer_token(did: &str, token: impl Into<String>) {
     if let Ok(mut store) = request_token_store().lock() {
-        store.insert(did.to_string(), token);
+        store.insert(did.to_string(), token.into());
     }
 }
 
