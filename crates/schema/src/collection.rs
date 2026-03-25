@@ -433,6 +433,7 @@ impl CollectionVersion {
 }
 
 /// Builder for creating collection versions
+#[must_use = "CollectionBuilder does nothing until .build() is called"]
 pub struct CollectionBuilder {
     name: String,
     collection_id: String,
