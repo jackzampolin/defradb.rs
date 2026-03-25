@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use super::config::{DurabilityMode, RedbStoreOptions};
 use super::group_commit::GroupCommitBuffer;
@@ -25,7 +24,7 @@ use crate::corekv::{Dropable, Error, Result, Store, Txn};
 /// will reject new transactions and wait for existing ones to complete.
 pub struct RedbStore {
     db: Arc<Database>,
-    closed: Arc<RwLock<bool>>,
+    closed: AtomicBool,
     /// Count of active transactions (for graceful shutdown)
     active_txn_count: Arc<AtomicUsize>,
     /// Close timeout duration
@@ -160,7 +159,7 @@ impl RedbStore {
 
         Ok(Self {
             db,
-            closed: Arc::new(RwLock::new(false)),
+            closed: AtomicBool::new(false),
             active_txn_count: Arc::new(AtomicUsize::new(0)),
             close_timeout: opts.close_timeout(),
             db_path,
@@ -172,7 +171,7 @@ impl RedbStore {
 
     /// Get the current count of active transactions.
     pub fn active_transaction_count(&self) -> usize {
-        self.active_txn_count.load(Ordering::SeqCst)
+        self.active_txn_count.load(Ordering::Acquire)
     }
 
     /// Get the database file path.
@@ -270,23 +269,22 @@ impl RedbStore {
     }
 
     /// Check if the store is closed.
-    async fn is_closed(&self) -> bool {
-        *self.closed.read().await
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 }
 
 #[async_trait]
 impl Store for RedbStore {
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
-        // Check closed status and increment count atomically to prevent TOCTOU race.
-        // By holding the read lock while incrementing, we ensure close() will see
-        // our incremented count if it runs concurrently.
-        {
-            let closed = self.closed.read().await;
-            if *closed {
-                return Err(Error::DBClosed);
-            }
-            self.active_txn_count.fetch_add(1, Ordering::SeqCst);
+        // CAS-based TOCTOU protection: increment count, then verify not closed.
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::DBClosed);
+        }
+        self.active_txn_count.fetch_add(1, Ordering::AcqRel);
+        if self.closed.load(Ordering::Acquire) {
+            self.active_txn_count.fetch_sub(1, Ordering::AcqRel);
+            return Err(Error::DBClosed);
         }
 
         // Use a local guard to ensure count is decremented on panic or early return.
@@ -295,7 +293,7 @@ impl Store for RedbStore {
         impl Drop for NewTxnGuard<'_> {
             fn drop(&mut self) {
                 if !self.1 {
-                    self.0.fetch_sub(1, Ordering::SeqCst);
+                    self.0.fetch_sub(1, Ordering::AcqRel);
                 }
             }
         }
@@ -327,18 +325,13 @@ impl Store for RedbStore {
     }
 
     async fn close(&self) -> Result<()> {
-        // Mark as closed first to prevent new transactions.
-        // If already closed, return early (idempotent behavior).
-        {
-            let mut closed = self.closed.write().await;
-            if *closed {
-                return Ok(());
-            }
-            *closed = true;
+        // Swap closed to true; if already true, another close() won.
+        if self.closed.swap(true, Ordering::Release) {
+            return Ok(());
         }
 
         // Wait for active transactions to complete (with timeout)
-        let active = self.active_txn_count.load(Ordering::SeqCst);
+        let active = self.active_txn_count.load(Ordering::Acquire);
         if active > 0 {
             tracing::info!(
                 active_transactions = active,
@@ -346,12 +339,11 @@ impl Store for RedbStore {
                 "Store closing with active transactions - waiting for completion"
             );
 
-            // Poll for transactions to complete (uses configurable timeout)
             let start = std::time::Instant::now();
             let timeout = self.close_timeout;
-            while self.active_txn_count.load(Ordering::SeqCst) > 0 {
+            while self.active_txn_count.load(Ordering::Acquire) > 0 {
                 if start.elapsed() > timeout {
-                    let remaining = self.active_txn_count.load(Ordering::SeqCst);
+                    let remaining = self.active_txn_count.load(Ordering::Acquire);
                     tracing::error!(
                         remaining_transactions = remaining,
                         timeout_secs = timeout.as_secs(),
@@ -384,7 +376,7 @@ impl Store for RedbStore {
 #[async_trait]
 impl Dropable for RedbStore {
     async fn drop_all(&self) -> Result<()> {
-        if self.is_closed().await {
+        if self.is_closed() {
             return Err(Error::DBClosed);
         }
 

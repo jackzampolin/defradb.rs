@@ -18,13 +18,17 @@ use crate::corekv::{
 /// The transmute is safe because the `Arc<DB>` guarantees the DB lives
 /// as long as this struct.
 struct OwnedSnapshot {
+    // IMPORTANT: _db MUST be declared before snapshot to ensure correct drop order.
+    // Rust drops fields in declaration order. If snapshot were dropped after _db,
+    // and _db held the last Arc reference, the snapshot would reference freed memory.
     _db: Arc<rocksdb::OptimisticTransactionDB>,
-    // Safety: lifetime is tied to _db via the Arc above
     snapshot: rocksdb::SnapshotWithThreadMode<'static, rocksdb::OptimisticTransactionDB>,
 }
 
-// Safety: OwnedSnapshot is safe to send/sync because the underlying
-// SnapshotWithThreadMode is Send+Sync and the Arc ensures lifetime safety.
+// Safety: OwnedSnapshot is safe to Send/Sync because:
+// (1) the Arc<DB> ensures the DB outlives the snapshot,
+// (2) rocksdb::SnapshotWithThreadMode is internally thread-safe (uses a C pointer),
+// (3) no &mut access to the snapshot is possible through &OwnedSnapshot.
 unsafe impl Send for OwnedSnapshot {}
 unsafe impl Sync for OwnedSnapshot {}
 
@@ -73,7 +77,7 @@ pub(crate) struct RocksDbTxn {
 
 impl Drop for RocksDbTxn {
     fn drop(&mut self) {
-        self.active_txn_count.fetch_sub(1, Ordering::SeqCst);
+        self.active_txn_count.fetch_sub(1, Ordering::AcqRel);
 
         let was_committed = *self.committed.lock();
         let was_discarded = *self.discarded.lock();

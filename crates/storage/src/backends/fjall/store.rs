@@ -2,9 +2,8 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use super::config::FjallStoreOptions;
 use super::transaction::FjallTxn;
@@ -23,7 +22,7 @@ use crate::corekv::{Dropable, Error, Result, Store, Txn};
 pub struct FjallStore {
     db: fjall::Database,
     keyspace: fjall::Keyspace,
-    closed: Arc<RwLock<bool>>,
+    closed: AtomicBool,
     conflict_tracker: Arc<ConflictTracker>,
     db_path: std::path::PathBuf,
     active_txn_count: Arc<AtomicUsize>,
@@ -118,7 +117,7 @@ impl FjallStore {
         Ok(Self {
             db,
             keyspace,
-            closed: Arc::new(RwLock::new(false)),
+            closed: AtomicBool::new(false),
             conflict_tracker: Arc::new(ConflictTracker::new()),
             db_path,
             active_txn_count: Arc::new(AtomicUsize::new(0)),
@@ -134,7 +133,7 @@ impl FjallStore {
 
     /// Get the current count of active transactions.
     pub fn active_transaction_count(&self) -> usize {
-        self.active_txn_count.load(Ordering::SeqCst)
+        self.active_txn_count.load(Ordering::Acquire)
     }
 
     /// Returns true if the underlying keyspace uses KV separation (blob storage).
@@ -142,20 +141,22 @@ impl FjallStore {
         self.keyspace.is_kv_separated()
     }
 
-    async fn is_closed(&self) -> bool {
-        *self.closed.read().await
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 }
 
 #[async_trait]
 impl Store for FjallStore {
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
-        {
-            let closed = self.closed.read().await;
-            if *closed {
-                return Err(Error::DBClosed);
-            }
-            self.active_txn_count.fetch_add(1, Ordering::SeqCst);
+        // CAS-based TOCTOU protection: increment count, then verify not closed.
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::DBClosed);
+        }
+        self.active_txn_count.fetch_add(1, Ordering::AcqRel);
+        if self.closed.load(Ordering::Acquire) {
+            self.active_txn_count.fetch_sub(1, Ordering::AcqRel);
+            return Err(Error::DBClosed);
         }
 
         // Guard to decrement count on panic or early return
@@ -163,7 +164,7 @@ impl Store for FjallStore {
         impl Drop for NewTxnGuard<'_> {
             fn drop(&mut self) {
                 if !self.1 {
-                    self.0.fetch_sub(1, Ordering::SeqCst);
+                    self.0.fetch_sub(1, Ordering::AcqRel);
                 }
             }
         }
@@ -192,15 +193,12 @@ impl Store for FjallStore {
     }
 
     async fn close(&self) -> Result<()> {
-        {
-            let mut closed = self.closed.write().await;
-            if *closed {
-                return Ok(());
-            }
-            *closed = true;
+        // Swap closed to true; if already true, another close() won.
+        if self.closed.swap(true, Ordering::Release) {
+            return Ok(());
         }
 
-        let active = self.active_txn_count.load(Ordering::SeqCst);
+        let active = self.active_txn_count.load(Ordering::Acquire);
         if active > 0 {
             tracing::info!(
                 active_transactions = active,
@@ -210,9 +208,9 @@ impl Store for FjallStore {
 
             let start = std::time::Instant::now();
             let timeout = self.close_timeout;
-            while self.active_txn_count.load(Ordering::SeqCst) > 0 {
+            while self.active_txn_count.load(Ordering::Acquire) > 0 {
                 if start.elapsed() > timeout {
-                    let remaining = self.active_txn_count.load(Ordering::SeqCst);
+                    let remaining = self.active_txn_count.load(Ordering::Acquire);
                     tracing::error!(
                         remaining_transactions = remaining,
                         timeout_secs = timeout.as_secs(),
@@ -237,7 +235,7 @@ impl Store for FjallStore {
 #[async_trait]
 impl Dropable for FjallStore {
     async fn drop_all(&self) -> Result<()> {
-        if self.is_closed().await {
+        if self.is_closed() {
             return Err(Error::DBClosed);
         }
 
