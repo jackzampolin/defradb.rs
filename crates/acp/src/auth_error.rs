@@ -4,7 +4,8 @@
 /// failures. Rust returns more specific messages like "only admins can disable NAC"
 /// or "UNAUTHORIZED: not document owner". This function maps them to the
 /// Go-compatible generic message.
-pub fn normalize_auth_error(err: String, permission: &str) -> String {
+pub fn normalize_auth_error(err: impl Into<String>, permission: &str) -> String {
+    let err = err.into();
     let lower = err.to_lowercase();
     if lower.contains("only admins can")
         || lower.contains("unauthorized")

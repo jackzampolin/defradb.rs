@@ -3,6 +3,7 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("invalid DID: {0}")]
     InvalidDid(String),
@@ -40,6 +41,9 @@ pub enum Error {
         relation: String,
         operation: String,
     },
+
+    #[error("invalid relationship field '{field}': {reason}")]
+    InvalidRelationshipField { field: String, reason: String },
 
     #[error("serialization error: {0}")]
     Serialization(String),

@@ -152,7 +152,7 @@ impl PersistentAcpStore<RedbStore> {
         self.store
             .close()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))
+            .map_err(|e| Error::storage_txn("close", e))
     }
 }
 
@@ -165,19 +165,18 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .store
             .new_txn(false)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("put_tuple:begin", e))?;
 
         let key = tuple.storage_key();
-        // Store the tuple as JSON for debugging/inspection
-        let value = serde_json::to_vec(tuple).map_err(|e| Error::Storage(e.to_string()))?;
+        let value = serde_json::to_vec(tuple).map_err(|e| Error::Serialization(e.to_string()))?;
 
         txn.set(key.as_bytes(), &value)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_write("put_tuple:set", e))?;
 
         txn.commit()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("put_tuple:commit", e))?;
 
         Ok(())
     }
@@ -187,17 +186,17 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .store
             .new_txn(false)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("delete_tuple:begin", e))?;
 
         let key = tuple.storage_key();
 
         txn.delete(key.as_bytes())
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_write("delete_tuple:delete", e))?;
 
         txn.commit()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("delete_tuple:commit", e))?;
 
         Ok(())
     }
@@ -207,13 +206,13 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .store
             .new_txn(true)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("has_tuple:begin", e))?;
 
         let key = tuple.storage_key();
 
         txn.has(key.as_bytes())
             .await
-            .map_err(|e| Error::Storage(e.to_string()))
+            .map_err(|e| Error::storage_read("has_tuple:has", e))
     }
 
     async fn get_doc_tuples(
@@ -228,7 +227,7 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .store
             .new_txn(true)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("get_doc_tuples:begin", e))?;
 
         let prefix = RelationTuple::doc_prefix(collection_id, doc_id);
 
@@ -237,17 +236,17 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
         let mut iter = txn
             .iterator(iter_opts)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_iter("get_doc_tuples:iterator", e))?;
 
         let mut tuples = Vec::new();
 
         while let Some(kv) = iter
             .next()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?
+            .map_err(|e| Error::storage_iter("get_doc_tuples:next", e))?
         {
-            let tuple: RelationTuple =
-                serde_json::from_slice(&kv.value).map_err(|e| Error::Storage(e.to_string()))?;
+            let tuple: RelationTuple = serde_json::from_slice(&kv.value)
+                .map_err(|e| Error::Serialization(e.to_string()))?;
             tuples.push(tuple);
         }
 
@@ -267,7 +266,7 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .store
             .new_txn(true)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("get_relation_subjects:begin", e))?;
 
         let prefix = RelationTuple::relation_prefix(collection_id, doc_id, relation);
 
@@ -276,17 +275,17 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
         let mut iter = txn
             .iterator(iter_opts)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_iter("get_relation_subjects:iterator", e))?;
 
         let mut subjects = Vec::new();
 
         while let Some(kv) = iter
             .next()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?
+            .map_err(|e| Error::storage_iter("get_relation_subjects:next", e))?
         {
-            let tuple: RelationTuple =
-                serde_json::from_slice(&kv.value).map_err(|e| Error::Storage(e.to_string()))?;
+            let tuple: RelationTuple = serde_json::from_slice(&kv.value)
+                .map_err(|e| Error::Serialization(e.to_string()))?;
             subjects.push(tuple.subject().clone());
         }
 
@@ -306,7 +305,7 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .store
             .new_txn(true)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("get_subject_relations:begin", e))?;
 
         let prefix = RelationTuple::doc_prefix(collection_id, doc_id);
 
@@ -315,17 +314,17 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
         let mut iter = txn
             .iterator(iter_opts)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_iter("get_subject_relations:iterator", e))?;
 
         let mut relations = Vec::new();
 
         while let Some(kv) = iter
             .next()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?
+            .map_err(|e| Error::storage_iter("get_subject_relations:next", e))?
         {
-            let tuple: RelationTuple =
-                serde_json::from_slice(&kv.value).map_err(|e| Error::Storage(e.to_string()))?;
+            let tuple: RelationTuple = serde_json::from_slice(&kv.value)
+                .map_err(|e| Error::Serialization(e.to_string()))?;
             if tuple.subject() == subject {
                 relations.push(tuple.relation().to_string());
             }
@@ -342,7 +341,7 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .store
             .new_txn(false)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("delete_doc_tuples:begin", e))?;
 
         let prefix = RelationTuple::doc_prefix(collection_id, doc_id);
 
@@ -353,12 +352,12 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             let mut iter = txn
                 .iterator(iter_opts)
                 .await
-                .map_err(|e| Error::Storage(e.to_string()))?;
+                .map_err(|e| Error::storage_iter("delete_doc_tuples:iterator", e))?;
 
             while let Some(kv) = iter
                 .next()
                 .await
-                .map_err(|e| Error::Storage(e.to_string()))?
+                .map_err(|e| Error::storage_iter("delete_doc_tuples:next", e))?
             {
                 keys_to_delete.push(kv.key);
             }
@@ -367,12 +366,12 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
         for key in keys_to_delete {
             txn.delete(&key)
                 .await
-                .map_err(|e| Error::Storage(e.to_string()))?;
+                .map_err(|e| Error::storage_write("delete_doc_tuples:delete", e))?;
         }
 
         txn.commit()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("delete_doc_tuples:commit", e))?;
 
         Ok(())
     }
@@ -385,7 +384,7 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .store
             .new_txn(true)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("is_doc_registered:begin", e))?;
 
         let prefix = RelationTuple::doc_prefix(collection_id, doc_id);
 
@@ -394,12 +393,12 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
         let mut iter = txn
             .iterator(iter_opts)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_iter("is_doc_registered:iterator", e))?;
 
         Ok(iter
             .next()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?
+            .map_err(|e| Error::storage_iter("is_doc_registered:next", e))?
             .is_some())
     }
 
@@ -418,7 +417,7 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .store
             .new_txn(false)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_txn("register_doc_atomic:begin", e))?;
 
         let prefix = RelationTuple::doc_prefix(collection_id, doc_id);
         let iter_opts = IterOptions::new().with_prefix(prefix.into_bytes());
@@ -426,12 +425,12 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
         let mut iter = txn
             .iterator(iter_opts)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_iter("register_doc_atomic:iterator", e))?;
 
         if iter
             .next()
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?
+            .map_err(|e| Error::storage_iter("register_doc_atomic:next", e))?
             .is_some()
         {
             return Ok(false);
@@ -439,11 +438,11 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
 
         let tuple = RelationTuple::owner(owner.clone(), collection_id, doc_id);
         let key = tuple.storage_key();
-        let value = serde_json::to_vec(&tuple).map_err(|e| Error::Storage(e.to_string()))?;
+        let value = serde_json::to_vec(&tuple).map_err(|e| Error::Serialization(e.to_string()))?;
 
         txn.set(key.as_bytes(), &value)
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_write("register_doc_atomic:set_tuple", e))?;
 
         // Write a sentinel key so concurrent registrations for the same doc conflict.
         // Without this, two owners writing different keys would both succeed under
@@ -452,12 +451,12 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
         let sentinel = format!("/acp-reg/{}/{}", collection_id, doc_id);
         txn.set(sentinel.as_bytes(), &[1])
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
+            .map_err(|e| Error::storage_write("register_doc_atomic:set_sentinel", e))?;
 
         match txn.commit().await {
             Ok(()) => Ok(true),
             Err(e) if e.is_txn_conflict() => Ok(false),
-            Err(e) => Err(Error::Storage(e.to_string())),
+            Err(e) => Err(Error::storage_txn("register_doc_atomic:commit", e)),
         }
     }
 }
