@@ -185,12 +185,6 @@ impl WasmTransformStore {
     }
 }
 
-impl Default for WasmTransformStore {
-    fn default() -> Self {
-        Self::new().expect("failed to create WASM engine")
-    }
-}
-
 #[async_trait]
 impl TransformStore for WasmTransformStore {
     async fn add(&self, config: LensConfig) -> Result<TransformId> {
