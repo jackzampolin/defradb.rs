@@ -38,8 +38,8 @@ pub struct CounterDelta {
     nonce: i64,
     /// Schema version identifier
     schema_version_id: String,
-    /// The increment/decrement value (can be negative)
-    data: Vec<u8>,
+    /// The increment/decrement value as big-endian bytes (can be negative)
+    data: [u8; 8],
     /// Numeric kind (Int64 or Float64)
     kind: NumericKind,
 }
@@ -71,7 +71,7 @@ impl CounterDelta {
             priority,
             nonce,
             schema_version_id,
-            data: increment.to_be_bytes().to_vec(),
+            data: increment.to_be_bytes(),
             kind: NumericKind::Int64,
         })
     }
@@ -108,7 +108,7 @@ impl CounterDelta {
             priority,
             nonce,
             schema_version_id,
-            data: increment.to_be_bytes().to_vec(),
+            data: increment.to_be_bytes(),
             kind: NumericKind::Float64,
         })
     }
@@ -150,30 +150,12 @@ impl CounterDelta {
 
     /// Decode the increment value as i64
     pub fn decode_int64(&self) -> Result<i64> {
-        if self.data.len() != 8 {
-            return Err(Error::MergeError(format!(
-                "invalid counter data length for field '{}': expected 8 bytes for i64, got {} bytes",
-                self.field_name, self.data.len()
-            )));
-        }
-        let bytes: [u8; 8] = self.data[..8]
-            .try_into()
-            .expect("length already validated as 8 bytes");
-        Ok(i64::from_be_bytes(bytes))
+        Ok(i64::from_be_bytes(self.data))
     }
 
     /// Decode the increment value as f64
     pub fn decode_float64(&self) -> Result<f64> {
-        if self.data.len() != 8 {
-            return Err(Error::MergeError(format!(
-                "invalid counter data length for field '{}': expected 8 bytes for f64, got {} bytes",
-                self.field_name, self.data.len()
-            )));
-        }
-        let bytes: [u8; 8] = self.data[..8]
-            .try_into()
-            .expect("length already validated as 8 bytes");
-        Ok(f64::from_be_bytes(bytes))
+        Ok(f64::from_be_bytes(self.data))
     }
 }
 

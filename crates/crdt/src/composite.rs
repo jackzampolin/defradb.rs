@@ -46,7 +46,12 @@ impl CompositeDelta {
     }
 
     /// Add a field delta
-    pub fn add_field_delta(&mut self, field_name: String, delta: FieldDelta) -> Result<()> {
+    pub fn add_field_delta(
+        &mut self,
+        field_name: impl Into<String>,
+        delta: FieldDelta,
+    ) -> Result<()> {
+        let field_name = field_name.into();
         if field_name.is_empty() {
             return Err(Error::MergeError("field_name cannot be empty".into()));
         }
@@ -139,28 +144,29 @@ enum FieldCrdtType {
 
 impl CompositeDAG {
     /// Create a new CompositeDAG
-    pub fn new(doc_id: DocId, schema_version_id: String) -> Self {
+    pub fn new(doc_id: DocId, schema_version_id: impl Into<String>) -> Self {
         Self {
             doc_id,
-            schema_version_id,
+            schema_version_id: schema_version_id.into(),
             field_managers: HashMap::new(),
         }
     }
 
     /// Register a field as LWW
-    pub fn register_lww_field(&mut self, field_name: String) {
-        self.field_managers.insert(field_name, FieldCrdtType::Lww);
+    pub fn register_lww_field(&mut self, field_name: impl Into<String>) {
+        self.field_managers
+            .insert(field_name.into(), FieldCrdtType::Lww);
     }
 
     /// Register a field as Counter
     pub fn register_counter_field(
         &mut self,
-        field_name: String,
+        field_name: impl Into<String>,
         allow_decrement: bool,
         kind: NumericKind,
     ) {
         self.field_managers.insert(
-            field_name,
+            field_name.into(),
             FieldCrdtType::Counter {
                 allow_decrement,
                 kind,
@@ -312,9 +318,14 @@ impl CompositeDAG {
                 // Dispatch on numeric kind, enforcing allow_decrement for each type.
                 // Nonce is marked FIRST, then value updated — matching standalone Counter
                 // crash-recovery semantics (under-count on crash is safer than double-count).
-                let new_value_bytes: Vec<u8> = match kind {
+                let new_value_bytes: [u8; 8] = match kind {
                     NumericKind::Int64 => {
-                        let increment = i64::from_be_bytes(data[..8].try_into().unwrap());
+                        let increment = i64::from_be_bytes(data[..8].try_into().map_err(|_| {
+                            Error::MergeError(format!(
+                                "invalid counter increment data for field '{}': expected 8 bytes, got {}",
+                                field_name, data.len()
+                            ))
+                        })?);
                         if !allow_decrement && increment < 0 {
                             return Err(Error::MergeError("decrement not allowed".into()));
                         }
@@ -333,15 +344,25 @@ impl CompositeDAG {
                                             field_name, bytes.len()
                                         )));
                                     }
-                                    i64::from_be_bytes(bytes[..8].try_into().unwrap())
+                                    i64::from_be_bytes(bytes[..8].try_into().map_err(|_| {
+                                        Error::MergeError(format!(
+                                            "corrupted counter data for field '{}': expected 8 bytes, got {}",
+                                            field_name, bytes.len()
+                                        ))
+                                    })?)
                                 }
                                 None => 0,
                             }
                         };
-                        current.wrapping_add(increment).to_be_bytes().to_vec()
+                        current.wrapping_add(increment).to_be_bytes()
                     }
                     NumericKind::Float64 => {
-                        let increment = f64::from_be_bytes(data[..8].try_into().unwrap());
+                        let increment = f64::from_be_bytes(data[..8].try_into().map_err(|_| {
+                            Error::MergeError(format!(
+                                "invalid counter increment data for field '{}': expected 8 bytes, got {}",
+                                field_name, data.len()
+                            ))
+                        })?);
                         if !increment.is_finite() {
                             return Err(Error::MergeError(format!(
                                 "invalid float64 increment for field '{}': {}",
@@ -366,7 +387,12 @@ impl CompositeDAG {
                                             field_name, bytes.len()
                                         )));
                                     }
-                                    f64::from_be_bytes(bytes[..8].try_into().unwrap())
+                                    f64::from_be_bytes(bytes[..8].try_into().map_err(|_| {
+                                        Error::MergeError(format!(
+                                            "corrupted counter data for field '{}': expected 8 bytes, got {}",
+                                            field_name, bytes.len()
+                                        ))
+                                    })?)
                                 }
                                 None => 0.0,
                             }
@@ -384,7 +410,7 @@ impl CompositeDAG {
                                 field_name, current, increment, result
                             )));
                         }
-                        result.to_be_bytes().to_vec()
+                        result.to_be_bytes()
                     }
                 };
 
@@ -416,14 +442,14 @@ impl CompositeDAG {
                         }
                         std::cmp::Ordering::Equal => {
                             // Same priority - deletion (empty) loses to any existing value
-                            let current_value = rw
+                            if let Some(v) = rw
                                 .get(&value_key)
                                 .await
-                                .map_err(|e| Error::Storage(e.to_string()))?;
-                            if current_value.is_some()
-                                && !current_value.as_ref().unwrap().is_empty()
+                                .map_err(|e| Error::Storage(e.to_string()))?
                             {
-                                return Ok(MergeResult::RejectedTieBreak);
+                                if !v.is_empty() {
+                                    return Ok(MergeResult::RejectedTieBreak);
+                                }
                             }
                         }
                         std::cmp::Ordering::Greater => {

@@ -5,17 +5,40 @@
 
 use defra_core::{Error, Result};
 
-/// Encode a priority value as unsigned varint
+/// Stack-allocated encoded priority (max 10 bytes for u64 varint)
+pub struct EncodedPriority {
+    buf: [u8; 10],
+    len: usize,
+}
+
+impl AsRef<[u8]> for EncodedPriority {
+    fn as_ref(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+impl std::ops::Deref for EncodedPriority {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+/// Encode a priority value as unsigned varint (stack-allocated)
 ///
 /// # Arguments
 /// * `priority` - The priority value to encode
 ///
 /// # Returns
-/// * Encoded bytes (1-10 bytes depending on value)
-pub fn encode_priority(priority: u64) -> Vec<u8> {
-    let mut buf = Vec::new();
-    encode_varint(priority, &mut buf);
-    buf
+/// * `EncodedPriority` containing 1-10 bytes, dereferences to `&[u8]`
+pub fn encode_priority(priority: u64) -> EncodedPriority {
+    let mut ep = EncodedPriority {
+        buf: [0u8; 10],
+        len: 0,
+    };
+    encode_varint(priority, &mut ep);
+    ep
 }
 
 /// Decode a priority value from unsigned varint
@@ -32,15 +55,16 @@ pub fn decode_priority(data: &[u8]) -> Result<u64> {
         .ok_or_else(|| Error::MergeError("invalid priority encoding".into()))
 }
 
-/// Encode unsigned varint (LEB128)
-fn encode_varint(mut value: u64, buf: &mut Vec<u8>) {
+/// Encode unsigned varint (LEB128) into an `EncodedPriority` buffer
+fn encode_varint(mut value: u64, ep: &mut EncodedPriority) {
     loop {
         let mut byte = (value & 0x7F) as u8;
         value >>= 7;
         if value != 0 {
             byte |= 0x80;
         }
-        buf.push(byte);
+        ep.buf[ep.len] = byte;
+        ep.len += 1;
         if value == 0 {
             break;
         }
