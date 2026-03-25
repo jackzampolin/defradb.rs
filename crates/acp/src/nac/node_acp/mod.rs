@@ -33,7 +33,22 @@ pub const NODE_OBJECT_ID: &str = "singleton";
 /// Stored as a relationship in the Zanzibar store so it survives restarts.
 const DISABLED_RELATION: &str = "_disabled";
 
-/// NAC status indicating whether node access control is active.
+/// NAC lifecycle state machine.
+///
+/// ```text
+/// NotConfigured --[enable()]--> Enabled
+/// Enabled --[disable()]--> DisabledTemporarily
+/// DisabledTemporarily --[re_enable()]--> Enabled
+/// Enabled --[purge()]--> NotConfigured
+/// DisabledTemporarily --[purge()]--> NotConfigured
+/// ```
+///
+/// - `NotConfigured`: NAC has never been enabled or has been purged.
+///   All node operations are unrestricted.
+/// - `Enabled`: NAC is active. All node operations require permission checks.
+/// - `DisabledTemporarily`: NAC is paused. Permission checks are bypassed but
+///   write operations (adding/removing admins) are blocked to prevent
+///   privilege escalation. State is preserved for re-enable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NacStatus {
     NotConfigured,

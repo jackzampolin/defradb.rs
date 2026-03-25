@@ -144,6 +144,10 @@ impl From<zanzibar::error::Error> for Error {
                 relation,
                 operation,
             },
+            zanzibar::error::Error::InvalidRelationshipField { field, reason } => Error::Storage(
+                format!("invalid relationship field '{}': {}", field, reason),
+            ),
+            _ => Error::Storage(e.to_string()),
         }
     }
 }
