@@ -3,6 +3,8 @@
 //! This module provides Go-compatible Block structures with DAG-CBOR serialization.
 //! All types match the Go implementation in `internal/core/block/` for wire compatibility.
 
+use std::fmt;
+
 use cid::Cid;
 use multihash::MultihashGeneric;
 use serde::{Deserialize, Serialize};
@@ -683,6 +685,62 @@ impl SignatureHeader {
     /// Create a new signature header
     pub fn new(sig_type: SignatureType, identity: Vec<u8>) -> Self {
         Self { sig_type, identity }
+    }
+}
+
+/// Document status for composite deltas.
+///
+/// Replaces magic `u8` values (1 = active, 2 = deleted) with a type-safe enum.
+/// Serializes as the raw u8 value for Go wire compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u8)]
+pub enum DocumentStatus {
+    #[default]
+    Active = 1,
+    Deleted = 2,
+}
+
+impl DocumentStatus {
+    /// Convert from a raw u8 value.
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            1 => Some(DocumentStatus::Active),
+            2 => Some(DocumentStatus::Deleted),
+            _ => None,
+        }
+    }
+
+    /// Convert to the raw u8 value.
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+impl Serialize for DocumentStatus {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_u8(*self as u8)
+    }
+}
+
+impl<'de> Deserialize<'de> for DocumentStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let v = u8::deserialize(deserializer)?;
+        DocumentStatus::from_u8(v)
+            .ok_or_else(|| serde::de::Error::custom(format!("invalid document status: {v}")))
+    }
+}
+
+impl fmt::Display for DocumentStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DocumentStatus::Active => write!(f, "Active"),
+            DocumentStatus::Deleted => write!(f, "Deleted"),
+        }
     }
 }
 

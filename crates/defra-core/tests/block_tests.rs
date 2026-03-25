@@ -203,7 +203,7 @@ fn test_go_wire_compat_composite_active() {
     if let CrdtDelta::Composite(composite) = &block.delta {
         assert_eq!(composite.doc_id, b"doc1");
         assert_eq!(composite.priority, 1);
-        assert_eq!(composite.status, 1); // Active
+        assert_eq!(composite.status, 1);
     } else {
         panic!("Expected Composite delta");
     }
@@ -222,7 +222,7 @@ fn test_go_wire_compat_composite_deleted() {
 
     if let CrdtDelta::Composite(composite) = &block.delta {
         assert_eq!(composite.priority, 2);
-        assert_eq!(composite.status, 2); // Deleted
+        assert_eq!(composite.status, 2);
     } else {
         panic!("Expected Composite delta");
     }

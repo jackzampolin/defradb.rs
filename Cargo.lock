@@ -3602,7 +3602,6 @@ dependencies = [
 name = "defra-core"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "cid 0.10.1",
  "criterion 0.5.1",
@@ -4365,6 +4364,7 @@ name = "events"
 version = "0.5.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "cid 0.10.1",
  "parking_lot 0.12.5",
  "thiserror 1.0.69",

@@ -20,15 +20,17 @@ pub mod types;
 
 pub use block::{
     Block, CollectionDefinitionDeltaPayload, CollectionDeltaPayload, CollectionSetDeltaPayload,
-    CompositeDeltaPayload, CounterDeltaPayload, CrdtDelta, DAGLink, Encryption,
+    CompositeDeltaPayload, CounterDeltaPayload, CrdtDelta, DAGLink, DocumentStatus, Encryption,
     FieldDefinitionDeltaPayload, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
     DAG_CBOR_CODEC, SHA2_256_CODE,
 };
+pub use encryption::EncryptionKey;
 pub use error::{Error, Result};
 pub use ipld::{collect_block_links, extract_links, walk_ipld, IpldVisitor};
 pub use lens_block::{
     build_lens_ipld_blocks, CidBlock, LensConfigBlock, LensKeyValue, LensModuleBlock, LensWasmBlock,
 };
+pub use signing::SigningKeyType;
 
 /// Version information for DefraDB
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -98,12 +98,12 @@ impl Subscription {
     /// When this returns a non-zero value, the client should consider
     /// re-fetching the full state to ensure consistency.
     pub fn check_and_reset_dropped(&self) -> u64 {
-        self.dropped_count.swap(0, Ordering::SeqCst)
+        self.dropped_count.swap(0, Ordering::Relaxed)
     }
 
     /// Get the current dropped count without resetting.
     pub fn dropped_count(&self) -> u64 {
-        self.dropped_count.load(Ordering::SeqCst)
+        self.dropped_count.load(Ordering::Relaxed)
     }
 }
 

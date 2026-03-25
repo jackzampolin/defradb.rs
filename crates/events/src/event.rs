@@ -1,5 +1,6 @@
 //! Event types for the DefraDB event bus.
 
+use bytes::Bytes;
 use cid::Cid;
 
 /// Event names that can be subscribed to.
@@ -114,7 +115,7 @@ pub struct Update {
     /// Collection ID (schema version ID) the document belongs to.
     pub collection_id: String,
     /// Serialized block data.
-    pub block: Vec<u8>,
+    pub block: Bytes,
     /// Whether this is a retry of a previously failed operation.
     pub is_retry: bool,
     /// Whether this update came from P2P relay (vs local mutation).
@@ -127,7 +128,7 @@ impl Update {
         doc_id: String,
         cid: Cid,
         collection_id: String,
-        block: Vec<u8>,
+        block: impl Into<Bytes>,
         is_retry: bool,
         is_relay: bool,
     ) -> Self {
@@ -135,7 +136,7 @@ impl Update {
             doc_id,
             cid,
             collection_id,
-            block,
+            block: block.into(),
             is_retry,
             is_relay,
         }

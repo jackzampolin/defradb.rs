@@ -194,7 +194,7 @@ impl Bus for ChannelBus {
             return Subscription::new(0, rx);
         }
 
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(self.config.event_buffer_size);
 
         // Create shared dropped counter for both Subscriber and Subscription

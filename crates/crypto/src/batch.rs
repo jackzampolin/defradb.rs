@@ -12,6 +12,17 @@ use defra_core::signing::SigningConfig;
 use crate::keys::{PrivateKey, PublicKey};
 use crate::{Ed25519PrivateKey, Ed25519PublicKey, Secp256k1PrivateKey, Secp256k1PublicKey};
 
+/// Errors that can occur during batch signing.
+#[derive(Debug, thiserror::Error)]
+pub enum BatchSignError {
+    #[error("signing key not configured")]
+    MissingKey,
+    #[error("unsupported key type: {0}")]
+    UnsupportedKeyType(String),
+    #[error("signing failed: {0}")]
+    SigningFailed(String),
+}
+
 /// A batch signature covering a set of CIDs via their Merkle root.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchSignature {
@@ -30,27 +41,29 @@ pub struct BatchSignature {
 }
 
 /// Sign a batch of CIDs using the provided signing config.
-pub fn sign_batch(cids: &[Cid], config: &SigningConfig) -> Result<BatchSignature, String> {
-    let root = compute_merkle_root(cids).ok_or_else(|| "cannot sign empty batch".to_string())?;
+pub fn sign_batch(cids: &[Cid], config: &SigningConfig) -> Result<BatchSignature, BatchSignError> {
+    let root = compute_merkle_root(cids).ok_or(BatchSignError::MissingKey)?;
 
     let (sig_type, sig_bytes) = match config.key_type.as_str() {
         "ed25519" => {
-            let key = Ed25519PrivateKey::from_bytes(&config.private_key_bytes)
-                .map_err(|e| format!("invalid ed25519 key: {}", e))?;
-            let sig = key
-                .sign(&root)
-                .map_err(|e| format!("ed25519 sign failed: {}", e))?;
+            let key = Ed25519PrivateKey::from_bytes(&config.private_key_bytes).map_err(|e| {
+                BatchSignError::SigningFailed(format!("invalid ed25519 key: {}", e))
+            })?;
+            let sig = key.sign(&root).map_err(|e| {
+                BatchSignError::SigningFailed(format!("ed25519 sign failed: {}", e))
+            })?;
             ("EdDSA".to_string(), sig)
         }
         "secp256k1" => {
-            let key = Secp256k1PrivateKey::from_bytes(&config.private_key_bytes)
-                .map_err(|e| format!("invalid secp256k1 key: {}", e))?;
-            let sig = key
-                .sign(&root)
-                .map_err(|e| format!("secp256k1 sign failed: {}", e))?;
+            let key = Secp256k1PrivateKey::from_bytes(&config.private_key_bytes).map_err(|e| {
+                BatchSignError::SigningFailed(format!("invalid secp256k1 key: {}", e))
+            })?;
+            let sig = key.sign(&root).map_err(|e| {
+                BatchSignError::SigningFailed(format!("secp256k1 sign failed: {}", e))
+            })?;
             ("ES256K".to_string(), sig)
         }
-        other => return Err(format!("unsupported key type: {}", other)),
+        other => return Err(BatchSignError::UnsupportedKeyType(other.to_string())),
     };
 
     Ok(BatchSignature {
