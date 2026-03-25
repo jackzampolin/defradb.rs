@@ -118,7 +118,9 @@ impl<'a> SdlParser<'a> {
             std::collections::HashMap::new();
 
         for type_name in &sorted_type_names {
-            let type_def = self.type_defs.get(type_name).unwrap();
+            let type_def = self.type_defs.get(type_name).ok_or_else(|| {
+                QueryError::internal(format!("unknown type in dependency graph: {type_name}"))
+            })?;
             let mut deps = std::collections::HashSet::new();
 
             for field in &type_def.fields {
@@ -194,7 +196,9 @@ impl<'a> SdlParser<'a> {
             // For each type that depends on current, decrease its in-degree
             for (type_name, deps) in &dependencies {
                 if deps.contains(current) {
-                    let degree = in_degree.get_mut(type_name).unwrap();
+                    let Some(degree) = in_degree.get_mut(type_name) else {
+                        continue;
+                    };
                     *degree = degree.saturating_sub(1);
                     if *degree == 0 && !processing_order.contains(type_name) {
                         queue.push(type_name);
@@ -219,7 +223,9 @@ impl<'a> SdlParser<'a> {
         let mut headstore: HashMap<String, (Cid, u64)> = HashMap::new();
 
         for type_name in &processing_order {
-            let type_def = self.type_defs.get(type_name).unwrap();
+            let type_def = self.type_defs.get(type_name).ok_or_else(|| {
+                QueryError::internal(format!("unknown type in processing order: {type_name}"))
+            })?;
             let collection = self.build_collection(
                 type_def,
                 &type_names,
@@ -288,7 +294,9 @@ impl<'a> SdlParser<'a> {
         let mut collections = Vec::new();
 
         for type_name in &self.definition_order {
-            let type_def = self.type_defs.get(type_name).unwrap();
+            let type_def = self.type_defs.get(type_name).ok_or_else(|| {
+                QueryError::internal(format!("unknown type in definition order: {type_name}"))
+            })?;
             let mut collection = self.build_collection(
                 type_def,
                 &type_names,
@@ -989,7 +997,7 @@ fn find_sccs(
             if self.lowlinks[v] == self.indices[v] {
                 let mut scc = Vec::new();
                 loop {
-                    let w = self.stack.pop().unwrap();
+                    let w = self.stack.pop().expect("Tarjan SCC: v is on stack");
                     self.on_stack[w] = false;
                     scc.push(self.type_list[w].clone());
                     if w == v {

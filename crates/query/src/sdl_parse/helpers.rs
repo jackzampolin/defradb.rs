@@ -8,17 +8,30 @@
 //! - Hashing: `hash_to_hex()`
 
 use cid::Cid;
+use std::sync::LazyLock;
 
 use crate::error::{QueryError, Result};
 use graphql_parser::schema::{Directive, Type};
+use regex::Regex;
 use schema::{CType, FieldDescription, FieldKind, ScalarKind};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-use regex::Regex;
-
 use super::directives::get_directive_arg;
 use super::parser::{ParsedType, PolicyConfig, EMPTY_TYPE_PLACEHOLDER};
+
+static TYPE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:type|interface)\s+(\w+)(?:\s*@\w+(?:\([^)]*\))?)*\s*\{([^}]*)\}")
+        .expect("valid regex literal")
+});
+
+static MISSING_FIELD_TYPE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\w+)\s*:\s*(?:\}|\n|$)").expect("valid regex literal"));
+
+static EMPTY_TYPE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(\b(?:type|interface)\s+\w+(?:\s*@\w+(?:\([^)]*\))?)*\s*)\{\s*\}")
+        .expect("valid regex literal")
+});
 
 /// Detect fields with missing type declarations before graphql_parser runs.
 ///
@@ -27,18 +40,11 @@ use super::parser::{ParsedType, PolicyConfig, EMPTY_TYPE_PLACEHOLDER};
 /// crate rejects this at the syntax level with a generic parse error. We detect
 /// this pattern first and produce Go-compatible error messages.
 pub(super) fn detect_missing_field_types(sdl: &str) -> Result<()> {
-    // Match type/interface blocks and scan fields within them
-    let type_re =
-        Regex::new(r"(?:type|interface)\s+(\w+)(?:\s*@\w+(?:\([^)]*\))?)*\s*\{([^}]*)\}").unwrap();
-    // Match field declarations where name is followed by colon then whitespace/newline/}
-    // with no type before the next field or closing brace
-    let field_re = Regex::new(r"(\w+)\s*:\s*(?:\}|\n|$)").unwrap();
-
     let mut errors = Vec::new();
-    for cap in type_re.captures_iter(sdl) {
+    for cap in TYPE_BLOCK_RE.captures_iter(sdl) {
         let type_name = &cap[1];
         let body = &cap[2];
-        for field_cap in field_re.captures_iter(body) {
+        for field_cap in MISSING_FIELD_TYPE_RE.captures_iter(body) {
             let field_name = &field_cap[1];
             errors.push(format!(
                 "field type not specified. Object: {}, Field: {}",
@@ -56,15 +62,11 @@ pub(super) fn detect_missing_field_types(sdl: &str) -> Result<()> {
 /// Preprocess SDL to handle empty type/interface definitions.
 /// graphql_parser doesn't allow empty types, so we insert a placeholder field.
 pub(super) fn preprocess_empty_types(sdl: &str) -> String {
-    // Match patterns like `type Name @directive(...)* {}` or `interface Name {}`
-    // This regex finds `{` followed by optional whitespace then `}` in type/interface definitions
-    let re =
-        Regex::new(r"(\b(?:type|interface)\s+\w+(?:\s*@\w+(?:\([^)]*\))?)*\s*)\{\s*\}").unwrap();
-
-    re.replace_all(sdl, |caps: &regex::Captures| {
-        format!("{}{{ {}: String }}", &caps[1], EMPTY_TYPE_PLACEHOLDER)
-    })
-    .to_string()
+    EMPTY_TYPE_RE
+        .replace_all(sdl, |caps: &regex::Captures| {
+            format!("{}{{ {}: String }}", &caps[1], EMPTY_TYPE_PLACEHOLDER)
+        })
+        .to_string()
 }
 
 /// Generate an index name matching Go's `{Col}_{firstField}_ASC` pattern.

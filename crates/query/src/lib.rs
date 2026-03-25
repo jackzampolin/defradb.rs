@@ -34,6 +34,7 @@ pub mod schema_gen;
 pub mod sdl_parse;
 pub mod select_convert;
 pub mod subscription;
+#[cfg(test)]
 pub mod test_utils;
 pub mod txn;
 

@@ -39,10 +39,20 @@ pub(crate) struct FetcherWrapper {
 }
 
 impl FetcherWrapper {
+    /// Create a new FetcherWrapper from a borrowed DocFetcher reference.
+    ///
+    /// # Safety contract (enforced by caller, not compiler)
+    ///
+    /// The original `&dyn DocFetcher` MUST outlive this wrapper. Currently
+    /// this is guaranteed because the wrapper is only created and consumed
+    /// within a single `execute_nested_select_with_planner` call scope.
     pub(crate) fn new(fetcher: &dyn DocFetcher) -> Self {
-        // Split the fat pointer into data and vtable components.
-        // This avoids the lifetime issue with *const dyn Trait.
         let ptr = fetcher as *const dyn DocFetcher;
+        // SAFETY: Decompose the fat pointer (data_ptr, vtable_ptr) for storage.
+        // This relies on the standard two-word fat pointer layout for trait objects,
+        // which is stable in practice across all Rust targets but not yet formally
+        // guaranteed by the language spec. When `std::ptr::metadata` stabilizes,
+        // this should be replaced with the safe equivalent.
         let (data_ptr, vtable) =
             unsafe { std::mem::transmute::<*const dyn DocFetcher, (*const (), *const ())>(ptr) };
         Self {
@@ -53,14 +63,14 @@ impl FetcherWrapper {
     }
 
     fn get_fetcher(&self) -> &dyn DocFetcher {
-        // Reconstruct the fat pointer from data and vtable
+        // SAFETY: Reconstruct the fat pointer from stored components.
+        // Valid only while the original reference is alive (see safety contract on `new`).
         let ptr = unsafe {
             std::mem::transmute::<(*const (), *const ()), *const dyn DocFetcher>((
                 self.data_ptr,
                 self.vtable,
             ))
         };
-        // SAFETY: The caller guarantees the original reference outlives this wrapper
         unsafe { &*ptr }
     }
 }

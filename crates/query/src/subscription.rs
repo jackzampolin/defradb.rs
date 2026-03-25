@@ -61,8 +61,10 @@ pub fn subscription_to_query_with_doc_id(subscription_query: &str, doc_id: &str)
 
     let post_field = query[after_field..].trim_start();
     if post_field.starts_with('(') {
-        let paren_offset = query[after_field..].find('(').unwrap();
-        let paren_idx = after_field + paren_offset;
+        let paren_idx = match query[after_field..].find('(') {
+            Some(offset) => after_field + offset,
+            None => return query,
+        };
 
         if extract_doc_id_from_query(&query).is_some() {
             query
@@ -135,8 +137,10 @@ pub fn subscription_to_commits_query_with_cid(subscription_query: &str, cid: &st
     // Step 3: Replace or inject cid argument
     let post_field = query[after_field..].trim_start();
     if post_field.starts_with('(') {
-        let paren_start = query[after_field..].find('(').unwrap();
-        let paren_start_abs = after_field + paren_start;
+        let paren_start_abs = match query[after_field..].find('(') {
+            Some(offset) => after_field + offset,
+            None => return query,
+        };
         let mut depth = 0;
         let mut close_paren_abs = paren_start_abs;
         for (i, c) in query[paren_start_abs..].char_indices() {

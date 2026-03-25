@@ -378,9 +378,27 @@ impl TypeJoinOne {
             };
 
             // Create and run an IndexScanNode for the parent lookup
-            let parent_collection = self.parent_collection.as_ref().unwrap().clone();
-            let parent_mapping = self.parent_scan_mapping.as_ref().unwrap().clone();
-            let fetcher = self.fetcher.as_ref().unwrap().clone();
+            let parent_collection = self
+                .parent_collection
+                .as_ref()
+                .ok_or_else(|| {
+                    QueryError::internal("inverted index join: parent_collection not initialized")
+                })?
+                .clone();
+            let parent_mapping = self
+                .parent_scan_mapping
+                .as_ref()
+                .ok_or_else(|| {
+                    QueryError::internal("inverted index join: parent_scan_mapping not initialized")
+                })?
+                .clone();
+            let fetcher = self
+                .fetcher
+                .as_ref()
+                .ok_or_else(|| {
+                    QueryError::internal("inverted index join: fetcher not initialized")
+                })?
+                .clone();
 
             let mut index_scan =
                 IndexScanNode::new(parent_collection, parent_mapping, params).with_fetcher(fetcher);
@@ -452,9 +470,15 @@ impl TypeJoinOne {
             };
 
             // Fetch the parent doc by docID
-            let parent_collection = self.parent_collection.as_ref().unwrap();
-            let parent_mapping = self.parent_scan_mapping.as_ref().unwrap();
-            let fetcher = self.fetcher.as_ref().unwrap();
+            let parent_collection = self.parent_collection.as_ref().ok_or_else(|| {
+                QueryError::internal("ordered primary join: parent_collection not initialized")
+            })?;
+            let parent_mapping = self.parent_scan_mapping.as_ref().ok_or_else(|| {
+                QueryError::internal("ordered primary join: parent_scan_mapping not initialized")
+            })?;
+            let fetcher = self.fetcher.as_ref().ok_or_else(|| {
+                QueryError::internal("ordered primary join: fetcher not initialized")
+            })?;
 
             let result = fetcher
                 .get_by_ids(&parent_collection.name, &[parent_doc_id])
@@ -469,11 +493,10 @@ impl TypeJoinOne {
                 self.go_child_metrics.field_fetches += parent.stored_field_count as u64;
             }
 
-            if parent_docs.is_empty() {
-                continue;
-            }
-
-            let mut parent_doc = parent_docs.into_iter().next().unwrap();
+            let mut parent_doc = match parent_docs.into_iter().next() {
+                Some(doc) => doc,
+                None => continue,
+            };
 
             // Apply relation filter if present
             if let Some(ref rel_filter) = self.relation_filter {
