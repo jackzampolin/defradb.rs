@@ -8,8 +8,6 @@ pub(crate) mod helpers;
 mod reindex;
 mod set_migration;
 
-pub use helpers::json_to_native_value;
-
 use std::sync::Arc;
 
 use lens::{LensConfig, TransformId, TransformStore};
@@ -47,7 +45,8 @@ impl<S: Store> DB<S> {
         let wasm_bytes = if let Some(ref bytes) = first_lens.module {
             bytes.clone()
         } else if let Some(ref path) = first_lens.path {
-            std::fs::read(path)
+            tokio::fs::read(path)
+                .await
                 .map_err(|e| Error::Lens(format!("failed to read WASM from {}: {}", path, e)))?
         } else {
             return Err(Error::Lens("lens module has neither path nor bytes".into()));

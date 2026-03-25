@@ -91,7 +91,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             for head_cid in heads {
                 // Skip parents already processed by this or another path.
                 {
-                    let merged = self.merged_composites.lock().unwrap();
+                    let merged = self.merged_composites.lock().unwrap_or_else(|e| {
+                        tracing::warn!("merged_composites lock poisoned, recovering");
+                        e.into_inner()
+                    });
                     if merged.contains(head_cid) {
                         tracing::debug!(
                             parent_cid = %head_cid,
@@ -691,7 +694,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 // Mark this composite as merged so concurrent/recursive paths
                 // skip re-processing it (prevents stale headstore entries).
                 {
-                    let mut merged = self.merged_composites.lock().unwrap();
+                    let mut merged = self.merged_composites.lock().unwrap_or_else(|e| {
+                        tracing::warn!("merged_composites lock poisoned, recovering");
+                        e.into_inner()
+                    });
                     merged.insert(*cid);
                 }
 
@@ -844,13 +850,19 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             for head_cid in heads {
                 // Check both permanent and batch-local dedup sets
                 {
-                    let merged = self.merged_composites.lock().unwrap();
+                    let merged = self.merged_composites.lock().unwrap_or_else(|e| {
+                        tracing::warn!("merged_composites lock poisoned, recovering");
+                        e.into_inner()
+                    });
                     if merged.contains(head_cid) {
                         continue;
                     }
                 }
                 {
-                    let bm = batch_merged.lock().unwrap();
+                    let bm = batch_merged.lock().unwrap_or_else(|e| {
+                        tracing::warn!("batch_merged lock poisoned, recovering");
+                        e.into_inner()
+                    });
                     if bm.contains(head_cid) {
                         continue;
                     }
@@ -1300,7 +1312,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             None => {
                 // Mark as merged in batch-local set
                 {
-                    let mut bm = batch_merged.lock().unwrap();
+                    let mut bm = batch_merged.lock().unwrap_or_else(|e| {
+                        tracing::warn!("batch_merged lock poisoned, recovering");
+                        e.into_inner()
+                    });
                     bm.insert(*cid);
                 }
 
@@ -1312,14 +1327,22 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     {
                         pending_post_commit_actions
                             .lock()
-                            .unwrap()
+                            .unwrap_or_else(|e| {
+                                tracing::warn!(
+                                    "pending_post_commit_actions lock poisoned, recovering"
+                                );
+                                e.into_inner()
+                            })
                             .push(PendingPostCommitAction { action });
                     }
                 }
 
                 // Collect events for deferred publishing
                 {
-                    let mut pe = pending_events.lock().unwrap();
+                    let mut pe = pending_events.lock().unwrap_or_else(|e| {
+                        tracing::warn!("pending_events lock poisoned, recovering");
+                        e.into_inner()
+                    });
                     let update = Update::new(
                         doc_id_str.clone(),
                         *cid,

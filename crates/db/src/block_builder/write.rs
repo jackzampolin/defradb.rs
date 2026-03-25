@@ -51,7 +51,11 @@ pub async fn write_document_blocks(
     let priority: u64 = if is_create {
         1
     } else {
-        snapshot.as_ref().unwrap().max_priority() + 1
+        snapshot
+            .as_ref()
+            .ok_or_else(|| "snapshot required for updates".to_string())?
+            .max_priority()
+            + 1
     };
 
     // Create LWW blocks for each field
@@ -74,7 +78,10 @@ pub async fn write_document_blocks(
         let field_head_entries = if is_create {
             Vec::new()
         } else {
-            snapshot.as_ref().unwrap().field_heads(field_name)
+            snapshot
+                .as_ref()
+                .ok_or_else(|| "snapshot required for updates".to_string())?
+                .field_heads(field_name)
         };
 
         if should_create_block {
@@ -269,7 +276,10 @@ pub async fn write_document_blocks(
     let (composite_head_entries, composite_heads) = if is_create {
         (Vec::new(), Vec::new())
     } else {
-        let entries = snapshot.as_ref().unwrap().field_heads("C");
+        let entries = snapshot
+            .as_ref()
+            .ok_or_else(|| "snapshot required for updates".to_string())?
+            .field_heads("C");
         let heads: Vec<Cid> = entries.iter().map(|h| h.cid).collect();
         (entries, heads)
     };

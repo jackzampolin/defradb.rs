@@ -15,7 +15,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         // Single-doc fast path: reuse existing create() to avoid overhead
         if docs.len() == 1 {
-            let doc = docs.into_iter().next().unwrap();
+            let doc = docs.into_iter().next().expect("length checked above");
             return self
                 .create_impl(collection_name, doc)
                 .await

@@ -84,5 +84,17 @@ pub enum Error {
     JsonPatch(#[from] crate::json_patch::JsonPatchError),
 }
 
+impl From<acp::Error> for Error {
+    fn from(err: acp::Error) -> Self {
+        Error::Acp(err.to_string())
+    }
+}
+
+impl From<lens::Error> for Error {
+    fn from(err: lens::Error) -> Self {
+        Error::Lens(err.to_string())
+    }
+}
+
 /// Result type for database operations.
 pub type Result<T> = std::result::Result<T, Error>;
