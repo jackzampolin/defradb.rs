@@ -21,6 +21,8 @@ pub enum BroadcastStatus {
     Success,
     /// Broadcast failed with the given error message
     Failed(String),
+    /// Broadcast spawned but not yet complete (fire-and-forget)
+    Pending,
     /// Broadcast was not attempted (P2P not enabled or not applicable)
     #[default]
     NotAttempted,
