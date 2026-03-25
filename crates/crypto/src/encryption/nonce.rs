@@ -23,7 +23,7 @@ use crate::types::AES_NONCE_SIZE;
 /// ```
 pub fn generate_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
     // In test mode, use deterministic nonce for reproducibility
-    if USE_DETERMINISTIC_NONCE.load(std::sync::atomic::Ordering::Relaxed) {
+    if USE_DETERMINISTIC_NONCE.load(std::sync::atomic::Ordering::Acquire) {
         return generate_deterministic_nonce();
     }
 
