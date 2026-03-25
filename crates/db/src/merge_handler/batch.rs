@@ -21,6 +21,9 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
     ) -> Vec<Result<MergeOutcome, MergeError>> {
         let mut results = Vec::with_capacity(blocks.len());
         for block in blocks {
+            // Serialize merges for the same document
+            let _guard = self.merge_queue.acquire(&block.doc_id).await;
+
             let metadata = BlockMetadata::normal(
                 &block.doc_id,
                 &block.collection_id,

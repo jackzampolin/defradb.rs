@@ -165,6 +165,11 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// When set, the merge handler generates SE artifacts after merging documents
     /// that belong to collections with encrypted indexes.
     se_enc_key: std::sync::OnceLock<Zeroizing<Vec<u8>>>,
+    /// Per-document merge serialization queue.
+    ///
+    /// Ensures concurrent P2P merges for the same document are processed one
+    /// at a time, preventing write-write races at the storage level.
+    merge_queue: Arc<MergeQueue>,
 }
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
@@ -176,6 +181,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             composite_merge_hook: std::sync::OnceLock::new(),
             merged_composites: std::sync::Mutex::new(HashSet::new()),
             se_enc_key: std::sync::OnceLock::new(),
+            merge_queue: Arc::new(MergeQueue::new()),
         }
     }
 
