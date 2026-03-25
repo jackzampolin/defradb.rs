@@ -150,7 +150,13 @@ impl Lww {
     ///
     /// # Errors
     /// Returns an error if schema_version_id, doc_id, or field_name is empty.
-    pub fn new(schema_version_id: String, doc_id: &[u8], field_name: String) -> Result<Self> {
+    pub fn new(
+        schema_version_id: impl Into<String>,
+        doc_id: &[u8],
+        field_name: impl Into<String>,
+    ) -> Result<Self> {
+        let schema_version_id = schema_version_id.into();
+        let field_name = field_name.into();
         if schema_version_id.is_empty() {
             return Err(Error::MergeError(
                 "schema_version_id cannot be empty".into(),
