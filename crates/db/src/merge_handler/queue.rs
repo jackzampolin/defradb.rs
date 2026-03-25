@@ -14,11 +14,17 @@ pub struct MergeQueue {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
-impl MergeQueue {
-    pub fn new() -> Self {
+impl Default for MergeQueue {
+    fn default() -> Self {
         Self {
             locks: Mutex::new(HashMap::new()),
         }
+    }
+}
+
+impl MergeQueue {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Acquire the merge lock for a given key.

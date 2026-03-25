@@ -116,10 +116,9 @@ impl MergeError {
     pub(crate) fn is_txn_conflict(&self) -> bool {
         match self {
             MergeError::Database(db_err) => match db_err {
-                crate::error::Error::Datastore(ds_err) => match ds_err {
-                    datastore::Error::Storage(storage_err) => storage_err.is_txn_conflict(),
-                    _ => false,
-                },
+                crate::error::Error::Datastore(datastore::Error::Storage(storage_err)) => {
+                    storage_err.is_txn_conflict()
+                }
                 crate::error::Error::Storage(storage_err) => storage_err.is_txn_conflict(),
                 _ => false,
             },
