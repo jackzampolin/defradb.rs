@@ -552,9 +552,15 @@ pub fn cbor_to_normal_value(value: ciborium::Value) -> Result<NormalValue> {
                     if has_null {
                         Ok(NormalValue::NillableBoolElementArray(bools))
                     } else {
-                        // All values are Some, unwrap to BoolArray
                         Ok(NormalValue::BoolArray(
-                            bools.into_iter().map(|opt| opt.unwrap()).collect(),
+                            bools
+                                .into_iter()
+                                .map(|opt| {
+                                    opt.ok_or_else(|| {
+                                        Error::CborDecode("unexpected null in typed array".into())
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?,
                         ))
                     }
                 }
@@ -588,9 +594,14 @@ pub fn cbor_to_normal_value(value: ciborium::Value) -> Result<NormalValue> {
                     if has_null {
                         Ok(NormalValue::NillableIntElementArray(ints))
                     } else {
-                        // All values are Some, unwrap to IntArray
                         Ok(NormalValue::IntArray(
-                            ints.into_iter().map(|opt| opt.unwrap()).collect(),
+                            ints.into_iter()
+                                .map(|opt| {
+                                    opt.ok_or_else(|| {
+                                        Error::CborDecode("unexpected null in typed array".into())
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?,
                         ))
                     }
                 }
@@ -614,9 +625,15 @@ pub fn cbor_to_normal_value(value: ciborium::Value) -> Result<NormalValue> {
                     if has_null {
                         Ok(NormalValue::NillableFloat64ElementArray(floats))
                     } else {
-                        // All values are Some, unwrap to Float64Array
                         Ok(NormalValue::Float64Array(
-                            floats.into_iter().map(|opt| opt.unwrap()).collect(),
+                            floats
+                                .into_iter()
+                                .map(|opt| {
+                                    opt.ok_or_else(|| {
+                                        Error::CborDecode("unexpected null in typed array".into())
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?,
                         ))
                     }
                 }
@@ -640,9 +657,15 @@ pub fn cbor_to_normal_value(value: ciborium::Value) -> Result<NormalValue> {
                     if has_null {
                         Ok(NormalValue::NillableStringElementArray(strings))
                     } else {
-                        // All values are Some, unwrap to StringArray
                         Ok(NormalValue::StringArray(
-                            strings.into_iter().map(|opt| opt.unwrap()).collect(),
+                            strings
+                                .into_iter()
+                                .map(|opt| {
+                                    opt.ok_or_else(|| {
+                                        Error::CborDecode("unexpected null in typed array".into())
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?,
                         ))
                     }
                 }
