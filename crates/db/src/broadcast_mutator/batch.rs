@@ -121,7 +121,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
         Ok(())
     }
 
-    async fn broadcast_pending(&self, pending: PendingBroadcast) {
+    async fn broadcast_pending_static(sync: &SyncCoordinator<B, T>, pending: PendingBroadcast) {
         let PendingBroadcast {
             kind,
             cid,
@@ -138,26 +138,24 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
 
         match kind {
             BroadcastKind::DagPush => {
-                self.sync
-                    .push_dag_to_replicators_with_creator(
-                        &cid,
-                        &block,
-                        &doc_id,
-                        &collection_id,
-                        creator_ref,
-                    )
-                    .await;
+                sync.push_dag_to_replicators_with_creator(
+                    &cid,
+                    &block,
+                    &doc_id,
+                    &collection_id,
+                    creator_ref,
+                )
+                .await;
             }
             BroadcastKind::SingleBlockPush => {
-                self.sync
-                    .push_to_replicators_with_creator(
-                        &cid,
-                        &block,
-                        &doc_id,
-                        &collection_id,
-                        creator_ref,
-                    )
-                    .await;
+                sync.push_to_replicators_with_creator(
+                    &cid,
+                    &block,
+                    &doc_id,
+                    &collection_id,
+                    creator_ref,
+                )
+                .await;
             }
         }
 
@@ -168,7 +166,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             field_cids: vec![],
         };
         let broadcast_status = super::broadcast_with_retry_with_creator(
-            &self.sync,
+            sync,
             &block_result,
             &collection_id,
             &collection_name,
@@ -192,18 +190,17 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
                 doc_id,
                 field_cids: vec![],
             };
-            self.sync
-                .push_to_replicators_with_creator(
-                    &col_block_result.cid,
-                    &col_block_result.block,
-                    &col_block_result.doc_id,
-                    &collection_id,
-                    creator_ref,
-                )
-                .await;
+            sync.push_to_replicators_with_creator(
+                &col_block_result.cid,
+                &col_block_result.block,
+                &col_block_result.doc_id,
+                &collection_id,
+                creator_ref,
+            )
+            .await;
 
             let collection_broadcast_status = super::broadcast_with_retry_with_creator(
-                &self.sync,
+                sync,
                 &col_block_result,
                 &collection_id,
                 &collection_name,
@@ -326,8 +323,13 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> MutationBatch
         }
 
         let pending_broadcasts = std::mem::take(&mut *self.pending_broadcasts.lock().await);
-        for pending in pending_broadcasts {
-            self.broadcast_pending(pending).await;
+        if !pending_broadcasts.is_empty() {
+            let sync = self.sync.clone();
+            tokio::spawn(async move {
+                for pending in pending_broadcasts {
+                    Self::broadcast_pending_static(&sync, pending).await;
+                }
+            });
         }
 
         Ok(())
