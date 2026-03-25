@@ -10,7 +10,10 @@ mod counter;
 mod definition;
 pub(crate) mod hook;
 mod lww;
+mod queue;
 pub(crate) mod se_merge;
+
+pub use queue::MergeQueue;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -107,6 +110,21 @@ impl MergeError {
     /// Construct a `DepthExceeded` error.
     pub(crate) fn depth_exceeded(cid: &Cid, depth: usize) -> Self {
         MergeError::DepthExceeded { cid: *cid, depth }
+    }
+
+    /// Check if this error is a transaction conflict that can be retried.
+    pub(crate) fn is_txn_conflict(&self) -> bool {
+        match self {
+            MergeError::Database(db_err) => match db_err {
+                crate::error::Error::Datastore(ds_err) => match ds_err {
+                    datastore::Error::Storage(storage_err) => storage_err.is_txn_conflict(),
+                    _ => false,
+                },
+                crate::error::Error::Storage(storage_err) => storage_err.is_txn_conflict(),
+                _ => false,
+            },
+            _ => false,
+        }
     }
 }
 
