@@ -415,10 +415,19 @@ impl Txn for RedbTxn {
                 Err(join_err) => {
                     CallbackManager::execute_callbacks(error_callbacks);
                     CallbackManager::execute_async_callbacks(error_async_callbacks).await;
-                    return Err(Error::Other(format!(
-                        "spawn_blocking panicked: {}",
-                        join_err
-                    )));
+                    let msg = if join_err.is_panic() {
+                        let panic = join_err.into_panic();
+                        if let Some(s) = panic.downcast_ref::<String>() {
+                            format!("spawn_blocking panicked: {}", s)
+                        } else if let Some(s) = panic.downcast_ref::<&str>() {
+                            format!("spawn_blocking panicked: {}", s)
+                        } else {
+                            "spawn_blocking panicked with non-string payload".to_string()
+                        }
+                    } else {
+                        format!("spawn_blocking cancelled: {}", join_err)
+                    };
+                    return Err(Error::Other(msg));
                 }
             }
         }

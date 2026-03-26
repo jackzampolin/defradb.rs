@@ -5,10 +5,9 @@
 //!
 //! # Broadcast Status
 //!
-//! All mutation results include a `broadcast_status` field that indicates
-//! whether the P2P broadcast succeeded, failed, or was not attempted.
-//! Callers should check this status to determine if data synchronization
-//! may be incomplete.
+//! Broadcast is fire-and-forget: mutation results return `BroadcastStatus::Pending`
+//! immediately after the local commit. Broadcast failures are logged at `error`
+//! level but do not affect the mutation result.
 
 mod batch;
 
@@ -41,12 +40,11 @@ use crate::database::DB;
 ///
 /// # Error Handling
 ///
-/// Local mutations are atomic with the transaction. Broadcast failures do NOT
-/// roll back the local mutation - instead, the `broadcast_status` field in the
-/// result indicates whether broadcast succeeded or failed.
-///
-/// Callers should check `result.broadcast_status.is_failed()` and handle
-/// appropriately (e.g., queue for retry, alert user, etc.).
+/// Local mutations are atomic with the transaction. Broadcast is fire-and-forget
+/// via `tokio::spawn` — the mutation returns `BroadcastStatus::Pending` immediately
+/// after the local commit. Broadcast failures are logged at `error` level but do
+/// not affect the mutation result. Peers will eventually receive the data via the
+/// next replicator sync or DAG fetch.
 pub struct BroadcastMutator<S: Store, B: Blockstore, T: P2PTransport = p2p::Libp2pTransport> {
     inner: AutoCommitMutator<S>,
     sync: Arc<SyncCoordinator<B, T>>,
@@ -173,14 +171,16 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             .await;
 
             // Broadcast composite via GossipSub with retry for InsufficientPeers
-            let _ = broadcast_with_retry_with_creator(
-                &sync,
-                &block_result,
-                &collection_id,
-                &collection_name_owned,
-                creator_ref,
-            )
-            .await;
+            log_broadcast_failure(
+                &broadcast_with_retry_with_creator(
+                    &sync,
+                    &block_result,
+                    &collection_id,
+                    &collection_name_owned,
+                    creator_ref,
+                )
+                .await,
+            );
 
             // For branchable collections, also broadcast the collection block.
             if let Some(col_block_result) = branchable_data {
@@ -192,14 +192,16 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                     creator_ref,
                 )
                 .await;
-                let _ = broadcast_with_retry_with_creator(
-                    &sync,
-                    &col_block_result,
-                    &collection_id,
-                    &collection_name_owned,
-                    creator_ref,
-                )
-                .await;
+                log_broadcast_failure(
+                    &broadcast_with_retry_with_creator(
+                        &sync,
+                        &col_block_result,
+                        &collection_id,
+                        &collection_name_owned,
+                        creator_ref,
+                    )
+                    .await,
+                );
             }
         });
 
@@ -317,14 +319,16 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                     )
                     .await;
 
-                    let _ = broadcast_with_retry_with_creator(
-                        &sync,
-                        block_result,
-                        &collection_id,
-                        &collection_name_owned,
-                        creator_ref,
-                    )
-                    .await;
+                    log_broadcast_failure(
+                        &broadcast_with_retry_with_creator(
+                            &sync,
+                            block_result,
+                            &collection_id,
+                            &collection_name_owned,
+                            creator_ref,
+                        )
+                        .await,
+                    );
 
                     if let Some(col_block_result) = branchable_data {
                         sync.push_to_replicators_with_creator(
@@ -335,14 +339,16 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                             creator_ref,
                         )
                         .await;
-                        let _ = broadcast_with_retry_with_creator(
-                            &sync,
-                            col_block_result,
-                            &collection_id,
-                            &collection_name_owned,
-                            creator_ref,
-                        )
-                        .await;
+                        log_broadcast_failure(
+                            &broadcast_with_retry_with_creator(
+                                &sync,
+                                col_block_result,
+                                &collection_id,
+                                &collection_name_owned,
+                                creator_ref,
+                            )
+                            .await,
+                        );
                     }
                 }
             });
@@ -445,14 +451,16 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             .await;
 
             // Broadcast composite via GossipSub with retry for InsufficientPeers
-            let _ = broadcast_with_retry_with_creator(
-                &sync,
-                &block_result,
-                &collection_id,
-                &collection_name_owned,
-                creator_ref,
-            )
-            .await;
+            log_broadcast_failure(
+                &broadcast_with_retry_with_creator(
+                    &sync,
+                    &block_result,
+                    &collection_id,
+                    &collection_name_owned,
+                    creator_ref,
+                )
+                .await,
+            );
 
             // For branchable collections, also broadcast the collection block.
             if let Some(col_block_result) = branchable_data {
@@ -464,14 +472,16 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                     creator_ref,
                 )
                 .await;
-                let _ = broadcast_with_retry_with_creator(
-                    &sync,
-                    &col_block_result,
-                    &collection_id,
-                    &collection_name_owned,
-                    creator_ref,
-                )
-                .await;
+                log_broadcast_failure(
+                    &broadcast_with_retry_with_creator(
+                        &sync,
+                        &col_block_result,
+                        &collection_id,
+                        &collection_name_owned,
+                        creator_ref,
+                    )
+                    .await,
+                );
             }
         });
 
@@ -540,14 +550,16 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             .await;
 
             // Broadcast via GossipSub with retry for InsufficientPeers
-            let _ = broadcast_with_retry_with_creator(
-                &sync,
-                &block_result,
-                &collection_id,
-                &collection_name_owned,
-                creator_ref,
-            )
-            .await;
+            log_broadcast_failure(
+                &broadcast_with_retry_with_creator(
+                    &sync,
+                    &block_result,
+                    &collection_id,
+                    &collection_name_owned,
+                    creator_ref,
+                )
+                .await,
+            );
         });
 
         Ok(DeleteResult::with_broadcast(
@@ -580,6 +592,16 @@ fn broadcast_retry_delay_ms(err_str: &str, connected_peers: usize, attempt: u32)
         return None;
     }
     Some(100 * (1u64 << attempt.min(5)))
+}
+
+/// Log broadcast failures at error level for observability in fire-and-forget paths.
+fn log_broadcast_failure(status: &BroadcastStatus) {
+    if let BroadcastStatus::Failed(err) = status {
+        tracing::error!(
+            error = %err,
+            "Fire-and-forget broadcast failed — document committed locally but NOT replicated"
+        );
+    }
 }
 
 /// Broadcast via GossipSub with retry, optionally overriding the creator DID.

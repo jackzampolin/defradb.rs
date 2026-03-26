@@ -11,7 +11,7 @@ use query::mutator::{
 use std::collections::HashSet;
 use std::sync::Arc;
 use storage::corekv::Store;
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::auto_commit_mutator::BatchMutator;
 use crate::block_builder::BlockResult;
@@ -175,11 +175,11 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
         .await;
 
         if let BroadcastStatus::Failed(error) = &broadcast_status {
-            warn!(
+            error!(
                 doc_id = %doc_id,
                 collection = %collection_name,
                 error = %error,
-                "Deferred batch broadcast failed after commit"
+                "Deferred batch broadcast failed — document committed locally but NOT replicated"
             );
         }
 
@@ -209,11 +209,11 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             .await;
 
             if let BroadcastStatus::Failed(error) = &collection_broadcast_status {
-                warn!(
+                error!(
                     doc_id = %col_block_result.doc_id,
                     collection = %collection_name,
                     error = %error,
-                    "Deferred branchable collection broadcast failed after commit"
+                    "Deferred branchable collection broadcast failed — NOT replicated"
                 );
             }
         }

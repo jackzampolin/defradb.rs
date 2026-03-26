@@ -57,7 +57,18 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     }
                 }
             }
-            results.push(last_result.unwrap());
+            let final_result = last_result.unwrap();
+            if let Err(ref e) = final_result {
+                if e.is_txn_conflict() {
+                    tracing::warn!(
+                        doc_id = %block.doc_id,
+                        cid = %block.cid,
+                        max_retries = MAX_MERGE_RETRIES,
+                        "Merge conflict retries exhausted — document merge failed"
+                    );
+                }
+            }
+            results.push(final_result);
         }
         results
     }
