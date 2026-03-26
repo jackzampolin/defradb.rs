@@ -345,7 +345,7 @@ impl Node {
                         .map_err(Error::P2P)?;
 
                     let (failure_tx, failure_rx) =
-                        tokio::sync::mpsc::unbounded_channel::<p2p::sync::PushFailure>();
+                        tokio::sync::mpsc::channel::<p2p::sync::PushFailure>(1024);
                     coordinator.set_failure_channel(failure_tx);
                     let coordinator = Arc::new(coordinator);
 
@@ -687,7 +687,7 @@ impl Node {
 
                 // Set up failure channel for push failure recording
                 let (failure_tx, failure_rx) =
-                    tokio::sync::mpsc::unbounded_channel::<p2p::sync::PushFailure>();
+                    tokio::sync::mpsc::channel::<p2p::sync::PushFailure>(1024);
                 coordinator.set_failure_channel(failure_tx);
 
                 let coordinator = Arc::new(coordinator);

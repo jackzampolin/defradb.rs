@@ -78,10 +78,12 @@ impl BackupExportArgs {
 
         let data = client.backup_export(collections, self.pretty).await?;
 
-        std::fs::write(&self.file, &data).map_err(|e| Error::WriteConfig {
-            path: self.file.clone(),
-            source: e,
-        })?;
+        tokio::fs::write(&self.file, &data)
+            .await
+            .map_err(|e| Error::WriteConfig {
+                path: self.file.clone(),
+                source: e,
+            })?;
 
         println!("Backup exported to: {}", self.file.display());
         Ok(())
@@ -91,10 +93,12 @@ impl BackupExportArgs {
 impl BackupImportArgs {
     /// Execute the backup import command
     pub async fn execute(&self, ctx: &ClientContext) -> Result<()> {
-        let data = std::fs::read_to_string(&self.file).map_err(|e| Error::ReadFile {
-            path: self.file.clone(),
-            source: e,
-        })?;
+        let data = tokio::fs::read_to_string(&self.file)
+            .await
+            .map_err(|e| Error::ReadFile {
+                path: self.file.clone(),
+                source: e,
+            })?;
 
         let client = HttpClient::new(&ctx.url)?
             .with_auth_token(ctx.auth_token.clone())

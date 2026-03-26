@@ -563,7 +563,7 @@ impl NodeBuilder {
 
         // 3. Storage backend + database
         let node = if let Some(path) = self.data_path {
-            std::fs::create_dir_all(&path)?;
+            tokio::fs::create_dir_all(&path).await?;
 
             match self.storage_backend {
                 StorageBackend::Redb => {
@@ -756,7 +756,10 @@ impl NodeBuilder {
         config: &P2PConfig,
     ) -> anyhow::Result<P2PSetupResult> {
         // 1. Load or generate secret key for stable node identity
-        let secret_key = load_or_generate_secret_key(config.secret_key_path.as_deref())?;
+        let key_path = config.secret_key_path.clone();
+        let secret_key =
+            tokio::task::spawn_blocking(move || load_or_generate_secret_key(key_path.as_deref()))
+                .await??;
 
         // 2. Configure and spawn IROH endpoint with pinned port + optional bind address
         let iroh_config = p2p::iroh::IrohEndpointConfig {
@@ -800,7 +803,7 @@ impl NodeBuilder {
 
         // Failure channel (required by replication loop)
         let (failure_tx, mut failure_rx) =
-            tokio::sync::mpsc::unbounded_channel::<p2p::sync::PushFailure>();
+            tokio::sync::mpsc::channel::<p2p::sync::PushFailure>(1024);
         coordinator.set_failure_channel(failure_tx);
         tokio::spawn(async move {
             while let Some(failure) = failure_rx.recv().await {

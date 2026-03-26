@@ -3,28 +3,32 @@
 //! This library provides the core functionality for the DefraDB CLI.
 //! It is primarily used by the `defra` binary but can also be used for testing.
 
-pub mod acp_adapter;
-pub mod backup_adapter;
-pub mod block_adapter;
+pub(crate) mod acp_adapter;
+pub(crate) mod backup_adapter;
+pub(crate) mod block_adapter;
 pub mod cli;
-pub mod collection_mgmt_adapter;
+pub(crate) mod collection_mgmt_adapter;
 pub mod commands;
 pub mod config;
-pub mod doc_acp_adapter;
-pub mod dump_adapter;
-pub mod encrypted_index_adapter;
+pub(crate) mod doc_acp_adapter;
+pub(crate) mod dump_adapter;
+pub(crate) mod encrypted_index_adapter;
 pub mod error;
-pub mod index_adapter;
+pub(crate) mod index_adapter;
 #[cfg(feature = "iroh")]
-pub mod iroh_p2p_adapter;
-pub mod lens_adapter;
+pub(crate) mod iroh_p2p_adapter;
+pub(crate) mod lens_adapter;
 pub mod logging;
-pub mod nac_adapter;
-pub mod p2p_adapter;
-pub mod schema_adapter;
-pub mod sourcehub_acp_adapter;
-pub mod transport_doc_pusher;
-pub mod transport_version_syncer;
-pub mod txn_adapter;
-pub mod version_syncer;
-pub mod view_adapter;
+#[allow(dead_code)]
+pub(crate) mod nac_adapter;
+#[allow(dead_code)]
+pub(crate) mod p2p_adapter;
+pub(crate) mod schema_adapter;
+pub(crate) mod sourcehub_acp_adapter;
+#[allow(dead_code)]
+pub(crate) mod transport_doc_pusher;
+#[allow(dead_code)]
+pub(crate) mod transport_version_syncer;
+pub(crate) mod txn_adapter;
+pub(crate) mod version_syncer;
+pub(crate) mod view_adapter;
