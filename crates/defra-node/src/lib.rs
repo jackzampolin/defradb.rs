@@ -756,10 +756,8 @@ impl NodeBuilder {
         config: &P2PConfig,
     ) -> anyhow::Result<P2PSetupResult> {
         // 1. Load or generate secret key for stable node identity
-        let key_path = config.secret_key_path.clone();
         let secret_key =
-            tokio::task::spawn_blocking(move || load_or_generate_secret_key(key_path.as_deref()))
-                .await??;
+            p2p::iroh::load_or_generate_secret_key(config.secret_key_path.as_deref()).await?;
 
         // 2. Configure and spawn IROH endpoint with pinned port + optional bind address
         let iroh_config = p2p::iroh::IrohEndpointConfig {
@@ -885,36 +883,6 @@ impl NodeBuilder {
                 drop(permit);
             });
         }
-    }
-}
-
-/// Load a secret key from disk, or generate and persist a new one.
-/// If path is None, generates an ephemeral key (not persisted).
-#[cfg(feature = "p2p")]
-fn load_or_generate_secret_key(path: Option<&std::path::Path>) -> anyhow::Result<iroh::SecretKey> {
-    match path {
-        Some(p) if p.exists() => {
-            let bytes = std::fs::read(p)?;
-            let arr: [u8; 32] = bytes
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("secret key file must be exactly 32 bytes"))?;
-            Ok(iroh::SecretKey::from_bytes(&arr))
-        }
-        Some(p) => {
-            let key = iroh::SecretKey::generate(&mut rand::rng());
-            if let Some(parent) = p.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(p, key.to_bytes())?;
-            // Restrict permissions to owner-only (Unix)
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))?;
-            }
-            Ok(key)
-        }
-        None => Ok(iroh::SecretKey::generate(&mut rand::rng())),
     }
 }
 

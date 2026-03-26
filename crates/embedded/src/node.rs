@@ -716,7 +716,8 @@ where
     use crate::IrohP2PAdapter;
     use storage::stores::Peerstore;
 
-    let secret_key = load_or_generate_iroh_secret_key(config.secret_key_path.as_deref()).await?;
+    let secret_key =
+        p2p::iroh::load_or_generate_secret_key(config.secret_key_path.as_deref()).await?;
     let iroh_config = p2p::iroh::IrohEndpointConfig {
         secret_key: secret_key.clone(),
         relay_mode: config.relay_mode.clone(),
@@ -1230,43 +1231,4 @@ async fn restore_iroh_documents<S: storage::corekv::Store + 'static>(
         }
     }
     restored
-}
-
-#[cfg(feature = "iroh")]
-async fn load_or_generate_iroh_secret_key(
-    path: Option<&std::path::Path>,
-) -> Result<iroh_net::SecretKey> {
-    match path {
-        Some(path) if path.exists() => {
-            let bytes = tokio::fs::read(path)
-                .await
-                .with_context(|| format!("failed to read iroh secret key '{}'", path.display()))?;
-            let array: [u8; 32] = bytes
-                .try_into()
-                .map_err(|_| anyhow!("iroh secret key file must contain exactly 32 bytes"))?;
-            Ok(iroh_net::SecretKey::from_bytes(&array))
-        }
-        Some(path) => {
-            let key = iroh_net::SecretKey::generate(&mut rand::rng());
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.with_context(|| {
-                    format!("failed to create iroh key directory '{}'", parent.display())
-                })?;
-            }
-            tokio::fs::write(path, key.to_bytes())
-                .await
-                .with_context(|| format!("failed to write iroh secret key '{}'", path.display()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                    .await
-                    .with_context(|| {
-                        format!("failed to set permissions on '{}'", path.display())
-                    })?;
-            }
-            Ok(key)
-        }
-        None => Ok(iroh_net::SecretKey::generate(&mut rand::rng())),
-    }
 }

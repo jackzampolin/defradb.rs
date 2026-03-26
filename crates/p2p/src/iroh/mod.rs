@@ -15,6 +15,7 @@ mod config;
 mod endpoint;
 mod peer_map;
 mod protocols;
+mod secret_key;
 mod transport;
 
 pub use addr::{
@@ -23,4 +24,5 @@ pub use addr::{
 };
 pub use config::{IrohDiscoveryConfig, IrohRelayModeConfig};
 pub use endpoint::{spawn_endpoint, IrohEndpointConfig};
+pub use secret_key::load_or_generate_secret_key;
 pub use transport::IrohTransport;
