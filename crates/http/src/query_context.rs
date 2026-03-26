@@ -34,14 +34,17 @@ pub async fn execute_with_context(
 
     let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
 
-    tokio::task::spawn_blocking(move || {
+    match tokio::task::spawn_blocking(move || {
         defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
         defra_core::dac_bypass::set_dac_bypass(dac_bypass);
         handle.block_on(async { executor.execute(request).await })
     })
     .await
-    .expect("query execution task panicked")
+    {
+        Ok(response) => response,
+        Err(join_err) => QueryResponse::error(format!("query execution task failed: {join_err}")),
+    }
 }
 
 /// Execute a GraphQL query within a transaction with signing config and DAC bypass context.
@@ -65,14 +68,17 @@ pub async fn execute_in_txn_with_context(
 
     let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
 
-    tokio::task::spawn_blocking(move || {
+    match tokio::task::spawn_blocking(move || {
         defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
         defra_core::dac_bypass::set_dac_bypass(dac_bypass);
         handle.block_on(async { executor.execute_in_txn(request, &txn_handle).await })
     })
     .await
-    .expect("query execution task panicked")
+    {
+        Ok(response) => response,
+        Err(join_err) => QueryResponse::error(format!("query execution task failed: {join_err}")),
+    }
 }
 
 /// Execute a query inside `spawn_blocking` with pre-resolved context values.
@@ -89,14 +95,17 @@ pub async fn execute_with_resolved_context(
 
     let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
 
-    tokio::task::spawn_blocking(move || {
+    match tokio::task::spawn_blocking(move || {
         defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
         defra_core::dac_bypass::set_dac_bypass(dac_bypass);
         handle.block_on(async { executor.execute(request).await })
     })
     .await
-    .expect("query execution task panicked")
+    {
+        Ok(response) => response,
+        Err(join_err) => QueryResponse::error(format!("query execution task failed: {join_err}")),
+    }
 }
 
 /// Resolve the signing config for a request identity.

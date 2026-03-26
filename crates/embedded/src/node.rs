@@ -153,7 +153,7 @@ impl NodeBuilder {
     pub async fn build(mut self) -> Result<EmbeddedNode<EmbeddedStore>> {
         let (store, persistence) = if let Some(path) = self.data_path.take() {
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).with_context(|| {
+                tokio::fs::create_dir_all(parent).await.with_context(|| {
                     format!("failed to create parent directory for '{}'", path.display())
                 })?;
             }
@@ -630,7 +630,7 @@ where
     .await
     .map_err(|error| anyhow!("failed to create sync coordinator: {error}"))?;
 
-    let (failure_tx, failure_rx) = tokio::sync::mpsc::unbounded_channel::<PushFailure>();
+    let (failure_tx, failure_rx) = tokio::sync::mpsc::channel::<PushFailure>(1024);
     coordinator.set_failure_channel(failure_tx);
     let coordinator = Arc::new(coordinator);
     let merge_handler_inner = Arc::new(db::DbMergeHandler::new(
@@ -716,7 +716,7 @@ where
     use crate::IrohP2PAdapter;
     use storage::stores::Peerstore;
 
-    let secret_key = load_or_generate_iroh_secret_key(config.secret_key_path.as_deref())?;
+    let secret_key = load_or_generate_iroh_secret_key(config.secret_key_path.as_deref()).await?;
     let iroh_config = p2p::iroh::IrohEndpointConfig {
         secret_key: secret_key.clone(),
         relay_mode: config.relay_mode.clone(),
@@ -746,7 +746,7 @@ where
     .await
     .map_err(|error| anyhow!("failed to create iroh sync coordinator: {error}"))?;
 
-    let (failure_tx, failure_rx) = tokio::sync::mpsc::unbounded_channel::<PushFailure>();
+    let (failure_tx, failure_rx) = tokio::sync::mpsc::channel::<PushFailure>(1024);
     coordinator.set_failure_channel(failure_tx);
     let coordinator = Arc::new(coordinator);
     let merge_handler_inner = Arc::new(db::DbMergeHandler::new(
@@ -970,7 +970,7 @@ where
 
 fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
     store: Arc<S>,
-    mut failure_rx: tokio::sync::mpsc::UnboundedReceiver<PushFailure>,
+    mut failure_rx: tokio::sync::mpsc::Receiver<PushFailure>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(failure) = failure_rx.recv().await {
@@ -1233,10 +1233,13 @@ async fn restore_iroh_documents<S: storage::corekv::Store + 'static>(
 }
 
 #[cfg(feature = "iroh")]
-fn load_or_generate_iroh_secret_key(path: Option<&std::path::Path>) -> Result<iroh_net::SecretKey> {
+async fn load_or_generate_iroh_secret_key(
+    path: Option<&std::path::Path>,
+) -> Result<iroh_net::SecretKey> {
     match path {
         Some(path) if path.exists() => {
-            let bytes = std::fs::read(path)
+            let bytes = tokio::fs::read(path)
+                .await
                 .with_context(|| format!("failed to read iroh secret key '{}'", path.display()))?;
             let array: [u8; 32] = bytes
                 .try_into()
@@ -1246,16 +1249,18 @@ fn load_or_generate_iroh_secret_key(path: Option<&std::path::Path>) -> Result<ir
         Some(path) => {
             let key = iroh_net::SecretKey::generate(&mut rand::rng());
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).with_context(|| {
+                tokio::fs::create_dir_all(parent).await.with_context(|| {
                     format!("failed to create iroh key directory '{}'", parent.display())
                 })?;
             }
-            std::fs::write(path, key.to_bytes())
+            tokio::fs::write(path, key.to_bytes())
+                .await
                 .with_context(|| format!("failed to write iroh secret key '{}'", path.display()))?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                    .await
                     .with_context(|| {
                         format!("failed to set permissions on '{}'", path.display())
                     })?;

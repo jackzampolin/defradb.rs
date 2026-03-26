@@ -130,7 +130,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     Self::send_ordered_pushlogs_via_transport(&transport, &peer_id, requests).await;
                 if any_failed {
                     if let Some(tx) = failure_tx {
-                        let _ = tx.send(super::PushFailure {
+                        let _ = tx.try_send(super::PushFailure {
                             peer_id: peer_id.to_string(),
                             doc_id: doc_id_owned,
                             collection_id: collection_id_owned,
@@ -216,7 +216,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         "PushLog to replicator failed"
                     );
                     if let Some(tx) = failure_tx {
-                        let _ = tx.send(super::PushFailure {
+                        let _ = tx.try_send(super::PushFailure {
                             peer_id: peer_id_clone.to_string(),
                             doc_id: doc_id_owned,
                             collection_id: collection_id_owned,

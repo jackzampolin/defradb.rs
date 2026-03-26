@@ -119,7 +119,7 @@ pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
     pub(super) head_provider: Arc<dyn DocumentHeadProvider>,
 
     /// Channel for reporting push failures to the FFI layer for retry tracking.
-    pub(super) failure_tx: Option<tokio::sync::mpsc::UnboundedSender<PushFailure>>,
+    pub(super) failure_tx: Option<tokio::sync::mpsc::Sender<PushFailure>>,
 
     /// Semaphore limiting concurrent DAG fetch tasks (configurable via SyncConfig).
     pub(super) dag_fetch_semaphore: Arc<tokio::sync::Semaphore>,

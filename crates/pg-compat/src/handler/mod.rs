@@ -639,12 +639,19 @@ fn extract_regclass_table(sql: &str) -> Option<String> {
 
 /// Extract (field, value) from a GraphQL filter pattern like `filter: {field: {_eq: "value"}}`.
 fn extract_filter_from_graphql(gql: &str) -> (String, String) {
-    let re = regex::Regex::new(r#"filter:\s*\{(\w+):\s*\{_eq:\s*"([^"]*)"\}\}"#).unwrap();
-    if let Some(caps) = re.captures(gql) {
+    static RE_STR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"filter:\s*\{(\w+):\s*\{_eq:\s*"([^"]*)"\}\}"#)
+            .expect("valid regex literal")
+    });
+    static RE_NUM: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"filter:\s*\{(\w+):\s*\{_eq:\s*(\d+)\}\}"#)
+            .expect("valid regex literal")
+    });
+
+    if let Some(caps) = RE_STR.captures(gql) {
         return (caps[1].to_string(), caps[2].to_string());
     }
-    let re_num = regex::Regex::new(r#"filter:\s*\{(\w+):\s*\{_eq:\s*(\d+)\}\}"#).unwrap();
-    if let Some(caps) = re_num.captures(gql) {
+    if let Some(caps) = RE_NUM.captures(gql) {
         return (caps[1].to_string(), caps[2].to_string());
     }
     (String::new(), String::new())
