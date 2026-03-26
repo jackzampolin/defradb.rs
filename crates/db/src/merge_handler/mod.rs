@@ -10,7 +10,10 @@ mod counter;
 mod definition;
 pub(crate) mod hook;
 mod lww;
+mod queue;
 pub(crate) mod se_merge;
+
+pub use queue::MergeQueue;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -108,6 +111,20 @@ impl MergeError {
     pub(crate) fn depth_exceeded(cid: &Cid, depth: usize) -> Self {
         MergeError::DepthExceeded { cid: *cid, depth }
     }
+
+    /// Check if this error is a transaction conflict that can be retried.
+    pub(crate) fn is_txn_conflict(&self) -> bool {
+        match self {
+            MergeError::Database(db_err) => match db_err {
+                crate::error::Error::Datastore(datastore::Error::Storage(storage_err)) => {
+                    storage_err.is_txn_conflict()
+                }
+                crate::error::Error::Storage(storage_err) => storage_err.is_txn_conflict(),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
 }
 
 /// Result of processing an LWW delta, including whether it was applied
@@ -147,6 +164,11 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// When set, the merge handler generates SE artifacts after merging documents
     /// that belong to collections with encrypted indexes.
     se_enc_key: std::sync::OnceLock<Zeroizing<Vec<u8>>>,
+    /// Per-document merge serialization queue.
+    ///
+    /// Ensures concurrent P2P merges for the same document are processed one
+    /// at a time, preventing write-write races at the storage level.
+    merge_queue: Arc<MergeQueue>,
 }
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
@@ -158,6 +180,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             composite_merge_hook: std::sync::OnceLock::new(),
             merged_composites: std::sync::Mutex::new(HashSet::new()),
             se_enc_key: std::sync::OnceLock::new(),
+            merge_queue: Arc::new(MergeQueue::new()),
         }
     }
 

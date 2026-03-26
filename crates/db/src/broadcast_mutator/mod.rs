@@ -5,10 +5,9 @@
 //!
 //! # Broadcast Status
 //!
-//! All mutation results include a `broadcast_status` field that indicates
-//! whether the P2P broadcast succeeded, failed, or was not attempted.
-//! Callers should check this status to determine if data synchronization
-//! may be incomplete.
+//! Broadcast is fire-and-forget: mutation results return `BroadcastStatus::Pending`
+//! immediately after the local commit. Broadcast failures are logged at `error`
+//! level but do not affect the mutation result.
 
 mod batch;
 
@@ -41,12 +40,11 @@ use crate::database::DB;
 ///
 /// # Error Handling
 ///
-/// Local mutations are atomic with the transaction. Broadcast failures do NOT
-/// roll back the local mutation - instead, the `broadcast_status` field in the
-/// result indicates whether broadcast succeeded or failed.
-///
-/// Callers should check `result.broadcast_status.is_failed()` and handle
-/// appropriately (e.g., queue for retry, alert user, etc.).
+/// Local mutations are atomic with the transaction. Broadcast is fire-and-forget
+/// via `tokio::spawn` — the mutation returns `BroadcastStatus::Pending` immediately
+/// after the local commit. Broadcast failures are logged at `error` level but do
+/// not affect the mutation result. Peers will eventually receive the data via the
+/// next replicator sync or DAG fetch.
 pub struct BroadcastMutator<S: Store, B: Blockstore, T: P2PTransport = p2p::Libp2pTransport> {
     inner: AutoCommitMutator<S>,
     sync: Arc<SyncCoordinator<B, T>>,
@@ -100,8 +98,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         // Execute the create mutation
         let result = self.inner.create(collection_name, doc).await?;
 
-        // Always broadcast the composite block first (ensures composite + field blocks
-        // are available on the receiver before any collection block processing).
+        // Build the block result for broadcast
         let (cid, block, doc_id_str) = if let (Some(cid), Some(block)) =
             (result.commit_cid, result.commit_block.as_ref())
         {
@@ -135,17 +132,36 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             field_cids: vec![],
         };
 
-        // Read broadcast creator DID: when the mutation was initiated with an
-        // identity (ACP owner), PushLog messages carry the owner DID so the
-        // receiving node can register the document in its local ACP.
+        // Read broadcast creator DID before spawning (reads thread-local state).
         let creator_did = defra_core::signing::get_broadcast_creator_did();
-        let creator_ref = creator_did.as_deref();
 
-        // Push the full DAG (field blocks + composite) to replicators.
-        // Field blocks are sent first so the receiver has them when the composite arrives,
-        // avoiding Bitswap fetches (which can fail after node restarts).
-        self.sync
-            .push_dag_to_replicators_with_creator(
+        // Capture branchable collection broadcast data before spawning.
+        let branchable_data = if let (Some(col_cid), Some(col_block)) =
+            (result.broadcast_cid, result.broadcast_block.as_ref())
+        {
+            Some(BlockResult {
+                cid: col_cid,
+                block: col_block.clone(),
+                doc_id: block_result.doc_id.clone(),
+                field_cids: vec![],
+            })
+        } else {
+            None
+        };
+
+        // Capture everything for the spawned task by value.
+        let sync = self.sync.clone();
+        let collection_name_owned = collection_name.to_string();
+        let return_cid = block_result.cid;
+        let return_block = block_result.block.clone();
+
+        // Spawn broadcast work as a detached task — the local transaction
+        // is already committed, so we return immediately.
+        tokio::spawn(async move {
+            let creator_ref = creator_did.as_deref();
+
+            // Push the full DAG (field blocks + composite) to replicators.
+            sync.push_dag_to_replicators_with_creator(
                 &block_result.cid,
                 &block_result.block,
                 &block_result.doc_id,
@@ -154,30 +170,21 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             )
             .await;
 
-        // Broadcast composite via GossipSub with retry for InsufficientPeers
-        let broadcast_status = broadcast_with_retry_with_creator(
-            &self.sync,
-            &block_result,
-            &collection_id,
-            collection_name,
-            creator_ref,
-        )
-        .await;
+            // Broadcast composite via GossipSub with retry for InsufficientPeers
+            log_broadcast_failure(
+                &broadcast_with_retry_with_creator(
+                    &sync,
+                    &block_result,
+                    &collection_id,
+                    &collection_name_owned,
+                    creator_ref,
+                )
+                .await,
+            );
 
-        // For branchable collections, also broadcast the collection block so receivers
-        // get the sender's exact collection CID (critical for CID consistency across nodes).
-        // The composite broadcast above ensures the linked blocks are available first.
-        if let (Some(col_cid), Some(col_block)) =
-            (result.broadcast_cid, result.broadcast_block.as_ref())
-        {
-            let col_block_result = BlockResult {
-                cid: col_cid,
-                block: col_block.clone(),
-                doc_id: block_result.doc_id.clone(),
-                field_cids: vec![],
-            };
-            self.sync
-                .push_to_replicators_with_creator(
+            // For branchable collections, also broadcast the collection block.
+            if let Some(col_block_result) = branchable_data {
+                sync.push_to_replicators_with_creator(
                     &col_block_result.cid,
                     &col_block_result.block,
                     &col_block_result.doc_id,
@@ -185,22 +192,25 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                     creator_ref,
                 )
                 .await;
-            let _ = broadcast_with_retry_with_creator(
-                &self.sync,
-                &col_block_result,
-                &collection_id,
-                collection_name,
-                creator_ref,
-            )
-            .await;
-        }
+                log_broadcast_failure(
+                    &broadcast_with_retry_with_creator(
+                        &sync,
+                        &col_block_result,
+                        &collection_id,
+                        &collection_name_owned,
+                        creator_ref,
+                    )
+                    .await,
+                );
+            }
+        });
 
         Ok(CreateResult::with_commit_and_broadcast(
             result.doc_id,
             result.document,
-            block_result.cid,
-            block_result.block,
-            broadcast_status,
+            return_cid,
+            return_block,
+            BroadcastStatus::Pending,
         ))
     }
 
@@ -220,12 +230,15 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         // Delegate to inner (single transaction for all docs)
         let results = self.inner.create_many(collection_name, docs).await?;
 
-        // Read broadcast creator DID for P2P ACP propagation
+        // Read broadcast creator DID before spawning (reads thread-local state).
         let creator_did = defra_core::signing::get_broadcast_creator_did();
-        let creator_ref = creator_did.as_deref();
 
-        // Broadcast each result
+        // Build block results and collect broadcast work items.
+        // Block building failures return Failed status immediately (not spawned).
         let mut broadcast_results = Vec::with_capacity(results.len());
+        let mut broadcast_work: Vec<(BlockResult, Option<BlockResult>)> =
+            Vec::with_capacity(results.len());
+
         for result in results {
             let (cid, block, doc_id_str) = if let (Some(cid), Some(block)) =
                 (result.commit_cid, result.commit_block.as_ref())
@@ -264,60 +277,81 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 field_cids: vec![],
             };
 
-            self.sync
-                .push_dag_to_replicators_with_creator(
-                    &block_result.cid,
-                    &block_result.block,
-                    &block_result.doc_id,
-                    &collection_id,
-                    creator_ref,
-                )
-                .await;
-
-            let broadcast_status = broadcast_with_retry_with_creator(
-                &self.sync,
-                &block_result,
-                &collection_id,
-                collection_name,
-                creator_ref,
-            )
-            .await;
-
-            if let (Some(col_cid), Some(col_block)) =
+            let branchable_data = if let (Some(col_cid), Some(col_block)) =
                 (result.broadcast_cid, result.broadcast_block.as_ref())
             {
-                let col_block_result = BlockResult {
+                Some(BlockResult {
                     cid: col_cid,
                     block: col_block.clone(),
                     doc_id: block_result.doc_id.clone(),
                     field_cids: vec![],
-                };
-                self.sync
-                    .push_to_replicators_with_creator(
-                        &col_block_result.cid,
-                        &col_block_result.block,
-                        &col_block_result.doc_id,
-                        &collection_id,
-                        creator_ref,
-                    )
-                    .await;
-                let _ = broadcast_with_retry_with_creator(
-                    &self.sync,
-                    &col_block_result,
-                    &collection_id,
-                    collection_name,
-                    creator_ref,
-                )
-                .await;
-            }
+                })
+            } else {
+                None
+            };
 
             broadcast_results.push(CreateResult::with_commit_and_broadcast(
                 result.doc_id,
                 result.document,
                 block_result.cid,
-                block_result.block,
-                broadcast_status,
+                block_result.block.clone(),
+                BroadcastStatus::Pending,
             ));
+
+            broadcast_work.push((block_result, branchable_data));
+        }
+
+        // Spawn a single detached task that processes all broadcast work items.
+        if !broadcast_work.is_empty() {
+            let sync = self.sync.clone();
+            let collection_name_owned = collection_name.to_string();
+
+            tokio::spawn(async move {
+                let creator_ref = creator_did.as_deref();
+
+                for (block_result, branchable_data) in &broadcast_work {
+                    sync.push_dag_to_replicators_with_creator(
+                        &block_result.cid,
+                        &block_result.block,
+                        &block_result.doc_id,
+                        &collection_id,
+                        creator_ref,
+                    )
+                    .await;
+
+                    log_broadcast_failure(
+                        &broadcast_with_retry_with_creator(
+                            &sync,
+                            block_result,
+                            &collection_id,
+                            &collection_name_owned,
+                            creator_ref,
+                        )
+                        .await,
+                    );
+
+                    if let Some(col_block_result) = branchable_data {
+                        sync.push_to_replicators_with_creator(
+                            &col_block_result.cid,
+                            &col_block_result.block,
+                            &col_block_result.doc_id,
+                            &collection_id,
+                            creator_ref,
+                        )
+                        .await;
+                        log_broadcast_failure(
+                            &broadcast_with_retry_with_creator(
+                                &sync,
+                                col_block_result,
+                                &collection_id,
+                                &collection_name_owned,
+                                creator_ref,
+                            )
+                            .await,
+                        );
+                    }
+                }
+            });
         }
 
         Ok(broadcast_results)
@@ -380,13 +414,34 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             field_cids: vec![],
         };
 
-        // Read broadcast creator DID for P2P ACP propagation
+        // Read broadcast creator DID before spawning (reads thread-local state).
         let creator_did = defra_core::signing::get_broadcast_creator_did();
-        let creator_ref = creator_did.as_deref();
 
-        // Push the full DAG (field blocks + composite) to replicators.
-        self.sync
-            .push_dag_to_replicators_with_creator(
+        // Capture branchable collection broadcast data before spawning.
+        let branchable_data = if let (Some(col_cid), Some(col_block)) =
+            (result.broadcast_cid, result.broadcast_block.as_ref())
+        {
+            Some(BlockResult {
+                cid: col_cid,
+                block: col_block.clone(),
+                doc_id: block_result.doc_id.clone(),
+                field_cids: vec![],
+            })
+        } else {
+            None
+        };
+
+        // Capture everything for the spawned task by value.
+        let sync = self.sync.clone();
+        let collection_name_owned = collection_name.to_string();
+
+        // Spawn broadcast work as a detached task — the local transaction
+        // is already committed, so we return immediately.
+        tokio::spawn(async move {
+            let creator_ref = creator_did.as_deref();
+
+            // Push the full DAG (field blocks + composite) to replicators.
+            sync.push_dag_to_replicators_with_creator(
                 &block_result.cid,
                 &block_result.block,
                 &block_result.doc_id,
@@ -395,29 +450,21 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             )
             .await;
 
-        // Broadcast composite via GossipSub with retry for InsufficientPeers
-        let broadcast_status = broadcast_with_retry_with_creator(
-            &self.sync,
-            &block_result,
-            &collection_id,
-            collection_name,
-            creator_ref,
-        )
-        .await;
+            // Broadcast composite via GossipSub with retry for InsufficientPeers
+            log_broadcast_failure(
+                &broadcast_with_retry_with_creator(
+                    &sync,
+                    &block_result,
+                    &collection_id,
+                    &collection_name_owned,
+                    creator_ref,
+                )
+                .await,
+            );
 
-        // For branchable collections, also broadcast the collection block so receivers
-        // get the sender's exact collection CID (critical for CID consistency across nodes).
-        if let (Some(col_cid), Some(col_block)) =
-            (result.broadcast_cid, result.broadcast_block.as_ref())
-        {
-            let col_block_result = BlockResult {
-                cid: col_cid,
-                block: col_block.clone(),
-                doc_id: block_result.doc_id.clone(),
-                field_cids: vec![],
-            };
-            self.sync
-                .push_to_replicators_with_creator(
+            // For branchable collections, also broadcast the collection block.
+            if let Some(col_block_result) = branchable_data {
+                sync.push_to_replicators_with_creator(
                     &col_block_result.cid,
                     &col_block_result.block,
                     &col_block_result.doc_id,
@@ -425,20 +472,23 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                     creator_ref,
                 )
                 .await;
-            let _ = broadcast_with_retry_with_creator(
-                &self.sync,
-                &col_block_result,
-                &collection_id,
-                collection_name,
-                creator_ref,
-            )
-            .await;
-        }
+                log_broadcast_failure(
+                    &broadcast_with_retry_with_creator(
+                        &sync,
+                        &col_block_result,
+                        &collection_id,
+                        &collection_name_owned,
+                        creator_ref,
+                    )
+                    .await,
+                );
+            }
+        });
 
         Ok(UpdateResult::with_broadcast(
             result.document,
             result.fields_modified,
-            broadcast_status,
+            BroadcastStatus::Pending,
         ))
     }
 
@@ -477,13 +527,20 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             }
         };
 
-        // Read broadcast creator DID for P2P ACP propagation
+        // Read broadcast creator DID before spawning (reads thread-local state).
         let creator_did = defra_core::signing::get_broadcast_creator_did();
-        let creator_ref = creator_did.as_deref();
 
-        // Push to replicators and broadcast via GossipSub
-        self.sync
-            .push_to_replicators_with_creator(
+        // Capture everything for the spawned task by value.
+        let sync = self.sync.clone();
+        let collection_name_owned = collection_name.to_string();
+
+        // Spawn broadcast work as a detached task — the local transaction
+        // is already committed, so we return immediately.
+        tokio::spawn(async move {
+            let creator_ref = creator_did.as_deref();
+
+            // Push to replicators (single block for delete, not full DAG).
+            sync.push_to_replicators_with_creator(
                 &block_result.cid,
                 &block_result.block,
                 &block_result.doc_id,
@@ -492,19 +549,23 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             )
             .await;
 
-        let broadcast_status = broadcast_with_retry_with_creator(
-            &self.sync,
-            &block_result,
-            &collection_id,
-            collection_name,
-            creator_ref,
-        )
-        .await;
+            // Broadcast via GossipSub with retry for InsufficientPeers
+            log_broadcast_failure(
+                &broadcast_with_retry_with_creator(
+                    &sync,
+                    &block_result,
+                    &collection_id,
+                    &collection_name_owned,
+                    creator_ref,
+                )
+                .await,
+            );
+        });
 
         Ok(DeleteResult::with_broadcast(
             result.doc_id,
             result.existed,
-            broadcast_status,
+            BroadcastStatus::Pending,
         ))
     }
 
@@ -531,6 +592,16 @@ fn broadcast_retry_delay_ms(err_str: &str, connected_peers: usize, attempt: u32)
         return None;
     }
     Some(100 * (1u64 << attempt.min(5)))
+}
+
+/// Log broadcast failures at error level for observability in fire-and-forget paths.
+fn log_broadcast_failure(status: &BroadcastStatus) {
+    if let BroadcastStatus::Failed(err) = status {
+        tracing::error!(
+            error = %err,
+            "Fire-and-forget broadcast failed — document committed locally but NOT replicated"
+        );
+    }
 }
 
 /// Broadcast via GossipSub with retry, optionally overriding the creator DID.

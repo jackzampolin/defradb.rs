@@ -19,8 +19,13 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         &self,
         blocks: &[MergeBlock],
     ) -> Vec<Result<MergeOutcome, MergeError>> {
+        const MAX_MERGE_RETRIES: usize = 5;
+
         let mut results = Vec::with_capacity(blocks.len());
         for block in blocks {
+            // Serialize merges for the same document
+            let _guard = self.merge_queue.acquire(&block.doc_id).await;
+
             let metadata = BlockMetadata::normal(
                 &block.doc_id,
                 &block.collection_id,
@@ -29,10 +34,41 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                 block.is_explicit_replicator,
             )
             .with_explicit_replay_authorization(block.explicit_replay_authorization.clone());
-            results.push(
-                self.handle_block(&block.cid, &block.block_data, metadata)
-                    .await,
-            );
+
+            let mut last_result = None;
+            for attempt in 0..MAX_MERGE_RETRIES {
+                let result = self
+                    .handle_block(&block.cid, &block.block_data, metadata.clone())
+                    .await;
+                match &result {
+                    Err(e) if e.is_txn_conflict() => {
+                        tracing::debug!(
+                            attempt,
+                            doc_id = %block.doc_id,
+                            cid = %block.cid,
+                            "Merge conflict, retrying"
+                        );
+                        last_result = Some(result);
+                        continue;
+                    }
+                    _ => {
+                        last_result = Some(result);
+                        break;
+                    }
+                }
+            }
+            let final_result = last_result.unwrap();
+            if let Err(ref e) = final_result {
+                if e.is_txn_conflict() {
+                    tracing::warn!(
+                        doc_id = %block.doc_id,
+                        cid = %block.cid,
+                        max_retries = MAX_MERGE_RETRIES,
+                        "Merge conflict retries exhausted — document merge failed"
+                    );
+                }
+            }
+            results.push(final_result);
         }
         results
     }

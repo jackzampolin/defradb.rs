@@ -350,96 +350,85 @@ impl Txn for RedbTxn {
                 return Err(e);
             }
 
-            let mut write_txn = match self.db.begin_write() {
-                Ok(txn) => txn,
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        pending_changes = pending.len(),
-                        "Failed to begin write transaction during commit"
-                    );
-                    CallbackManager::execute_callbacks(self.callbacks.take_error());
-                    CallbackManager::execute_async_callbacks(self.callbacks.take_error_async())
-                        .await;
+            // Move blocking redb operations to a blocking thread so we don't
+            // starve tokio worker threads while waiting for the exclusive write lock.
+            let db = self.db.clone();
+            let durability = self.durability;
+            let error_callbacks = self.callbacks.take_error();
+            let error_async_callbacks = self.callbacks.take_error_async();
+
+            let write_result = tokio::task::spawn_blocking(move || -> Result<()> {
+                let mut write_txn = db.begin_write().map_err(|e| {
+                    tracing::error!(error = %e, pending_changes = pending.len(),
+                        "Failed to begin write transaction during commit");
+                    Error::from(e)
+                })?;
+
+                write_txn.set_durability(match durability {
+                    DurabilityMode::Immediate => redb::Durability::Immediate,
+                    DurabilityMode::Eventual => redb::Durability::Eventual,
+                });
+
+                {
+                    let mut table = write_txn.open_table(KV_TABLE).map_err(|e| {
+                        tracing::error!(error = %e, "Failed to open KV table during commit");
+                        Error::from(e)
+                    })?;
+
+                    for (key, value) in pending.iter() {
+                        match value {
+                            Some(v) => {
+                                if let Err(e) = table.insert(key.as_slice(), v.as_slice()) {
+                                    tracing::error!(error = %e, key_len = key.len(),
+                                        value_len = v.len(), "Failed to insert key during commit");
+                                    return Err(e.into());
+                                }
+                            }
+                            None => {
+                                if let Err(e) = table.remove(key.as_slice()) {
+                                    tracing::error!(error = %e, key_len = key.len(),
+                                        "Failed to delete key during commit");
+                                    return Err(e.into());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Err(e) = write_txn.commit() {
+                    tracing::error!(error = %e, pending_changes = pending.len(),
+                        "Failed to finalize commit");
                     return Err(e.into());
                 }
-            };
 
-            write_txn.set_durability(match self.durability {
-                DurabilityMode::Immediate => redb::Durability::Immediate,
-                DurabilityMode::Eventual => redb::Durability::Eventual,
-            });
+                Ok(())
+            })
+            .await;
 
-            {
-                let mut table = match write_txn.open_table(KV_TABLE) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "Failed to open KV table during commit"
-                        );
-                        CallbackManager::execute_callbacks(self.callbacks.take_error());
-                        CallbackManager::execute_async_callbacks(self.callbacks.take_error_async())
-                            .await;
-                        return Err(e.into());
-                    }
-                };
-
-                for (key, value) in pending.iter() {
-                    match value {
-                        Some(v) => {
-                            if let Err(e) = table.insert(key.as_slice(), v.as_slice()) {
-                                tracing::error!(
-                                    error = %e,
-                                    key_len = key.len(),
-                                    value_len = v.len(),
-                                    "Failed to insert key during commit - transaction will be rolled back"
-                                );
-                                tracing::debug!(
-                                    pending_changes = pending.len(),
-                                    "Write transaction aborted - no partial writes persisted"
-                                );
-                                CallbackManager::execute_callbacks(self.callbacks.take_error());
-                                CallbackManager::execute_async_callbacks(
-                                    self.callbacks.take_error_async(),
-                                )
-                                .await;
-                                return Err(e.into());
-                            }
-                        }
-                        None => {
-                            if let Err(e) = table.remove(key.as_slice()) {
-                                tracing::error!(
-                                    error = %e,
-                                    key_len = key.len(),
-                                    "Failed to delete key during commit - transaction will be rolled back"
-                                );
-                                tracing::debug!(
-                                    pending_changes = pending.len(),
-                                    "Write transaction aborted - no partial writes persisted"
-                                );
-                                CallbackManager::execute_callbacks(self.callbacks.take_error());
-                                CallbackManager::execute_async_callbacks(
-                                    self.callbacks.take_error_async(),
-                                )
-                                .await;
-                                return Err(e.into());
-                            }
-                        }
-                    }
+            match write_result {
+                Ok(Ok(())) => {} // Success — fall through to callback execution
+                Ok(Err(e)) => {
+                    CallbackManager::execute_callbacks(error_callbacks);
+                    CallbackManager::execute_async_callbacks(error_async_callbacks).await;
+                    return Err(e);
                 }
-            }
-
-            if let Err(e) = write_txn.commit() {
-                tracing::error!(
-                    error = %e,
-                    pending_changes = pending.len(),
-                    "Failed to finalize commit - all changes rolled back"
-                );
-                tracing::debug!("Commit failed at finalization stage - database state unchanged");
-                CallbackManager::execute_callbacks(self.callbacks.take_error());
-                CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
-                return Err(e.into());
+                Err(join_err) => {
+                    CallbackManager::execute_callbacks(error_callbacks);
+                    CallbackManager::execute_async_callbacks(error_async_callbacks).await;
+                    let msg = if join_err.is_panic() {
+                        let panic = join_err.into_panic();
+                        if let Some(s) = panic.downcast_ref::<String>() {
+                            format!("spawn_blocking panicked: {}", s)
+                        } else if let Some(s) = panic.downcast_ref::<&str>() {
+                            format!("spawn_blocking panicked: {}", s)
+                        } else {
+                            "spawn_blocking panicked with non-string payload".to_string()
+                        }
+                    } else {
+                        format!("spawn_blocking cancelled: {}", join_err)
+                    };
+                    return Err(Error::Other(msg));
+                }
             }
         }
 

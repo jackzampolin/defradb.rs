@@ -3534,6 +3534,7 @@ dependencies = [
  "libp2p",
  "multihash 0.18.1",
  "p2p",
+ "parking_lot 0.12.5",
  "proptest",
  "query",
  "rand 0.8.5",
