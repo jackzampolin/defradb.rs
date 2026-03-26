@@ -14,7 +14,6 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use bytes::Bytes;
 use cid::Cid;
 use iroh_bitswap::{Block, Store};
 
@@ -72,7 +71,7 @@ impl<B: Blockstore + Debug + 'static> Store for BitswapStoreAdapter<B> {
             .await
             .map_err(|e| anyhow!("blockstore error: {}", e))?
             .ok_or_else(|| anyhow!("block not found: {}", cid))?;
-        Ok(Block::new(Bytes::from(data), *cid))
+        Ok(Block::new(data, *cid))
     }
 
     /// Check if the blockstore contains a block with the given CID.

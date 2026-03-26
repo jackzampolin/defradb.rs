@@ -1,5 +1,6 @@
 //! Tests for P2P host functionality.
 
+use bytes::Bytes;
 use crypto::generate_ed25519;
 use identity::{Identity, RawIdentity};
 use std::time::Duration;
@@ -134,10 +135,10 @@ async fn test_two_stream_non_replicator_is_not_marked_explicit() {
 
     let mut request = PushLogRequest::new(
         "doc1".to_string(),
-        vec![1, 2, 3],
+        Bytes::from(vec![1, 2, 3]),
         "collection1".to_string(),
         "creator1".to_string(),
-        b"block-data".to_vec(),
+        Bytes::from(b"block-data".to_vec()),
     );
     sign_message(handle0.keypair(), &mut request).unwrap();
 
@@ -182,10 +183,10 @@ async fn test_two_stream_registered_replicator_without_capability_is_not_marked_
 
     let mut request = PushLogRequest::new(
         "doc1".to_string(),
-        vec![1, 2, 3],
+        Bytes::from(vec![1, 2, 3]),
         "collection1".to_string(),
         "creator1".to_string(),
-        b"block-data".to_vec(),
+        Bytes::from(b"block-data".to_vec()),
     );
     sign_message(handle0.keypair(), &mut request).unwrap();
 
@@ -233,10 +234,10 @@ async fn test_two_stream_registered_replicator_with_capability_is_marked_explici
 
     let mut request = PushLogRequest::new(
         "doc1".to_string(),
-        vec![1, 2, 3],
+        Bytes::from(vec![1, 2, 3]),
         "collection1".to_string(),
         creator,
-        b"block-data".to_vec(),
+        Bytes::from(b"block-data".to_vec()),
     );
     sign_message(handle0.keypair(), &mut request).unwrap();
 
@@ -277,10 +278,10 @@ async fn test_two_stream_capability_for_other_collection_is_rejected() {
     let (creator, capability) = explicit_replay_capability(&handle0, peer1, "collection-a");
     let mut request = PushLogRequest::new(
         "doc1".to_string(),
-        vec![1, 2, 3],
+        Bytes::from(vec![1, 2, 3]),
         "collection-b".to_string(),
         creator,
-        b"block-data".to_vec(),
+        Bytes::from(b"block-data".to_vec()),
     );
     request.explicit_replay_capability = Some(capability);
     sign_message(handle0.keypair(), &mut request).unwrap();
@@ -338,10 +339,10 @@ async fn test_two_stream_expired_capability_is_rejected() {
 
     let mut request = PushLogRequest::new(
         "doc1".to_string(),
-        vec![1, 2, 3],
+        Bytes::from(vec![1, 2, 3]),
         "collection1".to_string(),
         authorizer.did().unwrap().to_string(),
-        b"block-data".to_vec(),
+        Bytes::from(b"block-data".to_vec()),
     );
     request.explicit_replay_capability = Some(capability);
     sign_message(handle0.keypair(), &mut request).unwrap();
@@ -397,10 +398,10 @@ async fn test_two_stream_invalid_authorizer_signature_is_rejected() {
 
     let mut request = PushLogRequest::new(
         "doc1".to_string(),
-        vec![1, 2, 3],
+        Bytes::from(vec![1, 2, 3]),
         "collection1".to_string(),
         claimed_authorizer.did().unwrap().to_string(),
-        b"block-data".to_vec(),
+        Bytes::from(b"block-data".to_vec()),
     );
     request.explicit_replay_capability = Some(capability);
     sign_message(handle0.keypair(), &mut request).unwrap();
@@ -446,10 +447,10 @@ async fn test_two_stream_capability_is_edge_scoped() {
         explicit_replay_capability(&handle0, handle1.local_peer_id_cached(), "collection1");
     let mut request = PushLogRequest::new(
         "doc1".to_string(),
-        vec![1, 2, 3],
+        Bytes::from(vec![1, 2, 3]),
         "collection1".to_string(),
         creator,
-        b"block-data".to_vec(),
+        Bytes::from(b"block-data".to_vec()),
     );
     request.explicit_replay_capability = Some(capability_for_a_to_b);
     sign_message(handle1.keypair(), &mut request).unwrap();

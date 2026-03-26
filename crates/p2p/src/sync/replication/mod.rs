@@ -666,7 +666,7 @@ mod tests {
                 let data = format!("block{}", i);
                 MergeBlock {
                     cid: make_cid(data.as_bytes()),
-                    block_data: data.into_bytes(),
+                    block_data: bytes::Bytes::from(data.into_bytes()),
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),
@@ -698,7 +698,7 @@ mod tests {
                 let data = format!("block{}", i);
                 MergeBlock {
                     cid: make_cid(data.as_bytes()),
-                    block_data: data.into_bytes(),
+                    block_data: bytes::Bytes::from(data.into_bytes()),
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),
@@ -736,7 +736,7 @@ mod tests {
                 let data = format!("block{}", i);
                 MergeBlock {
                     cid: make_cid(data.as_bytes()),
-                    block_data: data.into_bytes(),
+                    block_data: bytes::Bytes::from(data.into_bytes()),
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),
@@ -774,7 +774,7 @@ mod tests {
         let handler = BatchTestHandler::new();
         let blocks = vec![MergeBlock {
             cid: make_cid(b"single"),
-            block_data: b"single".to_vec(),
+            block_data: bytes::Bytes::from_static(b"single"),
             doc_id: "doc0".to_string(),
             collection_id: "col1".to_string(),
             creator: "peer1".to_string(),
@@ -799,7 +799,7 @@ mod tests {
         let cid = make_cid(b"metadata-test");
         let blocks = vec![MergeBlock {
             cid,
-            block_data: b"test data".to_vec(),
+            block_data: bytes::Bytes::from_static(b"test data"),
             doc_id: "my-doc".to_string(),
             collection_id: "my-collection".to_string(),
             creator: "my-peer".to_string(),
@@ -829,7 +829,7 @@ mod tests {
                 let data = format!("block{}", i);
                 MergeBlock {
                     cid: make_cid(data.as_bytes()),
-                    block_data: data.into_bytes(),
+                    block_data: bytes::Bytes::from(data.into_bytes()),
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),
@@ -861,7 +861,7 @@ mod tests {
                 let data = format!("block{}", i);
                 MergeBlock {
                     cid: make_cid(data.as_bytes()),
-                    block_data: data.into_bytes(),
+                    block_data: bytes::Bytes::from(data.into_bytes()),
                     doc_id: format!("doc{}", i),
                     collection_id: "col1".to_string(),
                     creator: "peer1".to_string(),

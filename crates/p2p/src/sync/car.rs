@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 
 use blockstore::Blockstore;
+use bytes::Bytes;
 use cid::Cid;
 
 use crate::error::{Error, Result};
@@ -22,7 +23,7 @@ pub const CAR_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Result of collecting blocks for a CAR response.
 #[derive(Debug, Clone, Default)]
 pub struct CarCollectOutcome {
-    pub blocks: Vec<(Cid, Vec<u8>)>,
+    pub blocks: Vec<(Cid, Bytes)>,
     pub truncated_by_blocks: bool,
     pub truncated_by_bytes: bool,
 }

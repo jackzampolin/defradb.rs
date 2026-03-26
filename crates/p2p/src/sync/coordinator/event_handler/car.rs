@@ -47,8 +47,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return Ok(());
         }
 
-        let block_refs: Vec<(&Cid, &[u8])> =
-            blocks.iter().map(|(c, d)| (c, d.as_slice())).collect();
+        let block_refs: Vec<(&Cid, &[u8])> = blocks.iter().map(|(c, d)| (c, d.as_ref())).collect();
         let car_data = encode_car(&response_roots, &block_refs)?;
 
         tracing::debug!(
@@ -116,8 +115,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
         }
 
-        let block_refs: Vec<(&Cid, &[u8])> =
-            blocks.iter().map(|(c, d)| (c, d.as_slice())).collect();
+        let block_refs: Vec<(&Cid, &[u8])> = blocks.iter().map(|(c, d)| (c, d.as_ref())).collect();
         self.manager
             .blockstore()
             .as_ref()

@@ -56,7 +56,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             self.is_registered_replicator(peer_id.as_str(), &request.collection_id);
 
         // Parse CID - if invalid, send error response
-        let cid = match Cid::try_from(request.cid.as_slice()) {
+        let cid = match Cid::try_from(request.cid.as_ref()) {
             Ok(cid) => {
                 self.peer_state.peer_has_cid(peer_id.as_str(), cid);
                 cid
@@ -170,7 +170,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         // Parse CID
-        let cid = match Cid::try_from(request.cid.as_slice()) {
+        let cid = match Cid::try_from(request.cid.as_ref()) {
             Ok(cid) => {
                 self.peer_state.peer_has_cid(peer_id.as_str(), cid);
                 cid

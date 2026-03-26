@@ -109,10 +109,10 @@ fn cid_for(data: &[u8]) -> Cid {
 fn pushlog_request(collection_id: &str) -> PushLogRequest {
     PushLogRequest::new(
         "doc1".to_string(),
-        cid_for(BLOCK_DATA).to_bytes(),
+        bytes::Bytes::from(cid_for(BLOCK_DATA).to_bytes()),
         collection_id.to_string(),
         "creator1".to_string(),
-        BLOCK_DATA.to_vec(),
+        bytes::Bytes::copy_from_slice(BLOCK_DATA),
     )
 }
 

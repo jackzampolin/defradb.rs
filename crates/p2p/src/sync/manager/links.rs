@@ -2,6 +2,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
+use bytes::Bytes;
 use cid::Cid;
 use libipld::{Block, DefaultParams};
 
@@ -76,8 +77,8 @@ pub async fn find_all_missing_links<B: Blockstore>(
 ) -> Result<Vec<Cid>> {
     let mut missing = Vec::new();
     let mut visited = HashSet::new();
-    let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
-    queue.push_back(block_data.to_vec());
+    let mut queue: VecDeque<Bytes> = VecDeque::new();
+    queue.push_back(Bytes::copy_from_slice(block_data));
 
     while let Some(data) = queue.pop_front() {
         let refs = extract_ipld_links(&data)?;

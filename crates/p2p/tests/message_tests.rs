@@ -1,5 +1,6 @@
 //! Tests for the wire message types module.
 
+use bytes::Bytes;
 use p2p::message::{Message, MetaData, PushLogBroadcast, PushLogReply, PushLogRequest};
 use p2p::protocol::MESSAGE_VERSION;
 
@@ -7,10 +8,10 @@ use p2p::protocol::MESSAGE_VERSION;
 fn test_pushlog_request_serialization() {
     let request = PushLogRequest::new(
         "doc123".to_string(),
-        vec![1, 2, 3, 4],
+        Bytes::from(vec![1, 2, 3, 4]),
         "collection1".to_string(),
         "creator1".to_string(),
-        vec![5, 6, 7, 8],
+        Bytes::from(vec![5, 6, 7, 8]),
     );
 
     let encoded = serde_cbor::to_vec(&request).expect("failed to encode");
@@ -63,10 +64,10 @@ fn test_metadata_set_version() {
 fn test_message_trait_accessors_pushlog_request() {
     let mut request = PushLogRequest::new(
         "doc456".to_string(),
-        vec![10, 20],
+        Bytes::from(vec![10, 20]),
         "col2".to_string(),
         "creator2".to_string(),
-        vec![30, 40],
+        Bytes::from(vec![30, 40]),
     );
 
     // Set metadata fields via the embedded metadata struct
@@ -115,10 +116,10 @@ fn test_pushlog_request_cbor_field_names() {
     // This test verifies CBOR field names match Go implementation
     let request = PushLogRequest::new(
         "doc789".to_string(),
-        vec![1, 2, 3],
+        Bytes::from(vec![1, 2, 3]),
         "collection3".to_string(),
         "creator3".to_string(),
-        vec![4, 5, 6],
+        Bytes::from(vec![4, 5, 6]),
     );
 
     let encoded = serde_cbor::to_vec(&request).expect("failed to encode");
@@ -235,10 +236,10 @@ fn test_large_block_data() {
 
     let request = PushLogRequest::new(
         "large-doc".to_string(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        Bytes::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
         "collection".to_string(),
         "creator".to_string(),
-        large_block.clone(),
+        Bytes::from(large_block.clone()),
     );
 
     let encoded = serde_cbor::to_vec(&request).expect("failed to encode large request");
@@ -254,10 +255,10 @@ fn test_empty_fields() {
     // Test with empty but valid fields
     let request = PushLogRequest::new(
         "".to_string(),
-        vec![],
+        Bytes::from(vec![]),
         "".to_string(),
         "".to_string(),
-        vec![],
+        Bytes::from(vec![]),
     );
 
     let encoded = serde_cbor::to_vec(&request).expect("failed to encode");
@@ -274,10 +275,10 @@ fn test_empty_fields() {
 fn test_pushlog_broadcast_serialization() {
     let broadcast = PushLogBroadcast::new(
         "doc123".to_string(),
-        vec![1, 2, 3, 4],
+        Bytes::from(vec![1, 2, 3, 4]),
         "collection1".to_string(),
         "creator1".to_string(),
-        vec![5, 6, 7, 8],
+        Bytes::from(vec![5, 6, 7, 8]),
     );
 
     let encoded = serde_cbor::to_vec(&broadcast).expect("failed to encode");
@@ -295,10 +296,10 @@ fn test_pushlog_broadcast_cbor_field_names() {
     // Verify CBOR field names match Go implementation WITHOUT MetaData fields
     let broadcast = PushLogBroadcast::new(
         "doc789".to_string(),
-        vec![1, 2, 3],
+        Bytes::from(vec![1, 2, 3]),
         "collection3".to_string(),
         "creator3".to_string(),
-        vec![4, 5, 6],
+        Bytes::from(vec![4, 5, 6]),
     );
 
     let encoded = serde_cbor::to_vec(&broadcast).expect("failed to encode");
@@ -356,10 +357,10 @@ fn test_pushlog_broadcast_cbor_field_names() {
 fn test_pushlog_broadcast_from_request() {
     let request = PushLogRequest::new(
         "doc456".to_string(),
-        vec![10, 20, 30],
+        Bytes::from(vec![10, 20, 30]),
         "col2".to_string(),
         "creator2".to_string(),
-        vec![40, 50, 60],
+        Bytes::from(vec![40, 50, 60]),
     );
 
     let broadcast = PushLogBroadcast::from_request(&request);
@@ -375,10 +376,10 @@ fn test_pushlog_broadcast_from_request() {
 fn test_pushlog_broadcast_to_request() {
     let broadcast = PushLogBroadcast::new(
         "doc789".to_string(),
-        vec![70, 80, 90],
+        Bytes::from(vec![70, 80, 90]),
         "col3".to_string(),
         "creator3".to_string(),
-        vec![100, 110, 120],
+        Bytes::from(vec![100, 110, 120]),
     );
 
     let request = broadcast.to_request();

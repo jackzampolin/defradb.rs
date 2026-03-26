@@ -42,7 +42,7 @@ async fn fetch_block<B: Blockstore>(
     handle: &P2PHostHandle,
     peers: &[libp2p::PeerId],
     timeout_secs: u64,
-) -> Result<Vec<u8>, String> {
+) -> Result<bytes::Bytes, String> {
     if let Ok(Some(data)) = blockstore.get(&target_cid).await {
         return Ok(data);
     }

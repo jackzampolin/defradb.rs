@@ -80,6 +80,29 @@ pub mod nullable_bytes {
     }
 }
 
+/// Custom serialization for bytes::Bytes as CBOR byte strings.
+///
+/// Wire-compatible with `serde_bytes` on `Vec<u8>` -- produces identical CBOR.
+pub mod bytes_as_cbor {
+    use bytes::Bytes;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Bytes, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serde_bytes::serialize(value.as_ref(), serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let buf: serde_bytes::ByteBuf = serde_bytes::ByteBuf::deserialize(deserializer)?;
+        Ok(Bytes::from(buf.into_vec()))
+    }
+}
+
 /// Custom serialization for Vec<Vec<u8>> as CBOR byte strings.
 ///
 /// Use this for arrays of byte fields like CID heads in DocSync.

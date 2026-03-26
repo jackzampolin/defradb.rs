@@ -38,7 +38,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         // Parse CID
-        match Cid::try_from(message.cid.as_slice()) {
+        match Cid::try_from(message.cid.as_ref()) {
             Ok(cid) => {
                 self.peer_state
                     .peer_has_cid(propagation_source.as_str(), cid);

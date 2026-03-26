@@ -1,5 +1,6 @@
 //! PushLog message types for CRDT synchronization.
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use super::cbor::{nullable_bytes, optional_bytes};
@@ -21,9 +22,9 @@ pub struct PushLogRequest {
     pub doc_id: String,
 
     /// Content ID (CID) of the block.
-    /// Uses serde_bytes for CBOR byte string compatibility with Go.
-    #[serde(rename = "CID", with = "serde_bytes")]
-    pub cid: Vec<u8>,
+    /// Uses bytes_as_cbor for CBOR byte string compatibility with Go.
+    #[serde(rename = "CID", with = "super::cbor::bytes_as_cbor")]
+    pub cid: Bytes,
 
     /// Collection ID the document belongs to.
     #[serde(rename = "CollectionID")]
@@ -34,9 +35,9 @@ pub struct PushLogRequest {
     pub creator: String,
 
     /// The IPLD block data.
-    /// Uses serde_bytes for CBOR byte string compatibility with Go.
-    #[serde(rename = "Block", with = "serde_bytes")]
-    pub block: Vec<u8>,
+    /// Uses bytes_as_cbor for CBOR byte string compatibility with Go.
+    #[serde(rename = "Block", with = "super::cbor::bytes_as_cbor")]
+    pub block: Bytes,
 
     /// Optional authorizer-signed explicit replay capability for encrypted replay.
     #[serde(
@@ -51,10 +52,10 @@ impl PushLogRequest {
     /// Create a new PushLogRequest.
     pub fn new(
         doc_id: String,
-        cid: Vec<u8>,
+        cid: Bytes,
         collection_id: String,
         creator: String,
-        block: Vec<u8>,
+        block: Bytes,
     ) -> Self {
         Self {
             metadata: MetaData::new(),
@@ -243,9 +244,9 @@ pub struct PushLogBroadcast {
     pub doc_id: String,
 
     /// Content ID (CID) of the block.
-    /// Uses serde_bytes for CBOR byte string compatibility with Go.
-    #[serde(rename = "CID", with = "serde_bytes")]
-    pub cid: Vec<u8>,
+    /// Uses bytes_as_cbor for CBOR byte string compatibility with Go.
+    #[serde(rename = "CID", with = "super::cbor::bytes_as_cbor")]
+    pub cid: Bytes,
 
     /// Collection ID the document belongs to.
     #[serde(rename = "CollectionID")]
@@ -256,19 +257,19 @@ pub struct PushLogBroadcast {
     pub creator: String,
 
     /// The IPLD block data.
-    /// Uses serde_bytes for CBOR byte string compatibility with Go.
-    #[serde(rename = "Block", with = "serde_bytes")]
-    pub block: Vec<u8>,
+    /// Uses bytes_as_cbor for CBOR byte string compatibility with Go.
+    #[serde(rename = "Block", with = "super::cbor::bytes_as_cbor")]
+    pub block: Bytes,
 }
 
 impl PushLogBroadcast {
     /// Create a new PushLogBroadcast.
     pub fn new(
         doc_id: String,
-        cid: Vec<u8>,
+        cid: Bytes,
         collection_id: String,
         creator: String,
-        block: Vec<u8>,
+        block: Bytes,
     ) -> Self {
         Self {
             doc_id,
@@ -279,7 +280,7 @@ impl PushLogBroadcast {
         }
     }
 
-    /// Convert from a PushLogRequest (strips metadata).
+    /// Convert from a PushLogRequest (strips metadata, O(1) Bytes clone).
     pub fn from_request(req: &PushLogRequest) -> Self {
         Self {
             doc_id: req.doc_id.clone(),
@@ -290,7 +291,7 @@ impl PushLogBroadcast {
         }
     }
 
-    /// Convert to a PushLogRequest (adds default metadata).
+    /// Convert to a PushLogRequest (adds default metadata, O(1) Bytes clone).
     pub fn to_request(&self) -> PushLogRequest {
         PushLogRequest::new(
             self.doc_id.clone(),

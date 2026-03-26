@@ -41,7 +41,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
     ) -> Result<()> {
         // Parse CID from message
-        let cid = Cid::try_from(msg.cid.as_slice())
+        let cid = Cid::try_from(msg.cid.as_ref())
             .map_err(|e| Error::InvalidCid(format!("Failed to parse CID: {}", e)))?;
         tracing::debug!(
             cid = %cid,

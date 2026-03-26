@@ -182,13 +182,13 @@ impl<S: Store + 'static> DefraBlockstore<S> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     #[instrument(level = "trace", skip(self))]
-    async fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, cid: &Cid) -> Result<Option<Bytes>> {
         // Check LRU cache first (skip cache when hash verification is enabled,
         // since cached data may not have been verified yet)
         if !self.rehash.load(Ordering::Acquire) {
             let mut cache = self.cache.lock();
             if let Some(data) = cache.get(cid) {
-                return Ok(Some(data.to_vec()));
+                return Ok(Some(data.clone()));
             }
         }
 
@@ -206,12 +206,14 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
             }
         }
 
-        // Populate cache on miss
-        if let Some(ref data) = result {
-            self.cache.lock().put(*cid, Bytes::copy_from_slice(data));
+        // Populate cache on miss, convert Vec<u8> → Bytes
+        if let Some(data) = result {
+            let bytes = Bytes::from(data);
+            self.cache.lock().put(*cid, bytes.clone());
+            return Ok(Some(bytes));
         }
 
-        Ok(result)
+        Ok(None)
     }
 
     #[instrument(level = "trace", skip(self))]
@@ -451,9 +453,10 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> crypto::ProofBlockstore for DefraBlockstore<S> {
     async fn get_block(&self, cid: &Cid) -> defra_core::Result<Option<Vec<u8>>> {
-        // Delegate to the Blockstore::get implementation and convert error type
+        // Delegate to the Blockstore::get implementation and convert Bytes → Vec<u8>
         self.get(cid)
             .await
+            .map(|opt| opt.map(|b| b.to_vec()))
             .map_err(|e| defra_core::Error::Storage(e.to_string()))
     }
 }

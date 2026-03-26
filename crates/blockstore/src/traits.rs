@@ -4,6 +4,7 @@
 //! with merge tracking support for P2P synchronization.
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use cid::Cid;
 use storage::corekv::MaybeSendSync;
 
@@ -53,7 +54,7 @@ pub trait Blockstore: MaybeSendSync {
     /// * `Ok(None)` - Block not found
     /// * `Err(Error::HashMismatch)` - Data doesn't match CID (if hash_on_read enabled)
     /// * `Err(Error)` - Operation failed
-    async fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>>;
+    async fn get(&self, cid: &Cid) -> Result<Option<Bytes>>;
 
     /// Store a block with the given CID
     ///

@@ -27,6 +27,9 @@ serde_bytes.workspace = true
 ciborium.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 
+# Bytes (zero-copy block data on hot path)
+bytes.workspace = true
+
 # Memory zeroization for sensitive key material
 zeroize = "1"
 

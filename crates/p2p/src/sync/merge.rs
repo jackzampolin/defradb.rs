@@ -4,6 +4,7 @@
 //! layer for applying CRDT merges.
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use cid::Cid;
 
 use crate::ExplicitReplayAuthorization;
@@ -15,7 +16,7 @@ use crate::ExplicitReplayAuthorization;
 #[derive(Debug, Clone)]
 pub struct MergeBlock {
     pub cid: Cid,
-    pub block_data: Vec<u8>,
+    pub block_data: Bytes,
     pub doc_id: String,
     pub collection_id: String,
     pub creator: String,

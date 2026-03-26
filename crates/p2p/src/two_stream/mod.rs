@@ -36,10 +36,10 @@ mod tests {
     fn test_success_reply() {
         let request = PushLogRequest::new(
             "doc123".to_string(),
-            vec![1, 2, 3],
+            bytes::Bytes::from(vec![1, 2, 3]),
             "col123".to_string(),
             "creator".to_string(),
-            vec![4, 5, 6],
+            bytes::Bytes::from(vec![4, 5, 6]),
         );
 
         let reply = TwoStreamHandler::success_reply(&request);
@@ -52,10 +52,10 @@ mod tests {
     fn test_error_reply() {
         let request = PushLogRequest::new(
             "doc123".to_string(),
-            vec![1, 2, 3],
+            bytes::Bytes::from(vec![1, 2, 3]),
             "col123".to_string(),
             "creator".to_string(),
-            vec![4, 5, 6],
+            bytes::Bytes::from(vec![4, 5, 6]),
         );
 
         let reply = TwoStreamHandler::error_reply(&request, "test error");

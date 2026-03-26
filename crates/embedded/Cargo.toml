@@ -24,6 +24,7 @@ sourcehub = { path = "../sourcehub" }
 storage = { path = "../storage" }
 
 anyhow.workspace = true
+bytes.workspace = true
 async-trait.workspace = true
 cid.workspace = true
 hex.workspace = true

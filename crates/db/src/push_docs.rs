@@ -2,6 +2,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use acp::DocumentACP;
+use bytes::Bytes;
 use p2p::message::PushLogRequest;
 use storage::corekv::{IterOptions, Reader, Store};
 
@@ -159,10 +160,10 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
             for (block_cid, block_data) in doc_blocks {
                 let mut request = PushLogRequest::new(
                     doc_id.clone(),
-                    block_cid.to_bytes(),
+                    Bytes::from(block_cid.to_bytes()),
                     collection.collection_id().to_string(),
                     creator.clone(),
-                    block_data,
+                    Bytes::from(block_data),
                 );
                 if let Err(e) = p2p::signing::sign_message(handle.keypair(), &mut request) {
                     tracing::warn!(error = %e, "Failed to sign PushLog request");
@@ -403,10 +404,10 @@ pub async fn retry_doc<S: Store + 'static>(
         {
             let mut request = PushLogRequest::new(
                 doc_id.to_string(),
-                block_cid.to_bytes(),
+                Bytes::from(block_cid.to_bytes()),
                 collection_id.to_string(),
                 creator.clone(),
-                block_data,
+                Bytes::from(block_data),
             );
 
             if p2p::signing::sign_message(handle.keypair(), &mut request).is_err() {

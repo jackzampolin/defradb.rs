@@ -11,10 +11,10 @@ use p2p::Keypair;
 fn create_test_message() -> PushLogRequest {
     PushLogRequest::new(
         "doc123".to_string(),
-        vec![1, 2, 3, 4],
+        bytes::Bytes::from(vec![1, 2, 3, 4]),
         "collection1".to_string(),
         "creator1".to_string(),
-        vec![5, 6, 7, 8],
+        bytes::Bytes::from(vec![5, 6, 7, 8]),
     )
 }
 

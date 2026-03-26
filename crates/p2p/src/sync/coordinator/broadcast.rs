@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use blockstore::Blockstore;
+use bytes::Bytes;
 use cid::Cid;
 
 use super::SyncCoordinator;
@@ -79,7 +80,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return;
         }
 
-        let dag_blocks = self.load_dag_blocks(*cid, block.to_vec()).await;
+        let dag_blocks = self
+            .load_dag_blocks(*cid, Bytes::copy_from_slice(block))
+            .await;
 
         tracing::debug!(
             cid = %cid,
@@ -107,7 +110,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             for (block_cid, block_data) in &dag_blocks {
                 let mut req = PushLogRequest::new(
                     doc_id.to_string(),
-                    block_cid.to_bytes(),
+                    Bytes::from(block_cid.to_bytes()),
                     collection_id.to_string(),
                     creator.to_string(),
                     block_data.clone(),
@@ -185,10 +188,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
             let mut request = PushLogRequest::new(
                 doc_id.to_string(),
-                cid.to_bytes(),
+                Bytes::from(cid.to_bytes()),
                 collection_id.to_string(),
                 creator.to_string(),
-                block.to_vec(),
+                Bytes::copy_from_slice(block),
             );
 
             if let Err(e) = sign_with_transport(&self.transport, &mut request) {
@@ -228,7 +231,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     }
 
     /// Load every transitive block in a document DAG, with dependencies first.
-    async fn load_dag_blocks(&self, root_cid: Cid, root_bytes: Vec<u8>) -> Vec<(Cid, Vec<u8>)> {
+    async fn load_dag_blocks(&self, root_cid: Cid, root_bytes: Bytes) -> Vec<(Cid, Bytes)> {
         let mut ordered = Vec::new();
         let mut visited = HashSet::new();
         let mut stack = vec![(root_cid, root_bytes, false)];

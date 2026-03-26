@@ -13,6 +13,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use blockstore::{Blockstore, DefraBlockstore, Error};
+use bytes::Bytes;
 use cid::Cid;
 use storage::backends::MemoryStore;
 use storage::corekv::{Key, Store};
@@ -57,7 +58,7 @@ mod basic_crud {
         blockstore.put(&cid, data).await.unwrap();
 
         let retrieved = blockstore.get(&cid).await.unwrap();
-        assert_eq!(retrieved, Some(data.to_vec()));
+        assert_eq!(retrieved, Some(Bytes::copy_from_slice(data)));
     }
 
     #[tokio::test]
@@ -128,8 +129,14 @@ mod basic_crud {
         let blocks: Vec<(&Cid, &[u8])> = vec![(&cid1, data1.as_slice()), (&cid2, data2.as_slice())];
         blockstore.put_many(&blocks).await.unwrap();
 
-        assert_eq!(blockstore.get(&cid1).await.unwrap(), Some(data1.to_vec()));
-        assert_eq!(blockstore.get(&cid2).await.unwrap(), Some(data2.to_vec()));
+        assert_eq!(
+            blockstore.get(&cid1).await.unwrap(),
+            Some(Bytes::copy_from_slice(data1))
+        );
+        assert_eq!(
+            blockstore.get(&cid2).await.unwrap(),
+            Some(Bytes::copy_from_slice(data2))
+        );
     }
 
     #[tokio::test]
@@ -215,7 +222,7 @@ mod hash_verification {
         blockstore.hash_on_read(true);
 
         let result = blockstore.get(&cid).await.unwrap();
-        assert_eq!(result, Some(data.to_vec()));
+        assert_eq!(result, Some(Bytes::copy_from_slice(data)));
     }
 
     #[tokio::test]
@@ -236,7 +243,7 @@ mod hash_verification {
 
         blockstore.hash_on_read(false);
         let result = blockstore.get(&cid).await.unwrap();
-        assert_eq!(result, Some(corrupted_data.to_vec()));
+        assert_eq!(result, Some(Bytes::from(corrupted_data.to_vec())));
 
         blockstore.hash_on_read(true);
         let result = blockstore.get(&cid).await;
@@ -274,7 +281,7 @@ mod hash_verification {
         blockstore.hash_on_read(true);
 
         let result = blockstore.get(&cid).await.unwrap();
-        assert_eq!(result, Some(data.to_vec()));
+        assert_eq!(result, Some(Bytes::copy_from_slice(data)));
     }
 
     #[tokio::test]
@@ -292,7 +299,7 @@ mod hash_verification {
         blockstore.hash_on_read(true);
 
         let result = blockstore.get(&cid).await.unwrap();
-        assert_eq!(result, Some(data.to_vec()));
+        assert_eq!(result, Some(Bytes::copy_from_slice(data)));
     }
 
     #[tokio::test]
@@ -306,13 +313,13 @@ mod hash_verification {
         blockstore.put(&cid, data).await.unwrap();
 
         let retrieved = blockstore.get(&cid).await.unwrap();
-        assert_eq!(retrieved, Some(vec![]));
+        assert_eq!(retrieved, Some(Bytes::new()));
         assert_eq!(blockstore.get_size(&cid).await.unwrap(), Some(0));
         assert!(blockstore.has(&cid).await.unwrap());
 
         blockstore.hash_on_read(true);
         let verified = blockstore.get(&cid).await.unwrap();
-        assert_eq!(verified, Some(vec![]));
+        assert_eq!(verified, Some(Bytes::new()));
     }
 
     #[tokio::test]
@@ -326,12 +333,12 @@ mod hash_verification {
         blockstore.put(&cid, &data).await.unwrap();
 
         let retrieved = blockstore.get(&cid).await.unwrap();
-        assert_eq!(retrieved, Some(data.clone()));
+        assert_eq!(retrieved, Some(Bytes::from(data.clone())));
         assert_eq!(blockstore.get_size(&cid).await.unwrap(), Some(262144));
 
         blockstore.hash_on_read(true);
         let verified = blockstore.get(&cid).await.unwrap();
-        assert_eq!(verified, Some(data));
+        assert_eq!(verified, Some(Bytes::from(data)));
     }
 
     #[tokio::test]
@@ -354,9 +361,18 @@ mod hash_verification {
         ];
         blockstore.put_many(&blocks).await.unwrap();
 
-        assert_eq!(blockstore.get(&cid1).await.unwrap(), Some(data1));
-        assert_eq!(blockstore.get(&cid2).await.unwrap(), Some(data2));
-        assert_eq!(blockstore.get(&cid3).await.unwrap(), Some(data3));
+        assert_eq!(
+            blockstore.get(&cid1).await.unwrap(),
+            Some(Bytes::from(data1))
+        );
+        assert_eq!(
+            blockstore.get(&cid2).await.unwrap(),
+            Some(Bytes::from(data2))
+        );
+        assert_eq!(
+            blockstore.get(&cid3).await.unwrap(),
+            Some(Bytes::from(data3))
+        );
     }
 }
 
@@ -580,7 +596,10 @@ mod go_compat {
 
         blockstore.put(&cidv0, data).await.unwrap();
         assert!(blockstore.has(&cidv0).await.unwrap());
-        assert_eq!(blockstore.get(&cidv0).await.unwrap(), Some(data.to_vec()));
+        assert_eq!(
+            blockstore.get(&cidv0).await.unwrap(),
+            Some(Bytes::copy_from_slice(data))
+        );
         assert_eq!(blockstore.get_size(&cidv0).await.unwrap(), Some(data.len()));
 
         let cids = blockstore.all_cids().await.unwrap();
@@ -659,7 +678,7 @@ mod go_compat {
         blockstore.put(&cid, new_data).await.unwrap();
 
         let retrieved = blockstore.get(&cid).await.unwrap();
-        assert_eq!(retrieved, Some(original_data.to_vec()));
+        assert_eq!(retrieved, Some(Bytes::copy_from_slice(original_data)));
     }
 
     #[tokio::test]
@@ -675,7 +694,7 @@ mod go_compat {
         blockstore.put_many(&blocks).await.unwrap();
 
         let retrieved = blockstore.get(&cid).await.unwrap();
-        assert_eq!(retrieved, Some(data1.to_vec()));
+        assert_eq!(retrieved, Some(Bytes::copy_from_slice(data1)));
 
         let cids = blockstore.all_cids().await.unwrap();
         assert_eq!(cids.len(), 1);
@@ -765,9 +784,18 @@ mod concurrency {
         r2.unwrap();
         r3.unwrap();
 
-        assert_eq!(blockstore.get(&cid1).await.unwrap(), Some(data1.to_vec()));
-        assert_eq!(blockstore.get(&cid2).await.unwrap(), Some(data2.to_vec()));
-        assert_eq!(blockstore.get(&cid3).await.unwrap(), Some(data3.to_vec()));
+        assert_eq!(
+            blockstore.get(&cid1).await.unwrap(),
+            Some(Bytes::copy_from_slice(data1))
+        );
+        assert_eq!(
+            blockstore.get(&cid2).await.unwrap(),
+            Some(Bytes::copy_from_slice(data2))
+        );
+        assert_eq!(
+            blockstore.get(&cid3).await.unwrap(),
+            Some(Bytes::copy_from_slice(data3))
+        );
     }
 
     #[tokio::test]
@@ -790,7 +818,10 @@ mod concurrency {
         r2.unwrap();
 
         let retrieved = blockstore.get(&cid).await.unwrap();
-        assert!(retrieved == Some(data1.to_vec()) || retrieved == Some(data2.to_vec()));
+        assert!(
+            retrieved == Some(Bytes::copy_from_slice(data1))
+                || retrieved == Some(Bytes::copy_from_slice(data2))
+        );
 
         let cids = blockstore.all_cids().await.unwrap();
         assert_eq!(cids.len(), 1);
@@ -817,8 +848,8 @@ mod concurrency {
             async move { bs3.put(&cid2, b"other data").await }
         );
 
-        assert_eq!(r1.unwrap(), Some(data.to_vec()));
-        assert_eq!(r2.unwrap(), Some(data.to_vec()));
+        assert_eq!(r1.unwrap(), Some(Bytes::copy_from_slice(data)));
+        assert_eq!(r2.unwrap(), Some(Bytes::copy_from_slice(data)));
         r3.unwrap();
     }
 
@@ -845,7 +876,7 @@ mod concurrency {
             async move { bs3.get(&cid).await }
         );
 
-        assert_eq!(r3.unwrap(), Some(data.to_vec()));
+        assert_eq!(r3.unwrap(), Some(Bytes::copy_from_slice(data)));
     }
 
     #[tokio::test]
@@ -903,7 +934,7 @@ mod concurrency {
 
             let read_value = read_result.unwrap();
             assert!(
-                read_value.is_none() || read_value == Some(data.to_vec()),
+                read_value.is_none() || read_value == Some(Bytes::copy_from_slice(data)),
                 "Read during delete should return None or valid data, got {:?}",
                 read_value
             );
@@ -971,7 +1002,7 @@ mod stress {
         for (i, cid) in cids.iter().enumerate().step_by(50) {
             let expected = format!("block data {}", i);
             let data = blockstore.get(cid).await.unwrap();
-            assert_eq!(data, Some(expected.into_bytes()));
+            assert_eq!(data, Some(Bytes::from(expected.into_bytes())));
         }
 
         for cid in &cids {
@@ -1043,7 +1074,7 @@ mod stress {
 
         for (cid, expected_data) in &blocks {
             let data = blockstore.get(cid).await.unwrap();
-            assert_eq!(data.as_ref(), Some(expected_data));
+            assert_eq!(data, Some(Bytes::from(expected_data.clone())));
         }
 
         let all = blockstore.all_cids().await.unwrap();

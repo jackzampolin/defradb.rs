@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 # Internal crates
 acp = { path = "../acp" }
+bytes.workspace = true
 defra-core = { path = "../defra-core" }
 storage = { path = "../storage" }
 blockstore = { path = "../blockstore" }

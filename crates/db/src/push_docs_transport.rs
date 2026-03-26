@@ -2,6 +2,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use acp::DocumentACP;
+use bytes::Bytes;
 use p2p::message::PushLogRequest;
 use p2p::transport::PeerId;
 use p2p::P2PTransport;
@@ -151,10 +152,10 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
             for (block_cid, block_data) in doc_blocks {
                 let mut request = PushLogRequest::new(
                     doc_id.clone(),
-                    block_cid.to_bytes(),
+                    Bytes::from(block_cid.to_bytes()),
                     collection.collection_id().to_string(),
                     creator.clone(),
-                    block_data,
+                    Bytes::from(block_data),
                 );
                 if let Err(e) = p2p::signing::sign_with_transport(transport, &mut request) {
                     tracing::warn!(error = %e, "Failed to sign PushLog request");
@@ -380,10 +381,10 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
         {
             let mut request = PushLogRequest::new(
                 doc_id.to_string(),
-                block_cid.to_bytes(),
+                Bytes::from(block_cid.to_bytes()),
                 collection_id.to_string(),
                 creator.clone(),
-                block_data,
+                Bytes::from(block_data),
             );
 
             if p2p::signing::sign_with_transport(transport, &mut request).is_err() {

@@ -8,6 +8,7 @@
 //! This matches Go's `SendUpdate()` in `p2p.go:532-563` which publishes to both
 //! DocID and CollectionID topics.
 
+use bytes::Bytes;
 use cid::Cid;
 
 use crate::error::{Error, Result};
@@ -143,10 +144,10 @@ impl<T: P2PTransport> Broadcaster<T> {
     ) -> PushLogBroadcast {
         PushLogBroadcast::new(
             doc_id.to_string(),
-            cid.to_bytes(),
+            Bytes::from(cid.to_bytes()),
             collection_id.to_string(),
             creator.to_string(),
-            block.to_vec(),
+            Bytes::copy_from_slice(block),
         )
     }
 

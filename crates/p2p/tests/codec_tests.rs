@@ -1,5 +1,6 @@
 //! Tests for the CBOR codec module.
 
+use bytes::Bytes;
 use std::io;
 
 use futures::io::Cursor;
@@ -17,10 +18,10 @@ async fn test_codec_roundtrip_request() {
 
     let original = PushLogRequest::new(
         "doc123".to_string(),
-        vec![1, 2, 3],
+        Bytes::from(vec![1, 2, 3]),
         "collection1".to_string(),
         "creator1".to_string(),
-        vec![4, 5, 6],
+        Bytes::from(vec![4, 5, 6]),
     );
 
     // Write
@@ -117,10 +118,10 @@ async fn test_codec_truncated_cbor() {
 
     let original = PushLogRequest::new(
         "doc123".to_string(),
-        vec![1, 2, 3],
+        Bytes::from(vec![1, 2, 3]),
         "collection1".to_string(),
         "creator1".to_string(),
-        vec![4, 5, 6],
+        Bytes::from(vec![4, 5, 6]),
     );
 
     // Encode then truncate
@@ -138,10 +139,10 @@ async fn test_codec_truncated_cbor() {
 fn test_encode_decode_roundtrip() {
     let request = PushLogRequest::new(
         "doc456".to_string(),
-        vec![10, 20, 30],
+        Bytes::from(vec![10, 20, 30]),
         "col2".to_string(),
         "creator2".to_string(),
-        vec![40, 50, 60],
+        Bytes::from(vec![40, 50, 60]),
     );
 
     let encoded = encode(&request).expect("encode failed");

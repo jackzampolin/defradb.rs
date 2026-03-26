@@ -729,7 +729,7 @@ mod tests {
 
         MergeBlock {
             cid: result.cid,
-            block_data: result.block,
+            block_data: bytes::Bytes::from(result.block),
             doc_id: result.doc_id,
             collection_id: "col-users".to_string(),
             creator: "did:key:z6MkrBatchMergeTest".to_string(),

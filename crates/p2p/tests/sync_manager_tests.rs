@@ -1,5 +1,6 @@
 //! Tests for the sync manager module.
 
+use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,10 +34,10 @@ fn test_peer_state() -> Arc<PeerStateTracker> {
 fn create_test_broadcast(cid: &Cid) -> PushLogBroadcast {
     PushLogBroadcast::new(
         "doc123".to_string(),
-        cid.to_bytes(),
+        Bytes::from(cid.to_bytes()),
         "collection1".to_string(),
         "creator1".to_string(),
-        BLOCK_DATA.to_vec(),
+        Bytes::from(BLOCK_DATA.to_vec()),
     )
 }
 
@@ -208,10 +209,10 @@ async fn test_process_pushlog_invalid_cid_returns_error() {
     // Create a broadcast with invalid CID bytes
     let msg = PushLogBroadcast::new(
         "doc123".to_string(),
-        vec![0xFF, 0xFF, 0xFF], // Invalid CID bytes
+        Bytes::from(vec![0xFF, 0xFF, 0xFF]), // Invalid CID bytes
         "collection1".to_string(),
         "creator1".to_string(),
-        b"block data".to_vec(),
+        Bytes::from(b"block data".to_vec()),
     );
 
     // Processing should fail with InvalidCid error
@@ -235,10 +236,10 @@ async fn test_process_pushlog_cid_mismatch_returns_error() {
     let cid = test_cid();
     let msg = PushLogBroadcast::new(
         "doc123".to_string(),
-        cid.to_bytes(),
+        Bytes::from(cid.to_bytes()),
         "collection1".to_string(),
         "creator1".to_string(),
-        b"tampered content".to_vec(),
+        Bytes::from(b"tampered content".to_vec()),
     );
 
     let result = manager.process_pushlog(&msg, None, false, None).await;
@@ -420,10 +421,10 @@ async fn test_pending_dag_completes_when_missing_block_arrives_via_pushlog() {
 
     let composite_msg = PushLogBroadcast::new(
         "doc123".to_string(),
-        composite_cid.to_bytes(),
+        Bytes::from(composite_cid.to_bytes()),
         "collection1".to_string(),
         "creator1".to_string(),
-        composite_block,
+        Bytes::from(composite_block),
     );
 
     manager
@@ -448,10 +449,10 @@ async fn test_pending_dag_completes_when_missing_block_arrives_via_pushlog() {
 
     let field_msg = PushLogBroadcast::new(
         "doc123".to_string(),
-        field_cid.to_bytes(),
+        Bytes::from(field_cid.to_bytes()),
         "collection1".to_string(),
         "creator1".to_string(),
-        field_block,
+        Bytes::from(field_block),
     );
 
     manager
