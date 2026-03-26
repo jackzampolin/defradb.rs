@@ -133,6 +133,9 @@ fn resolve_embedded_config(
                     options.signing_private_key_len, MAX_PRIVATE_KEY_LEN
                 ));
             }
+            // SAFETY: `signing_private_key` is non-null (checked above) and
+            // `signing_private_key_len` is bounded by MAX_PRIVATE_KEY_LEN.
+            // The caller guarantees the pointer is valid for the given length.
             let key_bytes = unsafe {
                 std::slice::from_raw_parts(
                     options.signing_private_key,
@@ -178,6 +181,9 @@ fn resolve_embedded_config(
             ));
         }
 
+        // SAFETY: `sourcehub_signer_key` is non-null (checked above) and
+        // `sourcehub_signer_key_len` is bounded by MAX_PRIVATE_KEY_LEN.
+        // The caller guarantees the pointer is valid for the given length.
         let signer_key = unsafe {
             std::slice::from_raw_parts(
                 options.sourcehub_signer_key,

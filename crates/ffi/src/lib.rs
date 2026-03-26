@@ -189,11 +189,13 @@ pub use types::defra_free_string;
 /// Safe to call multiple times.
 #[no_mangle]
 pub extern "C" fn defra_init() {
-    // Ignore return value - errors will surface when operations are attempted
-    let _ = runtime::init_runtime();
-    // Enable deterministic nonce for testing (matches Go's init() detection)
-    crypto::encryption::nonce::USE_DETERMINISTIC_NONCE
-        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Ignore return value - errors will surface when operations are attempted
+        let _ = runtime::init_runtime();
+        // Enable deterministic nonce for testing (matches Go's init() detection)
+        crypto::encryption::nonce::USE_DETERMINISTIC_NONCE
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }));
 }
 
 /// Get the library version.
@@ -201,11 +203,16 @@ pub extern "C" fn defra_init() {
 /// Returns a null-terminated string that must be freed with `defra_free_string`.
 #[no_mangle]
 pub extern "C" fn defra_version() -> *mut c_char {
-    let version = env!("CARGO_PKG_VERSION");
-    // CARGO_PKG_VERSION is a compile-time constant without null bytes
-    CString::new(version)
-        .unwrap_or_else(|_| CString::new("unknown").unwrap())
-        .into_raw()
+    match std::panic::catch_unwind(|| {
+        let version = env!("CARGO_PKG_VERSION");
+        // CARGO_PKG_VERSION is a compile-time constant without null bytes
+        CString::new(version)
+            .unwrap_or_else(|_| CString::new("unknown").unwrap())
+            .into_raw()
+    }) {
+        Ok(ptr) => ptr,
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 #[cfg(test)]

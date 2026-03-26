@@ -456,7 +456,9 @@ pub extern "C" fn defra_mobile_open_node(config_json: *const c_char) -> NewNodeR
 /// Close a node opened via the mobile wrapper.
 #[no_mangle]
 pub extern "C" fn defra_mobile_close_node(node_ptr: usize) -> FfiResult {
-    node_close(node_ptr)
+    ffi_entry! {
+        node_close(node_ptr)
+    }
 }
 
 /// Idempotently ensure an SDL schema exists on a node.
@@ -595,32 +597,38 @@ pub extern "C" fn defra_mobile_execute(node_ptr: usize, request_json: *const c_c
 /// Return local peer info for the configured mobile transport.
 #[no_mangle]
 pub extern "C" fn defra_mobile_peer_info(node_ptr: usize) -> FfiResult {
-    let identity = match default_identity_cstring(node_ptr) {
-        Ok(value) => value,
-        Err(error) => return FfiResult::error(error),
-    };
-    unsafe { p2p_peer_info(node_ptr, c_string_ptr(&identity)) }
+    ffi_entry! {
+        let identity = match default_identity_cstring(node_ptr) {
+            Ok(value) => value,
+            Err(error) => return FfiResult::error(error),
+        };
+        unsafe { p2p_peer_info(node_ptr, c_string_ptr(&identity)) }
+    }
 }
 
 /// Connect the node to a peer address.
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn defra_mobile_connect(node_ptr: usize, addr: *const c_char) -> FfiResult {
-    let identity = match default_identity_cstring(node_ptr) {
-        Ok(value) => value,
-        Err(error) => return FfiResult::error(error),
-    };
-    unsafe { p2p_connect(node_ptr, c_string_ptr(&identity), addr) }
+    ffi_entry! {
+        let identity = match default_identity_cstring(node_ptr) {
+            Ok(value) => value,
+            Err(error) => return FfiResult::error(error),
+        };
+        unsafe { p2p_connect(node_ptr, c_string_ptr(&identity), addr) }
+    }
 }
 
 /// Notify the embedded iroh transport that network conditions may have changed.
 #[no_mangle]
 pub extern "C" fn defra_mobile_notify_network_change(node_ptr: usize) -> FfiResult {
-    let identity = match default_identity_cstring(node_ptr) {
-        Ok(value) => value,
-        Err(error) => return FfiResult::error(error),
-    };
-    unsafe { p2p_notify_network_change(node_ptr, c_string_ptr(&identity)) }
+    ffi_entry! {
+        let identity = match default_identity_cstring(node_ptr) {
+            Ok(value) => value,
+            Err(error) => return FfiResult::error(error),
+        };
+        unsafe { p2p_notify_network_change(node_ptr, c_string_ptr(&identity)) }
+    }
 }
 
 /// Sync branchable collections, schema versions, or specific documents.

@@ -58,6 +58,7 @@ pub(crate) fn check_and_set_dac_bypass(
         None => return,
     };
 
+    // SAFETY: `identity_did` is either null or a valid C string from the FFI caller.
     let identity_str = unsafe { c_str_to_string(identity_did) };
     let did = match identity_str {
         Some(s) if !s.is_empty() => match identity::Did::new(&s) {

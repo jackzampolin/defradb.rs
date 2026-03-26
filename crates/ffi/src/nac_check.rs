@@ -38,6 +38,7 @@ pub fn check_nac_permission(
         return Ok(());
     }
 
+    // SAFETY: `identity_did` is either null or a valid C string from the FFI caller.
     let identity_str = unsafe { c_str_to_string(identity_did) };
 
     let err_msg = format!(

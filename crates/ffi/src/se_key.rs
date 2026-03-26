@@ -35,6 +35,9 @@ pub unsafe extern "C" fn set_se_encryption_key(
             ));
         }
 
+        // SAFETY: `key_ptr` is non-null (checked above) and `key_len` is
+        // exactly 32 (checked above). The caller guarantees the pointer is
+        // valid for 32 bytes.
         let key = Zeroizing::new(std::slice::from_raw_parts(key_ptr, key_len).to_vec());
 
         let found = NODES.get_mut(node_ptr, |state| {

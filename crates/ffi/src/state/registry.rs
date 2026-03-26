@@ -27,7 +27,7 @@ impl NodeRegistry {
 
     /// Insert a new node state and return its handle.
     pub fn insert(&self, state: NodeState) -> NodeHandle {
-        let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
+        let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
         let mut nodes = self.nodes.write();
         nodes.insert(handle, state);
         handle
@@ -105,7 +105,7 @@ impl SubscriptionRegistry {
 
     /// Insert a new subscription state and return its handle.
     pub fn insert(&self, state: SubscriptionState) -> SubscriptionHandle {
-        let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
+        let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
         let mut subs = self.subscriptions.write();
         subs.insert(handle, state);
         handle
@@ -166,7 +166,7 @@ impl GraphQLSubscriptionRegistry {
 
     /// Insert a new GraphQL subscription state and return its handle.
     pub fn insert(&self, state: GraphQLSubscriptionState) -> SubscriptionHandle {
-        let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
+        let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
         let mut subs = self.subscriptions.write();
         subs.insert(handle, state);
         handle

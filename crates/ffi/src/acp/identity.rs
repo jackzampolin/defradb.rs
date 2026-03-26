@@ -300,8 +300,17 @@ pub extern "C" fn register_remote_identity_bytes(
             if public_key_ptr.is_null() || public_key_len == 0 {
                 return Err("invalid public_key_bytes parameter".to_string());
             }
+            if public_key_len > 256 {
+                return Err(format!(
+                    "public_key_len {} exceeds maximum 256",
+                    public_key_len
+                ));
+            }
             let key_type_str =
                 unsafe { c_str_to_string(key_type) }.unwrap_or_else(|| "secp256r1".to_string());
+            // SAFETY: `public_key_ptr` is non-null and `public_key_len` is
+            // bounded (checked above). The caller guarantees the pointer is
+            // valid for `public_key_len` bytes.
             let public_key_bytes =
                 unsafe { std::slice::from_raw_parts(public_key_ptr, public_key_len) }.to_vec();
 
