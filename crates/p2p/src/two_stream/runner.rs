@@ -100,7 +100,7 @@ impl TwoStreamRunner {
                     let max_msg_size = self.max_msg_size;
                     let stream_read_timeout = self.stream_read_timeout;
                     tokio::spawn(async move {
-                        let _permit = sem.acquire().await.expect("semaphore closed");
+                        let Ok(_permit) = sem.acquire().await else { return };
                         match TwoStreamHandler::handle_request_stream(peer_id, stream, max_msg_size, stream_read_timeout).await {
                             Ok(event) => {
                                 tracing::info!(peer_id = %peer_id, "Sending TwoStreamEvent to host channel");
@@ -139,7 +139,7 @@ impl TwoStreamRunner {
                     let max_msg_size = self.max_msg_size;
                     let stream_read_timeout = self.stream_read_timeout;
                     tokio::spawn(async move {
-                        let _permit = sem.acquire().await.expect("semaphore closed");
+                        let Ok(_permit) = sem.acquire().await else { return };
                         match TwoStreamHandler::handle_response_stream(&pending, peer_id, stream, max_msg_size, stream_read_timeout).await {
                             Ok(Some(event)) => {
                                 // DocSyncReply events should be forwarded to the coordinator
@@ -173,7 +173,7 @@ impl TwoStreamRunner {
                     let max_msg_size = self.max_msg_size;
                     let stream_read_timeout = self.stream_read_timeout;
                     tokio::spawn(async move {
-                        let _permit = sem.acquire().await.expect("semaphore closed");
+                        let Ok(_permit) = sem.acquire().await else { return };
                         let mut buf = Vec::new();
                         let read_result = tokio::time::timeout(
                             stream_read_timeout,
@@ -219,7 +219,7 @@ impl TwoStreamRunner {
                     let max_msg_size = self.max_msg_size;
                     let stream_read_timeout = self.stream_read_timeout;
                     tokio::spawn(async move {
-                        let _permit = sem.acquire().await.expect("semaphore closed");
+                        let Ok(_permit) = sem.acquire().await else { return };
                         let mut buf = Vec::new();
                         let read_result = tokio::time::timeout(
                             stream_read_timeout,
@@ -249,7 +249,7 @@ impl TwoStreamRunner {
                     let max_car_size = self.max_car_size;
                     let stream_read_timeout = self.stream_read_timeout;
                     tokio::spawn(async move {
-                        let _permit = sem.acquire().await.expect("semaphore closed");
+                        let Ok(_permit) = sem.acquire().await else { return };
                         match TwoStreamHandler::handle_car_request_stream(peer_id, stream, max_car_size, stream_read_timeout).await {
                             Ok(event) => {
                                 if event_tx.send(event).await.is_err() {
@@ -269,7 +269,7 @@ impl TwoStreamRunner {
                     let max_car_size = self.max_car_size;
                     let stream_read_timeout = self.stream_read_timeout;
                     tokio::spawn(async move {
-                        let _permit = sem.acquire().await.expect("semaphore closed");
+                        let Ok(_permit) = sem.acquire().await else { return };
                         match TwoStreamHandler::handle_car_response_stream(peer_id, stream, max_car_size, stream_read_timeout).await {
                             Ok(event) => {
                                 if event_tx.send(event).await.is_err() {

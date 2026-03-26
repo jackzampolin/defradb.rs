@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::provider::{
@@ -23,14 +24,9 @@ pub struct HubRsProvider {
     client: HubRsClient,
     signer: EvmSigner,
     signing_key: SigningKey,
-    nonce: Mutex<u64>,
-    light_client_observability: Arc<Mutex<HubRsLightClientObservability>>,
+    nonce: AtomicU64,
+    light_client_observability: Arc<AtomicU64>,
     light_client_observer_handle: tokio::task::JoinHandle<()>,
-}
-
-#[derive(Debug, Default)]
-struct HubRsLightClientObservability {
-    last_invalidation_height: Option<u64>,
 }
 
 fn derive_ws_url(rpc_url: &str) -> String {
@@ -52,8 +48,7 @@ impl HubRsProvider {
                 .await
                 .map_err(|e| ProviderError::Config(format!("light client: {}", e)))?,
         );
-        let light_client_observability =
-            Arc::new(Mutex::new(HubRsLightClientObservability::default()));
+        let light_client_observability = Arc::new(AtomicU64::new(0));
 
         let client = HubRsClient::new(rpc_url, tuning.request_timeout, tuning.receipt_timeout)
             .map_err(|e| ProviderError::Config(format!("HTTP client: {}", e)))?;
@@ -81,22 +76,14 @@ impl HubRsProvider {
             client,
             signer,
             signing_key,
-            nonce: Mutex::new(nonce),
+            nonce: AtomicU64::new(nonce),
             light_client_observability,
             light_client_observer_handle,
         })
     }
 
     async fn send_tx(&self, data: Bytes) -> Result<serde_json::Value, ProviderError> {
-        let nonce = {
-            let mut n = self
-                .nonce
-                .lock()
-                .map_err(|_| ProviderError::Transaction("nonce lock poisoned".into()))?;
-            let current = *n;
-            *n += 1;
-            current
-        };
+        let nonce = self.nonce.fetch_add(1, Ordering::Relaxed);
 
         let raw = self
             .signer
@@ -211,7 +198,7 @@ fn format_root(root: alloy_primitives::B256) -> String {
 
 async fn run_light_client_observer(
     light_client: Arc<AcpLightClient>,
-    observability: Arc<Mutex<HubRsLightClientObservability>>,
+    last_invalidation_height: Arc<AtomicU64>,
     event_bus: Option<Arc<dyn Bus>>,
 ) {
     let mut next_height = 1u64;
@@ -246,9 +233,7 @@ async fn run_light_client_observer(
                 let entries_invalidated = light_client
                     .cache()
                     .invalidate_stale(sync.module_state_root);
-                if let Ok(mut state) = observability.lock() {
-                    state.last_invalidation_height = Some(sync.height);
-                }
+                last_invalidation_height.store(sync.height, Ordering::Relaxed);
 
                 if let Some(ref bus) = event_bus {
                     bus.publish(Message::acp_cache_invalidated(AcpCacheInvalidatedData {
@@ -697,12 +682,7 @@ impl SourceHubProvider for HubRsProvider {
 
     fn acp_light_client_status(&self) -> Result<AcpLightClientStatus, ProviderError> {
         let sync = self.light_client.header_chain().state();
-        let last_invalidation_height = self
-            .light_client_observability
-            .lock()
-            .map_err(|_| ProviderError::Query("light client observability lock poisoned".into()))?
-            .last_invalidation_height
-            .unwrap_or_default();
+        let last_invalidation_height = self.light_client_observability.load(Ordering::Relaxed);
 
         Ok(AcpLightClientStatus {
             height: sync.as_ref().map_or(0, |state| state.height),

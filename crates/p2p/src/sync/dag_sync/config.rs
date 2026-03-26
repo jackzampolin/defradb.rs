@@ -94,8 +94,7 @@ impl Default for DagSyncConfig {
     fn default() -> Self {
         Self {
             block_fetch_timeout: Duration::from_secs(30),
-            max_depth: None, // Unlimited
-            // SAFETY: 16 is non-zero
+            max_depth: None,
             max_concurrent_fetches: NonZeroUsize::new(16).unwrap(),
         }
     }

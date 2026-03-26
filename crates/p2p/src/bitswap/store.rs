@@ -58,10 +58,9 @@ impl<B: Blockstore + Debug + 'static> Store for BitswapStoreAdapter<B> {
     /// Get the size of a block by CID.
     async fn get_size(&self, cid: &Cid) -> Result<usize> {
         self.blockstore
-            .get(cid)
+            .get_size(cid)
             .await
             .map_err(|e| anyhow!("blockstore error: {}", e))?
-            .map(|data| data.len())
             .ok_or_else(|| anyhow!("block not found: {}", cid))
     }
 
