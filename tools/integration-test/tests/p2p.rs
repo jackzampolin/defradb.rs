@@ -14,3 +14,5 @@ mod resilience;
 mod sync;
 #[path = "p2p/trust_boundary.rs"]
 mod trust_boundary;
+#[path = "p2p/write_contention.rs"]
+mod write_contention;
