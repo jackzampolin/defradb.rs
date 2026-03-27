@@ -10,12 +10,15 @@
 //! - `mutations`: Mutation operation parsing
 
 mod aggregates;
+mod explain;
 mod filters;
 pub mod limits;
 mod mutations;
 mod ordering;
 mod parser;
 mod validation;
+mod values;
+mod variables;
 
 // Re-export everything from parser for backwards compatibility
 pub use limits::{MAX_QUERY_DEPTH, MAX_QUERY_WIDTH};

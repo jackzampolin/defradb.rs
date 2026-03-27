@@ -17,7 +17,8 @@ use crate::error::{QueryError, Result};
 use crate::mapper::{parse_mutation_name, FullTextSearch, Mutation, MutationType, Similarity};
 
 use super::filters::parse_filter_value;
-use super::parser::{graphql_value_to_json, parse_doc_ids_value, parse_selection_set, FragmentMap};
+use super::parser::{parse_selection_set, FragmentMap};
+use super::values::{graphql_value_to_json, parse_doc_ids_value};
 
 /// Parse a single GraphQL field into a Mutation operation.
 ///

@@ -16,6 +16,9 @@ mod filter_relation;
 mod mapping;
 mod multi_level;
 mod secondary_id;
+mod shared;
+
+pub(super) use shared::{JoinResult, SelectionJoinInfo};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,48 +27,17 @@ use schema::CollectionVersion;
 use tracing::{debug, warn};
 
 use crate::document::DocumentMapping;
-use crate::error::{QueryError, Result};
+use crate::error::QueryError;
 use crate::mapper::{Field, Filter, OrderBy, OrderCondition, Requestable, Select};
 use crate::plan::{
     IndexScanNode, JoinSide, RelationFilter, ScanNode, SelectNode, TypeJoinMany, TypeJoinOne,
 };
 use crate::planner::PlanNode;
 
+use self::shared::can_use_direct_indexed_child_cache;
 use super::builder::{Planner, MAX_NESTING_DEPTH};
 
-/// Result of applying joins: the updated plan node, document mapping, aggregate internal keys,
-/// and whether a child index scan provides the parent's ORDER BY.
-type JoinResult = Result<(
-    Box<dyn PlanNode>,
-    DocumentMapping,
-    HashMap<String, (String, String)>,
-    bool, // join_provides_ordering
-)>;
-
-/// Info about a selection join, used for aggregate join sharing decisions.
-pub(super) struct SelectionJoinInfo {
-    pub(super) filter_json: Option<String>,
-    pub(super) has_limit: bool,
-}
-
 impl Planner {
-    fn can_use_direct_indexed_child_cache(nested_select: &Select) -> bool {
-        nested_select.filter.is_none()
-            && nested_select.group_by.is_none()
-            && nested_select
-                .order_by
-                .as_ref()
-                .map(|order_by| !order_by.has_relation_order())
-                .unwrap_or(true)
-            && nested_select.fields.iter().all(|field| match field {
-                Requestable::Field(_) => true,
-                Requestable::FullTextSearch(fts) => {
-                    fts.target_fields.iter().all(|field| !field.contains('.'))
-                }
-                _ => false,
-            })
-    }
-
     /// Apply join nodes for nested selects (relation fields)
     ///
     /// The `depth` parameter tracks recursion depth to prevent stack overflow
@@ -1197,9 +1169,7 @@ impl Planner {
                 } else if let (Some(fetcher), Some((fk_field_name, index_name))) =
                     (self.fetcher.clone(), child_fk_index_info.clone())
                 {
-                    if Self::can_use_direct_indexed_child_cache(nested_select)
-                        && !has_filter_child_plan
-                    {
+                    if can_use_direct_indexed_child_cache(nested_select) && !has_filter_child_plan {
                         join_many = join_many.with_indexed_child_fetch(
                             fetcher,
                             target_collection.name.clone(),

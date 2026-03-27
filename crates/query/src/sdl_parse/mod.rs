@@ -16,6 +16,8 @@
 //! - `helpers`: Helper utilities (placeholder)
 
 mod builder;
+mod builder_cycles;
+mod builder_field_kinds;
 mod directives;
 mod fields;
 mod helpers;

@@ -149,10 +149,11 @@ pub(crate) fn parse_optional_int_value(
 }
 
 /// Resolve a string value from GraphQL Value, supporting variable substitution.
+#[allow(dead_code)]
 pub(crate) fn resolve_string_value(
     value: &Value<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
-    field_name: &str,
+    arg_name: &str,
 ) -> Result<String> {
     match value {
         Value::String(s) => Ok(s.clone()),
@@ -166,17 +167,146 @@ pub(crate) fn resolve_string_value(
             let json_val = vars.get(name).ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))
             })?;
-            json_val.as_str().map(String::from).ok_or_else(|| {
-                QueryError::parse(format!(
-                    "Variable \"${}\" must be of type String for field '{}'",
-                    name, field_name
-                ))
+            json_val.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" must be of type String", name))
             })
         }
         _ => Err(QueryError::parse(format!(
-            "expected string value for field '{}'",
-            field_name
+            "{} argument must be a string",
+            arg_name
         ))),
+    }
+}
+
+/// Parse docIDs argument into vector of strings.
+pub(crate) fn parse_doc_ids_value(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Vec<String>> {
+    match value {
+        Value::List(items) => {
+            let ids: Result<Vec<String>> = items
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) => Ok(s.clone()),
+                    Value::Variable(name) => {
+                        let vars = variables.ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "variable '{}' used but no variables provided",
+                                name
+                            ))
+                        })?;
+                        let json_val = vars.get(name).ok_or_else(|| {
+                            QueryError::parse(format!("Variable \"${}\" was not provided", name))
+                        })?;
+                        json_val.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "Variable \"${}\" must be of type String",
+                                name
+                            ))
+                        })
+                    }
+                    _ => Err(QueryError::parse("docIDs items must be strings")),
+                })
+                .collect();
+            ids
+        }
+        Value::String(s) => Ok(vec![s.clone()]),
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            let json_val = vars.get(name).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })?;
+            if let Some(s) = json_val.as_str() {
+                Ok(vec![s.to_string()])
+            } else if let Some(arr) = json_val.as_array() {
+                arr.iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(|s| s.to_string())
+                            .ok_or_else(|| QueryError::parse("docIDs items must be strings"))
+                    })
+                    .collect()
+            } else {
+                Err(QueryError::parse(format!(
+                    "Variable \"${}\" must be of type String or [String]",
+                    name
+                )))
+            }
+        }
+        _ => Err(QueryError::parse("docIDs must be a string or list")),
+    }
+}
+
+/// Parse cid argument into vector of strings.
+///
+/// Accepts `[String!]` (array) or a single `String` (wrapped into a vec).
+pub(crate) fn parse_cid_value(
+    value: &Value<'_, String>,
+    variables: Option<&HashMap<String, JsonValue>>,
+) -> Result<Vec<String>> {
+    match value {
+        Value::List(items) => {
+            let cids: Result<Vec<String>> = items
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) => Ok(s.clone()),
+                    Value::Variable(name) => {
+                        let vars = variables.ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "variable '{}' used but no variables provided",
+                                name
+                            ))
+                        })?;
+                        let json_val = vars.get(name).ok_or_else(|| {
+                            QueryError::parse(format!("Variable \"${}\" was not provided", name))
+                        })?;
+                        json_val.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                            QueryError::parse(format!(
+                                "Variable \"${}\" must be of type String",
+                                name
+                            ))
+                        })
+                    }
+                    _ => Err(QueryError::parse("cid items must be strings")),
+                })
+                .collect();
+            cids
+        }
+        Value::String(s) => Ok(vec![s.clone()]),
+        Value::Variable(name) => {
+            let vars = variables.ok_or_else(|| {
+                QueryError::parse(format!(
+                    "variable '{}' used but no variables provided",
+                    name
+                ))
+            })?;
+            let json_val = vars.get(name).ok_or_else(|| {
+                QueryError::parse(format!("Variable \"${}\" was not provided", name))
+            })?;
+            if let Some(s) = json_val.as_str() {
+                Ok(vec![s.to_string()])
+            } else if let Some(arr) = json_val.as_array() {
+                arr.iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(|s| s.to_string())
+                            .ok_or_else(|| QueryError::parse("cid items must be strings"))
+                    })
+                    .collect()
+            } else {
+                Err(QueryError::parse(format!(
+                    "Variable \"${}\" must be of type String or [String]",
+                    name
+                )))
+            }
+        }
+        _ => Err(QueryError::parse("cid must be a string or list")),
     }
 }
 
@@ -184,7 +314,7 @@ pub(crate) fn resolve_string_value(
 pub(crate) fn resolve_bool_value(
     value: &Value<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
-    field_name: &str,
+    arg_name: &str,
 ) -> Result<bool> {
     match value {
         Value::Boolean(b) => Ok(*b),
@@ -199,15 +329,12 @@ pub(crate) fn resolve_bool_value(
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))
             })?;
             json_val.as_bool().ok_or_else(|| {
-                QueryError::parse(format!(
-                    "Variable \"${}\" must be of type Boolean for field '{}'",
-                    name, field_name
-                ))
+                QueryError::parse(format!("Variable \"${}\" must be of type Boolean", name))
             })
         }
         _ => Err(QueryError::parse(format!(
-            "expected boolean value for field '{}'",
-            field_name
+            "{} argument must be a boolean",
+            arg_name
         ))),
     }
 }

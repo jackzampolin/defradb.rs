@@ -19,7 +19,7 @@ use crate::mapper::{
 
 use super::filters::parse_filter_value;
 use super::ordering::{parse_order_from_json, parse_order_value};
-use super::parser::parse_int_value;
+use super::values::parse_int_value;
 
 /// Parse groupBy argument into GroupBy.
 pub(super) fn parse_group_by_value(

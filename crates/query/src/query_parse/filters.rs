@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use crate::error::{QueryError, Result};
 use crate::mapper::Filter;
 
-use super::parser::graphql_value_to_json;
+use super::values::graphql_value_to_json;
 
 /// Parse a filter argument value into a Filter.
 pub(super) fn parse_filter_value(

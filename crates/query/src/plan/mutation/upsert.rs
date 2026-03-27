@@ -19,7 +19,8 @@ use crate::error::{QueryError, Result};
 use crate::mutator::DocMutator;
 use crate::planner::{Doc, PlanNode};
 
-use super::create::{json_to_normal_value_with_kind_and_time, normal_value_to_json, CreateInput};
+use super::create::CreateInput;
+use super::create_conversions::{json_to_normal_value_with_kind_and_time, normal_value_to_json};
 
 /// Input for an upsert mutation - field values for create or update.
 #[derive(Debug, Clone)]
