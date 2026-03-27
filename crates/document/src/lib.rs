@@ -26,12 +26,14 @@
 mod doc_id;
 mod document;
 mod encoding;
+mod encoding_cbor;
 mod error;
 mod field;
 mod json_leaf;
 mod json_path;
 mod json_traverse;
 mod normal;
+mod normal_conversions;
 mod value;
 
 pub use doc_id::{validate_doc_ids, DocID, DOC_ID_V0, SDN_NAMESPACE_V0};

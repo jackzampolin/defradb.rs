@@ -1,0 +1,555 @@
+//! CBOR encoding/decoding helpers for NormalValue conversion.
+
+use crate::encoding::format_time_rfc3339_nano;
+use crate::error::{Error, Result};
+use crate::NormalValue;
+
+fn base64_encode(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Convert a NormalValue to a ciborium::Value for CBOR encoding.
+///
+/// Returns an error if nested document encoding fails.
+pub fn normal_value_to_cbor(value: &NormalValue) -> Result<ciborium::Value> {
+    match value {
+        NormalValue::Null => Ok(ciborium::Value::Null),
+        NormalValue::Bool(b) => Ok(ciborium::Value::Bool(*b)),
+        NormalValue::Int(i) => Ok(ciborium::Value::Integer((*i).into())),
+        NormalValue::Float64(f) => Ok(ciborium::Value::Float(*f)),
+        NormalValue::Float32(f) => Ok(ciborium::Value::Float(*f as f64)),
+        NormalValue::String(s) => Ok(ciborium::Value::Text(s.clone())),
+        NormalValue::Bytes(b) => Ok(ciborium::Value::Bytes(b.clone())),
+        NormalValue::Time(t) => Ok(ciborium::Value::Text(format_time_rfc3339_nano(t))),
+        NormalValue::Json(v) => json_to_cbor_value(v),
+        NormalValue::IntArray(arr) => Ok(ciborium::Value::Array(
+            arr.iter()
+                .map(|i| ciborium::Value::Integer((*i).into()))
+                .collect(),
+        )),
+        NormalValue::StringArray(arr) => Ok(ciborium::Value::Array(
+            arr.iter()
+                .map(|s| ciborium::Value::Text(s.clone()))
+                .collect(),
+        )),
+        NormalValue::BoolArray(arr) => Ok(ciborium::Value::Array(
+            arr.iter().map(|b| ciborium::Value::Bool(*b)).collect(),
+        )),
+        NormalValue::Float64Array(arr) => Ok(ciborium::Value::Array(
+            arr.iter().map(|f| ciborium::Value::Float(*f)).collect(),
+        )),
+        NormalValue::Float32Array(arr) => Ok(ciborium::Value::Array(
+            arr.iter()
+                .map(|f| ciborium::Value::Float(*f as f64))
+                .collect(),
+        )),
+        NormalValue::JsonArray(arr) => {
+            let cbor_values: Result<Vec<ciborium::Value>> =
+                arr.iter().map(json_to_cbor_value).collect();
+            Ok(ciborium::Value::Array(cbor_values?))
+        }
+        // Nillable variants - encode as value or null
+        NormalValue::NillableBool(opt) => Ok(opt
+            .map(ciborium::Value::Bool)
+            .unwrap_or(ciborium::Value::Null)),
+        NormalValue::NillableInt(opt) => Ok(opt
+            .map(|i| ciborium::Value::Integer(i.into()))
+            .unwrap_or(ciborium::Value::Null)),
+        NormalValue::NillableFloat64(opt) => Ok(opt
+            .map(ciborium::Value::Float)
+            .unwrap_or(ciborium::Value::Null)),
+        NormalValue::NillableFloat32(opt) => Ok(opt
+            .map(|f| ciborium::Value::Float(f as f64))
+            .unwrap_or(ciborium::Value::Null)),
+        NormalValue::NillableString(opt) => Ok(opt
+            .as_ref()
+            .map(|s| ciborium::Value::Text(s.clone()))
+            .unwrap_or(ciborium::Value::Null)),
+        NormalValue::NillableBytes(opt) => Ok(opt
+            .as_ref()
+            .map(|b| ciborium::Value::Bytes(b.clone()))
+            .unwrap_or(ciborium::Value::Null)),
+        NormalValue::NillableTime(opt) => Ok(opt
+            .map(|t| ciborium::Value::Text(format_time_rfc3339_nano(&t)))
+            .unwrap_or(ciborium::Value::Null)),
+        // Document value - propagate errors instead of silently converting to null
+        NormalValue::Document(doc) => {
+            let bytes = doc.to_cbor()?;
+            ciborium::from_reader(&bytes[..])
+                .map_err(|e| Error::CborDecode(format!("nested document: {}", e)))
+        }
+        NormalValue::NillableDocument(opt) => match opt {
+            Some(doc) => {
+                let bytes = doc.to_cbor()?;
+                ciborium::from_reader(&bytes[..])
+                    .map_err(|e| Error::CborDecode(format!("nested document: {}", e)))
+            }
+            None => Ok(ciborium::Value::Null),
+        },
+        // Additional array types
+        NormalValue::BytesArray(arr) => Ok(ciborium::Value::Array(
+            arr.iter()
+                .map(|b| ciborium::Value::Bytes(b.clone()))
+                .collect(),
+        )),
+        NormalValue::TimeArray(arr) => Ok(ciborium::Value::Array(
+            arr.iter()
+                .map(|t| ciborium::Value::Text(format_time_rfc3339_nano(t)))
+                .collect(),
+        )),
+        NormalValue::DocumentArray(arr) => {
+            let mut result = Vec::with_capacity(arr.len());
+            for doc in arr {
+                let bytes = doc.to_cbor()?;
+                let cbor_val: ciborium::Value = ciborium::from_reader(&bytes[..])
+                    .map_err(|e| Error::CborDecode(format!("document array element: {}", e)))?;
+                result.push(cbor_val);
+            }
+            Ok(ciborium::Value::Array(result))
+        }
+        // Nillable array types
+        NormalValue::NillableBoolArray(opt) => Ok(opt
+            .as_ref()
+            .map(|arr| {
+                ciborium::Value::Array(arr.iter().map(|b| ciborium::Value::Bool(*b)).collect())
+            })
+            .unwrap_or(ciborium::Value::Null)),
+        NormalValue::NillableIntArray(opt) => Ok(opt
+            .as_ref()
+            .map(|arr| {
+                ciborium::Value::Array(
+                    arr.iter()
+                        .map(|i| ciborium::Value::Integer((*i).into()))
+                        .collect(),
+                )
+            })
+            .unwrap_or(ciborium::Value::Null)),
+        NormalValue::NillableFloat64Array(opt) => Ok(opt
+            .as_ref()
+            .map(|arr| {
+                ciborium::Value::Array(arr.iter().map(|f| ciborium::Value::Float(*f)).collect())
+            })
+            .unwrap_or(ciborium::Value::Null)),
+        NormalValue::NillableFloat32Array(opt) => Ok(opt
+            .as_ref()
+            .map(|arr| {
+                ciborium::Value::Array(
+                    arr.iter()
+                        .map(|f| ciborium::Value::Float(*f as f64))
+                        .collect(),
+                )
+            })
+            .unwrap_or(ciborium::Value::Null)),
+        NormalValue::NillableStringArray(opt) => Ok(opt
+            .as_ref()
+            .map(|arr: &Vec<String>| {
+                ciborium::Value::Array(
+                    arr.iter()
+                        .map(|s| ciborium::Value::Text(s.clone()))
+                        .collect(),
+                )
+            })
+            .unwrap_or(ciborium::Value::Null)),
+        NormalValue::NillableBytesArray(opt) => Ok(opt
+            .as_ref()
+            .map(|arr| {
+                ciborium::Value::Array(
+                    arr.iter()
+                        .map(|b| ciborium::Value::Bytes(b.clone()))
+                        .collect(),
+                )
+            })
+            .unwrap_or(ciborium::Value::Null)),
+        NormalValue::NillableTimeArray(opt) => Ok(opt
+            .as_ref()
+            .map(|arr| {
+                ciborium::Value::Array(
+                    arr.iter()
+                        .map(|t| ciborium::Value::Text(format_time_rfc3339_nano(t)))
+                        .collect(),
+                )
+            })
+            .unwrap_or(ciborium::Value::Null)),
+        // Arrays with nillable elements
+        NormalValue::NillableBoolElementArray(arr) => Ok(ciborium::Value::Array(
+            arr.iter()
+                .map(|opt| {
+                    opt.map(ciborium::Value::Bool)
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        )),
+        NormalValue::NillableIntElementArray(arr) => Ok(ciborium::Value::Array(
+            arr.iter()
+                .map(|opt| {
+                    opt.map(|i| ciborium::Value::Integer(i.into()))
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        )),
+        NormalValue::NillableFloat64ElementArray(arr) => Ok(ciborium::Value::Array(
+            arr.iter()
+                .map(|opt| {
+                    opt.map(ciborium::Value::Float)
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        )),
+        NormalValue::NillableFloat32ElementArray(arr) => Ok(ciborium::Value::Array(
+            arr.iter()
+                .map(|opt| {
+                    opt.map(|f| ciborium::Value::Float(f as f64))
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        )),
+        NormalValue::NillableStringElementArray(arr) => Ok(ciborium::Value::Array(
+            arr.iter()
+                .map(|opt| {
+                    opt.as_ref()
+                        .map(|s| ciborium::Value::Text(s.clone()))
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        )),
+        NormalValue::NillableBytesElementArray(arr) => Ok(ciborium::Value::Array(
+            arr.iter()
+                .map(|opt| {
+                    opt.as_ref()
+                        .map(|b| ciborium::Value::Bytes(b.clone()))
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        )),
+        NormalValue::NillableTimeElementArray(arr) => Ok(ciborium::Value::Array(
+            arr.iter()
+                .map(|opt: &Option<chrono::DateTime<chrono::FixedOffset>>| {
+                    opt.map(|t| ciborium::Value::Text(format_time_rfc3339_nano(&t)))
+                        .unwrap_or(ciborium::Value::Null)
+                })
+                .collect(),
+        )),
+        NormalValue::NillableDocumentElementArray(arr) => {
+            let mut result = Vec::with_capacity(arr.len());
+            for opt in arr {
+                let cbor_val = match opt {
+                    Some(doc) => {
+                        let bytes = doc.to_cbor()?;
+                        ciborium::from_reader(&bytes[..]).map_err(|e| {
+                            Error::CborDecode(format!("document array element: {}", e))
+                        })?
+                    }
+                    None => ciborium::Value::Null,
+                };
+                result.push(cbor_val);
+            }
+            Ok(ciborium::Value::Array(result))
+        }
+        NormalValue::NillableDocumentArray(opt) => match opt {
+            Some(arr) => {
+                let mut result = Vec::with_capacity(arr.len());
+                for doc in arr {
+                    let bytes = doc.to_cbor()?;
+                    let cbor_val: ciborium::Value = ciborium::from_reader(&bytes[..])
+                        .map_err(|e| Error::CborDecode(format!("document array element: {}", e)))?;
+                    result.push(cbor_val);
+                }
+                Ok(ciborium::Value::Array(result))
+            }
+            None => Ok(ciborium::Value::Null),
+        },
+        // JsonLeaf is an internal type for index key generation, not for CBOR encoding
+        NormalValue::JsonLeaf(_) => Err(Error::CborEncode(
+            "JsonLeaf is an internal indexing type and cannot be encoded to CBOR".to_string(),
+        )),
+    }
+}
+
+/// Convert a JSON value to a ciborium::Value.
+pub(crate) fn json_to_cbor_value(value: &serde_json::Value) -> Result<ciborium::Value> {
+    match value {
+        serde_json::Value::Null => Ok(ciborium::Value::Null),
+        serde_json::Value::Bool(b) => Ok(ciborium::Value::Bool(*b)),
+        serde_json::Value::Number(n) => {
+            // Go's JSON type stores ALL numbers as float64 (via GetFloat64()).
+            // CBOR canonical encoding with ShortestFloat16 then encodes them
+            // as the smallest float representation. We must match this to
+            // produce identical CBOR bytes and thus identical docIDs.
+            let f = n
+                .as_f64()
+                .ok_or_else(|| Error::JsonNumberOutOfRange(n.to_string()))?;
+            Ok(ciborium::Value::Float(f))
+        }
+        serde_json::Value::String(s) => Ok(ciborium::Value::Text(s.clone())),
+        serde_json::Value::Array(arr) => {
+            let mut result = Vec::with_capacity(arr.len());
+            for v in arr {
+                result.push(json_to_cbor_value(v)?);
+            }
+            Ok(ciborium::Value::Array(result))
+        }
+        serde_json::Value::Object(obj) => {
+            // Sort keys using canonical CBOR ordering for Go compatibility
+            let mut keys: Vec<&String> = obj.keys().collect();
+            keys.sort_by(|a, b| {
+                crate::encoding::canonical_cbor_key_order(&a.as_str(), &b.as_str())
+            });
+
+            let mut entries = Vec::with_capacity(obj.len());
+            for k in keys {
+                let v = obj.get(k).unwrap();
+                entries.push((ciborium::Value::Text(k.clone()), json_to_cbor_value(v)?));
+            }
+            Ok(ciborium::Value::Map(entries))
+        }
+    }
+}
+
+/// Convert a ciborium::Value to a NormalValue.
+///
+/// This is used for decoding CBOR bytes back into document values.
+pub fn cbor_to_normal_value(value: ciborium::Value) -> Result<NormalValue> {
+    match value {
+        ciborium::Value::Null => Ok(NormalValue::Null),
+        ciborium::Value::Bool(b) => Ok(NormalValue::Bool(b)),
+        ciborium::Value::Integer(i) => {
+            let val: i128 = i.into();
+            if val >= i64::MIN as i128 && val <= i64::MAX as i128 {
+                Ok(NormalValue::Int(val as i64))
+            } else {
+                Err(Error::CborDecode(format!(
+                    "integer out of i64 range: {}",
+                    val
+                )))
+            }
+        }
+        ciborium::Value::Float(f) => Ok(NormalValue::Float64(f)),
+        ciborium::Value::Text(s) => Ok(NormalValue::String(s)),
+        ciborium::Value::Bytes(b) => Ok(NormalValue::Bytes(b)),
+        ciborium::Value::Array(arr) => {
+            if arr.is_empty() {
+                return Ok(NormalValue::JsonArray(vec![]));
+            }
+            // Try to infer array type from first element
+            match &arr[0] {
+                ciborium::Value::Bool(_) => {
+                    let mut bools = Vec::with_capacity(arr.len());
+                    let mut has_null = false;
+                    for v in &arr {
+                        match v {
+                            ciborium::Value::Bool(b) => bools.push(Some(*b)),
+                            ciborium::Value::Null => {
+                                has_null = true;
+                                bools.push(None);
+                            }
+                            _ => {
+                                return cbor_array_to_json_array(arr.into_iter());
+                            }
+                        }
+                    }
+                    if has_null {
+                        Ok(NormalValue::NillableBoolElementArray(bools))
+                    } else {
+                        Ok(NormalValue::BoolArray(
+                            bools
+                                .into_iter()
+                                .map(|opt| {
+                                    opt.ok_or_else(|| {
+                                        Error::CborDecode("unexpected null in typed array".into())
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?,
+                        ))
+                    }
+                }
+                ciborium::Value::Integer(_) => {
+                    let mut ints = Vec::with_capacity(arr.len());
+                    let mut has_null = false;
+                    for v in &arr {
+                        match v {
+                            ciborium::Value::Integer(i) => {
+                                let val: i128 = (*i).into();
+                                if val >= i64::MIN as i128 && val <= i64::MAX as i128 {
+                                    ints.push(Some(val as i64));
+                                } else {
+                                    return Err(Error::CborDecode(format!(
+                                        "integer out of i64 range: {}",
+                                        val
+                                    )));
+                                }
+                            }
+                            ciborium::Value::Null => {
+                                has_null = true;
+                                ints.push(None);
+                            }
+                            _ => {
+                                return cbor_array_to_json_array(arr.into_iter());
+                            }
+                        }
+                    }
+                    if has_null {
+                        Ok(NormalValue::NillableIntElementArray(ints))
+                    } else {
+                        Ok(NormalValue::IntArray(
+                            ints.into_iter()
+                                .map(|opt| {
+                                    opt.ok_or_else(|| {
+                                        Error::CborDecode("unexpected null in typed array".into())
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?,
+                        ))
+                    }
+                }
+                ciborium::Value::Float(_) => {
+                    let mut floats = Vec::with_capacity(arr.len());
+                    let mut has_null = false;
+                    for v in &arr {
+                        match v {
+                            ciborium::Value::Float(f) => floats.push(Some(*f)),
+                            ciborium::Value::Null => {
+                                has_null = true;
+                                floats.push(None);
+                            }
+                            _ => {
+                                return cbor_array_to_json_array(arr.into_iter());
+                            }
+                        }
+                    }
+                    if has_null {
+                        Ok(NormalValue::NillableFloat64ElementArray(floats))
+                    } else {
+                        Ok(NormalValue::Float64Array(
+                            floats
+                                .into_iter()
+                                .map(|opt| {
+                                    opt.ok_or_else(|| {
+                                        Error::CborDecode("unexpected null in typed array".into())
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?,
+                        ))
+                    }
+                }
+                ciborium::Value::Text(_) => {
+                    let mut strings: Vec<Option<String>> = Vec::with_capacity(arr.len());
+                    let mut has_null = false;
+                    for v in &arr {
+                        match v {
+                            ciborium::Value::Text(s) => strings.push(Some(s.clone())),
+                            ciborium::Value::Null => {
+                                has_null = true;
+                                strings.push(None);
+                            }
+                            _ => {
+                                return cbor_array_to_json_array(arr.into_iter());
+                            }
+                        }
+                    }
+                    if has_null {
+                        Ok(NormalValue::NillableStringElementArray(strings))
+                    } else {
+                        Ok(NormalValue::StringArray(
+                            strings
+                                .into_iter()
+                                .map(|opt| {
+                                    opt.ok_or_else(|| {
+                                        Error::CborDecode("unexpected null in typed array".into())
+                                    })
+                                })
+                                .collect::<Result<Vec<_>>>()?,
+                        ))
+                    }
+                }
+                _ => {
+                    // Complex array - convert to JSON array
+                    let mut json_arr = Vec::with_capacity(arr.len());
+                    for v in arr {
+                        json_arr.push(cbor_value_to_json(&v)?);
+                    }
+                    Ok(NormalValue::JsonArray(json_arr))
+                }
+            }
+        }
+        ciborium::Value::Map(map) => {
+            // Convert map to JSON object
+            let mut json_obj = serde_json::Map::new();
+            for (k, v) in map {
+                let key = match k {
+                    ciborium::Value::Text(s) => s,
+                    _ => return Err(Error::CborDecode("map key must be text".into())),
+                };
+                json_obj.insert(key, cbor_value_to_json(&v)?);
+            }
+            Ok(NormalValue::Json(serde_json::Value::Object(json_obj)))
+        }
+        ciborium::Value::Tag(_, _) => Err(Error::CborDecode("CBOR tags not supported".into())),
+        _ => Err(Error::CborDecode("unsupported CBOR value type".into())),
+    }
+}
+
+/// Helper to convert CBOR array to JSON array when types are mixed.
+fn cbor_array_to_json_array<I: Iterator<Item = ciborium::Value>>(iter: I) -> Result<NormalValue> {
+    let mut json_arr = Vec::new();
+    for v in iter {
+        json_arr.push(cbor_value_to_json(&v)?);
+    }
+    Ok(NormalValue::JsonArray(json_arr))
+}
+
+/// Convert a ciborium::Value to a serde_json::Value.
+fn cbor_value_to_json(value: &ciborium::Value) -> Result<serde_json::Value> {
+    match value {
+        ciborium::Value::Null => Ok(serde_json::Value::Null),
+        ciborium::Value::Bool(b) => Ok(serde_json::Value::Bool(*b)),
+        ciborium::Value::Integer(i) => {
+            let val: i128 = (*i).into();
+            if val >= i64::MIN as i128 && val <= i64::MAX as i128 {
+                Ok(serde_json::json!(val as i64))
+            } else {
+                Err(Error::CborDecode(format!(
+                    "integer out of i64 range: {}",
+                    val
+                )))
+            }
+        }
+        ciborium::Value::Float(f) => {
+            if f.is_finite() {
+                // Match Go's json.Marshal behavior: whole-number floats serialize as integers
+                // e.g., 1.0 becomes "1", not "1.0"
+                if f.fract() == 0.0 && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
+                    Ok(serde_json::json!(*f as i64))
+                } else {
+                    Ok(serde_json::json!(f))
+                }
+            } else {
+                // NaN/Infinity can't be represented in JSON
+                Err(Error::NonFiniteFloat(format!("{}", f)))
+            }
+        }
+        ciborium::Value::Text(s) => Ok(serde_json::Value::String(s.clone())),
+        ciborium::Value::Bytes(b) => Ok(serde_json::Value::String(base64_encode(b))),
+        ciborium::Value::Array(arr) => {
+            let mut json_arr = Vec::with_capacity(arr.len());
+            for v in arr {
+                json_arr.push(cbor_value_to_json(v)?);
+            }
+            Ok(serde_json::Value::Array(json_arr))
+        }
+        ciborium::Value::Map(map) => {
+            let mut json_obj = serde_json::Map::new();
+            for (k, v) in map {
+                let key = match k {
+                    ciborium::Value::Text(s) => s.clone(),
+                    _ => return Err(Error::CborDecode("map key must be text".into())),
+                };
+                json_obj.insert(key, cbor_value_to_json(v)?);
+            }
+            Ok(serde_json::Value::Object(json_obj))
+        }
+        _ => Err(Error::CborDecode(
+            "unsupported CBOR value type for JSON conversion".into(),
+        )),
+    }
+}

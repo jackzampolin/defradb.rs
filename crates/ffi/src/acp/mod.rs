@@ -6,6 +6,7 @@
 
 mod dac;
 mod identity;
+mod identity_ops;
 mod nac;
 
 pub use dac::{

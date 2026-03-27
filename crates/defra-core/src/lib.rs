@@ -5,6 +5,8 @@
 
 pub mod batch_signing;
 pub mod block;
+pub mod block_delta;
+pub mod block_signature;
 pub mod collection;
 pub mod dac_bypass;
 pub mod document;

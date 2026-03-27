@@ -17,6 +17,10 @@ use sha2::{Digest, Sha256};
 use super::abi::{IAcp, ACP_ADDRESS};
 use super::bearer;
 use super::client::{ClientError, HubRsClient};
+use super::provider_commands::{
+    encode_archive_object_cmd, encode_delete_relationship_cmd, encode_register_object_cmd,
+    encode_set_relationship_cmd, resolve_registered_or_passthrough_bearer_token,
+};
 use super::signer::EvmSigner;
 
 pub struct HubRsProvider {
@@ -249,84 +253,6 @@ async fn run_light_client_observer(
         previous_root = Some(sync.module_state_root);
         next_height = sync.height.saturating_add(1);
     }
-}
-
-fn subject_to_cmd_json(subject: &SubjectRef) -> serde_json::Value {
-    match subject {
-        SubjectRef::Actor(did) => serde_json::json!({ "actor": { "id": did } }),
-        SubjectRef::AllActors => serde_json::json!({ "all_actors": {} }),
-    }
-}
-
-fn encode_register_object_cmd(resource: &str, object_id: &str) -> Vec<u8> {
-    // Matches hub.rs PolicyCmd::RegisterObject(Object { resource, id })
-    serde_json::to_vec(&serde_json::json!({
-        "RegisterObject": { "resource": resource, "id": object_id }
-    }))
-    .unwrap_or_default()
-}
-
-fn encode_archive_object_cmd(resource: &str, object_id: &str) -> Vec<u8> {
-    // Matches hub.rs PolicyCmd::ArchiveObject(Object { resource, id })
-    serde_json::to_vec(&serde_json::json!({
-        "ArchiveObject": { "resource": resource, "id": object_id }
-    }))
-    .unwrap_or_default()
-}
-
-fn encode_set_relationship_cmd(
-    resource: &str,
-    object_id: &str,
-    relation: &str,
-    subject: &SubjectRef,
-) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({
-        "set_relationship_cmd": {
-            "relationship": {
-                "object": { "resource": resource, "id": object_id },
-                "relation": relation,
-                "subject": subject_to_cmd_json(subject),
-            }
-        }
-    }))
-    .unwrap_or_default()
-}
-
-fn encode_delete_relationship_cmd(
-    resource: &str,
-    object_id: &str,
-    relation: &str,
-    subject: &SubjectRef,
-) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({
-        "delete_relationship_cmd": {
-            "relationship": {
-                "object": { "resource": resource, "id": object_id },
-                "relation": relation,
-                "subject": subject_to_cmd_json(subject),
-            }
-        }
-    }))
-    .unwrap_or_default()
-}
-
-fn resolve_registered_or_passthrough_bearer_token(
-    did: &str,
-) -> Result<Option<String>, ProviderError> {
-    if let Some(signing_config) = defra_core::signing::get_identity(did) {
-        if signing_config.has_local_private_key() && signing_config.key_type == "secp256k1" {
-            let key = SigningKey::from_slice(&signing_config.private_key_bytes)
-                .map_err(|e| ProviderError::Config(format!("invalid signing key: {}", e)))?;
-
-            return bearer::create_bearer_token(&key, did, 300)
-                .map(Some)
-                .map_err(|e| {
-                    ProviderError::Config(format!("bearer token creation failed: {}", e))
-                });
-        }
-    }
-
-    Ok(defra_core::signing::get_request_bearer_token(did))
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

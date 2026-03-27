@@ -11,6 +11,8 @@ mod pipeline;
 mod store;
 #[cfg(feature = "wasmtime-runtime")]
 mod wasm;
+#[cfg(feature = "wasmtime-runtime")]
+mod wasm_runtime;
 
 pub use config::{LensConfig, LensModule};
 pub use doc::{LensDoc, DELETED_FIELD, DOC_ID_FIELD};

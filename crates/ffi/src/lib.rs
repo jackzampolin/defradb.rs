@@ -44,6 +44,7 @@ pub mod helpers;
 pub mod index;
 pub mod lens;
 pub mod mobile;
+pub mod mobile_config;
 pub mod nac_check;
 pub mod node;
 pub mod p2p;

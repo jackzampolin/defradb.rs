@@ -2,21 +2,19 @@
 //!
 //! Provides the runtime for executing Lens WASM modules.
 //! Resource limits (memory, CPU fuel, epoch interruption) are opt-in via
-//! `WasmSandboxConfig` — by default modules run without restrictions.
+//! `WasmSandboxConfig` -- by default modules run without restrictions.
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::Path;
-use wasmtime::{
-    AsContext, AsContextMut, Config, Engine, Linker, Module, Store as WasmStore, StoreLimits,
-    StoreLimitsBuilder, TypedFunc,
-};
+use wasmtime::{Config, Engine, Module, StoreLimits, StoreLimitsBuilder};
 
 use tracing::{info, warn};
 
 use crate::store::{LensDocResultStream, LensDocStream, TransformId, TransformStore};
+use crate::wasm_runtime::execute_batch_transform;
 use crate::{Error, LensConfig, LensDoc, LensModule, Result};
 
 /// Opt-in resource limits for WASM execution.
@@ -59,33 +57,6 @@ pub struct WasmTransformStore {
 struct CompiledModule {
     module: Module,
     arguments: Option<serde_json::Value>,
-}
-
-/// Host state for batch transforms that feed multiple docs via lens::next.
-struct BatchHostState {
-    input_docs: Vec<LensDoc>,
-    current_index: usize,
-    limits: Option<StoreLimits>,
-}
-
-impl BatchHostState {
-    fn new(docs: Vec<LensDoc>, limits: Option<StoreLimits>) -> Self {
-        Self {
-            input_docs: docs,
-            current_index: 0,
-            limits,
-        }
-    }
-
-    fn next_input(&mut self) -> Option<LensDoc> {
-        if self.current_index < self.input_docs.len() {
-            let doc = self.input_docs[self.current_index].clone();
-            self.current_index += 1;
-            Some(doc)
-        } else {
-            None
-        }
-    }
 }
 
 impl WasmTransformStore {
@@ -197,35 +168,23 @@ impl TransformStore for WasmTransformStore {
             "Adding transform to WASM store"
         );
 
-        // Compute content-based ID for deduplication (matches Go's IPLD CID approach)
-        // Hash only the lens modules, not the version IDs, so identical lens content
-        // produces the same ID regardless of which versions it's associated with.
         let lenses_json = serde_json::to_vec(&config.lenses)
             .map_err(|e| Error::Pipeline(format!("failed to serialize lenses: {}", e)))?;
         let mut hasher = Sha256::new();
         hasher.update(&lenses_json);
         let hash = hasher.finalize();
-        // Use "baf" prefix to mimic CID format, then 16 bytes of hash for uniqueness
         let id = TransformId::new(format!("baf{}", hex::encode(&hash[..16])));
 
-        info!(
-            transform_id = %id,
-            "Computed transform ID"
-        );
+        info!(transform_id = %id, "Computed transform ID");
 
-        // Check if this transform already exists (deduplication)
         {
             let modules = self.modules.read();
             if modules.contains_key(&id) {
-                info!(
-                    transform_id = %id,
-                    "Transform already exists, returning existing ID"
-                );
+                info!(transform_id = %id, "Transform already exists, returning existing ID");
                 return Ok(id);
             }
         }
 
-        // Load and compile the WASM module
         let first_lens = config.lens().cloned().unwrap_or_default();
         info!(
             path = ?first_lens.path,
@@ -235,10 +194,7 @@ impl TransformStore for WasmTransformStore {
         );
 
         let module = self.load_module(&first_lens)?;
-        info!(
-            transform_id = %id,
-            "WASM module compiled successfully"
-        );
+        info!(transform_id = %id, "WASM module compiled successfully");
 
         let compiled = CompiledModule {
             module,
@@ -248,21 +204,14 @@ impl TransformStore for WasmTransformStore {
         self.modules.write().insert(id.clone(), compiled);
         self.configs.write().insert(id.clone(), config);
 
-        info!(
-            transform_id = %id,
-            "Transform added to store"
-        );
+        info!(transform_id = %id, "Transform added to store");
 
         Ok(id)
     }
 
     async fn add_with_id(&self, id: TransformId, config: LensConfig) -> Result<()> {
-        info!(
-            transform_id = %id,
-            "Adding transform to WASM store with explicit ID"
-        );
+        info!(transform_id = %id, "Adding transform to WASM store with explicit ID");
 
-        // Check if this transform already exists
         {
             let modules = self.modules.read();
             if modules.contains_key(&id) {
@@ -296,10 +245,7 @@ impl TransformStore for WasmTransformStore {
     }
 
     fn transform(&self, id: &TransformId, docs: LensDocStream) -> Result<LensDocResultStream> {
-        info!(
-            transform_id = %id,
-            "WasmTransformStore::transform called"
-        );
+        info!(transform_id = %id, "WasmTransformStore::transform called");
 
         let modules = self.modules.read();
         let compiled = modules.get(id).ok_or_else(|| {
@@ -323,15 +269,9 @@ impl TransformStore for WasmTransformStore {
         let engine = self.engine.clone();
         let limits = self.store_limits();
         let sandbox = self.sandbox.clone();
-        let transform_id_str = id.to_string();
 
-        info!(
-            transform_id = %transform_id_str,
-            "Executing forward WASM transform (batch mode)"
-        );
+        info!(transform_id = %id, "Executing forward WASM transform (batch mode)");
 
-        // Batch mode: collect all inputs, run in a single WASM instance, yield all outputs.
-        // This supports transforms that aggregate (N→1) or multiply (1→N) documents.
         enum Phase {
             Collecting {
                 engine: Engine,
@@ -424,7 +364,6 @@ impl TransformStore for WasmTransformStore {
         let limits = self.store_limits();
         let sandbox = self.sandbox.clone();
 
-        // Batch mode for inverse transforms (same as forward)
         enum Phase {
             Collecting {
                 engine: Engine,
@@ -515,257 +454,6 @@ impl TransformStore for WasmTransformStore {
         self.configs.write().remove(id);
         Ok(())
     }
-}
-
-/// Execute a batch transform: all input docs are fed to a single WASM instance,
-/// and all outputs are collected by calling transform/inverse repeatedly until EOS.
-///
-/// This supports transforms that change document counts (aggregate N→1, multiply 1→N).
-///
-/// When sandbox config is provided, resource limits (memory, fuel, epoch) are applied.
-fn execute_batch_transform(
-    engine: &Engine,
-    module: &Module,
-    input_docs: Vec<LensDoc>,
-    arguments: Option<serde_json::Value>,
-    inverse: bool,
-    limits: Option<StoreLimits>,
-    sandbox: &Option<WasmSandboxConfig>,
-) -> Result<Vec<LensDoc>> {
-    let mut store = WasmStore::new(engine, BatchHostState::new(input_docs, limits));
-
-    // Apply opt-in resource limits
-    if store.data().limits.is_some() {
-        store.limiter(|state| state.limits.as_mut().unwrap());
-    }
-    if let Some(ref sb) = sandbox {
-        if let Some(fuel) = sb.fuel_budget {
-            store
-                .set_fuel(fuel)
-                .map_err(|e| Error::WasmExecution(format!("failed to set fuel: {}", e)))?;
-        }
-        if let Some(ticks) = sb.epoch_deadline_ticks {
-            store.set_epoch_deadline(ticks);
-        }
-    }
-
-    let mut linker: Linker<BatchHostState> = Linker::new(engine);
-
-    // Add lens::next import that returns docs from the queue one at a time
-    linker
-        .func_wrap(
-            "lens",
-            "next",
-            |mut caller: wasmtime::Caller<'_, BatchHostState>| -> i32 {
-                let memory = match caller.get_export("memory") {
-                    Some(wasmtime::Extern::Memory(mem)) => mem,
-                    _ => return 0,
-                };
-
-                let alloc = match caller.get_export("alloc") {
-                    Some(wasmtime::Extern::Func(f)) => f,
-                    _ => return 0,
-                };
-
-                let doc = match caller.data_mut().next_input() {
-                    Some(d) => d,
-                    None => {
-                        // No more input docs — write an EOS marker (type_id=127)
-                        // to WASM memory so the module knows the stream ended.
-                        // Go's writeEOS does exactly this.
-                        let offset = match alloc.typed::<i32, i32>(&caller) {
-                            Ok(typed_alloc) => match typed_alloc.call(&mut caller, 1) {
-                                Ok(o) => o,
-                                Err(_) => return 0,
-                            },
-                            Err(_) => return 0,
-                        };
-                        if memory
-                            .write(&mut caller, offset as usize, &[127u8])
-                            .is_err()
-                        {
-                            return 0;
-                        }
-                        return offset;
-                    }
-                };
-
-                let json = match serde_json::to_vec(&doc) {
-                    Ok(j) => j,
-                    Err(_) => return 0,
-                };
-
-                // Format: [type_id: i8][len: u32 LE][data: bytes]
-                let header_size = 5i32;
-                let total_size = header_size + json.len() as i32;
-
-                let offset = match alloc.typed::<i32, i32>(&caller) {
-                    Ok(typed_alloc) => match typed_alloc.call(&mut caller, total_size) {
-                        Ok(o) => o,
-                        Err(_) => return 0,
-                    },
-                    Err(_) => return 0,
-                };
-
-                // Write type_id (1 = JSON)
-                if memory.write(&mut caller, offset as usize, &[1u8]).is_err() {
-                    return 0;
-                }
-
-                // Write length as u32 LE
-                let len_bytes = (json.len() as u32).to_le_bytes();
-                if memory
-                    .write(&mut caller, (offset + 1) as usize, &len_bytes)
-                    .is_err()
-                {
-                    return 0;
-                }
-
-                // Write JSON data
-                if memory
-                    .write(&mut caller, (offset + header_size) as usize, &json)
-                    .is_err()
-                {
-                    return 0;
-                }
-
-                offset
-            },
-        )
-        .map_err(|e| Error::WasmExecution(format!("failed to define lens::next: {}", e)))?;
-
-    let instance = linker
-        .instantiate(&mut store, module)
-        .map_err(|e| Error::WasmExecution(format!("failed to instantiate: {}", e)))?;
-
-    let memory = instance
-        .get_memory(store.as_context_mut(), "memory")
-        .ok_or_else(|| Error::WasmExecution("no memory export".to_string()))?;
-
-    // Set parameters if provided
-    if let Some(params) = arguments {
-        let alloc_fn: Option<TypedFunc<i32, i32>> = instance
-            .get_typed_func(store.as_context_mut(), "alloc")
-            .ok();
-        let set_param_fn: Option<TypedFunc<i32, i32>> = instance
-            .get_typed_func(store.as_context_mut(), "set_param")
-            .ok();
-
-        if let (Some(alloc), Some(set_param)) = (alloc_fn, set_param_fn) {
-            let param_json = serde_json::to_vec(&params)
-                .map_err(|e| Error::WasmExecution(format!("failed to serialize params: {}", e)))?;
-
-            let total_size = 5 + param_json.len() as i32;
-            let offset = alloc
-                .call(store.as_context_mut(), total_size)
-                .map_err(|e| Error::WasmExecution(format!("alloc for params failed: {}", e)))?;
-
-            memory
-                .write(store.as_context_mut(), offset as usize, &[1u8])
-                .map_err(|e| Error::WasmExecution(format!("write type_id failed: {}", e)))?;
-
-            let len_bytes = (param_json.len() as u32).to_le_bytes();
-            memory
-                .write(store.as_context_mut(), (offset + 1) as usize, &len_bytes)
-                .map_err(|e| Error::WasmExecution(format!("write len failed: {}", e)))?;
-
-            memory
-                .write(store.as_context_mut(), (offset + 5) as usize, &param_json)
-                .map_err(|e| Error::WasmExecution(format!("write data failed: {}", e)))?;
-
-            let _ = set_param
-                .call(store.as_context_mut(), offset)
-                .map_err(|e| Error::WasmExecution(format!("set_param failed: {}", e)))?;
-        }
-    }
-
-    // Get the transform/inverse function
-    let func_name = if inverse { "inverse" } else { "transform" };
-    let transform_fn: TypedFunc<(), i32> = instance
-        .get_typed_func(store.as_context_mut(), func_name)
-        .map_err(|e| Error::WasmExecution(format!("{} func not found: {}", func_name, e)))?;
-
-    // Call transform repeatedly until EOS to collect all output docs
-    let mut output_docs = Vec::new();
-    loop {
-        let result_offset = transform_fn
-            .call(store.as_context_mut(), ())
-            .map_err(|e| Error::WasmExecution(format!("{} call failed: {}", func_name, e)))?;
-
-        if result_offset == 0 {
-            break;
-        }
-
-        let mut type_id_buf = [0u8; 1];
-        memory
-            .read(store.as_context(), result_offset as usize, &mut type_id_buf)
-            .map_err(|e| Error::WasmExecution(format!("read type_id failed: {}", e)))?;
-
-        let type_id = type_id_buf[0] as i8;
-
-        if type_id == 127 {
-            // EOS - no more output documents
-            break;
-        }
-
-        if type_id < 0 {
-            // Error from WASM
-            let mut len_buf = [0u8; 4];
-            memory
-                .read(
-                    store.as_context(),
-                    (result_offset + 1) as usize,
-                    &mut len_buf,
-                )
-                .map_err(|e| Error::WasmExecution(format!("read error len failed: {}", e)))?;
-            let len = u32::from_le_bytes(len_buf) as usize;
-
-            let mut error_bytes = vec![0u8; len];
-            memory
-                .read(
-                    store.as_context(),
-                    (result_offset + 5) as usize,
-                    &mut error_bytes,
-                )
-                .map_err(|e| Error::WasmExecution(format!("read error failed: {}", e)))?;
-
-            let error_str = String::from_utf8_lossy(&error_bytes);
-            return Err(Error::WasmExecution(format!("WASM error: {}", error_str)));
-        }
-
-        if type_id != 1 {
-            return Err(Error::WasmExecution(format!(
-                "unexpected type_id: {}",
-                type_id
-            )));
-        }
-
-        // Read JSON document
-        let mut len_buf = [0u8; 4];
-        memory
-            .read(
-                store.as_context(),
-                (result_offset + 1) as usize,
-                &mut len_buf,
-            )
-            .map_err(|e| Error::WasmExecution(format!("read len failed: {}", e)))?;
-        let len = u32::from_le_bytes(len_buf) as usize;
-
-        let mut result_bytes = vec![0u8; len];
-        memory
-            .read(
-                store.as_context(),
-                (result_offset + 5) as usize,
-                &mut result_bytes,
-            )
-            .map_err(|e| Error::WasmExecution(format!("read data failed: {}", e)))?;
-
-        let doc: LensDoc = serde_json::from_slice(&result_bytes)
-            .map_err(|e| Error::WasmExecution(e.to_string()))?;
-        output_docs.push(doc);
-    }
-
-    Ok(output_docs)
 }
 
 #[cfg(test)]

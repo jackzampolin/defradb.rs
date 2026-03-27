@@ -7,6 +7,10 @@ use std::ptr;
 use acp::nac::NodePermission;
 
 use crate::helpers::get_rt;
+use crate::mobile_config::{
+    c_string_ptr, decode_hex_field, ffi_result_error, maybe_cstring, MobileExecuteRequest,
+    MobileNodeConfig, MobileSyncRequest,
+};
 use crate::nac_check::check_nac_for_node;
 use crate::node::{new_node, node_close};
 use crate::p2p::{
@@ -18,124 +22,6 @@ use crate::schema::validate_collection_policy;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, defra_free_string, FfiResult, NewNodeResult, NodeInitOptions};
 use crate::{ffi_async, ffi_entry, try_ffi, ERR_INVALID_NODE_HANDLE};
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MobileNodeConfig {
-    db_path: Option<String>,
-    in_memory: Option<bool>,
-    datastore_backend: Option<String>,
-    signing: Option<MobileSigningConfig>,
-    default_identity_did: Option<String>,
-    sourcehub: Option<MobileSourceHubConfig>,
-    p2p: Option<MobileP2pConfig>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MobileSigningConfig {
-    enable: Option<bool>,
-    key_type: Option<String>,
-    private_key_hex: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MobileSourceHubConfig {
-    grpc_address: String,
-    comet_rpc_address: String,
-    chain_id: String,
-    signer_key_hex: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MobileP2pConfig {
-    transport: Option<String>,
-    listen_address: Option<String>,
-    iroh: Option<MobileIrohConfig>,
-    max_concurrent_dag_fetches: Option<usize>,
-    max_concurrent_push_tasks: Option<usize>,
-    rate_limit_burst: Option<u32>,
-    rate_limit_rate: Option<f64>,
-}
-
-#[derive(Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MobileIrohConfig {
-    relay_mode: Option<String>,
-    relay_url: Option<String>,
-    relay_urls: Option<Vec<String>>,
-    bind_address: Option<String>,
-    bind_port: Option<u16>,
-    discovery: Option<bool>,
-    discovery_origin_domain: Option<String>,
-    pkarr_relay_url: Option<String>,
-    key_path: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MobileExecuteRequest {
-    identity_did: Option<String>,
-    query: String,
-    operation_name: Option<String>,
-    variables: Option<serde_json::Value>,
-    batch_session_id: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MobileSyncRequest {
-    identity_did: Option<String>,
-    collection_id: Option<String>,
-    collection_name: Option<String>,
-    doc_ids: Option<Vec<String>>,
-    version_ids: Option<Vec<String>>,
-}
-
-fn maybe_cstring(value: Option<&str>, field_name: &str) -> Result<Option<CString>, String> {
-    value
-        .map(|value| {
-            CString::new(value)
-                .map_err(|_| format!("{} contains an embedded null byte", field_name))
-        })
-        .transpose()
-}
-
-fn decode_hex_field(value: Option<&str>, field_name: &str) -> Result<Vec<u8>, String> {
-    match value {
-        Some(value) if !value.is_empty() => {
-            hex::decode(value).map_err(|error| format!("invalid {} hex: {}", field_name, error))
-        }
-        _ => Ok(Vec::new()),
-    }
-}
-
-fn c_string_ptr(value: &Option<CString>) -> *const c_char {
-    value.as_ref().map_or(ptr::null(), |value| value.as_ptr())
-}
-
-fn ffi_result_error(result: FfiResult) -> String {
-    let message = if result.error.is_null() {
-        "unknown FFI error".to_string()
-    } else {
-        unsafe { std::ffi::CStr::from_ptr(result.error) }
-            .to_string_lossy()
-            .into_owned()
-    };
-
-    unsafe {
-        if !result.error.is_null() {
-            defra_free_string(result.error);
-        }
-        if !result.value.is_null() {
-            defra_free_string(result.value);
-        }
-    }
-
-    message
-}
 
 fn default_identity_cstring(node_ptr: usize) -> Result<Option<CString>, String> {
     let Some(identity_did) = NODES.get(node_ptr, |state| state.node_identity_did.clone()) else {
