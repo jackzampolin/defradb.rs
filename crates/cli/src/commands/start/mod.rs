@@ -4,6 +4,10 @@ mod node;
 mod p2p;
 mod run;
 mod server;
+mod server_acp;
+mod server_http;
+mod server_p2p;
+mod server_query;
 
 use clap::Args;
 
