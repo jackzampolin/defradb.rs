@@ -13,6 +13,10 @@ mod addr;
 mod command;
 mod config;
 mod endpoint;
+mod endpoint_commands;
+mod endpoint_config;
+mod endpoint_rpc;
+mod endpoint_streams;
 mod peer_map;
 mod protocols;
 mod secret_key;
@@ -23,6 +27,6 @@ pub use addr::{
     parse_public_peer_addr,
 };
 pub use config::{IrohDiscoveryConfig, IrohRelayModeConfig};
-pub use endpoint::{spawn_endpoint, IrohEndpointConfig};
-pub use secret_key::load_or_generate_secret_key;
+pub use endpoint::spawn_endpoint;
+pub use endpoint_config::IrohEndpointConfig;
 pub use transport::IrohTransport;

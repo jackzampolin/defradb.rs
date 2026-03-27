@@ -165,7 +165,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             doc_id: doc_id.clone(),
             field_cids: vec![],
         };
-        let broadcast_status = super::broadcast_with_retry_with_creator(
+        let broadcast_status = super::broadcast::broadcast_with_retry_with_creator(
             sync,
             &block_result,
             &collection_id,
@@ -199,7 +199,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             )
             .await;
 
-            let collection_broadcast_status = super::broadcast_with_retry_with_creator(
+            let collection_broadcast_status = super::broadcast::broadcast_with_retry_with_creator(
                 sync,
                 &col_block_result,
                 &collection_id,

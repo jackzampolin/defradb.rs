@@ -8,11 +8,15 @@ mod collection;
 mod composite;
 mod counter;
 mod definition;
+pub(crate) mod error;
 pub(crate) mod hook;
 mod lww;
 mod queue;
 pub(crate) mod se_merge;
+mod signature;
 
+pub use error::MergeError;
+pub(crate) use error::{CounterMergeResult, LwwMergeResult};
 pub use queue::MergeQueue;
 
 use std::collections::{HashMap, HashSet};
@@ -40,7 +44,6 @@ use zeroize::Zeroizing;
 
 use crate::collection::collection_short_id;
 use crate::database::DB;
-use crate::error::Error;
 use crate::index_manager::IndexManager;
 use hook::CompositeMergeHook;
 
@@ -63,104 +66,21 @@ pub(crate) fn encode_priority_varint(priority: u64) -> Vec<u8> {
     buf
 }
 
-/// Error type for database merge operations.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum MergeError {
-    /// Failed to decode block from DAG-CBOR.
-    #[error("block decode failed: {0}")]
-    BlockDecode(String),
-
-    /// Unsupported CRDT delta type.
-    #[error("unsupported delta type: {0}")]
-    UnsupportedDelta(String),
-
-    /// Missing metadata during non-recovery operation.
-    #[error("missing metadata: {0}")]
-    MissingMetadata(String),
-
-    /// CRDT merge failed.
-    #[error("merge failed: {0}")]
-    MergeFailed(String),
-
-    /// Database error.
-    #[error("database error: {0}")]
-    Database(#[from] Error),
-
-    /// Storage error.
-    #[error("storage error: {0}")]
-    Storage(String),
-
-    /// Block signature verification failed — block MUST be rejected.
-    #[error("block signature verification failed for cid={cid}: {reason}")]
-    SignatureVerificationFailed { cid: Cid, reason: String },
-
-    /// DAG recursion depth limit exceeded.
-    ///
-    /// A maliciously crafted deeply-nested DAG could otherwise cause a stack overflow.
-    #[error("DAG merge depth limit exceeded at cid={cid} depth={depth}")]
-    DepthExceeded {
-        /// CID that triggered the depth check.
-        cid: Cid,
-        /// Depth at which the limit was hit.
-        depth: usize,
-    },
-}
-
-impl MergeError {
-    /// Construct a `DepthExceeded` error.
-    pub(crate) fn depth_exceeded(cid: &Cid, depth: usize) -> Self {
-        MergeError::DepthExceeded { cid: *cid, depth }
-    }
-
-    /// Check if this error is a transaction conflict that can be retried.
-    pub(crate) fn is_txn_conflict(&self) -> bool {
-        match self {
-            MergeError::Database(db_err) => match db_err {
-                crate::error::Error::Datastore(datastore::Error::Storage(storage_err)) => {
-                    storage_err.is_txn_conflict()
-                }
-                crate::error::Error::Storage(storage_err) => storage_err.is_txn_conflict(),
-                _ => false,
-            },
-            _ => false,
-        }
-    }
-}
-
-/// Result of processing an LWW delta, including whether it was applied
-/// and the value to use for document reconstruction.
-pub(crate) struct LwwMergeResult {
-    /// Whether the merge was applied (vs rejected/skipped)
-    pub(crate) applied: bool,
-    /// The winning value for document reconstruction (if applied, use incoming; else read from store)
-    pub(crate) value: Option<NormalValue>,
-}
-
-/// Result of processing a Counter delta, including whether it was applied
-/// and the accumulated value for document reconstruction.
-pub(crate) struct CounterMergeResult {
-    /// Whether the merge was applied (vs skipped due to nonce)
-    pub(crate) applied: bool,
-    /// The accumulated counter value after merge
-    pub(crate) value: Option<NormalValue>,
-}
-
 /// Database merge handler that processes incoming P2P blocks.
 ///
 /// This handler decodes IPLD blocks, extracts CRDT deltas, and applies
 /// them to the database using the appropriate CRDT type.
 pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// Reference to the database for creating transactions.
-    db: Arc<DB<S>>,
+    pub(crate) db: Arc<DB<S>>,
     /// Reference to the blockstore for loading linked blocks.
-    blockstore: Arc<B>,
+    pub(crate) blockstore: Arc<B>,
     /// Optional merge hook for policy-specific behavior around composite merges.
     composite_merge_hook: std::sync::OnceLock<Arc<dyn CompositeMergeHook>>,
     /// Tracks composite CIDs that have already been merged, preventing
     /// duplicate processing from concurrent dual-broadcast paths (doc topic
     /// + collection topic). Matches Go's `loadComposites` dedup guard.
-    merged_composites: std::sync::Mutex<HashSet<Cid>>,
+    pub(crate) merged_composites: std::sync::Mutex<HashSet<Cid>>,
     /// Optional SE encryption key for generating search artifacts on replicated documents.
     /// When set, the merge handler generates SE artifacts after merging documents
     /// that belong to collections with encrypted indexes.
@@ -169,7 +89,7 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     ///
     /// Ensures concurrent P2P merges for the same document are processed one
     /// at a time, preventing write-write races at the storage level.
-    merge_queue: Arc<MergeQueue>,
+    pub(crate) merge_queue: Arc<MergeQueue>,
 }
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
@@ -265,10 +185,14 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     /// First checks systemstore, then falls back to decoding the head block directly
     /// from blockstore (for the UnknownCollection case where the initial version
     /// hasn't been processed yet).
-    async fn resolve_previous_collection_version(
+    pub(super) async fn resolve_previous_collection_version(
         &self,
         block: &Block,
-    ) -> Result<Option<CollectionVersion>, MergeError> {
+    ) -> Result<Option<schema::CollectionVersion>, MergeError> {
+        use defra_core::block::CrdtDelta;
+        use storage::corekv::Key;
+        use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
+
         let heads = match &block.heads {
             Some(heads) if !heads.is_empty() => heads,
             _ => return Ok(None),
@@ -281,7 +205,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             let systemstore = txn.systemstore().map_err(MergeError::Database)?;
 
             if let Ok(Some(data)) = systemstore.get(&head_key.bytes()).await {
-                if let Ok(prev) = serde_json::from_slice::<CollectionVersion>(&data) {
+                if let Ok(prev) = serde_json::from_slice::<schema::CollectionVersion>(&data) {
                     tracing::debug!(
                         head_cid = %head_cid,
                         name = %prev.name,
@@ -330,7 +254,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         }
 
                         let head_version_id = head_cid.to_string();
-                        let mut prev = CollectionVersion::new(
+                        let mut prev = schema::CollectionVersion::new(
                             name,
                             &head_version_id,
                             &head_version_id,
@@ -385,116 +309,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         }
 
         Ok(None)
-    }
-}
-
-impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
-    /// Verify block signature and return the verified creator identity.
-    ///
-    /// Returns:
-    /// - `Ok(Some(identity))` — signature valid, identity is the verified signer
-    /// - `Ok(None)` — unsigned block or BLS (unsupported), proceed with warning
-    /// - `Err(SignatureVerificationFailed)` — invalid signature, block MUST be rejected
-    pub(crate) async fn verify_block_signature(
-        &self,
-        cid: &Cid,
-        block: &Block,
-        _block_data: &[u8],
-    ) -> Result<Option<String>, MergeError> {
-        let sig_cid = match &block.signature {
-            Some(sig_cid) => sig_cid,
-            None => {
-                tracing::warn!(
-                    cid = %cid,
-                    "P2P block has no signature — cannot verify authenticity"
-                );
-                return Ok(None);
-            }
-        };
-
-        let sig_data = match self.blockstore.get(sig_cid).await {
-            Ok(Some(data)) => data,
-            Ok(None) => {
-                return Err(MergeError::SignatureVerificationFailed {
-                    cid: *cid,
-                    reason: format!("signature block {} not found in blockstore", sig_cid),
-                });
-            }
-            Err(e) => {
-                return Err(MergeError::SignatureVerificationFailed {
-                    cid: *cid,
-                    reason: format!("failed to load signature block {}: {}", sig_cid, e),
-                });
-            }
-        };
-
-        let signature = match defra_core::block::Signature::from_dag_cbor(&sig_data) {
-            Ok(sig) => sig,
-            Err(e) => {
-                return Err(MergeError::SignatureVerificationFailed {
-                    cid: *cid,
-                    reason: format!("failed to decode signature block: {}", e),
-                });
-            }
-        };
-
-        let sig_identity = String::from_utf8_lossy(&signature.header.identity).to_string();
-
-        // Verify the signature over the block data (block without signature field)
-        let mut block_to_verify = block.clone();
-        block_to_verify.signature = None;
-        let signed_bytes =
-            block_to_verify
-                .to_dag_cbor()
-                .map_err(|e| MergeError::SignatureVerificationFailed {
-                    cid: *cid,
-                    reason: format!("failed to serialize block for verification: {}", e),
-                })?;
-
-        let sig_type = signature.header.sig_type;
-        let key_type = match sig_type {
-            defra_core::block::SignatureType::ES256K => crypto::KeyType::Secp256k1,
-            defra_core::block::SignatureType::ES256 => crypto::KeyType::Secp256r1,
-            defra_core::block::SignatureType::EdDSA => crypto::KeyType::Ed25519,
-            defra_core::block::SignatureType::BLS => crypto::KeyType::Bls12381,
-            _ => unreachable!(),
-        };
-
-        let pub_key = crypto::public_key_from_string(key_type, &sig_identity).map_err(|e| {
-            MergeError::SignatureVerificationFailed {
-                cid: *cid,
-                reason: format!("failed to parse public key from identity: {}", e),
-            }
-        })?;
-
-        match pub_key.verify(&signed_bytes, &signature.value) {
-            Ok(true) => {
-                // Convert the hex public key to a did:key: DID so that
-                // effective_creator() returns a format compatible with ACP
-                // registration (which checks for "did:key:" prefix).
-                let verified_did =
-                    pub_key
-                        .did()
-                        .map_err(|e| MergeError::SignatureVerificationFailed {
-                            cid: *cid,
-                            reason: format!("failed to derive DID from verified key: {}", e),
-                        })?;
-                tracing::debug!(
-                    cid = %cid,
-                    identity = %verified_did,
-                    "Block signature verified successfully"
-                );
-                Ok(Some(verified_did))
-            }
-            Ok(false) => Err(MergeError::SignatureVerificationFailed {
-                cid: *cid,
-                reason: "signature value does not match block content".to_string(),
-            }),
-            Err(e) => Err(MergeError::SignatureVerificationFailed {
-                cid: *cid,
-                reason: format!("signature verification error: {}", e),
-            }),
-        }
     }
 }
 

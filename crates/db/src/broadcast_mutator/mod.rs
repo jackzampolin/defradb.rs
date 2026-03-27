@@ -10,11 +10,12 @@
 //! level but do not affect the mutation result.
 
 mod batch;
+pub(crate) mod broadcast;
 
 use async_trait::async_trait;
 use blockstore::Blockstore;
 use document::{DocID, Document};
-use p2p::sync::{BroadcastResult, SyncCoordinator};
+use p2p::sync::SyncCoordinator;
 use p2p::transport::P2PTransport;
 use query::mutator::{
     BroadcastStatus, CreateResult, DeleteResult, DocMutator, MutationBatch,
@@ -24,6 +25,7 @@ use std::sync::Arc;
 use storage::corekv::Store;
 
 use self::batch::BroadcastBatchMutator;
+use self::broadcast::{broadcast_with_retry_with_creator, log_broadcast_failure};
 use crate::auto_commit_mutator::AutoCommitMutator;
 use crate::block_builder::{build_blocks_from_document, read_latest_composite_block, BlockResult};
 use crate::database::DB;
@@ -41,7 +43,7 @@ use crate::database::DB;
 /// # Error Handling
 ///
 /// Local mutations are atomic with the transaction. Broadcast is fire-and-forget
-/// via `tokio::spawn` — the mutation returns `BroadcastStatus::Pending` immediately
+/// via `tokio::spawn` -- the mutation returns `BroadcastStatus::Pending` immediately
 /// after the local commit. Broadcast failures are logged at `error` level but do
 /// not affect the mutation result. Peers will eventually receive the data via the
 /// next replicator sync or DAG fetch.
@@ -155,7 +157,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let return_cid = block_result.cid;
         let return_block = block_result.block.clone();
 
-        // Spawn broadcast work as a detached task — the local transaction
+        // Spawn broadcast work as a detached task -- the local transaction
         // is already committed, so we return immediately.
         tokio::spawn(async move {
             let creator_ref = creator_did.as_deref();
@@ -435,7 +437,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let sync = self.sync.clone();
         let collection_name_owned = collection_name.to_string();
 
-        // Spawn broadcast work as a detached task — the local transaction
+        // Spawn broadcast work as a detached task -- the local transaction
         // is already committed, so we return immediately.
         tokio::spawn(async move {
             let creator_ref = creator_did.as_deref();
@@ -534,7 +536,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let sync = self.sync.clone();
         let collection_name_owned = collection_name.to_string();
 
-        // Spawn broadcast work as a detached task — the local transaction
+        // Spawn broadcast work as a detached task -- the local transaction
         // is already committed, so we return immediately.
         tokio::spawn(async move {
             let creator_ref = creator_did.as_deref();
@@ -579,143 +581,5 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         doc_id: &DocID,
     ) -> query::error::Result<Option<Document>> {
         self.inner.get_for_update(collection_name, doc_id).await
-    }
-}
-
-const BROADCAST_MAX_RETRIES: u32 = 10;
-
-fn broadcast_retry_delay_ms(err_str: &str, connected_peers: usize, attempt: u32) -> Option<u64> {
-    if !err_str.contains("InsufficientPeers") {
-        return None;
-    }
-    if connected_peers == 0 || attempt > BROADCAST_MAX_RETRIES {
-        return None;
-    }
-    Some(100 * (1u64 << attempt.min(5)))
-}
-
-/// Log broadcast failures at error level for observability in fire-and-forget paths.
-fn log_broadcast_failure(status: &BroadcastStatus) {
-    if let BroadcastStatus::Failed(err) = status {
-        tracing::error!(
-            error = %err,
-            "Fire-and-forget broadcast failed — document committed locally but NOT replicated"
-        );
-    }
-}
-
-/// Broadcast via GossipSub with retry, optionally overriding the creator DID.
-async fn broadcast_with_retry_with_creator<B: Blockstore + 'static, T: P2PTransport>(
-    sync: &SyncCoordinator<B, T>,
-    block_result: &BlockResult,
-    collection_id: &str,
-    collection_name: &str,
-    creator_override: Option<&str>,
-) -> BroadcastStatus {
-    let mut attempt = 0u32;
-
-    loop {
-        attempt += 1;
-        match sync
-            .broadcast_local_update_with_creator(
-                &block_result.cid,
-                &block_result.block,
-                &block_result.doc_id,
-                collection_id,
-                creator_override,
-            )
-            .await
-        {
-            Ok(BroadcastResult::Success) => {
-                tracing::debug!(
-                    doc_id = %block_result.doc_id,
-                    cid = %block_result.cid,
-                    collection = %collection_name,
-                    attempts = attempt,
-                    "Broadcast document to P2P network"
-                );
-                return BroadcastStatus::Success;
-            }
-            Ok(BroadcastResult::PartialDocumentOnly { collection_error }) => {
-                tracing::warn!(
-                    doc_id = %block_result.doc_id,
-                    collection = %collection_name,
-                    error = %collection_error,
-                    "Partial broadcast: document topic succeeded, collection topic failed"
-                );
-                return BroadcastStatus::Failed(format!(
-                    "Partial: collection topic failed: {}",
-                    collection_error
-                ));
-            }
-            Ok(BroadcastResult::PartialCollectionOnly { document_error }) => {
-                tracing::warn!(
-                    doc_id = %block_result.doc_id,
-                    collection = %collection_name,
-                    error = %document_error,
-                    "Partial broadcast: collection topic succeeded, document topic failed"
-                );
-                return BroadcastStatus::Failed(format!(
-                    "Partial: document topic failed: {}",
-                    document_error
-                ));
-            }
-            Err(e) => {
-                let err_str = e.to_string();
-                let connected_peers = sync.peer_state().stats().connected_peers();
-                if let Some(delay_ms) = broadcast_retry_delay_ms(&err_str, connected_peers, attempt)
-                {
-                    tracing::trace!(
-                        doc_id = %block_result.doc_id,
-                        attempt = attempt,
-                        connected_peers = connected_peers,
-                        delay_ms = delay_ms,
-                        "Retrying broadcast after InsufficientPeers"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                    continue;
-                }
-                if err_str.contains("InsufficientPeers") && connected_peers == 0 {
-                    tracing::debug!(
-                        doc_id = %block_result.doc_id,
-                        collection = %collection_name,
-                        attempts = attempt,
-                        "Skipping GossipSub retries because no P2P peers are connected"
-                    );
-                }
-                tracing::warn!(
-                    doc_id = %block_result.doc_id,
-                    collection = %collection_name,
-                    error = %e,
-                    attempts = attempt,
-                    "Failed to broadcast document to P2P network - local mutation succeeded"
-                );
-                return BroadcastStatus::Failed(e.to_string());
-            }
-            _ => {}
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::broadcast_retry_delay_ms;
-
-    #[test]
-    fn insufficient_peers_without_connections_does_not_retry() {
-        let delay = broadcast_retry_delay_ms("gossipsub publish error: InsufficientPeers", 0, 1);
-        assert_eq!(delay, None);
-    }
-
-    #[test]
-    fn insufficient_peers_with_connections_retries_with_backoff() {
-        let delay = broadcast_retry_delay_ms("gossipsub publish error: InsufficientPeers", 2, 3);
-        assert_eq!(delay, Some(800));
-    }
-
-    #[test]
-    fn non_retryable_broadcast_errors_fail_fast() {
-        let delay = broadcast_retry_delay_ms("gossipsub publish error: MessageTooLarge", 2, 1);
-        assert_eq!(delay, None);
     }
 }
