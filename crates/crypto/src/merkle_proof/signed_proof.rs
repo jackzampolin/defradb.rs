@@ -54,6 +54,7 @@ impl SignedMerkleProof {
     /// The public key type must match the signature algorithm.
     pub fn verify(&self, public_key: &dyn PublicKey) -> Result<bool> {
         // Validate key type matches signature algorithm
+        #[allow(unreachable_patterns)]
         let expected_key_type = match self.signature.header.sig_type {
             SignatureType::EdDSA => KeyType::Ed25519,
             SignatureType::ES256K => KeyType::Secp256k1,
@@ -123,6 +124,7 @@ impl SignedMerkleProof {
 /// The identity field is stored as hex-encoded public key string bytes
 /// for wire compatibility with Go DefraDB.
 fn extract_public_key_from_signature(sig: &Signature) -> Result<Box<dyn PublicKey>> {
+    #[allow(unreachable_patterns)]
     let key_type = match sig.header.sig_type {
         SignatureType::EdDSA => KeyType::Ed25519,
         SignatureType::ES256K => KeyType::Secp256k1,
