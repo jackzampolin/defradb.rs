@@ -6,8 +6,15 @@
 //!
 //! P2P uses IROH (QUIC-native) transport for peer-to-peer replication.
 
+mod benchmark_data_gen;
+mod benchmark_queries;
+mod benchmark_stats;
 #[doc(hidden)]
 pub mod benchmark_support;
+pub mod config;
+mod db_impls;
+#[cfg(feature = "p2p")]
+mod p2p_handle;
 pub mod version;
 
 use std::path::PathBuf;
@@ -16,6 +23,10 @@ use std::sync::Arc;
 #[cfg(feature = "p2p")]
 use p2p::P2PTransport;
 
+#[cfg(feature = "http")]
+pub use config::HttpConfig;
+#[cfg(feature = "p2p")]
+pub use config::P2PConfig;
 pub use events::EventName;
 pub use query::{QueryExecutor, QueryRequest, QueryResponse};
 
@@ -135,66 +146,6 @@ impl defra_http::P2POperations for HttpP2PAdapter {
     }
 }
 
-/// Configuration for the optional HTTP GraphQL server.
-#[cfg(feature = "http")]
-pub struct HttpConfig {
-    pub address: std::net::SocketAddr,
-    extra_routes: Option<axum::Router>,
-}
-
-#[cfg(feature = "http")]
-impl HttpConfig {
-    pub fn new(port: u16) -> Self {
-        Self {
-            address: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-            extra_routes: None,
-        }
-    }
-
-    pub fn with_addr(addr: impl Into<std::net::SocketAddr>) -> Self {
-        Self {
-            address: addr.into(),
-            extra_routes: None,
-        }
-    }
-
-    pub fn with_extra_routes(mut self, extra: axum::Router) -> Self {
-        self.extra_routes = Some(extra);
-        self
-    }
-}
-
-/// Configuration for the optional P2P networking layer (IROH/QUIC).
-#[cfg(feature = "p2p")]
-pub struct P2PConfig {
-    /// UDP port for QUIC listener.
-    pub port: u16,
-    /// Bind to a specific IP address. When set, IROH only listens on this
-    /// interface — use the Tailscale IP to keep P2P within the mesh and
-    /// prevent IROH from advertising unreachable LAN addresses across sites.
-    /// None = 0.0.0.0 (all interfaces).
-    pub bind_addr: Option<std::net::IpAddr>,
-    /// Relay behavior for NAT traversal.
-    pub relay_mode: p2p::iroh::IrohRelayModeConfig,
-    /// Address publishing / lookup behavior.
-    pub discovery: p2p::iroh::IrohDiscoveryConfig,
-    /// Path to persist secret key. None = ephemeral (new identity each restart).
-    pub secret_key_path: Option<std::path::PathBuf>,
-    /// Reload collection subscriptions persisted in the local store on startup.
-    /// When false, only explicit subscribe calls in the current process take effect.
-    pub load_persisted_collections: bool,
-    /// Maximum concurrent DAG fetch tasks. Lower values reduce resource pressure
-    /// on constrained clients (mobile, embedded). Default: 4.
-    pub max_concurrent_dag_fetches: usize,
-    /// Maximum concurrent push tasks for sending blocks to replicators.
-    /// Default: 8.
-    pub max_concurrent_push_tasks: usize,
-    /// Per-peer rate limit burst capacity (max tokens in bucket). Default: 500.
-    pub rate_limit_burst: u32,
-    /// Per-peer rate limit refill rate (tokens per second). Default: 50.
-    pub rate_limit_rate: f64,
-}
-
 /// Type-erased P2P operations exposed on EmbeddedNode.
 #[cfg(feature = "p2p")]
 #[async_trait::async_trait]
@@ -224,212 +175,6 @@ trait SchemaOps: Send + Sync {
 #[cfg(feature = "p2p")]
 trait CollectionLookup: Send + Sync {
     fn get_collection_id(&self, name: &str) -> Option<String>;
-}
-
-#[async_trait::async_trait]
-impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
-    async fn add_schema(&self, sdl: &str) -> anyhow::Result<()> {
-        let collections =
-            query::parse_sdl(sdl).map_err(|e| anyhow::anyhow!("SDL parse error: {}", e))?;
-
-        db::definition_validation::validate_new_collections(&collections)
-            .map_err(|e| anyhow::anyhow!("schema validation error: {}", e))?;
-
-        for collection in collections {
-            self.create_collection(collection)
-                .await
-                .map_err(|e| anyhow::anyhow!("create collection error: {}", e))?;
-        }
-        Ok(())
-    }
-
-    async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()> {
-        let known_types: std::collections::HashSet<String> = self
-            .list_collections()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-
-        let mut collections = query::parse_sdl_with_known_types(target_sdl, known_types)
-            .map_err(|e| anyhow::anyhow!("view SDL parse error: {}", e))?;
-
-        let wrapped_query = format!("query {{ {} }}", source_query.trim());
-        let selects = query::parse_query(&wrapped_query)
-            .map_err(|e| anyhow::anyhow!("view query parse error: {}", e))?;
-        let select = selects
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("invalid view query: no selections found"))?;
-        let query_source = schema::QuerySource::new(query::select_to_go_json(&select));
-
-        let mut materialized_names = Vec::new();
-        let mut downsample_names = Vec::new();
-
-        for collection in &mut collections {
-            if collection.downsample_interval.is_some() {
-                collection.downsample_source = Some(query_source.clone());
-                self.validate_downsample_collection(collection)
-                    .map_err(|e| anyhow::anyhow!("invalid downsample definition: {}", e))?;
-            } else {
-                collection.query = Some(query_source.clone());
-            }
-
-            if collection.query.is_some()
-                && collection.is_materialized
-                && !collection.is_embedded_only
-            {
-                materialized_names.push(collection.name.clone());
-            }
-
-            if collection.downsample_interval.is_some() {
-                downsample_names.push(collection.name.clone());
-            }
-        }
-
-        self.create_collections_atomic(collections)
-            .await
-            .map_err(|e| anyhow::anyhow!("create view collection error: {}", e))?;
-
-        if !materialized_names.is_empty() {
-            self.refresh_views(Some(db::RefreshViewsOptions::with_names(
-                materialized_names,
-            )))
-            .await
-            .map_err(|e| anyhow::anyhow!("refresh materialized views error: {}", e))?;
-        }
-
-        if !downsample_names.is_empty() {
-            self.bootstrap_downsamples(Some(&downsample_names))
-                .await
-                .map_err(|e| anyhow::anyhow!("bootstrap downsample collections error: {}", e))?;
-        }
-
-        Ok(())
-    }
-}
-
-#[cfg(feature = "p2p")]
-impl<S: storage::corekv::Store + 'static> CollectionLookup for db::DB<S> {
-    fn get_collection_id(&self, name: &str) -> Option<String> {
-        match self.get_collection(name) {
-            Ok(Some(collection)) => Some(collection.collection_id().to_string()),
-            Ok(None) => {
-                tracing::debug!(collection_name = %name, "collection not found for P2P lookup");
-                None
-            }
-            Err(e) => {
-                tracing::warn!(collection_name = %name, error = %e, "error looking up collection for P2P");
-                None
-            }
-        }
-    }
-}
-
-/// Concrete P2P handle implementation (type-erased behind P2POps trait).
-#[cfg(feature = "p2p")]
-struct P2PHandleImpl<B: blockstore::Blockstore + Send + Sync + 'static> {
-    transport: p2p::iroh::IrohTransport,
-    coordinator: Arc<p2p::sync::SyncCoordinator<B, p2p::iroh::IrohTransport>>,
-    collection_lookup: Arc<dyn CollectionLookup>,
-}
-
-#[cfg(feature = "p2p")]
-#[async_trait::async_trait]
-impl<B: blockstore::Blockstore + Send + Sync + 'static> P2POps for P2PHandleImpl<B> {
-    async fn local_peer_id(&self) -> String {
-        self.transport.local_peer_id().to_string()
-    }
-
-    async fn listen_addresses(&self) -> Vec<String> {
-        let raw_addrs = self.transport.listen_addresses().await.unwrap_or_default();
-        p2p::iroh::format_public_listen_addrs(self.transport.local_peer_id(), &raw_addrs)
-    }
-
-    async fn connected_peers(&self) -> anyhow::Result<Vec<String>> {
-        self.transport
-            .connected_peers()
-            .await
-            .map(|peers| peers.into_iter().map(|peer| peer.to_string()).collect())
-            .map_err(|e| anyhow::anyhow!("connected peers failed: {}", e))
-    }
-
-    async fn connect_peer(&self, addr: &str) -> anyhow::Result<()> {
-        let (peer_id, addrs) = p2p::iroh::parse_public_peer_addr(addr)?;
-        self.transport
-            .dial(&peer_id, addrs)
-            .await
-            .map_err(|e| anyhow::anyhow!("dial failed: {}", e))
-    }
-
-    async fn notify_network_change(&self) -> anyhow::Result<()> {
-        self.transport
-            .network_change()
-            .await
-            .map_err(|e| anyhow::anyhow!("network_change failed: {}", e))
-    }
-
-    async fn subscribe_collection(&self, name: &str) -> anyhow::Result<()> {
-        // Resolve collection name → CID (gossip topics use CIDs, not names)
-        let collection_id = self
-            .collection_lookup
-            .get_collection_id(name)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "collection '{}' not found — add schema before subscribing to P2P",
-                    name
-                )
-            })?;
-        tracing::debug!(
-            collection_name = %name,
-            collection_id = %collection_id,
-            "resolved collection name to CID for P2P subscription"
-        );
-        self.coordinator
-            .subscribe_collection(&collection_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("subscribe collection failed: {}", e))?;
-        Ok(())
-    }
-
-    async fn set_replicator(
-        &self,
-        peer_addr: &str,
-        collections: Vec<String>,
-    ) -> anyhow::Result<()> {
-        let (peer_id, addrs) = p2p::iroh::parse_public_peer_addr(peer_addr)?;
-        if !addrs.is_empty() || p2p::iroh::is_ticket_string(peer_addr) {
-            self.connect_peer(peer_addr).await?;
-        }
-
-        // Resolve collection names → CIDs
-        let mut collection_cids = Vec::with_capacity(collections.len());
-        for name in &collections {
-            let cid = self
-                .collection_lookup
-                .get_collection_id(name)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("collection '{}' not found for replicator setup", name)
-                })?;
-            tracing::debug!(
-                collection_name = %name,
-                collection_id = %cid,
-                "resolved collection name to CID for replicator"
-            );
-            collection_cids.push(cid);
-        }
-
-        self.coordinator
-            .create_replicator(&peer_id, collection_cids, true)
-            .await
-            .map_err(|e| anyhow::anyhow!("set replicator failed: {}", e))?;
-
-        tracing::info!(
-            peer_id = %peer_id,
-            collections = ?collections,
-            "configured live replicator; skipping eager backfill"
-        );
-        Ok(())
-    }
 }
 
 /// An embedded DefraDB node with query execution and event subscription.
@@ -782,7 +527,7 @@ impl NodeBuilder {
         let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
             Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
 
-        // 7. SyncCoordinator (transport-generic — same constructor, different type param)
+        // 7. SyncCoordinator (transport-generic -- same constructor, different type param)
         let sync_config = p2p::sync::SyncConfig {
             max_concurrent_dag_fetches: config.max_concurrent_dag_fetches,
             max_concurrent_push_tasks: config.max_concurrent_push_tasks,
@@ -838,13 +583,13 @@ impl NodeBuilder {
             .await;
         });
 
-        // 10. IROH event handler (events are already TransportEvent — no conversion needed)
+        // 10. IROH event handler (events are already TransportEvent -- no conversion needed)
         let coord_for_events = coordinator.clone();
         tokio::spawn(async move {
             Self::run_event_handler(iroh_events, coord_for_events).await;
         });
 
-        // 11. Collection lookup (resolves names → CIDs for gossip topics)
+        // 11. Collection lookup (resolves names -> CIDs for gossip topics)
         let collection_lookup: Arc<dyn CollectionLookup> = database.clone();
 
         // 12. BroadcastMutator (replaces AutoCommitMutator)
@@ -855,7 +600,7 @@ impl NodeBuilder {
 
         let peer_id = transport.local_peer_id().to_string();
         tracing::info!(peer_id = %peer_id, "P2P started (IROH/QUIC)");
-        let ops: Arc<dyn P2POps> = Arc::new(P2PHandleImpl {
+        let ops: Arc<dyn P2POps> = Arc::new(p2p_handle::P2PHandleImpl {
             transport,
             coordinator,
             collection_lookup,

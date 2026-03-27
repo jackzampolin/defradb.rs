@@ -11,6 +11,11 @@ use p2p::sync::Libp2pSyncCoordinator;
 use p2p::topics::DefraTopic;
 use p2p::P2PHostHandle;
 
+// Re-export extracted types so existing `crate::p2p_adapter::Foo` paths still resolve.
+pub(crate) use crate::p2p_adapter_helpers::collections_requiring_replay;
+pub(crate) use crate::p2p_collection_lookup::LookupOnlyDocPusher;
+pub use crate::p2p_doc_pusher::DbDocPusher;
+
 /// Trait for looking up collection IDs by name.
 ///
 /// This is used by the P2P adapter to resolve collection names to their
@@ -65,177 +70,6 @@ pub trait DocPusher: Send + Sync {
     ) -> Result<(), String>;
 }
 
-/// Database-backed `DocPusher` implementation.
-///
-/// Wraps `db::DB<S>` and delegates to `db::push_existing_docs` for push
-/// operations and `db::DB::get_collection` / `list_collections` for lookups.
-pub struct DbDocPusher<S: storage::corekv::Store> {
-    db: Arc<db::DB<S>>,
-    document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
-}
-
-impl<S: storage::corekv::Store + 'static> DbDocPusher<S> {
-    pub fn new(db: Arc<db::DB<S>>) -> Self {
-        Self {
-            db,
-            document_acp: std::sync::OnceLock::new(),
-        }
-    }
-
-    pub fn new_arc(db: Arc<db::DB<S>>) -> Arc<dyn DocPusher> {
-        Arc::new(Self::new(db))
-    }
-
-    pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
-        let _ = self.document_acp.set(acp);
-    }
-}
-
-#[async_trait]
-impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
-    async fn push_existing_docs(
-        &self,
-        handle: &P2PHostHandle,
-        peer_id: libp2p::PeerId,
-        collections: &[String],
-        se_key: Option<&[u8]>,
-        se_identity_pubkey: Option<&[u8]>,
-    ) -> Result<(), String> {
-        db::push_existing_docs(
-            handle,
-            &self.db,
-            self.document_acp.get().map(|acp| acp.as_ref()),
-            peer_id,
-            collections,
-            se_key,
-            se_identity_pubkey,
-        )
-        .await
-    }
-
-    fn get_collection_id(&self, name: &str) -> Option<String> {
-        match self.db.get_collection(name) {
-            Ok(Some(collection)) => Some(collection.collection_id().to_string()),
-            Ok(None) => {
-                tracing::debug!(collection_name = %name, "Collection not found for P2P lookup");
-                None
-            }
-            Err(e) => {
-                tracing::warn!(
-                    collection_name = %name,
-                    error = %e,
-                    "Error looking up collection for P2P"
-                );
-                None
-            }
-        }
-    }
-
-    fn list_collections(&self) -> Result<Vec<String>, String> {
-        self.db
-            .list_collections()
-            .map_err(|e| format!("failed to list collections: {}", e))
-    }
-
-    async fn persist_replicator(
-        &self,
-        peer_id: &str,
-        collections: &[String],
-    ) -> Result<(), String> {
-        let pid: libp2p::PeerId = peer_id
-            .parse()
-            .map_err(|e| format!("invalid peer ID: {}", e))?;
-        let info = p2p::ReplicatorInfo::new(pid, collections.to_vec());
-        let bytes = info
-            .to_bytes()
-            .map_err(|e| format!("failed to serialize replicator info: {}", e))?;
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
-        peerstore
-            .create_replicator(peer_id, &bytes)
-            .await
-            .map_err(|e| format!("failed to persist replicator: {}", e))
-    }
-
-    async fn delete_persisted_replicator(&self, peer_id: &str) -> Result<(), String> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
-        peerstore
-            .delete_replicator(peer_id)
-            .await
-            .map_err(|e| format!("failed to delete persisted replicator: {}", e))
-    }
-
-    async fn persist_p2p_documents(&self, doc_ids: &[String]) -> Result<(), String> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
-        peerstore
-            .persist_documents(doc_ids)
-            .await
-            .map_err(|e| format!("failed to persist P2P documents: {}", e))
-    }
-
-    async fn load_p2p_documents(&self) -> Result<Vec<String>, String> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
-        peerstore
-            .load_documents()
-            .await
-            .map_err(|e| format!("failed to load P2P documents: {}", e))
-    }
-
-    async fn persist_p2p_collections(&self, collections: &[String]) -> Result<(), String> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
-        peerstore
-            .persist_collections(collections)
-            .await
-            .map_err(|e| format!("failed to persist P2P collections: {}", e))
-    }
-
-    fn validate_collection_exists(&self, name: &str) -> Result<(), String> {
-        self.db
-            .require_collection(name)
-            .map(|_| ())
-            .map_err(|e| format!("{}", e))
-    }
-
-    fn validate_branchable_collection(&self, collection_id: &str) -> Result<(), String> {
-        match self.db.find_collection_by_id(collection_id) {
-            Ok(Some(collection)) => {
-                if !collection.schema().is_branchable {
-                    Err("collection is not branchable".to_string())
-                } else {
-                    Ok(())
-                }
-            }
-            Ok(None) => Err(format!("collection with ID '{}' not found", collection_id)),
-            Err(e) => Err(format!("failed to find collection: {}", e)),
-        }
-    }
-
-    async fn retry_doc(
-        &self,
-        handle: &P2PHostHandle,
-        peer_id: libp2p::PeerId,
-        doc_id: &str,
-        collection_id: &str,
-    ) -> Result<(), String> {
-        db::retry_doc(
-            handle,
-            &self.db,
-            self.document_acp.get().map(|acp| acp.as_ref()),
-            peer_id,
-            doc_id,
-            collection_id,
-        )
-        .await
-    }
-}
-
-/// Also implement `CollectionLookup` so `DbDocPusher` can be used anywhere
-/// the older trait is expected.
-impl<S: storage::corekv::Store + 'static> CollectionLookup for DbDocPusher<S> {
-    fn get_collection_id(&self, name: &str) -> Option<String> {
-        DocPusher::get_collection_id(self, name)
-    }
-}
-
 /// Trait for syncing collection versions (schema definitions) via Bitswap.
 #[async_trait]
 pub trait VersionSyncer: Send + Sync {
@@ -245,23 +79,6 @@ pub trait VersionSyncer: Send + Sync {
         version_ids: Vec<String>,
         connected_peers: Vec<libp2p::PeerId>,
     ) -> Result<(), String>;
-}
-
-fn collections_requiring_replay(
-    effective_collections: &[String],
-    collection_cids: &[String],
-    existing_collection_ids: &HashSet<String>,
-    collections_with_changed_capabilities: &HashSet<String>,
-) -> Vec<String> {
-    effective_collections
-        .iter()
-        .zip(collection_cids.iter())
-        .filter(|(_, cid)| {
-            !existing_collection_ids.contains(*cid)
-                || collections_with_changed_capabilities.contains(*cid)
-        })
-        .map(|(name, _)| name.clone())
-        .collect()
 }
 
 /// Adapter that implements P2POperations using P2PHostHandle.
@@ -402,74 +219,6 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
     }
 }
 
-/// Adapter that wraps a `CollectionLookup` as a `DocPusher` for backward
-/// compatibility. Push operations return an error since no DB is available.
-struct LookupOnlyDocPusher(Arc<dyn CollectionLookup>);
-
-#[async_trait]
-impl DocPusher for LookupOnlyDocPusher {
-    async fn push_existing_docs(
-        &self,
-        _handle: &P2PHostHandle,
-        _peer_id: libp2p::PeerId,
-        _collections: &[String],
-        _se_key: Option<&[u8]>,
-        _se_identity_pubkey: Option<&[u8]>,
-    ) -> Result<(), String> {
-        Err("push_existing_docs not available (no database context)".to_string())
-    }
-
-    fn get_collection_id(&self, name: &str) -> Option<String> {
-        self.0.get_collection_id(name)
-    }
-
-    fn list_collections(&self) -> Result<Vec<String>, String> {
-        Err("list_collections not available (no database context)".to_string())
-    }
-
-    async fn persist_replicator(
-        &self,
-        _peer_id: &str,
-        _collections: &[String],
-    ) -> Result<(), String> {
-        Err("persist_replicator not available (no database context)".to_string())
-    }
-
-    async fn delete_persisted_replicator(&self, _peer_id: &str) -> Result<(), String> {
-        Err("delete_persisted_replicator not available (no database context)".to_string())
-    }
-
-    async fn persist_p2p_documents(&self, _doc_ids: &[String]) -> Result<(), String> {
-        Err("persist_p2p_documents not available (no database context)".to_string())
-    }
-
-    async fn load_p2p_documents(&self) -> Result<Vec<String>, String> {
-        Err("load_p2p_documents not available (no database context)".to_string())
-    }
-
-    async fn persist_p2p_collections(&self, _collections: &[String]) -> Result<(), String> {
-        Err("persist_p2p_collections not available (no database context)".to_string())
-    }
-
-    fn validate_collection_exists(&self, _name: &str) -> Result<(), String> {
-        Err("validate_collection_exists not available (no database context)".to_string())
-    }
-
-    fn validate_branchable_collection(&self, _collection_id: &str) -> Result<(), String> {
-        Err("validate_branchable_collection not available (no database context)".to_string())
-    }
-
-    async fn retry_doc(
-        &self,
-        _handle: &P2PHostHandle,
-        _peer_id: libp2p::PeerId,
-        _doc_id: &str,
-        _collection_id: &str,
-    ) -> Result<(), String> {
-        Err("retry_doc not available (no database context)".to_string())
-    }
-}
-
 #[async_trait]
 impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     async fn local_peer_id(&self) -> Result<String, String> {
@@ -570,7 +319,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             collections
         };
 
-        // Resolve collection names → CIDs
+        // Resolve collection names -> CIDs
         let mut collection_cids = Vec::new();
         if let Some(ref pusher) = self.doc_pusher {
             for name in &effective_collections {
@@ -1132,83 +881,5 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         syncer
             .sync_versions(&self.handle, version_ids, connected_peers)
             .await
-    }
-}
-
-/// Implementation of CollectionLookup for the database.
-///
-/// Retained for backward compatibility. Prefer `DbDocPusher` for new code.
-pub struct DbCollectionLookup<S: storage::corekv::Store> {
-    db: Arc<db::DB<S>>,
-}
-
-impl<S: storage::corekv::Store + 'static> DbCollectionLookup<S> {
-    pub fn new(db: Arc<db::DB<S>>) -> Self {
-        Self { db }
-    }
-
-    pub fn new_arc(db: Arc<db::DB<S>>) -> Arc<dyn CollectionLookup> {
-        Arc::new(Self::new(db))
-    }
-}
-
-impl<S: storage::corekv::Store + 'static> CollectionLookup for DbCollectionLookup<S> {
-    fn get_collection_id(&self, name: &str) -> Option<String> {
-        match self.db.get_collection(name) {
-            Ok(Some(collection)) => Some(collection.collection_id().to_string()),
-            Ok(None) => {
-                tracing::debug!(collection_name = %name, "Collection not found for P2P lookup");
-                None
-            }
-            Err(e) => {
-                tracing::warn!(
-                    collection_name = %name,
-                    error = %e,
-                    "Error looking up collection for P2P"
-                );
-                None
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use super::collections_requiring_replay;
-
-    #[test]
-    fn collections_requiring_replay_replays_existing_collection_when_capability_changes() {
-        let effective_collections = vec!["User".to_string()];
-        let collection_cids = vec!["cid-user".to_string()];
-        let existing_collection_ids = HashSet::from(["cid-user".to_string()]);
-        let changed_capabilities = HashSet::from(["cid-user".to_string()]);
-
-        let replay_collections = collections_requiring_replay(
-            &effective_collections,
-            &collection_cids,
-            &existing_collection_ids,
-            &changed_capabilities,
-        );
-
-        assert_eq!(replay_collections, vec!["User".to_string()]);
-    }
-
-    #[test]
-    fn collections_requiring_replay_skips_existing_collection_when_capability_matches() {
-        let effective_collections = vec!["User".to_string()];
-        let collection_cids = vec!["cid-user".to_string()];
-        let existing_collection_ids = HashSet::from(["cid-user".to_string()]);
-        let changed_capabilities = HashSet::new();
-
-        let replay_collections = collections_requiring_replay(
-            &effective_collections,
-            &collection_cids,
-            &existing_collection_ids,
-            &changed_capabilities,
-        );
-
-        assert!(replay_collections.is_empty());
     }
 }

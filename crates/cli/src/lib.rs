@@ -23,6 +23,12 @@ pub mod logging;
 pub(crate) mod nac_adapter;
 #[allow(dead_code)]
 pub(crate) mod p2p_adapter;
+#[allow(dead_code)]
+pub(crate) mod p2p_adapter_helpers;
+#[allow(dead_code)]
+pub(crate) mod p2p_collection_lookup;
+#[allow(dead_code)]
+pub(crate) mod p2p_doc_pusher;
 pub(crate) mod schema_adapter;
 pub(crate) mod sourcehub_acp_adapter;
 #[allow(dead_code)]
