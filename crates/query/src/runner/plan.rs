@@ -10,11 +10,13 @@ use crate::document::DocumentMapping;
 use crate::error::{QueryError, Result};
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
-    AllDocsNode, AverageNode, ChildSelectMeta, CountNode, CountSourceMeta, GroupAlias, GroupByNode,
-    LimitNode, MaxNode, MaxSourceMeta, MinNode, MinSourceMeta, OrderByNode, PermissionFilterNode,
-    ScanNode, SelectNode, SumNode, SumSourceMeta,
+    AllDocsNode, ChildSelectMeta, GroupAlias, GroupByNode, LimitNode, OrderByNode,
+    PermissionFilterNode, ScanNode, SelectNode,
 };
 use crate::planner::{Doc, PlanNode};
+
+pub(crate) use super::plan_aggregates::add_aggregate_nodes;
+pub(crate) use super::plan_validation::validate_select;
 
 /// ACP filter configuration for inserting PermissionFilterNode into plan trees.
 pub(crate) struct AcpFilter {
@@ -22,224 +24,6 @@ pub(crate) struct AcpFilter {
     pub identity: Identity,
     pub policy_id: String,
     pub resource_name: String,
-}
-
-/// Validate that the select doesn't use unsupported features.
-pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -> Result<()> {
-    // Note: CID-based queries are now handled by execute_cid_query() before this validation
-
-    // Note: Nested selections (relations) are now supported via the Planner
-
-    // Helper to check if a field exists in the collection schema
-    // Special fields: _docID (document ID), _group (groupBy results), __typename (GraphQL introspection),
-    // _version (CRDT version metadata), _deleted (document deletion status)
-    let field_exists = |name: &str| -> bool {
-        name == "_docID"
-            || name == "_deleted"
-            || name == "GROUP"
-            || name == "__typename"
-            || name == "_version"
-            || collection.fields.iter().any(|f| f.name == name)
-    };
-
-    // Validate that all requested simple fields exist in schema
-    for requestable in &select.fields {
-        if let Requestable::Field(field) = requestable {
-            if !field_exists(&field.name) {
-                return Err(QueryError::unknown_field(format!(
-                    "Cannot query field \"{}\" on type \"{}\".",
-                    field.name, select.collection_name
-                )));
-            }
-        }
-    }
-
-    // Validate aggregate target fields exist in schema
-    // Note: For relation-based aggregates (e.g., _sum(books: {field: score})),
-    // the field belongs to the related collection, not the current one.
-    // We skip validation here; it will be checked during execution.
-    for requestable in &select.fields {
-        if let Requestable::Aggregate(agg) = requestable {
-            for target in &agg.targets {
-                if let Some(ref field_name) = target.field_name {
-                    // Skip validation for:
-                    // 1. Relation-based aggregates (non-empty host_name that's a relation field)
-                    // 2. _group aggregates (host_name is "GROUP") - targets grouped results
-                    // 3. Nested aggregates (field_name starts with "_") - targets other aggregate results
-                    let is_relation_aggregate = !target.host_name.is_empty()
-                        && collection.fields.iter().any(|f| f.name == target.host_name);
-                    let is_group_aggregate = target.host_name == "GROUP";
-                    let is_nested_aggregate = field_name.starts_with('_');
-
-                    if !is_relation_aggregate
-                        && !is_group_aggregate
-                        && !is_nested_aggregate
-                        && !field_exists(field_name)
-                    {
-                        return Err(QueryError::unknown_field(format!(
-                            "aggregate target field '{}' not found in collection '{}'",
-                            field_name, select.collection_name
-                        )));
-                    }
-                }
-            }
-        }
-    }
-
-    // Validate GROUP BY fields exist in schema and are groupable
-    if let Some(ref group_by) = select.group_by {
-        for field_name in &group_by.fields {
-            if !field_exists(field_name) {
-                return Err(QueryError::unknown_field(format!(
-                    "GROUP BY field '{}' not found in collection '{}'",
-                    field_name, select.collection_name
-                )));
-            }
-            // Reject array relation fields (one-to-many) - can't group by a list value
-            if let Some(field) = collection.field_by_name(field_name) {
-                if field.kind.is_object() && field.kind.is_array() {
-                    return Err(QueryError::parse(format!(
-                        "invalid field value to groupBy. Field: {}",
-                        field_name
-                    )));
-                }
-            }
-        }
-
-        // Validate that non-special fields selected at group level are in the groupBy list
-        let group_fields: Vec<&str> = group_by.fields.iter().map(|s| s.as_str()).collect();
-        for requestable in &select.fields {
-            match requestable {
-                Requestable::Field(field) => {
-                    let name = field.name.as_str();
-                    // Skip special fields
-                    if name == "_docID" || name == "GROUP" || name == "__typename" {
-                        continue;
-                    }
-                    if group_fields.contains(&name) {
-                        continue;
-                    }
-                    // Allow FK fields for relation groupBy fields (e.g. _authorID for author)
-                    let is_fk_for_group = group_fields
-                        .iter()
-                        .any(|gb_field| name == format!("_{}ID", gb_field));
-                    if is_fk_for_group {
-                        continue;
-                    }
-                    return Err(QueryError::parse(
-                        "cannot select a non-group-by field at group-level",
-                    ));
-                }
-                Requestable::Select(nested) => {
-                    if nested.field.name == "GROUP" {
-                        // _group is always allowed in groupBy queries
-                        continue;
-                    }
-                }
-                Requestable::Aggregate(_) => {
-                    // Aggregates are allowed at group level
-                }
-                Requestable::Similarity(_) => {
-                    // Similarity is allowed at group level
-                }
-                Requestable::FullTextSearch(_) => {
-                    // Full-text search is allowed at group level
-                }
-            }
-        }
-    }
-
-    // Validate _group references only appear within groupBy context
-    let has_group_by = select.group_by.is_some();
-    for requestable in &select.fields {
-        // Check for _count(_group: {}) or similar aggregates referencing _group
-        if let Requestable::Aggregate(agg) = requestable {
-            for target in &agg.targets {
-                if target.host_name == "GROUP" && !has_group_by {
-                    return Err(QueryError::parse(
-                        "_group may only be referenced when within a groupBy request",
-                    ));
-                }
-            }
-        }
-
-        // Check for _group references inside nested _group selections
-        if let Requestable::Select(nested) = requestable {
-            if nested.field.name == "GROUP" {
-                for inner in &nested.fields {
-                    if let Requestable::Aggregate(inner_agg) = inner {
-                        for target in &inner_agg.targets {
-                            if target.host_name == "GROUP" && nested.group_by.is_none() {
-                                return Err(QueryError::parse(
-                                    "_group may only be referenced when within a groupBy request",
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Validate bare aggregates have a property to aggregate
-    for requestable in &select.fields {
-        if let Requestable::Aggregate(agg) = requestable {
-            if agg.targets.is_empty() {
-                return Err(QueryError::parse(
-                    "aggregate must be provided with a property to aggregate",
-                ));
-            }
-        }
-    }
-
-    // Validate top-level filter field names exist in schema
-    if let Some(ref filter) = select.filter {
-        for key in filter.conditions().keys() {
-            // Skip logical operators and special filter directives
-            if key == "_and" || key == "_or" || key == "_not" || key == "_alias" {
-                continue;
-            }
-            if !field_exists(key) {
-                let filter_repr = format_graphql_conditions(filter.conditions());
-                return Err(QueryError::parse(format!(
-                    "Argument \"filter\" has invalid value {}.\nIn field \"{}\": Unknown field.",
-                    filter_repr, key
-                )));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Format filter conditions in Go graphql-go style (unquoted keys).
-fn format_graphql_conditions(conditions: &serde_json::Map<String, JsonValue>) -> String {
-    let entries: Vec<String> = conditions
-        .iter()
-        .map(|(k, v)| format!("{}: {}", k, format_graphql_value(v)))
-        .collect();
-    format!("{{{}}}", entries.join(", "))
-}
-
-/// Format a JSON value in Go graphql-go style.
-fn format_graphql_value(val: &JsonValue) -> String {
-    match val {
-        JsonValue::Object(obj) => {
-            let entries: Vec<String> = obj
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k, format_graphql_value(v)))
-                .collect();
-            format!("{{{}}}", entries.join(", "))
-        }
-        JsonValue::String(s) => format!("\"{}\"", s),
-        JsonValue::Number(n) => n.to_string(),
-        JsonValue::Bool(b) => b.to_string(),
-        JsonValue::Null => "null".to_string(),
-        JsonValue::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(format_graphql_value).collect();
-            format!("[{}]", items.join(", "))
-        }
-    }
 }
 
 /// Build the document mapping for a select operation.
@@ -500,7 +284,7 @@ pub(crate) fn build_plan(
     let has_group_by = select.group_by.is_some();
 
     if has_group_by {
-        // WITH GROUP BY: GroupByNode → Aggregates → OrderBy → Limit
+        // WITH GROUP BY: GroupByNode -> Aggregates -> OrderBy -> Limit
 
         // Add GroupByNode
         if let Some(ref group_by) = select.group_by {
@@ -624,7 +408,7 @@ pub(crate) fn build_plan(
             }
         }
     } else {
-        // WITHOUT GROUP BY: OrderBy → [AllDocs if multiple aggs] → Aggregates → Limit
+        // WITHOUT GROUP BY: OrderBy -> [AllDocs if multiple aggs] -> Aggregates -> Limit
         // Go applies limit AFTER aggregates so limit restricts the final output,
         // not the documents fed to aggregation.
 
@@ -663,169 +447,6 @@ pub(crate) fn build_plan(
         }
     }
 
-    Ok(plan)
-}
-
-/// Add aggregate nodes to the plan based on the select's aggregate fields.
-fn add_aggregate_nodes(
-    mut plan: Box<dyn PlanNode>,
-    select: &Select,
-    mapping: &DocumentMapping,
-) -> Result<Box<dyn PlanNode>> {
-    for field in &select.fields {
-        if let Requestable::Aggregate(agg) = field {
-            // Get the index where the aggregate result should be stored.
-            // Use the output name (alias if set, otherwise type name) to look up the
-            // correct render_key index. This handles aliased aggregates correctly
-            // (e.g., C1: _count(...) and C2: _count(...) get different indices).
-            let agg_index = mapping
-                .try_find_index_from_render_key(agg.output_name())
-                .ok_or_else(|| {
-                    QueryError::internal(format!(
-                        "aggregate '{}' not found in document mapping render keys - this is a bug",
-                        agg.output_name()
-                    ))
-                })?;
-
-            // For aggregates that operate on a field, get the field index
-            let field_index = if !agg.targets.is_empty() && agg.targets[0].field_name.is_some() {
-                let target_field = agg.targets[0].field_name.as_ref().unwrap();
-                mapping.first_index_of_name(target_field).ok_or_else(|| {
-                    QueryError::execution(format!(
-                        "aggregate target field '{}' not found in mapping",
-                        target_field
-                    ))
-                })?
-            } else {
-                0 // Not used for count
-            };
-
-            // Extract filter and limit from aggregate target (if any)
-            let target_filter = if !agg.targets.is_empty() {
-                agg.targets[0].filter.clone()
-            } else {
-                None
-            };
-            let target_limit = if !agg.targets.is_empty() {
-                agg.targets[0].limit.clone()
-            } else {
-                None
-            };
-
-            match agg.aggregate_type {
-                AggregateType::Count => {
-                    let mut node = CountNode::new(plan, mapping.clone(), agg_index);
-                    if let Some(ref filter) = target_filter {
-                        node = node.with_filter(filter.clone());
-                    }
-                    if let Some(limit) = target_limit {
-                        node = node.with_limit(limit);
-                    }
-                    // Add sources for explain output
-                    let sources: Vec<CountSourceMeta> = agg
-                        .targets
-                        .iter()
-                        .map(|target| CountSourceMeta {
-                            field_name: if !target.host_name.is_empty() {
-                                target.host_name.clone()
-                            } else {
-                                select.collection_name.clone()
-                            },
-                            filter: target.filter.clone(),
-                            is_inline_array: target.field_name.is_none(),
-                        })
-                        .collect();
-                    node = node.with_sources(sources);
-                    plan = Box::new(node);
-                }
-                AggregateType::Sum => {
-                    let mut node = SumNode::new(plan, mapping.clone(), field_index, agg_index);
-                    if let Some(ref filter) = target_filter {
-                        node = node.with_filter(filter.clone());
-                    }
-                    if let Some(limit) = target_limit {
-                        node = node.with_limit(limit);
-                    }
-                    let sources: Vec<SumSourceMeta> = agg
-                        .targets
-                        .iter()
-                        .map(|target| SumSourceMeta {
-                            field_name: if !target.host_name.is_empty() {
-                                target.host_name.clone()
-                            } else {
-                                select.collection_name.clone()
-                            },
-                            child_field_name: target.field_name.clone(),
-                            filter: target.filter.clone(),
-                            is_inline_array: target.field_name.is_none(),
-                        })
-                        .collect();
-                    node = node.with_sources(sources);
-                    plan = Box::new(node);
-                }
-                AggregateType::Average => {
-                    let mut node = AverageNode::new(plan, mapping.clone(), field_index, agg_index);
-                    if let Some(filter) = target_filter {
-                        node = node.with_filter(filter);
-                    }
-                    if let Some(limit) = target_limit {
-                        node = node.with_limit(limit);
-                    }
-                    plan = Box::new(node);
-                }
-                AggregateType::Min => {
-                    let mut node = MinNode::new(plan, mapping.clone(), field_index, agg_index);
-                    if let Some(ref filter) = target_filter {
-                        node = node.with_filter(filter.clone());
-                    }
-                    if let Some(limit) = target_limit {
-                        node = node.with_limit(limit);
-                    }
-                    let sources: Vec<MinSourceMeta> = agg
-                        .targets
-                        .iter()
-                        .map(|target| MinSourceMeta {
-                            field_name: if !target.host_name.is_empty() {
-                                target.host_name.clone()
-                            } else {
-                                select.collection_name.clone()
-                            },
-                            child_field_name: target.field_name.clone(),
-                            filter: target.filter.clone(),
-                            is_inline_array: target.field_name.is_none(),
-                        })
-                        .collect();
-                    node = node.with_sources(sources);
-                    plan = Box::new(node);
-                }
-                AggregateType::Max => {
-                    let mut node = MaxNode::new(plan, mapping.clone(), field_index, agg_index);
-                    if let Some(ref filter) = target_filter {
-                        node = node.with_filter(filter.clone());
-                    }
-                    if let Some(limit) = target_limit {
-                        node = node.with_limit(limit);
-                    }
-                    let sources: Vec<MaxSourceMeta> = agg
-                        .targets
-                        .iter()
-                        .map(|target| MaxSourceMeta {
-                            field_name: if !target.host_name.is_empty() {
-                                target.host_name.clone()
-                            } else {
-                                select.collection_name.clone()
-                            },
-                            child_field_name: target.field_name.clone(),
-                            filter: target.filter.clone(),
-                            is_inline_array: target.field_name.is_none(),
-                        })
-                        .collect();
-                    node = node.with_sources(sources);
-                    plan = Box::new(node);
-                }
-            }
-        }
-    }
     Ok(plan)
 }
 

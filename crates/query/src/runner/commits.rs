@@ -15,13 +15,12 @@ use crate::error::Result;
 use crate::mapper::{Aggregate, AggregateType, Requestable, Select};
 use crate::txn::TransactionRegistry;
 
+use super::commits_height::{extract_commits_height_range, HeightRangeExtraction};
+use super::commits_numeric::{
+    max_commit_numeric_values, min_commit_numeric_values, sum_commit_numeric_values,
+    CommitNumericValue,
+};
 use super::{DocFetcher, QueryRunner};
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct CommitsHeightRange {
-    start: u64,
-    end: Option<u64>,
-}
 
 #[cfg(test)]
 mod tests {
@@ -43,7 +42,7 @@ mod tests {
 
         assert_eq!(
             extract_commits_height_range(&filter),
-            HeightRangeExtraction::Range(CommitsHeightRange {
+            HeightRangeExtraction::Range(super::super::commits_height::CommitsHeightRange {
                 start: 2,
                 end: Some(5),
             })
@@ -62,7 +61,7 @@ mod tests {
 
         assert_eq!(
             extract_commits_height_range(&filter),
-            HeightRangeExtraction::Range(CommitsHeightRange {
+            HeightRangeExtraction::Range(super::super::commits_height::CommitsHeightRange {
                 start: 2,
                 end: Some(4),
             })
@@ -81,7 +80,7 @@ mod tests {
 
         assert_eq!(
             extract_commits_height_range(&filter),
-            HeightRangeExtraction::Range(CommitsHeightRange {
+            HeightRangeExtraction::Range(super::super::commits_height::CommitsHeightRange {
                 start: 2,
                 end: None,
             })
@@ -142,297 +141,6 @@ mod tests {
             max_commit_numeric_values(&values).as_i64(),
             Some(9_007_199_254_740_993)
         );
-    }
-}
-
-impl CommitsHeightRange {
-    fn merge(self, other: Self) -> HeightRangeExtraction {
-        let start = self.start.max(other.start);
-        let end = match (self.end, other.end) {
-            (Some(lhs), Some(rhs)) => Some(lhs.min(rhs)),
-            (Some(lhs), None) => Some(lhs),
-            (None, Some(rhs)) => Some(rhs),
-            (None, None) => None,
-        };
-
-        if end.is_some_and(|end| start >= end) {
-            HeightRangeExtraction::Empty
-        } else {
-            HeightRangeExtraction::Range(Self { start, end })
-        }
-    }
-
-    fn with_lower_bound(mut self, start: u64) -> HeightRangeExtraction {
-        self.start = self.start.max(start);
-        if self.end.is_some_and(|end| self.start >= end) {
-            HeightRangeExtraction::Empty
-        } else {
-            HeightRangeExtraction::Range(self)
-        }
-    }
-
-    fn with_upper_bound(mut self, end: Option<u64>) -> HeightRangeExtraction {
-        self.end = match (self.end, end) {
-            (Some(lhs), Some(rhs)) => Some(lhs.min(rhs)),
-            (Some(lhs), None) => Some(lhs),
-            (None, Some(rhs)) => Some(rhs),
-            (None, None) => None,
-        };
-
-        if self.end.is_some_and(|end| self.start >= end) {
-            HeightRangeExtraction::Empty
-        } else {
-            HeightRangeExtraction::Range(self)
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum HeightRangeExtraction {
-    None,
-    Range(CommitsHeightRange),
-    Empty,
-    Unsupported,
-}
-
-impl HeightRangeExtraction {
-    fn merge_and(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Unsupported, _) | (_, Self::Unsupported) => Self::Unsupported,
-            (Self::Empty, _) | (_, Self::Empty) => Self::Empty,
-            (Self::None, rhs) => rhs,
-            (lhs, Self::None) => lhs,
-            (Self::Range(lhs), Self::Range(rhs)) => lhs.merge(rhs),
-        }
-    }
-}
-
-fn extract_commits_height_range(filter: &crate::mapper::Filter) -> HeightRangeExtraction {
-    extract_commits_height_range_from_conditions(filter.conditions())
-}
-
-fn extract_commits_height_range_from_conditions(
-    conditions: &serde_json::Map<String, JsonValue>,
-) -> HeightRangeExtraction {
-    let mut extracted = HeightRangeExtraction::None;
-
-    for (field_name, value) in conditions {
-        if field_name == "height" {
-            extracted = extracted.merge_and(parse_height_condition(value));
-            continue;
-        }
-
-        match crate::mapper::FilterOp::parse(field_name) {
-            Some(crate::mapper::FilterOp::And) => {
-                if value.is_null() {
-                    continue;
-                }
-                let Some(items) = value.as_array() else {
-                    return HeightRangeExtraction::Unsupported;
-                };
-                for item in items {
-                    let Ok(sub_conditions) =
-                        serde_json::from_value::<serde_json::Map<String, JsonValue>>(item.clone())
-                    else {
-                        return HeightRangeExtraction::Unsupported;
-                    };
-                    extracted = extracted.merge_and(extract_commits_height_range_from_conditions(
-                        &sub_conditions,
-                    ));
-                }
-            }
-            Some(crate::mapper::FilterOp::Or | crate::mapper::FilterOp::Not) => {
-                if logical_value_contains_top_level_height(value) {
-                    return HeightRangeExtraction::Unsupported;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    extracted
-}
-
-fn logical_value_contains_top_level_height(value: &JsonValue) -> bool {
-    match value {
-        JsonValue::Array(items) => items.iter().any(logical_value_contains_top_level_height),
-        JsonValue::Object(obj) => logical_conditions_contain_top_level_height(obj),
-        _ => false,
-    }
-}
-
-fn logical_conditions_contain_top_level_height(
-    conditions: &serde_json::Map<String, JsonValue>,
-) -> bool {
-    conditions.iter().any(|(field_name, value)| {
-        field_name == "height"
-            || matches!(
-                crate::mapper::FilterOp::parse(field_name),
-                Some(
-                    crate::mapper::FilterOp::And
-                        | crate::mapper::FilterOp::Or
-                        | crate::mapper::FilterOp::Not
-                )
-            ) && logical_value_contains_top_level_height(value)
-    })
-}
-
-fn parse_height_condition(value: &JsonValue) -> HeightRangeExtraction {
-    if value.is_null() {
-        return HeightRangeExtraction::Empty;
-    }
-
-    if let Some(height) = json_value_to_non_negative_u64(value) {
-        return HeightRangeExtraction::Range(CommitsHeightRange {
-            start: height,
-            end: height.checked_add(1),
-        });
-    }
-
-    let Some(ops) = value.as_object() else {
-        return HeightRangeExtraction::Unsupported;
-    };
-
-    let mut range = HeightRangeExtraction::Range(CommitsHeightRange::default());
-
-    for (op_str, expected) in ops {
-        let Some(op) = crate::mapper::FilterOp::parse(op_str) else {
-            return HeightRangeExtraction::Unsupported;
-        };
-        let Some(height) = json_value_to_non_negative_u64(expected) else {
-            return HeightRangeExtraction::Unsupported;
-        };
-
-        range = match (range, op) {
-            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Eq) => {
-                range.with_lower_bound(height).merge_and(
-                    CommitsHeightRange {
-                        start: height,
-                        end: height.checked_add(1),
-                    }
-                    .into(),
-                )
-            }
-            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Gt) => {
-                if let Some(start) = height.checked_add(1) {
-                    range.with_lower_bound(start)
-                } else {
-                    HeightRangeExtraction::Empty
-                }
-            }
-            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Gte) => {
-                range.with_lower_bound(height)
-            }
-            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Lt) => {
-                range.with_upper_bound(Some(height))
-            }
-            (HeightRangeExtraction::Range(range), crate::mapper::FilterOp::Lte) => {
-                range.with_upper_bound(height.checked_add(1))
-            }
-            (_, _) => HeightRangeExtraction::Unsupported,
-        };
-
-        match range {
-            HeightRangeExtraction::Range(_) => {}
-            other => return other,
-        }
-    }
-
-    range
-}
-
-impl From<CommitsHeightRange> for HeightRangeExtraction {
-    fn from(range: CommitsHeightRange) -> Self {
-        Self::Range(range)
-    }
-}
-
-fn json_value_to_non_negative_u64(value: &JsonValue) -> Option<u64> {
-    value.as_i64().and_then(|height| u64::try_from(height).ok())
-}
-
-#[derive(Debug, Clone, Copy)]
-enum CommitNumericValue {
-    Int(i64),
-    Float(f64),
-}
-
-impl CommitNumericValue {
-    fn as_f64(self) -> f64 {
-        match self {
-            Self::Int(value) => value as f64,
-            Self::Float(value) => value,
-        }
-    }
-
-    fn is_float(self) -> bool {
-        matches!(self, Self::Float(_))
-    }
-}
-
-fn sum_commit_numeric_values(values: &[CommitNumericValue]) -> JsonValue {
-    if values.iter().any(|value| value.is_float()) {
-        let sum = values.iter().map(|value| value.as_f64()).sum::<f64>();
-        serde_json::Number::from_f64(sum)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null)
-    } else {
-        values
-            .iter()
-            .try_fold(0i64, |sum, value| match value {
-                CommitNumericValue::Int(value) => sum.checked_add(*value),
-                CommitNumericValue::Float(_) => None,
-            })
-            .map(|sum| JsonValue::Number(sum.into()))
-            .unwrap_or(JsonValue::Null)
-    }
-}
-
-fn min_commit_numeric_values(values: &[CommitNumericValue]) -> JsonValue {
-    if values.iter().any(|value| value.is_float()) {
-        let min = values
-            .iter()
-            .map(|value| value.as_f64())
-            .fold(None, |current: Option<f64>, value| {
-                Some(current.map_or(value, |min| min.min(value)))
-            });
-        min.and_then(serde_json::Number::from_f64)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null)
-    } else {
-        values
-            .iter()
-            .filter_map(|value| match value {
-                CommitNumericValue::Int(value) => Some(*value),
-                CommitNumericValue::Float(_) => None,
-            })
-            .min()
-            .map(|value| JsonValue::Number(value.into()))
-            .unwrap_or(JsonValue::Null)
-    }
-}
-
-fn max_commit_numeric_values(values: &[CommitNumericValue]) -> JsonValue {
-    if values.iter().any(|value| value.is_float()) {
-        let max = values
-            .iter()
-            .map(|value| value.as_f64())
-            .fold(None, |current: Option<f64>, value| {
-                Some(current.map_or(value, |max| max.max(value)))
-            });
-        max.and_then(serde_json::Number::from_f64)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null)
-    } else {
-        values
-            .iter()
-            .filter_map(|value| match value {
-                CommitNumericValue::Int(value) => Some(*value),
-                CommitNumericValue::Float(_) => None,
-            })
-            .max()
-            .map(|value| JsonValue::Number(value.into()))
-            .unwrap_or(JsonValue::Null)
     }
 }
 
@@ -1021,7 +729,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
             if !policies.is_empty() {
                 // Collect the set of doc_ids that the caller is allowed to read.
-                // For each doc_id, check against every ACP policy — the doc belongs
+                // For each doc_id, check against every ACP policy -- the doc belongs
                 // to exactly one collection, and only that policy's check will be
                 // authoritative (others will return Ok(false) for unknown docs).
                 let mut denied_doc_ids: std::collections::HashSet<String> =
@@ -1039,7 +747,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     }
                     checked_doc_ids.insert(doc_id.clone());
 
-                    // Check against all policies — at least one must grant access.
+                    // Check against all policies -- at least one must grant access.
                     let mut any_granted = false;
                     for &(policy_id, resource_name) in &policies {
                         match acp

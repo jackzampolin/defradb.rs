@@ -22,13 +22,19 @@
 //! - `helpers`: Utility functions (placeholder for extraction)
 
 mod commits;
+mod commits_height;
+mod commits_numeric;
 mod executor;
 mod explain;
 mod fetcher;
 mod helpers;
 mod introspection;
 mod mutation;
+mod mutation_inputs;
 mod plan;
+mod plan_aggregates;
+mod plan_formatting;
+mod plan_validation;
 mod query;
 mod version;
 

@@ -2,6 +2,8 @@
 
 mod aggregate;
 mod nested;
+mod nested_fulltext;
+mod nested_profile;
 mod relation_aggregate;
 mod select;
 mod simple;
