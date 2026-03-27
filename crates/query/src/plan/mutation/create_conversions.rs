@@ -393,6 +393,10 @@ fn json_array_to_normal_value_with_kind(
             }
             Ok(NormalValue::NillableStringElementArray(strings))
         }
+        _ => Err(QueryError::Execution(format!(
+            "unsupported array kind: {:?}",
+            array_kind
+        ))),
     }
 }
 
