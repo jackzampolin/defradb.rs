@@ -6,6 +6,9 @@
 mod batch;
 mod collection;
 mod composite;
+mod composite_fields;
+mod composite_heads;
+mod composite_persist;
 mod counter;
 mod definition;
 pub(crate) mod error;
@@ -42,7 +45,7 @@ use storage::corekv::{Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
 use zeroize::Zeroizing;
 
-use crate::collection::collection_short_id;
+use crate::collection::{collection_short_id, Collection};
 use crate::database::DB;
 use crate::index_manager::IndexManager;
 use hook::CompositeMergeHook;

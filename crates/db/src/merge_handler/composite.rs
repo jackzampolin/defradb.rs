@@ -1,17 +1,57 @@
 use super::batch::{PendingMergeEvent, PendingPostCommitAction};
 use super::*;
 
-/// Marker byte indicating a document is deleted (matches Go's DeletedObjectMarker).
-const DELETED_MARKER: u8 = 0x01;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CompositeMergeMode {
+    Standalone,
+    Batch,
+}
 
-/// Build the deletion marker key: /del/{collection_id}/{doc_id}
-fn build_deleted_key(collection_id: &str, doc_id: &str) -> Vec<u8> {
-    let mut key = Vec::new();
-    key.extend_from_slice(b"/del/");
-    key.extend_from_slice(collection_id.as_bytes());
-    key.push(b'/');
-    key.extend_from_slice(doc_id.as_bytes());
-    key
+impl CompositeMergeMode {
+    pub(crate) fn is_standalone(self) -> bool {
+        matches!(self, Self::Standalone)
+    }
+}
+
+pub(crate) struct CompositeMergeContext<'a, 'b> {
+    pub(crate) cid: &'a Cid,
+    pub(crate) block: &'a Block,
+    pub(crate) payload: &'a defra_core::block::CompositeDeltaPayload,
+    pub(crate) metadata: &'a BlockMetadata<'b>,
+    pub(crate) doc_id_str: &'a str,
+    pub(crate) collection: Option<Collection>,
+    pub(crate) mode: CompositeMergeMode,
+}
+
+impl<'a, 'b> CompositeMergeContext<'a, 'b> {
+    fn new(
+        cid: &'a Cid,
+        block: &'a Block,
+        payload: &'a defra_core::block::CompositeDeltaPayload,
+        metadata: &'a BlockMetadata<'b>,
+        doc_id_str: &'a str,
+        collection: Option<Collection>,
+        mode: CompositeMergeMode,
+    ) -> Self {
+        Self {
+            cid,
+            block,
+            payload,
+            metadata,
+            doc_id_str,
+            collection,
+            mode,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CompositeMergeState {
+    pub(crate) field_values: HashMap<String, NormalValue>,
+    pub(crate) any_field_applied: bool,
+    pub(crate) encrypted_policy_checked: bool,
+    pub(crate) field_block_heads: HashMap<String, Vec<Cid>>,
+    pub(crate) is_branchable: bool,
 }
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
@@ -89,7 +129,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // re-processing parents that were already merged.
         if let Some(heads) = &block.heads {
             for head_cid in heads {
-                // Skip parents already processed by this or another path.
                 {
                     let merged = self.merged_composites.lock().unwrap_or_else(|e| {
                         tracing::warn!("merged_composites lock poisoned, recovering");
@@ -105,7 +144,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     }
                 }
 
-                // Load the parent block from blockstore
                 let head_data = match self.blockstore.get(head_cid).await {
                     Ok(Some(data)) => data,
                     Ok(None) => {
@@ -127,7 +165,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 };
 
                 let head_block = match Block::from_dag_cbor(&head_data) {
-                    Ok(b) => b,
+                    Ok(block) => block,
                     Err(_) => continue,
                 };
 
@@ -137,9 +175,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         child_cid = %cid,
                         "Recursively merging parent composite before current"
                     );
-                    // Recursive call — the parent will in turn merge its own parents.
-                    // Each composite opens its own transaction so ordering is safe.
-                    // Box::pin is required because recursive async fns are unsized.
                     match Box::pin(self.process_composite_delta(
                         head_cid,
                         &head_block,
@@ -159,540 +194,52 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
-        // Create a SINGLE transaction for all field merges AND document storage
         let txn = self.db.new_txn(false).await?;
+        let context = CompositeMergeContext::new(
+            cid,
+            block,
+            payload,
+            metadata,
+            &doc_id_str,
+            collection_lookup.clone(),
+            CompositeMergeMode::Standalone,
+        );
+        let mut state = CompositeMergeState::default();
 
-        let collection_for_policy = collection_lookup.clone();
-
-        // Collect winning field values for document reconstruction
-        // These are the values that WON conflict resolution, not just the incoming values
-        let mut field_values: HashMap<String, NormalValue> = HashMap::new();
-        let mut any_field_applied = false;
-        let mut process_error: Option<MergeError> = None;
-        let mut skip_outcome: Option<MergeOutcome> = None;
-        let mut is_branchable = false;
-        let mut encrypted_policy_checked = false;
-        // Collect field block heads for proper headstore merging during concurrent updates
-        let mut field_block_heads: HashMap<String, Vec<Cid>> = HashMap::new();
-
-        // Process linked blocks within the transaction scope
-        // Use a scoped block to ensure datastore is dropped before commit/discard
-        {
+        let process_result: std::result::Result<Option<MergeOutcome>, MergeError> = {
             let mut datastore = match txn.datastore() {
-                Ok(ds) => ds,
+                Ok(datastore) => datastore,
                 Err(e) => {
                     let _ = txn.force_discard();
                     return Err(MergeError::Database(e));
                 }
             };
 
-            if let Some(links) = &block.links {
-                tracing::info!(
-                    cid = %cid,
-                    links_count = links.len(),
-                    "Processing linked blocks from Composite delta"
-                );
-
-                for dag_link in links {
-                    let link_name = &dag_link.name;
-                    let link_cid = &dag_link.link;
-
-                    tracing::debug!(
-                        parent_cid = %cid,
-                        link_cid = %link_cid,
-                        link_name = %link_name,
-                        "Processing linked block"
-                    );
-
-                    // Load the linked block from storage
-                    let linked_block_data = match self.blockstore.get(link_cid).await {
-                        Ok(Some(data)) => data,
-                        Ok(None) => {
-                            tracing::error!(
-                                parent_cid = %cid,
-                                link_cid = %link_cid,
-                                "Linked block not found in blockstore"
-                            );
-                            process_error = Some(MergeError::Storage(format!(
-                                "Linked block {} not found in blockstore",
-                                link_cid
-                            )));
-                            break;
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                parent_cid = %cid,
-                                link_cid = %link_cid,
-                                error = %e,
-                                "Failed to load linked block from blockstore"
-                            );
-                            process_error = Some(MergeError::Storage(e.to_string()));
-                            break;
-                        }
-                    };
-
-                    // Decode and process the linked block
-                    let linked_block = match Block::from_dag_cbor(&linked_block_data) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            process_error = Some(MergeError::BlockDecode(e.to_string()));
-                            break;
-                        }
-                    };
-
-                    // Collect field block heads for proper headstore merging.
-                    // During concurrent updates, we must only delete the heads that
-                    // this field block explicitly supersedes, not ALL heads for the field.
-                    if let Some(heads) = &linked_block.heads {
-                        field_block_heads.insert(link_name.clone(), heads.clone());
-                    }
-
-                    if linked_block.encryption.is_some() && !encrypted_policy_checked {
-                        encrypted_policy_checked = true;
-                        if let (Some(collection), Some(hook)) =
-                            (collection_for_policy.as_ref(), self.composite_merge_hook())
-                        {
-                            if let Some(outcome) = hook
-                                .on_encrypted_link(&doc_id_str, collection.schema(), metadata)
-                                .await?
-                            {
-                                skip_outcome = Some(outcome);
-                                break;
-                            }
-                        }
-                    }
-
-                    // Decrypt linked block data if it has encryption
-                    let effective_linked_delta = match &linked_block.delta {
-                        CrdtDelta::Lww(p) if linked_block.encryption.is_some() => {
-                            match self
-                                .decrypt_block_data(&p.data, linked_block.encryption.as_ref())
-                                .await
-                            {
-                                Ok(decrypted) => {
-                                    let mut dp = p.clone();
-                                    dp.data = decrypted;
-                                    CrdtDelta::Lww(dp)
-                                }
-                                Err(_) => linked_block.delta.clone(),
-                            }
-                        }
-                        CrdtDelta::Counter(p) if linked_block.encryption.is_some() => {
-                            match self
-                                .decrypt_block_data(&p.data, linked_block.encryption.as_ref())
-                                .await
-                            {
-                                Ok(decrypted) => {
-                                    let mut dp = p.clone();
-                                    dp.data = decrypted;
-                                    CrdtDelta::Counter(dp)
-                                }
-                                Err(_) => linked_block.delta.clone(),
-                            }
-                        }
-                        other => other.clone(),
-                    };
-
-                    match &effective_linked_delta {
-                        CrdtDelta::Lww(lww_payload) => {
-                            // Process the LWW delta within our transaction
-                            match self
-                                .process_lww_delta_in_txn(&mut datastore, link_cid, lww_payload)
-                                .await
-                            {
-                                Ok(result) => {
-                                    if result.applied {
-                                        any_field_applied = true;
-                                    }
-                                    // Collect the WINNING value for document reconstruction
-                                    if let Some(value) = result.value {
-                                        field_values.insert(lww_payload.field_name.clone(), value);
-                                    }
-                                }
-                                Err(e) => {
-                                    process_error = Some(e);
-                                    break;
-                                }
-                            }
-                        }
-                        CrdtDelta::Counter(counter_payload) => {
-                            // Process the Counter delta within our transaction
-                            match self
-                                .process_counter_delta_in_txn(
-                                    &mut datastore,
-                                    link_cid,
-                                    counter_payload,
-                                    metadata.collection_id,
-                                )
-                                .await
-                            {
-                                Ok(result) => {
-                                    if result.applied {
-                                        any_field_applied = true;
-                                    }
-                                    // Collect the accumulated value for document reconstruction
-                                    if let Some(value) = result.value {
-                                        field_values
-                                            .insert(counter_payload.field_name.clone(), value);
-                                    }
-                                }
-                                Err(e) => {
-                                    process_error = Some(e);
-                                    break;
-                                }
-                            }
-                        }
-                        other => {
-                            tracing::error!(
-                                parent_cid = %cid,
-                                link_cid = %link_cid,
-                                delta_type = ?std::mem::discriminant(other),
-                                "Unexpected delta type in linked block - expected LWW or Counter"
-                            );
-                            process_error = Some(MergeError::UnsupportedDelta(format!(
-                                "Unexpected delta type in linked block: {:?}",
-                                std::mem::discriminant(other)
-                            )));
-                            break;
-                        }
-                    }
+            match self
+                .process_linked_field_blocks(&mut datastore, &context, &mut state)
+                .await?
+            {
+                Some(outcome) => Ok(Some(outcome)),
+                None => {
+                    self.persist_merged_document(&mut datastore, &context, &mut state)
+                        .await?;
+                    Ok(None)
                 }
             }
+        };
 
-            // Find the collection by schema version ID, with fallback to
-            // the P2P metadata's collection_id (handles cross-version sync
-            // where the incoming block's schema version differs from local)
-            if process_error.is_none() {
-                let is_delete = payload.status == 2;
-
-                match collection_lookup.clone() {
-                    Some(collection) => {
-                        is_branchable = collection.schema().is_branchable;
-                        if is_delete {
-                            // Handle delete: remove index entries, then write deletion marker.
-                            // Must load the old document first so we know which index
-                            // entries to remove (Go's syncIndexedDoc does the same).
-                            if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
-                                if let Ok(Some(old_doc)) =
-                                    collection.get_with_datastore(&datastore, &doc_id).await
-                                {
-                                    let short_id = collection_short_id(collection.collection_id());
-                                    if let Ok(index_manager) =
-                                        IndexManager::from_collection(short_id, collection.schema())
-                                    {
-                                        if let Err(e) = index_manager
-                                            .on_document_delete(
-                                                &datastore,
-                                                &old_doc,
-                                                collection.schema(),
-                                            )
-                                            .await
-                                        {
-                                            process_error = Some(MergeError::MergeFailed(format!(
-                                                "Failed to delete indexes after merge: {}",
-                                                e
-                                            )));
-                                        }
-                                    }
-                                }
-                            }
-
-                            if process_error.is_none() {
-                                let deleted_key =
-                                    build_deleted_key(collection.collection_id(), &doc_id_str);
-                                if let Err(e) = datastore.set(&deleted_key, &[DELETED_MARKER]).await
-                                {
-                                    process_error =
-                                        Some(MergeError::Database(crate::error::Error::Storage(e)));
-                                } else {
-                                    tracing::info!(
-                                        doc_id = %doc_id_str,
-                                        collection = %collection.name(),
-                                        "Deletion marker set after P2P merge"
-                                    );
-                                }
-                            }
-                        } else if !field_values.is_empty() {
-                            // Store the reconstructed document within the same transaction.
-                            // Load the existing document first so unmodified fields (e.g.
-                            // foreign keys like _AuthorID) are preserved across partial
-                            // updates that only touch a subset of fields.
-                            match DocID::from_string(&doc_id_str) {
-                                Ok(doc_id) => {
-                                    let (mut doc, old_doc) = match collection
-                                        .get_with_datastore(&datastore, &doc_id)
-                                        .await
-                                    {
-                                        Ok(Some(existing)) => {
-                                            let old = existing.clone();
-                                            (existing, Some(old))
-                                        }
-                                        _ => {
-                                            let mut new_doc = Document::new();
-                                            new_doc.set_id(doc_id.clone());
-                                            (new_doc, None)
-                                        }
-                                    };
-
-                                    // Set the schema version from the incoming block so the
-                                    // lensed fetcher can detect version mismatches and apply
-                                    // migrations at query time (matches Go's composite merge).
-                                    doc.set_schema_version_id(&payload.schema_version_id);
-
-                                    // Overlay new/winning field values on top of existing fields
-                                    for (field_name, value) in &field_values {
-                                        doc.set(field_name, value.clone());
-                                    }
-
-                                    // Only store fields that the local collection knows about,
-                                    // so cross-version syncs don't leak unknown fields into
-                                    // query results.
-                                    let known_fields: std::collections::HashSet<&str> = collection
-                                        .schema()
-                                        .fields
-                                        .iter()
-                                        .map(|f| f.name.as_str())
-                                        .collect();
-                                    let all_field_names: Vec<String> =
-                                        doc.field_names().map(|s| s.to_string()).collect();
-                                    for fname in &all_field_names {
-                                        if !known_fields.contains(fname.as_str()) {
-                                            doc.remove(fname);
-                                        }
-                                    }
-
-                                    if let Err(e) =
-                                        collection.save_with_datastore(&datastore, &doc).await
-                                    {
-                                        process_error = Some(MergeError::Database(e));
-                                    } else {
-                                        // Update indexes for the merged document.
-                                        // Index failure blocks the transaction — index and document
-                                        // storage must remain consistent.
-                                        let short_id =
-                                            collection_short_id(collection.collection_id());
-                                        if let Ok(index_manager) = IndexManager::from_collection(
-                                            short_id,
-                                            collection.schema(),
-                                        ) {
-                                            let index_result = match &old_doc {
-                                                Some(old) => {
-                                                    index_manager
-                                                        .on_document_update(
-                                                            &datastore,
-                                                            old,
-                                                            &doc,
-                                                            collection.schema(),
-                                                        )
-                                                        .await
-                                                }
-                                                None => {
-                                                    index_manager
-                                                        .on_document_create(
-                                                            &datastore,
-                                                            &doc,
-                                                            collection.schema(),
-                                                        )
-                                                        .await
-                                                }
-                                            };
-                                            if let Err(e) = index_result {
-                                                process_error =
-                                                    Some(MergeError::MergeFailed(format!(
-                                                        "Failed to update indexes after merge: {}",
-                                                        e
-                                                    )));
-                                            }
-                                        }
-
-                                        if process_error.is_none() {
-                                            // Generate SE artifacts for replicated doc
-                                            if let Some(enc_key) = self.se_enc_key() {
-                                                if let Err(e) = se_merge::generate_merge_artifacts(
-                                                    &mut datastore,
-                                                    collection.schema(),
-                                                    &doc_id_str,
-                                                    &field_values,
-                                                    enc_key,
-                                                    None,
-                                                )
-                                                .await
-                                                {
-                                                    tracing::warn!(
-                                                        doc_id = %doc_id_str,
-                                                        error = %e,
-                                                        "Failed to generate SE artifacts after merge"
-                                                    );
-                                                }
-                                            }
-
-                                            tracing::info!(
-                                                doc_id = %doc_id_str,
-                                                collection = %collection.name(),
-                                                fields_count = field_values.len(),
-                                                any_applied = any_field_applied,
-                                                "Document stored for queries"
-                                            );
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    process_error = Some(MergeError::MergeFailed(format!(
-                                        "Invalid doc_id: {}",
-                                        e
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        process_error = Some(MergeError::MissingMetadata(format!(
-                            "Collection not found for schema_version_id: {}",
-                            payload.schema_version_id
-                        )));
-                    }
-                }
+        match process_result {
+            Ok(Some(outcome)) => {
+                txn.force_discard()?;
+                Ok(outcome)
             }
-        } // datastore dropped here
-
-        if let Some(outcome) = skip_outcome {
-            txn.force_discard()?;
-            return Ok(outcome);
-        }
-
-        // Write headstore entries so _version / _commits queries work on
-        // the receiving node.  The headstore tracks the latest CID for each
-        // field and for the composite ("C"), keyed by doc_id.
-        //
-        // IMPORTANT: Use proper head merging — only delete heads that this block
-        // explicitly supersedes (listed in block.heads / field block heads).
-        // This preserves concurrent branches during concurrent P2P updates.
-        if process_error.is_none() {
-            if let Ok(headstore) = txn.headstore() {
-                let priority_bytes = encode_priority_varint(payload.priority);
-
-                // Composite head: only delete heads listed in block.heads
-                if let Some(heads) = &block.heads {
-                    for parent_cid in heads {
-                        let parent_key = storage::keys::headstore::HeadstoreDocKey::new(
-                            &doc_id_str,
-                            "C",
-                            *parent_cid,
-                        );
-                        let _ = headstore
-                            .delete(
-                                &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&parent_key),
-                            )
-                            .await;
-                    }
-                }
-                // Add new composite head
-                let composite_head_key =
-                    storage::keys::headstore::HeadstoreDocKey::new(&doc_id_str, "C", *cid);
-                if let Err(e) = headstore
-                    .set(
-                        &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(
-                            &composite_head_key,
-                        ),
-                        &priority_bytes,
-                    )
-                    .await
-                {
-                    tracing::warn!(error = %e, "Failed to write composite head to headstore");
-                }
-                let composite_priority_key = storage::keys::headstore::HeadstorePriorityKey::new(
-                    &doc_id_str,
-                    payload.priority,
-                    *cid,
-                );
-                if let Err(e) = headstore
-                    .set(
-                        &<storage::keys::headstore::HeadstorePriorityKey as storage::corekv::Key>::bytes(
-                            &composite_priority_key,
-                        ),
-                        &[],
-                    )
-                    .await
-                {
-                    tracing::warn!(error = %e, "Failed to write composite priority index");
+            Ok(None) => {
+                if let Ok(headstore) = txn.headstore() {
+                    self.update_heads(&headstore, &context, &state).await;
                 }
 
-                // Field heads: only delete heads that each field block supersedes
-                if let Some(links) = &block.links {
-                    for dag_link in links {
-                        // Delete only the parent field heads (from the field block's heads)
-                        if let Some(parent_cids) = field_block_heads.get(&dag_link.name) {
-                            for parent_cid in parent_cids {
-                                let parent_key = storage::keys::headstore::HeadstoreDocKey::new(
-                                    &doc_id_str,
-                                    &dag_link.name,
-                                    *parent_cid,
-                                );
-                                let _ = headstore
-                                    .delete(
-                                        &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&parent_key),
-                                    )
-                                    .await;
-                            }
-                        }
-                        // Add new field head
-                        let field_head_key = storage::keys::headstore::HeadstoreDocKey::new(
-                            &doc_id_str,
-                            &dag_link.name,
-                            dag_link.link,
-                        );
-                        if let Err(e) = headstore
-                            .set(
-                                &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&field_head_key),
-                                &priority_bytes,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                field = %dag_link.name,
-                                error = %e,
-                                "Failed to write field head to headstore"
-                            );
-                        }
-                        let field_priority_key =
-                            storage::keys::headstore::HeadstorePriorityKey::new(
-                                &doc_id_str,
-                                payload.priority,
-                                dag_link.link,
-                            );
-                        if let Err(e) = headstore
-                            .set(
-                                &<storage::keys::headstore::HeadstorePriorityKey as storage::corekv::Key>::bytes(
-                                    &field_priority_key,
-                                ),
-                                &[],
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                field = %dag_link.name,
-                                error = %e,
-                                "Failed to write field priority index"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // For branchable collections, the sender broadcasts the collection block
-        // separately (dual broadcast), so we don't create local collection blocks here.
-        // The sender's collection block arrives via handle_block → process_collection_delta
-        // which preserves the exact collection CID for cross-node consistency.
-
-        // Handle transaction commit/discard based on result
-        match process_error {
-            None => {
-                // Commit the entire transaction (all field merges + document storage + headstore)
                 txn.force_commit().await?;
 
-                // Mark this composite as merged so concurrent/recursive paths
-                // skip re-processing it (prevents stale headstore entries).
                 {
                     let mut merged = self.merged_composites.lock().unwrap_or_else(|e| {
                         tracing::warn!("merged_composites lock poisoned, recovering");
@@ -704,12 +251,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 tracing::info!(
                     cid = %cid,
                     doc_id = %doc_id_str,
-                    fields_merged = field_values.len(),
+                    fields_merged = state.field_values.len(),
                     "Composite delta processed and committed successfully"
                 );
 
                 if let (Some(collection), Some(hook)) =
-                    (collection_for_policy.as_ref(), self.composite_merge_hook())
+                    (context.collection.as_ref(), self.composite_merge_hook())
                 {
                     if let Some(action) =
                         hook.post_commit_action(&doc_id_str, collection.schema(), metadata)
@@ -725,20 +272,19 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     }
                 }
 
-                // Emit update event for subscriptions (P2P relay)
                 if let Some(bus) = self.db.event_bus() {
                     let update = Update::new(
                         doc_id_str.clone(),
                         *cid,
                         payload.schema_version_id.clone(),
-                        vec![], // Block data not needed for subscription re-query
-                        false,  // is_retry
-                        true,   // is_relay (P2P update)
+                        vec![],
+                        false,
+                        true,
                     );
                     bus.publish(Message::update(update));
 
                     if !from_collection {
-                        let mc = MergeCompleteData {
+                        let merge_complete = MergeCompleteData {
                             doc_id: doc_id_str.clone(),
                             cid: *cid,
                             collection_id: metadata
@@ -747,30 +293,26 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                 .to_string(),
                             by_peer: metadata.sender_peer.unwrap_or("").to_string(),
                         };
-                        bus.publish(Message::merge_complete(mc));
+                        bus.publish(Message::merge_complete(merge_complete));
                     }
 
-                    // For branchable collections, emit a collection-level merge_complete
-                    // event. Uses composite CID to match the sender's Update event CID.
-                    if is_branchable {
-                        let by_peer = metadata.sender_peer.unwrap_or("").to_string();
-                        let mc = MergeCompleteData {
-                            doc_id: String::new(), // empty → keyed by collection_id
+                    if state.is_branchable {
+                        let merge_complete = MergeCompleteData {
+                            doc_id: String::new(),
                             cid: *cid,
                             collection_id: metadata
                                 .collection_id
                                 .unwrap_or(&payload.schema_version_id)
                                 .to_string(),
-                            by_peer,
+                            by_peer: metadata.sender_peer.unwrap_or("").to_string(),
                         };
-                        bus.publish(Message::merge_complete(mc));
+                        bus.publish(Message::merge_complete(merge_complete));
                     }
                 }
 
                 Ok(MergeOutcome::Merged)
             }
-            Some(e) => {
-                // Discard the transaction - rollback all changes
+            Err(e) => {
                 if let Err(discard_err) = txn.force_discard() {
                     tracing::error!(
                         cid = %cid,
@@ -845,10 +387,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
-        // Recursively merge parent composites (using batch dedup)
         if let Some(heads) = &block.heads {
             for head_cid in heads {
-                // Check both permanent and batch-local dedup sets
                 {
                     let merged = self.merged_composites.lock().unwrap_or_else(|e| {
                         tracing::warn!("merged_composites lock poisoned, recovering");
@@ -859,11 +399,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     }
                 }
                 {
-                    let bm = batch_merged.lock().unwrap_or_else(|e| {
+                    let batch_merged_guard = batch_merged.lock().unwrap_or_else(|e| {
                         tracing::warn!("batch_merged lock poisoned, recovering");
                         e.into_inner()
                     });
-                    if bm.contains(head_cid) {
+                    if batch_merged_guard.contains(head_cid) {
                         continue;
                     }
                 }
@@ -874,7 +414,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 };
 
                 let head_block = match Block::from_dag_cbor(&head_data) {
-                    Ok(b) => b,
+                    Ok(block) => block,
                     Err(_) => continue,
                 };
 
@@ -903,424 +443,48 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
-        let collection_for_policy = collection_lookup.clone();
+        let context = CompositeMergeContext::new(
+            cid,
+            block,
+            payload,
+            metadata,
+            &doc_id_str,
+            collection_lookup.clone(),
+            CompositeMergeMode::Batch,
+        );
+        let mut state = CompositeMergeState::default();
 
-        // Process field links within the shared transaction
-        let mut field_values: HashMap<String, NormalValue> = HashMap::new();
-        let mut _any_field_applied = false;
-        let mut process_error: Option<MergeError> = None;
-        let mut skip_outcome: Option<MergeOutcome> = None;
-        let mut is_branchable = false;
-        let mut encrypted_policy_checked = false;
-        let mut field_block_heads: HashMap<String, Vec<Cid>> = HashMap::new();
-
-        {
+        let process_result: std::result::Result<Option<MergeOutcome>, MergeError> = {
             let mut datastore = datastore.clone();
 
-            if let Some(links) = &block.links {
-                for dag_link in links {
-                    let link_name = &dag_link.name;
-                    let link_cid = &dag_link.link;
-
-                    let linked_block_data = match self.blockstore.get(link_cid).await {
-                        Ok(Some(data)) => data,
-                        Ok(None) => {
-                            process_error = Some(MergeError::Storage(format!(
-                                "Linked block {} not found in blockstore",
-                                link_cid
-                            )));
-                            break;
-                        }
-                        Err(e) => {
-                            process_error = Some(MergeError::Storage(e.to_string()));
-                            break;
-                        }
-                    };
-
-                    let linked_block = match Block::from_dag_cbor(&linked_block_data) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            process_error = Some(MergeError::BlockDecode(e.to_string()));
-                            break;
-                        }
-                    };
-
-                    if let Some(heads) = &linked_block.heads {
-                        field_block_heads.insert(link_name.clone(), heads.clone());
-                    }
-
-                    if linked_block.encryption.is_some() && !encrypted_policy_checked {
-                        encrypted_policy_checked = true;
-                        if let (Some(collection), Some(hook)) =
-                            (collection_for_policy.as_ref(), self.composite_merge_hook())
-                        {
-                            if let Some(outcome) = hook
-                                .on_encrypted_link(&doc_id_str, collection.schema(), metadata)
-                                .await?
-                            {
-                                skip_outcome = Some(outcome);
-                                break;
-                            }
-                        }
-                    }
-
-                    // Decrypt linked block data if encrypted
-                    let effective_linked_delta = match &linked_block.delta {
-                        CrdtDelta::Lww(p) if linked_block.encryption.is_some() => {
-                            match self
-                                .decrypt_block_data(&p.data, linked_block.encryption.as_ref())
-                                .await
-                            {
-                                Ok(decrypted) => {
-                                    let mut dp = p.clone();
-                                    dp.data = decrypted;
-                                    CrdtDelta::Lww(dp)
-                                }
-                                Err(_) => linked_block.delta.clone(),
-                            }
-                        }
-                        CrdtDelta::Counter(p) if linked_block.encryption.is_some() => {
-                            match self
-                                .decrypt_block_data(&p.data, linked_block.encryption.as_ref())
-                                .await
-                            {
-                                Ok(decrypted) => {
-                                    let mut dp = p.clone();
-                                    dp.data = decrypted;
-                                    CrdtDelta::Counter(dp)
-                                }
-                                Err(_) => linked_block.delta.clone(),
-                            }
-                        }
-                        other => other.clone(),
-                    };
-
-                    match &effective_linked_delta {
-                        CrdtDelta::Lww(lww_payload) => {
-                            match self
-                                .process_lww_delta_in_txn(&mut datastore, link_cid, lww_payload)
-                                .await
-                            {
-                                Ok(result) => {
-                                    if result.applied {
-                                        _any_field_applied = true;
-                                    }
-                                    if let Some(value) = result.value {
-                                        field_values.insert(lww_payload.field_name.clone(), value);
-                                    }
-                                }
-                                Err(e) => {
-                                    process_error = Some(e);
-                                    break;
-                                }
-                            }
-                        }
-                        CrdtDelta::Counter(counter_payload) => {
-                            match self
-                                .process_counter_delta_in_txn(
-                                    &mut datastore,
-                                    link_cid,
-                                    counter_payload,
-                                    metadata.collection_id,
-                                )
-                                .await
-                            {
-                                Ok(result) => {
-                                    if result.applied {
-                                        _any_field_applied = true;
-                                    }
-                                    if let Some(value) = result.value {
-                                        field_values
-                                            .insert(counter_payload.field_name.clone(), value);
-                                    }
-                                }
-                                Err(e) => {
-                                    process_error = Some(e);
-                                    break;
-                                }
-                            }
-                        }
-                        other => {
-                            process_error = Some(MergeError::UnsupportedDelta(format!(
-                                "Unexpected delta type in linked block: {:?}",
-                                std::mem::discriminant(other)
-                            )));
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Store document if no errors
-            if process_error.is_none() {
-                let is_delete = payload.status == 2;
-
-                match collection_lookup.clone() {
-                    Some(collection) => {
-                        is_branchable = collection.schema().is_branchable;
-                        if is_delete {
-                            if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
-                                if let Ok(Some(old_doc)) =
-                                    collection.get_with_datastore(&datastore, &doc_id).await
-                                {
-                                    let short_id = collection_short_id(collection.collection_id());
-                                    if let Ok(index_manager) =
-                                        IndexManager::from_collection(short_id, collection.schema())
-                                    {
-                                        if let Err(e) = index_manager
-                                            .on_document_delete(
-                                                &datastore,
-                                                &old_doc,
-                                                collection.schema(),
-                                            )
-                                            .await
-                                        {
-                                            process_error = Some(MergeError::MergeFailed(format!(
-                                                "Failed to delete indexes after batch merge: {}",
-                                                e
-                                            )));
-                                        }
-                                    }
-                                }
-                            }
-
-                            if process_error.is_none() {
-                                let deleted_key =
-                                    build_deleted_key(collection.collection_id(), &doc_id_str);
-                                if let Err(e) = datastore.set(&deleted_key, &[DELETED_MARKER]).await
-                                {
-                                    process_error =
-                                        Some(MergeError::Database(crate::error::Error::Storage(e)));
-                                }
-                            }
-                        } else if !field_values.is_empty() {
-                            match DocID::from_string(&doc_id_str) {
-                                Ok(doc_id) => {
-                                    let (mut doc, old_doc) = match collection
-                                        .get_with_datastore(&datastore, &doc_id)
-                                        .await
-                                    {
-                                        Ok(Some(existing)) => {
-                                            let old = existing.clone();
-                                            (existing, Some(old))
-                                        }
-                                        _ => {
-                                            let mut new_doc = Document::new();
-                                            new_doc.set_id(doc_id.clone());
-                                            (new_doc, None)
-                                        }
-                                    };
-
-                                    doc.set_schema_version_id(&payload.schema_version_id);
-                                    for (field_name, value) in &field_values {
-                                        doc.set(field_name, value.clone());
-                                    }
-
-                                    let known_fields: std::collections::HashSet<&str> = collection
-                                        .schema()
-                                        .fields
-                                        .iter()
-                                        .map(|f| f.name.as_str())
-                                        .collect();
-                                    let all_field_names: Vec<String> =
-                                        doc.field_names().map(|s| s.to_string()).collect();
-                                    for fname in &all_field_names {
-                                        if !known_fields.contains(fname.as_str()) {
-                                            doc.remove(fname);
-                                        }
-                                    }
-
-                                    if let Err(e) =
-                                        collection.save_with_datastore(&datastore, &doc).await
-                                    {
-                                        process_error = Some(MergeError::Database(e));
-                                    } else {
-                                        // Index failure blocks the transaction — index and document
-                                        // storage must remain consistent.
-                                        let short_id =
-                                            collection_short_id(collection.collection_id());
-                                        if let Ok(index_manager) = IndexManager::from_collection(
-                                            short_id,
-                                            collection.schema(),
-                                        ) {
-                                            let index_result = match &old_doc {
-                                                Some(old) => {
-                                                    index_manager
-                                                        .on_document_update(
-                                                            &datastore,
-                                                            old,
-                                                            &doc,
-                                                            collection.schema(),
-                                                        )
-                                                        .await
-                                                }
-                                                None => {
-                                                    index_manager
-                                                        .on_document_create(
-                                                            &datastore,
-                                                            &doc,
-                                                            collection.schema(),
-                                                        )
-                                                        .await
-                                                }
-                                            };
-                                            if let Err(e) = index_result {
-                                                process_error = Some(MergeError::MergeFailed(
-                                                    format!("Failed to update indexes after batch merge: {}", e),
-                                                ));
-                                            }
-                                        }
-
-                                        // Generate SE artifacts for replicated doc (batch path)
-                                        if process_error.is_none() {
-                                            if let Some(enc_key) = self.se_enc_key() {
-                                                if let Err(e) = se_merge::generate_merge_artifacts(
-                                                    &mut datastore,
-                                                    collection.schema(),
-                                                    &doc_id_str,
-                                                    &field_values,
-                                                    enc_key,
-                                                    None,
-                                                )
-                                                .await
-                                                {
-                                                    tracing::warn!(
-                                                        doc_id = %doc_id_str,
-                                                        error = %e,
-                                                        "Failed to generate SE artifacts after batch merge"
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    process_error = Some(MergeError::MergeFailed(format!(
-                                        "Invalid doc_id: {}",
-                                        e
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        process_error = Some(MergeError::MissingMetadata(format!(
-                            "Collection not found for schema_version_id: {}",
-                            payload.schema_version_id
-                        )));
-                    }
-                }
-            }
-        } // datastore dropped here
-
-        if let Some(outcome) = skip_outcome {
-            return Ok(outcome);
-        }
-
-        // Write headstore entries using the shared headstore view
-        if process_error.is_none() {
+            match self
+                .process_linked_field_blocks(&mut datastore, &context, &mut state)
+                .await?
             {
-                let priority_bytes = encode_priority_varint(payload.priority);
-
-                if let Some(heads) = &block.heads {
-                    for parent_cid in heads {
-                        let parent_key = storage::keys::headstore::HeadstoreDocKey::new(
-                            &doc_id_str,
-                            "C",
-                            *parent_cid,
-                        );
-                        let _ = headstore
-                            .delete(
-                                &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&parent_key),
-                            )
-                            .await;
-                    }
-                }
-
-                let composite_head_key =
-                    storage::keys::headstore::HeadstoreDocKey::new(&doc_id_str, "C", *cid);
-                let _ = headstore
-                    .set(
-                        &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(
-                            &composite_head_key,
-                        ),
-                        &priority_bytes,
-                    )
-                    .await;
-                let composite_priority_key = storage::keys::headstore::HeadstorePriorityKey::new(
-                    &doc_id_str,
-                    payload.priority,
-                    *cid,
-                );
-                let _ = headstore
-                    .set(
-                        &<storage::keys::headstore::HeadstorePriorityKey as storage::corekv::Key>::bytes(
-                            &composite_priority_key,
-                        ),
-                        &[],
-                    )
-                    .await;
-
-                if let Some(links) = &block.links {
-                    for dag_link in links {
-                        if let Some(parent_cids) = field_block_heads.get(&dag_link.name) {
-                            for parent_cid in parent_cids {
-                                let parent_key = storage::keys::headstore::HeadstoreDocKey::new(
-                                    &doc_id_str,
-                                    &dag_link.name,
-                                    *parent_cid,
-                                );
-                                let _ = headstore
-                                    .delete(
-                                        &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&parent_key),
-                                    )
-                                    .await;
-                            }
-                        }
-                        let field_head_key = storage::keys::headstore::HeadstoreDocKey::new(
-                            &doc_id_str,
-                            &dag_link.name,
-                            dag_link.link,
-                        );
-                        let _ = headstore
-                            .set(
-                                &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(&field_head_key),
-                                &priority_bytes,
-                            )
-                            .await;
-                        let field_priority_key =
-                            storage::keys::headstore::HeadstorePriorityKey::new(
-                                &doc_id_str,
-                                payload.priority,
-                                dag_link.link,
-                            );
-                        let _ = headstore
-                            .set(
-                                &<storage::keys::headstore::HeadstorePriorityKey as storage::corekv::Key>::bytes(
-                                    &field_priority_key,
-                                ),
-                                &[],
-                            )
-                            .await;
-                    }
+                Some(outcome) => Ok(Some(outcome)),
+                None => {
+                    self.persist_merged_document(&mut datastore, &context, &mut state)
+                        .await?;
+                    Ok(None)
                 }
             }
-        }
+        };
 
-        // Handle result (NO commit/discard — caller manages transaction)
-        match process_error {
-            None => {
-                // Mark as merged in batch-local set
+        match process_result {
+            Ok(Some(outcome)) => Ok(outcome),
+            Ok(None) => {
+                self.update_heads(headstore, &context, &state).await;
+
                 {
-                    let mut bm = batch_merged.lock().unwrap_or_else(|e| {
+                    let mut batch_merged_guard = batch_merged.lock().unwrap_or_else(|e| {
                         tracing::warn!("batch_merged lock poisoned, recovering");
                         e.into_inner()
                     });
-                    bm.insert(*cid);
+                    batch_merged_guard.insert(*cid);
                 }
 
                 if let (Some(collection), Some(hook)) =
-                    (collection_for_policy.as_ref(), self.composite_merge_hook())
+                    (context.collection.as_ref(), self.composite_merge_hook())
                 {
                     if let Some(action) =
                         hook.post_commit_action(&doc_id_str, collection.schema(), metadata)
@@ -1337,12 +501,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     }
                 }
 
-                // Collect events for deferred publishing
                 {
-                    let mut pe = pending_events.lock().unwrap_or_else(|e| {
+                    let mut pending_events_guard = pending_events.lock().unwrap_or_else(|e| {
                         tracing::warn!("pending_events lock poisoned, recovering");
                         e.into_inner()
                     });
+
                     let update = Update::new(
                         doc_id_str.clone(),
                         *cid,
@@ -1351,12 +515,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         false,
                         true,
                     );
-                    pe.push(PendingMergeEvent {
+                    pending_events_guard.push(PendingMergeEvent {
                         message: Message::update(update),
                     });
 
                     if !from_collection {
-                        let mc = MergeCompleteData {
+                        let merge_complete = MergeCompleteData {
                             doc_id: doc_id_str.clone(),
                             cid: *cid,
                             collection_id: metadata
@@ -1365,31 +529,30 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                 .to_string(),
                             by_peer: metadata.sender_peer.unwrap_or("").to_string(),
                         };
-                        pe.push(PendingMergeEvent {
-                            message: Message::merge_complete(mc),
+                        pending_events_guard.push(PendingMergeEvent {
+                            message: Message::merge_complete(merge_complete),
                         });
                     }
 
-                    if is_branchable {
-                        let by_peer = metadata.sender_peer.unwrap_or("").to_string();
-                        let mc = MergeCompleteData {
+                    if state.is_branchable {
+                        let merge_complete = MergeCompleteData {
                             doc_id: String::new(),
                             cid: *cid,
                             collection_id: metadata
                                 .collection_id
                                 .unwrap_or(&payload.schema_version_id)
                                 .to_string(),
-                            by_peer,
+                            by_peer: metadata.sender_peer.unwrap_or("").to_string(),
                         };
-                        pe.push(PendingMergeEvent {
-                            message: Message::merge_complete(mc),
+                        pending_events_guard.push(PendingMergeEvent {
+                            message: Message::merge_complete(merge_complete),
                         });
                     }
                 }
 
                 Ok(MergeOutcome::Merged)
             }
-            Some(e) => Err(e),
+            Err(e) => Err(e),
         }
     }
 }
