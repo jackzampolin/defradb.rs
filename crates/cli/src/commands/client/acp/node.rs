@@ -15,6 +15,7 @@ pub struct AcpNodeArgs {
 
 /// ACP node subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum AcpNodeCommand {
     /// Manage node ACP relationships
     Relationship(AcpNodeRelationshipArgs),
@@ -35,6 +36,7 @@ pub struct AcpNodeRelationshipArgs {
 
 /// ACP node relationship subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum AcpNodeRelationshipCommand {
     /// Add a node ACP relationship
     Add(AcpNodeRelationshipAddArgs),

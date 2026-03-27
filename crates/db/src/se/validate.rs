@@ -11,6 +11,7 @@ const MAX_FIELD_LEN: usize = 512;
 
 /// Validation error for SE artifacts.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ValidationError {
     #[error("search tag has invalid size: expected {expected}, got {actual}")]
     InvalidTagSize { expected: usize, actual: usize },

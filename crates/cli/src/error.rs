@@ -9,6 +9,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// CLI errors
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("failed to determine home directory")]
     HomeDirectory,

@@ -102,6 +102,7 @@ pub fn json_to_native_value(
                 }
             }
             ScalarKind::Json | ScalarKind::None => {}
+            _ => {}
         }
     }
 

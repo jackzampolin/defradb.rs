@@ -13,6 +13,7 @@ pub struct ViewArgs {
 
 /// View subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum ViewCommand {
     /// Add a new view
     Add(ViewAddArgs),

@@ -206,6 +206,7 @@ impl IndexManager {
                         .collect()
                 }
             }
+            _ => unreachable!(),
         }
     }
 

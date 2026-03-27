@@ -9,6 +9,7 @@ use crate::error::Result;
 
 /// Document status (active or deleted)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum DocStatus {
     #[default]
     Active,

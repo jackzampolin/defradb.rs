@@ -49,6 +49,7 @@ const DISABLED_RELATION: &str = "_disabled";
 ///   write operations (adding/removing admins) are blocked to prevent
 ///   privilege escalation. State is preserved for re-enable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NacStatus {
     NotConfigured,
     Enabled,

@@ -245,6 +245,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                 None
                             }
                         }
+                        _ => unreachable!(),
                     }
                 }
             }
@@ -333,6 +334,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 )
                 .map_err(|e| MergeError::MergeFailed(e.to_string()))
             }
+            _ => unreachable!(),
         }
     }
 }

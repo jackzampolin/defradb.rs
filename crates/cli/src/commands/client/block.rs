@@ -15,6 +15,7 @@ pub struct BlockArgs {
 
 /// Block subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum BlockCommand {
     /// Verify the signature of a block
     VerifySignature(BlockVerifySignatureArgs),

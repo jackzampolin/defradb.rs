@@ -59,6 +59,12 @@ impl SignedMerkleProof {
             SignatureType::ES256K => KeyType::Secp256k1,
             SignatureType::ES256 => KeyType::Secp256r1,
             SignatureType::BLS => KeyType::Bls12381,
+            _ => {
+                return Err(Error::Crypto(format!(
+                    "unsupported signature type: {:?}",
+                    self.signature.header.sig_type
+                )));
+            }
         };
         if public_key.key_type() != expected_key_type {
             return Err(Error::Crypto(format!(
@@ -122,6 +128,12 @@ fn extract_public_key_from_signature(sig: &Signature) -> Result<Box<dyn PublicKe
         SignatureType::ES256K => KeyType::Secp256k1,
         SignatureType::ES256 => KeyType::Secp256r1,
         SignatureType::BLS => KeyType::Bls12381,
+        _ => {
+            return Err(Error::Crypto(format!(
+                "unsupported signature type: {:?}",
+                sig.header.sig_type
+            )));
+        }
     };
 
     // Identity is stored as hex-encoded string bytes

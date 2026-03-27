@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 /// Having Update or Delete permission implies Read access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum DocumentPermission {
     /// Can read document
     Read = 0,

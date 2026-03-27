@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Filter operators for condition matching
 /// Uses Go DefraDB naming conventions for compatibility
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum FilterOp {
     /// Equal (_eq)
     #[serde(rename = "_eq")]

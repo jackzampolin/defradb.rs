@@ -50,6 +50,7 @@ fn base64url_encode(data: &[u8]) -> String {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum BearerError {
     #[error("system time error: {0}")]
     Time(String),

@@ -5,6 +5,7 @@ use cid::Cid;
 
 /// Event names that can be subscribed to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum EventName {
     /// Subscribe to all events.
     WildCard,
@@ -154,6 +155,7 @@ pub struct Message {
 
 /// Event data variants.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum MessageData {
     /// No data (for simple signals).
     None,

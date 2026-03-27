@@ -295,6 +295,7 @@ pub fn field_kind_to_pg_type_name(kind: &FieldKind) -> String {
             ScalarKind::DateTime => "timestamp with time zone".to_string(),
             ScalarKind::Blob => "bytea".to_string(),
             ScalarKind::Json => "jsonb".to_string(),
+            _ => unreachable!(),
         },
         _ => "text".to_string(),
     }

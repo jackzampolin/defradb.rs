@@ -100,6 +100,7 @@ impl<S: Store> crate::database::DB<S> {
                                     schema::ScalarKind::String => "String".to_string(),
                                     schema::ScalarKind::Blob => "Blob".to_string(),
                                     schema::ScalarKind::Json => "JSON".to_string(),
+                                    _ => String::new(),
                                 },
                                 other => format!("{:?}", other),
                             };

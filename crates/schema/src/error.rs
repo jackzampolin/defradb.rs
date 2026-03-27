@@ -7,6 +7,7 @@ pub type Result<T> = std::result::Result<T, SchemaError>;
 
 /// Schema-specific errors
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SchemaError {
     #[error("duplicate field. Name: {0}")]
     DuplicateFieldName(String),

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// Part of a JSON path - property name or array index marker.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum JsonPathPart {
     /// Property name in an object
     Property(String),

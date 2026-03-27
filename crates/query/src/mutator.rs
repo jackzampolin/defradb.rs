@@ -16,6 +16,7 @@ use crate::error::Result;
 /// This allows callers to know whether changes were successfully broadcast
 /// to the P2P network, enabling appropriate handling of partial success.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum BroadcastStatus {
     /// Broadcast succeeded
     Success,

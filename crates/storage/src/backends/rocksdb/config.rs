@@ -37,6 +37,7 @@ const DEFAULT_BLOCK_SIZE: usize = 16 * 1024;
 
 /// Compression type for RocksDB SST files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CompressionType {
     None,
     Snappy,
@@ -46,6 +47,7 @@ pub enum CompressionType {
 
 /// Compaction style for RocksDB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CompactionStyle {
     Level,
     Universal,

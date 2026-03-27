@@ -65,6 +65,7 @@ pub(crate) fn encode_priority_varint(priority: u64) -> Vec<u8> {
 
 /// Error type for database merge operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum MergeError {
     /// Failed to decode block from DAG-CBOR.
     #[error("block decode failed: {0}")]
@@ -456,6 +457,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             defra_core::block::SignatureType::ES256 => crypto::KeyType::Secp256r1,
             defra_core::block::SignatureType::EdDSA => crypto::KeyType::Ed25519,
             defra_core::block::SignatureType::BLS => crypto::KeyType::Bls12381,
+            _ => unreachable!(),
         };
 
         let pub_key = crypto::public_key_from_string(key_type, &sig_identity).map_err(|e| {
@@ -616,6 +618,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                 tracing::debug!(cid = %cid, "CollectionSet delta - skipping");
                 Ok(MergeOutcome::terminal_skip("collection set delta"))
             }
+            _ => unreachable!(),
         }
     }
 

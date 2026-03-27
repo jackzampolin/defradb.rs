@@ -394,6 +394,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
                 }
                 (all_doc_ids, total_raw_fetches)
             }
+            _ => (Vec::new(), 0),
         };
 
         // Deduplicate doc_ids while preserving order.

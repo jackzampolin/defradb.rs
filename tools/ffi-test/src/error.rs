@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum FfiTestError {
     #[error("Worktree detection failed: {0}")]
     WorktreeDetection(String),

@@ -7,6 +7,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// ACP-specific error types
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Permission denied for the requested operation
     #[error("permission denied: {0}")]

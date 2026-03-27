@@ -60,6 +60,7 @@ impl EvmSigner {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SignerError {
     #[error("key error: {0}")]
     Key(String),

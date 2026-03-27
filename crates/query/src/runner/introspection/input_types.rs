@@ -194,6 +194,7 @@ pub(super) fn field_kind_to_input_type_ref(kind: &FieldKind) -> TypeRef {
                 TypeRef::named(name)
             }
         }
+        _ => TypeRef::named("String"),
     }
 }
 
@@ -214,6 +215,7 @@ pub(super) fn get_filter_type_for_field(
             ScalarKind::DateTime => "DateTimeOperatorBlock".to_string(),
             ScalarKind::Json => "JSON".to_string(),
             ScalarKind::Blob | ScalarKind::None => "StringOperatorBlock".to_string(),
+            _ => "StringOperatorBlock".to_string(),
         },
         FieldKind::ScalarArray(arr) => match arr {
             ScalarArrayKind::BoolArray => "NotNullBooleanListOperatorBlock".to_string(),
@@ -226,6 +228,7 @@ pub(super) fn get_filter_type_for_field(
             ScalarArrayKind::NillableFloat64Array => "Float64ListOperatorBlock".to_string(),
             ScalarArrayKind::NillableFloat32Array => "Float32ListOperatorBlock".to_string(),
             ScalarArrayKind::NillableStringArray => "StringListOperatorBlock".to_string(),
+            _ => "StringListOperatorBlock".to_string(),
         },
         FieldKind::Relation { collection_id, .. } => {
             let type_name = id_to_name
@@ -253,5 +256,6 @@ pub(super) fn get_filter_type_for_field(
                 .unwrap_or_else(|| name.clone());
             format!("{}FilterArg", type_name)
         }
+        _ => "StringOperatorBlock".to_string(),
     }
 }

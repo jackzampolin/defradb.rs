@@ -1,6 +1,7 @@
 use std::fmt;
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum PgCompatError {
     SqlParse(String),
     UnsupportedSql(String),

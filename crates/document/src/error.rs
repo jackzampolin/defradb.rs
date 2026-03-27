@@ -7,6 +7,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Document errors
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("malformed document ID")]
     MalformedDocID,

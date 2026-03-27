@@ -4,6 +4,7 @@ use crate::mapper::{Mutation, Select};
 
 /// Type of explain output requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum ExplainType {
     /// Simple explanation showing query plan structure without execution.
     #[default]
@@ -28,6 +29,7 @@ impl ExplainType {
 
 /// Result of parsing a GraphQL request.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ParsedOperation {
     /// Query operations (SELECT)
     Query {

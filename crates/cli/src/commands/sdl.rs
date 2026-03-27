@@ -13,6 +13,7 @@ pub struct SdlArgs {
 
 /// SDL subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum SdlCommand {
     /// Generate SDL from input files
     Generate(SdlGenerateArgs),

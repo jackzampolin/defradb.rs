@@ -82,6 +82,7 @@ impl CompositeDelta {
 
 /// Field-level delta within a composite
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum FieldDelta {
     /// LWW field update
     Lww { priority: u64, data: Vec<u8> },

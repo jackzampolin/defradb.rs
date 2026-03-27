@@ -5,6 +5,7 @@ use schema::{CollectionVersion, FieldKind, ScalarKind};
 
 /// GraphQL type representation
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum GqlType {
     /// Non-null type
     NonNull(Box<GqlType>),
@@ -236,6 +237,7 @@ pub fn field_kind_to_gql_type(
                 Ok(GqlType::named(name.clone()))
             }
         }
+        _ => Ok(GqlType::string()),
     }
 }
 
@@ -251,6 +253,7 @@ pub fn scalar_to_gql_type(scalar: &ScalarKind) -> GqlType {
         ScalarKind::String => GqlType::string(),
         ScalarKind::Blob => GqlType::blob(),
         ScalarKind::Json => GqlType::json(),
+        _ => GqlType::string(),
     }
 }
 

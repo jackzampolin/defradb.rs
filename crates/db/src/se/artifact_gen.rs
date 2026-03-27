@@ -51,6 +51,7 @@ pub fn generate_field_artifact(
             &value_bytes,
         )
         .map_err(|e| storage::corekv::Error::Other(e.to_string()))?,
+        _ => unreachable!(),
     };
 
     Ok(Artifact::new(

@@ -15,6 +15,7 @@ pub struct IdentityArgs {
 
 /// Identity subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum IdentityCommand {
     /// Generate a new identity
     New(IdentityNewArgs),
@@ -329,6 +330,9 @@ fn build_jwk(key_type: identity::IdentityKeyType, raw_bytes: &[u8]) -> Result<se
                 "did": did.to_string(),
             }))
         }
+        _ => Err(Error::InvalidIdentity(
+            "unsupported key type for JWK export".to_string(),
+        )),
     }
 }
 

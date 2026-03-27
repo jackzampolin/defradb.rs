@@ -2,6 +2,7 @@
 
 /// Relay configuration for an iroh endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum IrohRelayModeConfig {
     /// Use iroh's default relay behavior.
     #[default]
@@ -14,6 +15,7 @@ pub enum IrohRelayModeConfig {
 
 /// Address lookup / discovery configuration for an iroh endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum IrohDiscoveryConfig {
     /// Use iroh's default Number 0 discovery stack (pkarr publisher + DNS lookup).
     #[default]

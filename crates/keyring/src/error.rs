@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Keyring-specific errors
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("key not found: {0}")]
     NotFound(String),

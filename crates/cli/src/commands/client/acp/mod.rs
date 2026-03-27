@@ -20,6 +20,7 @@ pub struct AcpArgs {
 
 /// ACP subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum AcpCommand {
     /// Manage document-level ACP
     Document(AcpDocumentArgs),

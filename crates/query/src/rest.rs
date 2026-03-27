@@ -19,6 +19,7 @@ pub type RestResult<T> = std::result::Result<T, RestError>;
 
 /// Error type for REST operations.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum RestError {
     /// Collection not found.
     CollectionNotFound(String),

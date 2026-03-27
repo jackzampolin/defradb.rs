@@ -9,6 +9,7 @@ pub fn field_kind_to_pg_type(kind: &FieldKind) -> Type {
         FieldKind::Relation { .. } | FieldKind::SelfRef { .. } | FieldKind::Named { .. } => {
             Type::JSONB
         }
+        _ => unreachable!(),
     }
 }
 
@@ -24,6 +25,7 @@ fn scalar_to_pg_type(kind: ScalarKind) -> Type {
         ScalarKind::String => Type::TEXT,
         ScalarKind::Blob => Type::BYTEA,
         ScalarKind::Json => Type::JSONB,
+        _ => Type::TEXT,
     }
 }
 

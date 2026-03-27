@@ -69,6 +69,7 @@ pub(super) fn build_aggregate_types_for_collection(
                 ScalarArrayKind::NillableFloat64Array => "Float64FilterArg",
                 ScalarArrayKind::NillableFloat32Array => "Float32FilterArg",
                 ScalarArrayKind::NillableStringArray => "StringFilterArg",
+                _ => "StringFilterArg",
             };
 
             let inline_count =

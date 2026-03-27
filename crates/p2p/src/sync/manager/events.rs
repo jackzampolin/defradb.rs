@@ -6,6 +6,7 @@ use crate::ExplicitReplayAuthorization;
 
 /// Events emitted by the SyncManager for higher layers to process.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum SyncEvent {
     /// A new block was received and stored, needs CRDT merge.
     ///

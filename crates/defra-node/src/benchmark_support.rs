@@ -269,6 +269,7 @@ impl FixtureSession {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SessionKind {
     Hot,
     Medium,
@@ -294,6 +295,7 @@ impl SessionKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SearchTarget {
     Messages,
     Actions,

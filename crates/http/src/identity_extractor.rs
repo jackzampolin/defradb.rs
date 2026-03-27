@@ -63,6 +63,7 @@ impl ExtractIdentity {
 
 /// Error type for identity extraction failures.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum IdentityExtractionError {
     /// Invalid token format or signature.
     /// Returns 403 Forbidden to match Go DefraDB behavior.

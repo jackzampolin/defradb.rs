@@ -15,6 +15,7 @@ use crate::json_traverse::{index_traverse_options, traverse_json};
 /// matching Go's NormalValue interface but as a concrete Rust enum.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum NormalValue {
     // === Scalar types ===
     /// Null value

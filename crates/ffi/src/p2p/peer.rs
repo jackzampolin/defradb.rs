@@ -52,6 +52,7 @@ pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_c
                             .collect::<Vec<_>>(),
                         #[cfg(feature = "iroh")]
                         embedded::TransportKind::Iroh => addresses,
+                        _ => addresses,
                     };
 
                     serde_json::to_string(&full_addrs)

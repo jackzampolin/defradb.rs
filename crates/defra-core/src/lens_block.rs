@@ -32,6 +32,7 @@ pub struct LensKeyValue {
 /// Go uses a keyed union: `{"wasmBytes": <bytes>}` or `{"chunks": [<CID>...]}`.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum LensWasmBlock {
     Direct {
         #[serde(rename = "wasmBytes", with = "serde_bytes")]

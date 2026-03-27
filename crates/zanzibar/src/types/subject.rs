@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::did::Did;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SubjectRestriction {
     Entity,
     EntitySet { resource: String, relation: String },
@@ -73,6 +74,7 @@ fn subject_type_name(subject: &Subject) -> &'static str {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Subject {
     Entity(Did),
 

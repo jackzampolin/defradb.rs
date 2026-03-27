@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Cryptographic key types supported by DefraDB
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum KeyType {
     /// secp256k1 elliptic curve (used by Bitcoin, Ethereum)
     Secp256k1,

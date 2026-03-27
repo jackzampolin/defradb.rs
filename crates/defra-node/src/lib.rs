@@ -498,6 +498,7 @@ impl EmbeddedNode {
 ///
 /// Defaults to `Redb` for backwards compatibility.
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub enum StorageBackend {
     /// Pure-Rust embedded database. Loads the full dataset into memory on open,
     /// which can be slow for very large stores (10 GB+).

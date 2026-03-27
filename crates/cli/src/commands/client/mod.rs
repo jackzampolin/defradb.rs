@@ -101,6 +101,7 @@ pub struct ClientArgs {
 
 /// Client subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum ClientCommand {
     /// Interact with Access Control Policies
     Acp(AcpArgs),

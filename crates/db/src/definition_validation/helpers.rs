@@ -45,6 +45,7 @@ pub(super) fn format_crdt_type(crdt: CType) -> String {
         CType::PnCounter => "pncounter".to_string(),
         CType::PCounter => "pcounter".to_string(),
         CType::Unknown(_) => "unknown".to_string(),
+        _ => String::new(),
     }
 }
 
@@ -62,6 +63,7 @@ pub(super) fn format_field_kind(kind: &FieldKind) -> String {
             ScalarKind::String => "String".to_string(),
             ScalarKind::Blob => "Blob".to_string(),
             ScalarKind::Json => "JSON".to_string(),
+            _ => String::new(),
         },
         FieldKind::ScalarArray(a) => match a {
             schema::ScalarArrayKind::BoolArray => "[Boolean!]".to_string(),
@@ -74,9 +76,11 @@ pub(super) fn format_field_kind(kind: &FieldKind) -> String {
             schema::ScalarArrayKind::NillableFloat64Array => "[Float64]".to_string(),
             schema::ScalarArrayKind::NillableFloat32Array => "[Float32]".to_string(),
             schema::ScalarArrayKind::NillableStringArray => "[String]".to_string(),
+            _ => String::new(),
         },
         FieldKind::Relation { .. } | FieldKind::SelfRef { .. } | FieldKind::Named { .. } => {
             "Object".to_string()
         }
+        _ => unreachable!(),
     }
 }

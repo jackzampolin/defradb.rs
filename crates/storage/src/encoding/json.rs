@@ -112,6 +112,7 @@ fn encode_path_ascending(mut buf: Vec<u8>, path: &JsonPath) -> Vec<u8> {
                 // Array indices always encode as 0 per Go behavior
                 buf = encode_uvarint_ascending(buf, 0);
             }
+            _ => {}
         }
     }
     buf
@@ -127,6 +128,7 @@ fn encode_path_descending(mut buf: Vec<u8>, path: &JsonPath) -> Vec<u8> {
             JsonPathPart::Index => {
                 buf = encode_uvarint_descending(buf, 0);
             }
+            _ => {}
         }
     }
     buf
@@ -172,7 +174,7 @@ fn encode_scalar_ascending(buf: Vec<u8>, value: &JsonScalarValue) -> Vec<u8> {
         JsonScalarValue::Number(n) => encode_float64_ascending(buf, *n),
         JsonScalarValue::String(s) => encode_bytes_ascending(buf, s.as_bytes()),
         // PathMin/PathMax are handled specially in encode_json_ascending
-        JsonScalarValue::PathMin | JsonScalarValue::PathMax => buf,
+        JsonScalarValue::PathMin | JsonScalarValue::PathMax | _ => buf,
     }
 }
 
@@ -184,7 +186,7 @@ fn encode_scalar_descending(buf: Vec<u8>, value: &JsonScalarValue) -> Vec<u8> {
         JsonScalarValue::Number(n) => encode_float64_descending(buf, *n),
         JsonScalarValue::String(s) => encode_bytes_descending(buf, s.as_bytes()),
         // PathMin/PathMax are handled specially in encode_json_descending
-        JsonScalarValue::PathMin | JsonScalarValue::PathMax => buf,
+        JsonScalarValue::PathMin | JsonScalarValue::PathMax | _ => buf,
     }
 }
 

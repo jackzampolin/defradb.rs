@@ -27,6 +27,7 @@ struct GoTestEvent {
 /// Status of a test
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum TestStatus {
     Pass,
     Fail,

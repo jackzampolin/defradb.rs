@@ -21,6 +21,7 @@ use libp2p::PeerId;
 
 /// Error type for peer identity conversion.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PeerIdentityError {
     /// The peer's key type is not supported for DID conversion.
     #[error("unsupported key type for DID conversion: {0}")]

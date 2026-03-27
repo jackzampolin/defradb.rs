@@ -6,6 +6,7 @@ use crate::QueryId;
 
 /// Result of a replication loop iteration.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ReplicationResult {
     /// Block was merged successfully
     Merged {

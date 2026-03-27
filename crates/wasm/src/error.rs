@@ -10,6 +10,7 @@ pub type Result<T> = std::result::Result<T, WasmError>;
 
 /// Errors that can occur in the WASM client.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum WasmError {
     #[error("Storage error: {0}")]
     Storage(String),

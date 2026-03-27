@@ -245,6 +245,7 @@ pub fn filter_to_index_scan(
             Bound::Exclusive(normalize_for_index_field(v, first_field, collection_fields))
         }
         Bound::Unbounded => Bound::Unbounded,
+        _ => Bound::Unbounded,
     };
     upper_bound = match upper_bound {
         Bound::Inclusive(v) => {
@@ -254,6 +255,7 @@ pub fn filter_to_index_scan(
             Bound::Exclusive(normalize_for_index_field(v, first_field, collection_fields))
         }
         Bound::Unbounded => Bound::Unbounded,
+        _ => Bound::Unbounded,
     };
     for (i, v) in subsequent_eq_values.iter_mut().enumerate() {
         if let Some(field_desc) = index.fields.get(i + 1) {
@@ -358,6 +360,7 @@ pub fn filter_to_index_scan(
                     Bound::Unbounded
                 }
             }
+            _ => Bound::Unbounded,
         };
         let upper = match upper_bound {
             Bound::Inclusive(v) => {
@@ -382,6 +385,7 @@ pub fn filter_to_index_scan(
                     Bound::Unbounded
                 }
             }
+            _ => Bound::Unbounded,
         };
         IndexScanType::RangeScan {
             prefix_values: vec![],

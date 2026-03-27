@@ -21,6 +21,7 @@
 ///
 /// Controls whether access control is enforced at the SyncCoordinator level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum AccessMode {
     /// No access control - all requests are allowed.
     /// This is the default mode when ACP is not configured.

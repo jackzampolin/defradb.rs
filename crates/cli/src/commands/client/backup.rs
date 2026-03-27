@@ -17,6 +17,7 @@ pub struct BackupArgs {
 
 /// Backup subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum BackupCommand {
     /// Export database to a file
     Export(BackupExportArgs),

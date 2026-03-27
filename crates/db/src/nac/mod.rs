@@ -174,6 +174,7 @@ impl<S: ZanzibarStore> NacManager<S> {
                         "NAC re-enabled from temporarily disabled state"
                     );
                 }
+                _ => return Err(Error::Other("unexpected NacStatus variant".to_string())),
             }
         }
 

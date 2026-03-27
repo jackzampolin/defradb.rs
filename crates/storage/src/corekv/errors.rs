@@ -12,6 +12,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// These errors match the error types defined in the Go corekv package
 /// to maintain compatibility and consistent error handling.
 #[derive(Error, Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Error {
     /// Key was not found in the store.
     ///

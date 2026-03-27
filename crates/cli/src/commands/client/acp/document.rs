@@ -17,6 +17,7 @@ pub struct AcpDocumentArgs {
 
 /// ACP document subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum AcpDocumentCommand {
     /// Manage ACP policies
     Policy(AcpPolicyArgs),
@@ -33,6 +34,7 @@ pub struct AcpPolicyArgs {
 
 /// ACP policy subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum AcpPolicyCommand {
     /// Add a new ACP policy
     Add(AcpPolicyAddArgs),
@@ -59,6 +61,7 @@ pub struct AcpDocumentRelationshipArgs {
 
 /// ACP document relationship subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum AcpDocumentRelationshipCommand {
     /// Add a document ACP relationship
     Add(AcpDocumentRelationshipAddArgs),

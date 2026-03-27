@@ -74,6 +74,7 @@ pub fn classify_schema_fields(schema: &CollectionVersion) -> Vec<FieldInfo> {
                     is_primary: field.is_primary,
                 });
             }
+            _ => {}
         }
     }
     result

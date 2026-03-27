@@ -35,6 +35,7 @@ pub struct MergeBlock {
 ///
 /// Used by `MergeHandler::handle_block` to communicate the result.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MergeOutcome {
     /// Block was merged successfully into the database.
     Merged,

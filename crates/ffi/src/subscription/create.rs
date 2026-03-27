@@ -154,6 +154,7 @@ pub(crate) fn message_to_json(message: &events::Message) -> String {
         events::EventName::AcpHeightAdvanced => "acp_height_advanced",
         events::EventName::AcpCacheInvalidated => "acp_cache_invalidated",
         events::EventName::WildCard => "wildcard",
+        _ => "unknown",
     };
     serde_json::json!({
         "type": event_type

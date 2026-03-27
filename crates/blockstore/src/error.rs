@@ -7,6 +7,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Blockstore errors
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Storage layer error
     #[error("storage error: {0}")]

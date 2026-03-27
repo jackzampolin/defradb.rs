@@ -9,6 +9,7 @@ use crate::router::NodePermission;
 
 /// Permission requirement for a route.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RoutePermission {
     /// Route requires this specific permission.
     Required(NodePermission),

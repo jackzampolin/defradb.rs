@@ -12,6 +12,7 @@ pub const SEPARATOR: u8 = b'/';
 
 /// Instance type markers for DataStoreKey
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InstanceType {
     /// Value instance ('v')
     Value,

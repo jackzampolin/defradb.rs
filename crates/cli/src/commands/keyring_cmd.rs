@@ -16,6 +16,7 @@ pub struct KeyringArgs {
 
 /// Keyring subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum KeyringCommand {
     /// Generate a new key and store it in the keyring
     #[command(alias = "generate")]

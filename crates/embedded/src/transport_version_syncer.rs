@@ -124,6 +124,7 @@ async fn sync_lens<S: storage::corekv::Store + 'static, B: Blockstore, T: P2PTra
                 }
                 all_bytes
             }
+            _ => Vec::new(),
         };
 
         let mut lens_module = lens::LensModule::from_bytes(wasm_bytes);

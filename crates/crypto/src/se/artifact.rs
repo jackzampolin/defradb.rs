@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Currently only equality tags are supported, but this enum allows
 /// for future extension to other search types (range, prefix, etc.).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ArtifactType {
     /// Equality search tag - enables exact match queries.
     #[serde(rename = "equality_tag")]
@@ -32,6 +33,7 @@ impl std::fmt::Display for ArtifactType {
 /// Used to indicate whether an artifact should be added to or removed
 /// from the remote node's index.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum OperationType {
     /// Add the artifact to the index.
     #[serde(rename = "add")]

@@ -692,6 +692,7 @@ async fn broadcast_with_retry_with_creator<B: Blockstore + 'static, T: P2PTransp
                 );
                 return BroadcastStatus::Failed(e.to_string());
             }
+            _ => {}
         }
     }
 }

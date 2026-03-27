@@ -96,6 +96,7 @@ pub fn new_token<I: FullIdentity>(
         KeyType::Secp256k1 => encode_secp256k1(&claims, identity)?,
         KeyType::Secp256r1 => encode_secp256r1(&claims, identity)?,
         KeyType::Bls12381 => return Err(Error::UnsupportedKeyType(key_type)),
+        _ => return Err(Error::UnsupportedKeyType(key_type)),
     };
 
     Ok(token.into_bytes())
@@ -152,6 +153,7 @@ pub fn new_token_with_custom_claims<I: FullIdentity, T: Serialize>(
         KeyType::Secp256k1 => encode_secp256k1(&claims, identity)?,
         KeyType::Secp256r1 => encode_secp256r1(&claims, identity)?,
         KeyType::Bls12381 => return Err(Error::UnsupportedKeyType(key_type)),
+        _ => return Err(Error::UnsupportedKeyType(key_type)),
     };
 
     Ok(token.into_bytes())

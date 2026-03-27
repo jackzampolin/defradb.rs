@@ -110,6 +110,7 @@ pub struct Cli {
 /// Available subcommands
 #[derive(Subcommand, Debug)]
 #[allow(clippy::large_enum_variant)]
+#[non_exhaustive]
 pub enum Command {
     /// Start a DefraDB node
     Start(StartArgs),

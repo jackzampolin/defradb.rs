@@ -57,6 +57,7 @@ pub(crate) const ESCAPED_00: u8 = 0xff;
 
 /// Type of encoded value, used for decoding
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EncodedType {
     Unknown,
     Null,

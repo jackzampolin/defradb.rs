@@ -7,6 +7,7 @@ use crate::error::TransactionError;
 use super::context::TransactionContext;
 
 /// Result of looking up a transaction by handle.
+#[non_exhaustive]
 pub enum GetTransactionResult {
     /// Transaction found.
     Found(Arc<dyn TransactionContext>),

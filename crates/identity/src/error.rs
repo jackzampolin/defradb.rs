@@ -8,6 +8,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Identity-specific error types
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Key type is not supported for identity operations
     #[error("{0:?} is not supported for identity operations")]

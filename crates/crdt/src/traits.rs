@@ -8,6 +8,7 @@ use storage::{Reader, ReaderWriter};
 
 /// Result of a merge operation, providing visibility into what happened
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MergeResult {
     /// Delta was applied and state was updated
     Applied,

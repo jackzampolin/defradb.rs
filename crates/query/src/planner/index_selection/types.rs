@@ -28,6 +28,7 @@ pub struct IndexScanParams {
 /// Value-level filter applied to individual index entries during scan iteration.
 /// Matches Go's `indexLikeMatcher` behavior: non-string values return false.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ScanValueFilter {
     Like(String),
     Nlike(String),
@@ -74,6 +75,7 @@ impl ScanValueFilter {
 
 /// Type of index scan to perform.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum IndexScanType {
     /// Exact match on all indexed fields
     ExactMatch { values: Vec<NormalValue> },
@@ -120,6 +122,7 @@ pub struct FieldCondition {
 
 /// Value in a filter condition.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ConditionValue {
     /// Single value
     Single(NormalValue),

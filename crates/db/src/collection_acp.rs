@@ -171,6 +171,7 @@ impl AcpContext {
 
 /// Result of checking a policy transition.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum PolicyTransitionCheck {
     /// Transition is safe (no documents at risk).
     Safe,

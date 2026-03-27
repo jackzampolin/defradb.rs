@@ -83,6 +83,7 @@ pub(super) fn scalar_kind_name(kind: ScalarKind) -> &'static str {
         ScalarKind::String => "String",
         ScalarKind::Blob => "Blob",
         ScalarKind::Json => "JSON",
+        _ => unreachable!(),
     }
 }
 

@@ -51,6 +51,7 @@ fn is_value_compatible_with_kind(value: &NormalValue, kind: &FieldKind) -> bool 
                 matches!(value, NormalValue::String(_) | NormalValue::Document(_))
             }
         }
+        _ => false,
     }
 }
 
@@ -102,6 +103,7 @@ fn is_value_compatible_with_scalar(value: &NormalValue, scalar: ScalarKind) -> b
         // Accept both NormalValue::Json and NormalValue::String for JSON fields
         // String values are used for @default JSON values (stored as serialized strings)
         ScalarKind::Json => matches!(value, NormalValue::Json(_) | NormalValue::String(_)),
+        _ => false,
     }
 }
 
@@ -179,6 +181,7 @@ fn is_value_compatible_with_array(value: &NormalValue, array: ScalarArrayKind) -
                     | NormalValue::StringArray(_)
             )
         }
+        _ => false,
     }
 }
 

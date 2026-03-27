@@ -15,6 +15,7 @@ pub struct EncryptedIndexArgs {
 
 /// Encrypted index subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum EncryptedIndexCommand {
     /// Add an encrypted index on a collection field
     #[command(alias = "add")]

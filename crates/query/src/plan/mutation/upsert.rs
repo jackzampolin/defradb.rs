@@ -87,6 +87,7 @@ impl Default for UpsertInput {
 
 /// Result of an upsert operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UpsertAction {
     /// A new document was created
     Created,

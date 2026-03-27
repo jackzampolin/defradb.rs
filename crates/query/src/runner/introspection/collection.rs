@@ -373,6 +373,7 @@ pub(super) fn field_kind_to_type_ref(
                 TypeRef::named(type_name)
             }
         }
+        _ => TypeRef::named("String"),
     }
 }
 
@@ -391,5 +392,6 @@ pub(super) fn scalar_to_gql_name(scalar: &ScalarKind) -> &'static str {
         ScalarKind::String => "String",
         ScalarKind::Blob => "Blob",
         ScalarKind::Json => "JSON",
+        _ => "String",
     }
 }

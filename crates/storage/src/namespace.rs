@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 /// Store namespace prefixes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Namespace {
     /// Datastore - document and collection data
     Datastore,

@@ -7,6 +7,7 @@ use crate::error::Error;
 /// Log level options
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum LogLevel {
     Debug,
     #[default]
@@ -43,6 +44,7 @@ impl std::str::FromStr for LogLevel {
 /// Log format options
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum LogFormat {
     #[default]
     Text,
@@ -73,6 +75,7 @@ impl std::str::FromStr for LogFormat {
 /// Log output options
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum LogOutput {
     #[default]
     Stderr,
@@ -103,6 +106,7 @@ impl std::str::FromStr for LogOutput {
 /// Keyring backend options
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum KeyringBackend {
     #[default]
     File,
@@ -136,6 +140,7 @@ impl std::str::FromStr for KeyringBackend {
 /// Datastore backend options
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum DatastoreType {
     #[default]
     #[serde(alias = "badger")]
@@ -148,6 +153,7 @@ pub enum DatastoreType {
 /// P2P transport backend options.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum TransportType {
     #[default]
     Libp2p,
@@ -183,6 +189,7 @@ impl std::str::FromStr for TransportType {
 /// - `HubRs`: Remote hub.rs ACP (EVM precompile / hub.rs node)
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum AcpDocumentType {
     #[default]
     None,

@@ -27,6 +27,7 @@ pub use params::{
 pub type FieldTypeMap = HashMap<String, ScalarKind>;
 
 #[derive(Debug, PartialEq)]
+#[non_exhaustive]
 pub enum MutationKind {
     Insert,
     Update,
@@ -34,6 +35,7 @@ pub enum MutationKind {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum AggFunc {
     Count,
     Sum,
@@ -60,12 +62,14 @@ pub struct JoinClause {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum JoinType {
     Inner,
     Left,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum SetOp {
     Union,
     UnionAll,
@@ -74,6 +78,7 @@ pub enum SetOp {
 }
 
 #[derive(Debug, PartialEq)]
+#[non_exhaustive]
 pub enum SqlStatement {
     Query(String),
     Mutation {

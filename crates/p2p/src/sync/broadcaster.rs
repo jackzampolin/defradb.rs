@@ -18,6 +18,7 @@ use crate::transport::P2PTransport;
 
 /// Result of a broadcast operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BroadcastResult {
     /// Both document and collection topics received the message.
     Success,

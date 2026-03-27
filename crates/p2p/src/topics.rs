@@ -20,6 +20,7 @@ pub const ENCRYPTION_TOPIC: &str = "encryption";
 /// - Fixed topics like `doc-sync` and `encryption` for system-wide operations
 /// - Dynamic topics based on collection or document IDs for targeted updates
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DefraTopic {
     /// General document synchronization topic.
     DocSync,

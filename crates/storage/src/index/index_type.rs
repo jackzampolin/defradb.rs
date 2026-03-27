@@ -9,6 +9,7 @@ use super::{
 };
 
 /// Enum for index types (avoids dyn trait issues).
+#[non_exhaustive]
 pub enum IndexType {
     Simple(SimpleIndex),
     Unique(UniqueIndex),

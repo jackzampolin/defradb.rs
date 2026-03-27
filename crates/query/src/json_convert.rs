@@ -155,6 +155,9 @@ pub fn normal_value_to_json(value: &NormalValue) -> Result<JsonValue> {
             "JsonLeaf values should not appear in query results: {:?}",
             leaf
         ))),
+        _ => Err(QueryError::execution(
+            "unexpected NormalValue variant in query results",
+        )),
     }
 }
 

@@ -35,6 +35,7 @@ pub struct CollectionArgs {
 
 /// Collection subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum CollectionCommand {
     /// Add a new collection from a schema definition (SDL)
     Add(CollectionAddArgs),

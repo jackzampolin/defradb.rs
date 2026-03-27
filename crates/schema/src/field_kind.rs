@@ -25,6 +25,7 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 /// These values are stored in the datastore, so they must match exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum ScalarKind {
     None = 0,
     DocID = 1,
@@ -75,6 +76,7 @@ impl ScalarKind {
 /// Array field kinds with numeric values matching Go DefraDB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum ScalarArrayKind {
     BoolArray = 3,
     IntArray = 5,
@@ -128,6 +130,7 @@ impl ScalarArrayKind {
 ///
 /// Uses custom serde implementation for Go compatibility.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FieldKind {
     /// Scalar types (Bool, Int, String, etc.)
     Scalar(ScalarKind),

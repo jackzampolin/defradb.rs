@@ -86,6 +86,7 @@ pub struct DefraBehaviour<S: Store> {
 
 /// Events emitted by the DefraDB network behaviour.
 #[allow(clippy::large_enum_variant)]
+#[non_exhaustive]
 pub enum DefraEvent {
     /// Identify protocol event.
     Identify(identify::Event),

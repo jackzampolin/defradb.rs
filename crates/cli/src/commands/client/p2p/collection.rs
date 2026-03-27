@@ -15,6 +15,7 @@ pub struct P2pCollectionArgs {
 
 /// P2P collection subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum P2pCollectionCommand {
     /// Add P2P collections to the synchronized pubsub topics
     Add(P2pCollectionAddArgs),

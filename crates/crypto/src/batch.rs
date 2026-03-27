@@ -14,6 +14,7 @@ use crate::{Ed25519PrivateKey, Ed25519PublicKey, Secp256k1PrivateKey, Secp256k1P
 
 /// Errors that can occur during batch signing.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum BatchSignError {
     #[error("signing key not configured")]
     MissingKey,

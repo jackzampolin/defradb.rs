@@ -140,6 +140,7 @@ impl fmt::Debug for ResponseToken {
 ///
 /// This mirrors `HostEvent` but uses transport-agnostic types.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum TransportEvent {
     PeerConnected(PeerId),
     PeerDisconnected(PeerId),

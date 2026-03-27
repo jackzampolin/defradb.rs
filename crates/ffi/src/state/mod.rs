@@ -27,6 +27,7 @@ pub use registry::{
 ///
 /// Wraps all backend implementations so that `DB<FfiStore>` works for
 /// any backend without requiring separate type aliases or code paths.
+#[non_exhaustive]
 pub enum FfiStore {
     Memory(MemoryStore),
     Redb(storage::RedbStore),

@@ -93,6 +93,7 @@ pub struct P2pDocumentRequest {
 
 /// Storage persistence hints for ACP/NAC setup.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Persistence {
     #[default]
     Memory,
@@ -101,6 +102,7 @@ pub enum Persistence {
 
 /// Supported runtime transports for embedded nodes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransportConfig {
     #[default]
     None,
@@ -141,6 +143,7 @@ impl Default for IrohConfig {
 
 /// Node signing configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SigningConfig {
     #[default]
     Disabled,
@@ -154,6 +157,7 @@ pub enum SigningConfig {
 
 /// Explicit node signing key material.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SigningKey {
     Secp256k1(Vec<u8>),
     Secp256r1(Vec<u8>),
@@ -162,6 +166,7 @@ pub enum SigningKey {
 
 /// Document ACP configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DocumentAcpConfig {
     #[default]
     Local,
@@ -193,6 +198,7 @@ pub struct EmbeddedNodeConfig {
 
 /// Runtime P2P transport kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransportKind {
     Libp2p,
     #[cfg(feature = "iroh")]
@@ -233,6 +239,7 @@ impl ManagedP2PSystem {
 }
 
 /// Storage backends supported by the public `NodeBuilder`.
+#[non_exhaustive]
 pub enum EmbeddedStore {
     Memory(storage::MemoryStore),
     Redb(storage::RedbStore),

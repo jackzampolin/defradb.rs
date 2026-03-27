@@ -25,6 +25,7 @@ pub struct P2pArgs {
 
 /// P2P subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum P2pCommand {
     /// Show active peers
     ActivePeers(P2pActivePeersArgs),

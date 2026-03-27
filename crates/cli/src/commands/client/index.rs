@@ -15,6 +15,7 @@ pub struct IndexArgs {
 
 /// Index subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum IndexCommand {
     /// Create a new index on a collection
     #[command(alias = "create")]

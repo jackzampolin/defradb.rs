@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use defra_core::thread_bounds::MaybeSendSync;
 
+#[non_exhaustive]
 pub enum SubjectRef {
     Actor(String),
     AllActors,
@@ -21,6 +22,7 @@ pub struct AcpLightClientStatus {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ProviderError {
     #[error("query error: {0}")]
     Query(String),

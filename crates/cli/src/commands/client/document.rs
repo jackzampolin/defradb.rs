@@ -38,6 +38,7 @@ pub struct DocumentArgs {
 
 /// Document subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum DocumentCommand {
     /// Add a new document
     Add(DocumentAddArgs),

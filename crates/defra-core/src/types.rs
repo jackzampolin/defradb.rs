@@ -77,6 +77,7 @@ impl FieldId {
 
 /// Field kind - the type of a field in a schema
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum FieldKind {
     /// String type
     String,
@@ -100,6 +101,7 @@ pub enum FieldKind {
 
 /// CRDT type - conflict-free replicated data type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum CrdtType {
     /// Last-Write-Wins Register
     LWW,

@@ -16,6 +16,7 @@ use std::fmt;
 
 /// Which CRDT to use for a field
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum CType {
     /// No CRDT (for relations and special fields)
     None,

@@ -21,6 +21,7 @@ use identity::Did;
 /// - `Anonymous`: Can access unregistered (public) documents only
 /// - `Authenticated`: Can access owned documents and documents with granted relations
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Identity {
     /// No identity provided (anonymous/unauthenticated request).
     Anonymous,

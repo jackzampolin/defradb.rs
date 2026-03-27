@@ -106,6 +106,7 @@ impl RawIdentity {
                 Self::from_secp256r1(secp256r1_key)
             }
             KeyType::Bls12381 => Err(Error::UnsupportedKeyType(private_key.key_type())),
+            _ => Err(Error::UnsupportedKeyType(private_key.key_type())),
         }
     }
 
@@ -128,6 +129,7 @@ impl RawIdentity {
                 Self::from_secp256r1(private_key)
             }
             KeyType::Bls12381 => Err(Error::UnsupportedKeyType(key_type)),
+            _ => Err(Error::UnsupportedKeyType(key_type)),
         }
     }
 

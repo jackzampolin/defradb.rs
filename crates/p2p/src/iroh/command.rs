@@ -13,6 +13,7 @@ use crate::transport::{MessageId, PeerAddr, PeerId};
 use crate::QueryId;
 
 /// Commands from the transport facade to the background endpoint.
+#[non_exhaustive]
 pub enum IrohCommand {
     Dial {
         peer_id: PeerId,

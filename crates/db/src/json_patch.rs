@@ -8,6 +8,7 @@ use serde_json::Value;
 
 /// Error type for JSON Patch operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum JsonPatchError {
     #[error("invalid patch: {0}")]
     InvalidPath(String),

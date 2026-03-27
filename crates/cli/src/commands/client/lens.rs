@@ -17,6 +17,7 @@ pub struct LensArgs {
 
 /// Lens subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum LensCommand {
     /// Add a lens migration
     Add(LensAddArgs),

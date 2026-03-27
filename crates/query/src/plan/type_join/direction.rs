@@ -8,6 +8,7 @@
 /// - **Inverted**: The child side holds the FK. Lookup is done by scanning children
 ///   to find those whose FK matches the parent's `_docID`.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum JoinDirection {
     /// Primary join: parent has FK field at the given index.
     /// Lookup: child._docID == parent.FK_field

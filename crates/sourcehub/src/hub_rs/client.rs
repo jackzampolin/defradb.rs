@@ -198,6 +198,7 @@ fn parse_hex_u64(s: &str) -> Result<u64, ClientError> {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ClientError {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),

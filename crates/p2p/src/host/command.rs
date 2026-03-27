@@ -14,6 +14,7 @@ use super::ResponseChannel;
 
 /// Commands that can be sent to the P2P host.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum HostCommand {
     /// Start listening on an address.
     Listen {

@@ -9,6 +9,7 @@ use crate::corekv::{AsyncTxnCallback, TxnCallback};
 /// due to WAL; only OS crashes risk data loss.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum DurabilityMode {
     /// Flush to disk on every commit. Safe against process and OS crashes.
     Immediate,

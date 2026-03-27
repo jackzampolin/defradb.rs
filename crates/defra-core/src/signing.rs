@@ -28,6 +28,7 @@ pub trait RemoteSigner: Send + Sync {
 /// request so Orbis can authorize the signature ceremony before producing a
 /// threshold signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SigningAuthorization {
     Policy {
         policy_id: String,
@@ -47,6 +48,7 @@ pub enum SigningAuthorization {
 /// backward compatibility with JSON/FFI boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum SigningKeyType {
     Ed25519,
     Secp256k1,

@@ -14,6 +14,7 @@ use storage::{Reader, ReaderWriter};
 
 /// Numeric kind for counter values
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum NumericKind {
     Int64,
     Float64,

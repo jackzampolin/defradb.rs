@@ -222,6 +222,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                     total_raw_fetches,
                 ));
             }
+            _ => unreachable!(),
         };
 
         let _ = txn.discard();

@@ -7,6 +7,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can occur during lens operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// WASM module failed to load.
     #[error("failed to load WASM module: {0}")]

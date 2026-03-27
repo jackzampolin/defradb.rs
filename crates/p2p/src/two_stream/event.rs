@@ -10,6 +10,7 @@ use crate::message::{
 
 /// Event emitted by the two-stream handler.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum TwoStreamEvent {
     /// Received a PushLog request from a peer.
     InboundRequest {

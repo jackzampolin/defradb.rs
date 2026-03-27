@@ -219,6 +219,7 @@ impl Ord for DAGLink {
 /// Matches Go's `crdt.CRDT` IPLD union with "keyed" representation.
 /// Serializes as `{"lww": {...}}` or `{"counter": {...}}` etc.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum CrdtDelta {
     /// LWW Register delta
     #[serde(rename = "lww")]
@@ -694,6 +695,7 @@ impl SignatureHeader {
 /// Serializes as the raw u8 value for Go wire compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum DocumentStatus {
     #[default]
     Active = 1,
@@ -748,6 +750,7 @@ impl fmt::Display for DocumentStatus {
 ///
 /// Matches Go's signature type constants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum SignatureType {
     /// ECDSA with secp256k1 curve
     #[serde(rename = "ES256K")]

@@ -16,6 +16,7 @@ impl<S: Store> CommitsFetcher<S> {
             CrdtDelta::CollectionSet(_) => None,
             CrdtDelta::FieldDefinition(_) => None,
             CrdtDelta::CollectionDefinition(_) => None,
+            _ => None,
         }
     }
 
@@ -48,6 +49,7 @@ impl<S: Store> CommitsFetcher<S> {
             CrdtDelta::CollectionSet(_) => None,
             CrdtDelta::FieldDefinition(_) => None,
             CrdtDelta::CollectionDefinition(_) => None,
+            _ => None,
         }
     }
 
@@ -61,6 +63,7 @@ impl<S: Store> CommitsFetcher<S> {
             CrdtDelta::CollectionSet(_) => None,
             CrdtDelta::FieldDefinition(_) => None,
             CrdtDelta::CollectionDefinition(_) => None,
+            _ => None,
         }
     }
 

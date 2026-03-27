@@ -8,6 +8,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// P2P error types.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Transport error during network communication.
     #[error("transport error: {0}")]

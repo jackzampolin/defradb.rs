@@ -10,6 +10,7 @@ use super::ResponseChannel;
 
 /// Events emitted by the P2P host.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum HostEvent {
     /// A peer connection was established.
     PeerConnected(PeerId),

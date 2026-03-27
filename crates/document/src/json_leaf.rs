@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 /// JSON numbers are always stored as f64 to match Go behavior where
 /// JSON numbers are unmarshaled as float64.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum JsonScalarValue {
     /// JSON null
     Null,

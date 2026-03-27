@@ -15,6 +15,7 @@ pub struct P2pDocumentArgs {
 
 /// P2P document subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum P2pDocumentCommand {
     /// Add document(s) to P2P sync
     Add(P2pDocumentAddArgs),

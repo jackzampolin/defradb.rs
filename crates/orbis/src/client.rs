@@ -170,6 +170,13 @@ impl OrbisClient {
                 String::new(),
                 String::new(),
             ),
+            Some(_) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
         };
 
         SignRequest {
@@ -213,6 +220,13 @@ impl OrbisClient {
                 decision_id.clone(),
             ),
             None => (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
+            Some(_) => (
                 String::new(),
                 String::new(),
                 String::new(),
@@ -298,6 +312,7 @@ impl OrbisClient {
                     "Orbis sign request has no authorization context"
                 );
             }
+            Some(_) => {}
         }
 
         let bearer_token = self.create_bearer_token(data.to_vec(), authorization.as_ref())?;

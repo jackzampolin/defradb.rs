@@ -16,6 +16,7 @@ pub struct P2pReplicatorArgs {
 
 /// Replicator subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum P2pReplicatorCommand {
     /// Add replicator(s) and start synchronization
     Add(P2pReplicatorAddArgs),

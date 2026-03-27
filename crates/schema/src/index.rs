@@ -68,6 +68,7 @@ impl IndexDescription {
 /// Type of encrypted index.
 /// Matches Go's EncryptedIndexType.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum EncryptedIndexType {
     /// Equality-based searchable encryption.
     #[serde(rename = "equality")]

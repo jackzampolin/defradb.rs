@@ -42,6 +42,7 @@ impl IndexEntry {
 
 /// Bound for range queries on an index field.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Bound {
     /// Include the bound value in the range (>=, <=)
     Inclusive(NormalValue),

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 /// - `Difference`: Left AND NOT right
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RelationExpression {
     This,
 

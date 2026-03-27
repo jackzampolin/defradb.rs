@@ -2,6 +2,7 @@ use thiserror::Error;
 
 /// Errors that can occur in the database layer.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("storage error: {0}")]
     Storage(#[from] storage::Error),

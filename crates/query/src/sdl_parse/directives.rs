@@ -167,6 +167,7 @@ pub struct IndexConfig {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub enum IndexDirection {
     #[default]
     Asc,

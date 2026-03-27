@@ -9,6 +9,7 @@ use std::fmt;
 
 /// Error type for replicator operations.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ReplicatorError {
     /// The peer ID string is invalid.
     InvalidPeerId(String),

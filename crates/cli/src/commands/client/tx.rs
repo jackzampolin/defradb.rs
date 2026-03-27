@@ -15,6 +15,7 @@ pub struct TxArgs {
 
 /// Transaction subcommands
 #[derive(Subcommand, Debug)]
+#[non_exhaustive]
 pub enum TxCommand {
     /// Create a new transaction
     #[command(alias = "create")]

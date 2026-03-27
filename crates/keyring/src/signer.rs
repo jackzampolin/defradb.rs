@@ -45,6 +45,7 @@ pub struct KeyHandle {
 
 /// Key type for determining how to interpret key bytes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum KeyType {
     /// secp256k1 ECDSA key (32 bytes scalar)
     Secp256k1,

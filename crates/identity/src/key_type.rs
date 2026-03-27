@@ -15,6 +15,7 @@ use crate::Error;
 /// - **Secp256r1**: P-256 / NIST curve, used by browser Web Crypto API (ES256 JWTs)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum IdentityKeyType {
     /// Ed25519 elliptic curve (used by Solana, etc.)
     Ed25519,
@@ -44,6 +45,7 @@ impl TryFrom<KeyType> for IdentityKeyType {
             KeyType::Secp256k1 => Ok(IdentityKeyType::Secp256k1),
             KeyType::Secp256r1 => Ok(IdentityKeyType::Secp256r1),
             KeyType::Bls12381 => Err(Error::UnsupportedKeyType(key_type)),
+            _ => Err(Error::UnsupportedKeyType(key_type)),
         }
     }
 }

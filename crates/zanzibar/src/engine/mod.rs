@@ -76,6 +76,7 @@ pub struct EvaluationStep {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum StepResult {
     Granted,
     Denied,
