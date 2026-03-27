@@ -5,6 +5,8 @@ use crypto::{did::parse_did_key, public_key_from_bytes};
 use identity::FullIdentity;
 use serde::{Deserialize, Serialize};
 
+use crate::error::{Error, Result};
+
 const CAPABILITY_VERSION: u8 = 1;
 const CAPABILITY_PURPOSE: &str = "explicit-replay";
 pub const DEFAULT_CAPABILITY_TTL: Duration = Duration::from_secs(365 * 24 * 60 * 60);
@@ -36,25 +38,26 @@ pub struct ExplicitReplayAuthorization {
     pub expires_at: u64,
 }
 
-fn now_unix() -> Result<u64, String> {
+fn now_unix() -> Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
-        .map_err(|error| format!("system clock error: {error}"))
+        .map_err(|error| Error::SystemClock(error.to_string()))
 }
 
-fn encode_claims(claims: &ExplicitReplayCapabilityClaims) -> Result<Vec<u8>, String> {
-    serde_cbor::to_vec(claims)
-        .map_err(|error| format!("failed to encode explicit replay claims: {error}"))
+fn encode_claims(claims: &ExplicitReplayCapabilityClaims) -> Result<Vec<u8>> {
+    serde_cbor::to_vec(claims).map_err(|error| {
+        Error::ExplicitReplayCapability(format!("failed to encode claims: {error}"))
+    })
 }
 
-fn decode_envelope(capability: &str) -> Result<ExplicitReplayCapabilityEnvelope, String> {
+fn decode_envelope(capability: &str) -> Result<ExplicitReplayCapabilityEnvelope> {
     let bytes = URL_SAFE_NO_PAD
         .decode(capability)
-        .map_err(|error| format!("invalid explicit replay capability encoding: {error}"))?;
+        .map_err(|error| Error::ExplicitReplayCapability(format!("invalid encoding: {error}")))?;
 
     serde_cbor::from_slice(&bytes)
-        .map_err(|error| format!("invalid explicit replay capability payload: {error}"))
+        .map_err(|error| Error::ExplicitReplayCapability(format!("invalid payload: {error}")))
 }
 
 fn validate_claims(
@@ -62,51 +65,53 @@ fn validate_claims(
     transport_sender_peer_id: &str,
     target_peer_id: &str,
     collection_id: &str,
-) -> Result<(), String> {
+) -> Result<()> {
     if claims.version != CAPABILITY_VERSION {
-        return Err(format!(
-            "unsupported explicit replay capability version {}",
+        return Err(Error::ExplicitReplayCapability(format!(
+            "unsupported version {}",
             claims.version
-        ));
+        )));
     }
 
     if claims.purpose != CAPABILITY_PURPOSE {
-        return Err(format!(
-            "unexpected explicit replay capability purpose {}",
+        return Err(Error::ExplicitReplayCapability(format!(
+            "unexpected purpose {}",
             claims.purpose
-        ));
+        )));
     }
 
     if claims.source_peer_id != transport_sender_peer_id {
-        return Err(format!(
-            "explicit replay capability source {} did not match transport sender {}",
+        return Err(Error::ExplicitReplayCapability(format!(
+            "source {} did not match transport sender {}",
             claims.source_peer_id, transport_sender_peer_id
-        ));
+        )));
     }
 
     if claims.target_peer_id != target_peer_id {
-        return Err(format!(
-            "explicit replay capability target {} did not match local peer {}",
+        return Err(Error::ExplicitReplayCapability(format!(
+            "target {} did not match local peer {}",
             claims.target_peer_id, target_peer_id
-        ));
+        )));
     }
 
     if claims.collection_id != collection_id {
-        return Err(format!(
-            "explicit replay capability collection {} did not match request collection {}",
+        return Err(Error::ExplicitReplayCapability(format!(
+            "collection {} did not match request collection {}",
             claims.collection_id, collection_id
-        ));
+        )));
     }
 
     if claims.authorizer_did.is_empty() {
-        return Err("explicit replay capability authorizer DID was empty".to_string());
+        return Err(Error::ExplicitReplayCapability(
+            "authorizer DID was empty".to_string(),
+        ));
     }
 
     if claims.expires_at < now_unix()? {
-        return Err(format!(
-            "explicit replay capability expired at {}",
+        return Err(Error::ExplicitReplayCapability(format!(
+            "expired at {}",
             claims.expires_at
-        ));
+        )));
     }
 
     Ok(())
@@ -118,12 +123,12 @@ pub fn generate_capability<I: FullIdentity>(
     target_peer_id: &str,
     collection_id: &str,
     lifetime: Duration,
-) -> Result<String, String> {
+) -> Result<String> {
     let issued_at = now_unix()?;
     let expires_at = issued_at.saturating_add(lifetime.as_secs());
-    let authorizer_did = authorizer
-        .did()
-        .map_err(|error| format!("failed to derive explicit replay authorizer DID: {error}"))?;
+    let authorizer_did = authorizer.did().map_err(|error| {
+        Error::ExplicitReplayCapability(format!("failed to derive authorizer DID: {error}"))
+    })?;
     let claims = ExplicitReplayCapabilityClaims {
         version: CAPABILITY_VERSION,
         purpose: CAPABILITY_PURPOSE.to_string(),
@@ -139,27 +144,27 @@ pub fn generate_capability<I: FullIdentity>(
 pub fn generate_capability_from_claims<I: FullIdentity>(
     authorizer: &I,
     claims: ExplicitReplayCapabilityClaims,
-) -> Result<String, String> {
+) -> Result<String> {
     let claims_bytes = encode_claims(&claims)?;
     let signature = authorizer
         .sign(&claims_bytes)
-        .map_err(|error| format!("failed to sign explicit replay capability: {error}"))?;
+        .map_err(|error| Error::ExplicitReplayCapability(format!("failed to sign: {error}")))?;
 
     let envelope = ExplicitReplayCapabilityEnvelope { claims, signature };
 
     let envelope_bytes = serde_cbor::to_vec(&envelope)
-        .map_err(|error| format!("failed to encode explicit replay capability: {error}"))?;
+        .map_err(|error| Error::ExplicitReplayCapability(format!("failed to encode: {error}")))?;
 
     Ok(URL_SAFE_NO_PAD.encode(envelope_bytes))
 }
 
-fn decode_authorizer_public_key(
-    authorizer_did: &str,
-) -> Result<Box<dyn crypto::keys::PublicKey>, String> {
-    let (key_type, public_key_bytes) = parse_did_key(authorizer_did)
-        .map_err(|error| format!("invalid explicit replay capability authorizer DID: {error}"))?;
-    public_key_from_bytes(key_type, &public_key_bytes)
-        .map_err(|error| format!("invalid explicit replay capability authorizer key: {error}"))
+fn decode_authorizer_public_key(authorizer_did: &str) -> Result<Box<dyn crypto::keys::PublicKey>> {
+    let (key_type, public_key_bytes) = parse_did_key(authorizer_did).map_err(|error| {
+        Error::ExplicitReplayCapability(format!("invalid authorizer DID: {error}"))
+    })?;
+    public_key_from_bytes(key_type, &public_key_bytes).map_err(|error| {
+        Error::ExplicitReplayCapability(format!("invalid authorizer key: {error}"))
+    })
 }
 
 pub fn verify_capability(
@@ -167,7 +172,7 @@ pub fn verify_capability(
     transport_sender_peer_id: &str,
     target_peer_id: &str,
     collection_id: &str,
-) -> Result<ExplicitReplayAuthorization, String> {
+) -> Result<ExplicitReplayAuthorization> {
     let envelope = decode_envelope(capability)?;
     validate_claims(
         &envelope.claims,
@@ -181,10 +186,12 @@ pub fn verify_capability(
     if !public_key
         .verify(&claims_bytes, &envelope.signature)
         .map_err(|error| {
-            format!("explicit replay capability signature verification error: {error}")
+            Error::ExplicitReplayCapability(format!("signature verification error: {error}"))
         })?
     {
-        return Err("explicit replay capability signature verification failed".to_string());
+        return Err(Error::ExplicitReplayCapability(
+            "signature verification failed".to_string(),
+        ));
     }
 
     Ok(ExplicitReplayAuthorization {
@@ -247,9 +254,10 @@ mod tests {
         let error = verify_capability(&capability, &source_peer_id, "peer-target", "collection-b")
             .unwrap_err();
 
+        let msg = error.to_string();
         assert!(
-            error.contains("did not match request collection"),
-            "unexpected error: {error}"
+            msg.contains("did not match request collection"),
+            "unexpected error: {msg}"
         );
     }
 
@@ -274,7 +282,8 @@ mod tests {
         let error = verify_capability(&capability, &source_peer_id, "peer-target", "collection-a")
             .unwrap_err();
 
-        assert!(error.contains("expired"), "unexpected error: {error}");
+        let msg = error.to_string();
+        assert!(msg.contains("expired"), "unexpected error: {msg}");
     }
 
     #[test]
@@ -299,6 +308,7 @@ mod tests {
         let error = verify_capability(&capability, &source_peer_id, "peer-target", "collection-a")
             .unwrap_err();
 
-        assert!(error.contains("signature"), "unexpected error: {error}");
+        let msg = error.to_string();
+        assert!(msg.contains("signature"), "unexpected error: {msg}");
     }
 }

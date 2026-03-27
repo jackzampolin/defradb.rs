@@ -320,7 +320,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn connect_peer(&self, addr: &str) -> Result<(), String> {
-        let parsed = p2p::parse_multiaddr_with_peer_id(addr)?;
+        let parsed = p2p::parse_multiaddr_with_peer_id(addr).map_err(|e| e.to_string())?;
         self.handle
             .dial(parsed.peer_id, vec![parsed.transport_addr])
             .await
@@ -366,7 +366,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         push_options: ReplicatorPushOptions,
     ) -> Result<(), String> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
-        let parsed = p2p::parse_multiaddr_with_peer_id(addr_str)?;
+        let parsed = p2p::parse_multiaddr_with_peer_id(addr_str).map_err(|e| e.to_string())?;
 
         let effective_collections = if collections.is_empty() {
             if let Some(ref pusher) = self.doc_pusher {

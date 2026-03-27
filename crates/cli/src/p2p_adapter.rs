@@ -507,7 +507,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     }
 
     async fn connect_peer(&self, addr: &str) -> Result<(), String> {
-        let parsed = p2p::parse_multiaddr_with_peer_id(addr)?;
+        let parsed = p2p::parse_multiaddr_with_peer_id(addr).map_err(|e| e.to_string())?;
 
         self.handle
             .dial(parsed.peer_id, vec![parsed.transport_addr])
@@ -557,7 +557,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         expected_authorizer_did: Option<&str>,
     ) -> Result<(), String> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
-        let parsed = p2p::parse_multiaddr_with_peer_id(addr_str)?;
+        let parsed = p2p::parse_multiaddr_with_peer_id(addr_str).map_err(|e| e.to_string())?;
 
         // If collections empty, replicate all (matching Go behavior)
         let effective_collections = if collections.is_empty() {
@@ -782,7 +782,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         addr: Option<&str>,
     ) -> Result<(), String> {
         let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
-        let parsed = p2p::parse_multiaddr_with_peer_id(addr_str)?;
+        let parsed = p2p::parse_multiaddr_with_peer_id(addr_str).map_err(|e| e.to_string())?;
         let peer_id = parsed.peer_id;
 
         if let Some(ref coordinator) = self.sync_coordinator {

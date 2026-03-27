@@ -198,8 +198,7 @@ impl<S: Store> P2PHost<S> {
             config.enable_pubsub,
             &config,
         )
-        .await
-        .map_err(|e| Error::Behaviour(e.to_string()))?;
+        .await?;
 
         // Enable TCP port reuse to match Go-libp2p behavior.
         // Go-libp2p reuses the listen port for outgoing connections, so the

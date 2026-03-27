@@ -5,28 +5,19 @@
 
 use libp2p::{Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use thiserror::Error;
 
 /// Error type for replicator operations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum ReplicatorError {
     /// The peer ID string is invalid.
+    #[error("invalid peer ID: {0}")]
     InvalidPeerId(String),
     /// No collections specified.
+    #[error("collections cannot be empty")]
     EmptyCollections,
 }
-
-impl fmt::Display for ReplicatorError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ReplicatorError::InvalidPeerId(s) => write!(f, "invalid peer ID: {}", s),
-            ReplicatorError::EmptyCollections => write!(f, "collections cannot be empty"),
-        }
-    }
-}
-
-impl std::error::Error for ReplicatorError {}
 
 /// Information about a replicator peer.
 ///

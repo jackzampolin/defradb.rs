@@ -124,10 +124,10 @@ async fn build_explicit_replay_capabilities(
         .and_then(|addr| {
             p2p::parse_multiaddr_with_peer_id(addr)
                 .map(|parsed| parsed.peer_id.to_string())
-                .map_err(Error::Server)
+                .map_err(|e| Error::Server(e.to_string()))
         })?;
     let target_peer_id = p2p::parse_multiaddr_with_peer_id(address)
-        .map_err(Error::Server)?
+        .map_err(|e| Error::Server(e.to_string()))?
         .peer_id
         .to_string();
     let identity = raw_identity_from_key_bytes("replicator identity", identity_key_bytes)?;
@@ -153,7 +153,7 @@ async fn build_explicit_replay_capabilities(
                 &collection_id,
                 p2p::DEFAULT_EXPLICIT_REPLAY_CAPABILITY_TTL,
             )
-            .map_err(Error::Server)?;
+            .map_err(|e| Error::Server(e.to_string()))?;
             Ok(ExplicitReplayCapabilityInput {
                 collection_id,
                 capability,

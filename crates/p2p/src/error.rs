@@ -201,6 +201,46 @@ pub enum Error {
     /// Storage error during P2P operation.
     #[error("storage error: {0}")]
     Storage(String),
+
+    /// Failed to open a P2P stream.
+    #[error("failed to open {protocol} stream to {peer_id}: {reason}")]
+    StreamOpen {
+        peer_id: String,
+        protocol: String,
+        reason: String,
+    },
+
+    /// Failed to write to a P2P stream.
+    #[error("failed to write to {protocol} stream: {reason}")]
+    StreamWrite { protocol: String, reason: String },
+
+    /// Failed to read from a P2P stream.
+    #[error("stream read timed out from peer {peer_id}")]
+    StreamReadTimeout { peer_id: String },
+
+    /// Multiaddr does not contain a peer ID component.
+    #[error("multiaddr does not contain peer ID: {addr}")]
+    MissingPeerIdInMultiaddr { addr: String },
+
+    /// Replicator has no collections specified.
+    #[error("replicator collections cannot be empty")]
+    EmptyReplicatorCollections,
+
+    /// GossipSub configuration error.
+    #[error("gossipsub config error: {0}")]
+    GossipSubConfig(String),
+
+    /// Explicit replay capability validation failed.
+    #[error("explicit replay capability error: {0}")]
+    ExplicitReplayCapability(String),
+
+    /// System clock error (used in explicit replay capability TTL checks).
+    #[error("system clock error: {0}")]
+    SystemClock(String),
+
+    /// Head provider error (used in DocSync / BranchableSync).
+    #[error("head provider error: {0}")]
+    HeadProvider(String),
 }
 
 /// Convert a blockstore CID verification error into its P2P counterpart.

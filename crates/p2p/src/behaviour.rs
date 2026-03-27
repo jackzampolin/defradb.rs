@@ -184,7 +184,7 @@ impl<S: Store> DefraBehaviour<S> {
         bitswap_store: S,
         enable_pubsub: bool,
         config: &super::P2PHostConfig,
-    ) -> Result<Self, std::io::Error> {
+    ) -> Result<Self, crate::error::Error> {
         // Configure identify behaviour
         let identify_config =
             identify::Config::new("/defra/identify/0.0.1".to_string(), local_public_key)
@@ -218,21 +218,11 @@ impl<S: Store> DefraBehaviour<S> {
                     MessageId::from(hash.to_vec())
                 })
                 .build()
-                .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!("gossipsub config error: {}", e),
-                    )
-                })?;
+                .map_err(|e| crate::error::Error::GossipSubConfig(e.to_string()))?;
 
             let gs =
                 gossipsub::Behaviour::new(MessageAuthenticity::Signed(keypair), gossipsub_config)
-                    .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!("gossipsub creation error: {}", e),
-                    )
-                })?;
+                    .map_err(|e| crate::error::Error::GossipSubConfig(e.to_string()))?;
             Toggle::from(Some(gs))
         } else {
             Toggle::from(None)
@@ -293,7 +283,7 @@ impl<S: Store> DefraBehaviour<S> {
         local_public_key: libp2p::identity::PublicKey,
         bitswap_store: S,
         enable_pubsub: bool,
-    ) -> Result<Self, std::io::Error> {
+    ) -> Result<Self, crate::error::Error> {
         let identify_config =
             identify::Config::new("/defra/identify/0.0.1".to_string(), local_public_key)
                 .with_agent_version(format!("defradb-rs/{}", env!("CARGO_PKG_VERSION")));
@@ -317,20 +307,10 @@ impl<S: Store> DefraBehaviour<S> {
                     MessageId::from(hash.to_vec())
                 })
                 .build()
-                .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!("gossipsub config error: {}", e),
-                    )
-                })?;
+                .map_err(|e| crate::error::Error::GossipSubConfig(e.to_string()))?;
 
             let gs = gossipsub::Behaviour::new(MessageAuthenticity::RandomAuthor, gossipsub_config)
-                .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!("gossipsub creation error: {}", e),
-                    )
-                })?;
+                .map_err(|e| crate::error::Error::GossipSubConfig(e.to_string()))?;
             Toggle::from(Some(gs))
         } else {
             Toggle::from(None)

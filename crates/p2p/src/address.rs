@@ -10,10 +10,12 @@ pub struct ParsedMultiaddr {
 /// Expects format like: `/ip4/127.0.0.1/tcp/9171/p2p/12D3KooW...`
 ///
 /// Returns the peer ID and the transport address (without /p2p component).
-pub fn parse_multiaddr_with_peer_id(addr_str: &str) -> Result<ParsedMultiaddr, String> {
+pub fn parse_multiaddr_with_peer_id(addr_str: &str) -> crate::error::Result<ParsedMultiaddr> {
+    use crate::error::Error;
+
     let full_addr: libp2p::Multiaddr = addr_str
         .parse()
-        .map_err(|e| format!("invalid multiaddr '{}': {}", addr_str, e))?;
+        .map_err(|e: libp2p::multiaddr::Error| Error::InvalidMultiaddr(e.to_string()))?;
 
     let peer_id = full_addr
         .iter()
@@ -21,7 +23,9 @@ pub fn parse_multiaddr_with_peer_id(addr_str: &str) -> Result<ParsedMultiaddr, S
             libp2p::multiaddr::Protocol::P2p(id) => Some(id),
             _ => None,
         })
-        .ok_or_else(|| format!("multiaddr '{}' does not contain peer ID", addr_str))?;
+        .ok_or_else(|| Error::MissingPeerIdInMultiaddr {
+            addr: addr_str.to_string(),
+        })?;
 
     let transport_addr: libp2p::Multiaddr = full_addr
         .iter()

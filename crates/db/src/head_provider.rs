@@ -35,38 +35,33 @@ impl<S: Store> DbHeadProvider<S> {
 
 #[async_trait]
 impl<S: Store + 'static> DocumentHeadProvider for DbHeadProvider<S> {
-    async fn get_document_heads(&self, doc_id: &str) -> Result<Vec<Cid>, String> {
+    async fn get_document_heads(&self, doc_id: &str) -> p2p::error::Result<Vec<Cid>> {
         let binary_doc_id = DocID::from_string(doc_id)
             .ok()
             .map(|parsed| parsed.to_bytes());
 
         // Create a read-only transaction to access the headstore
-        let txn = self
-            .db
-            .new_txn(true)
-            .await
-            .map_err(|e| format!("failed to create transaction: {}", e))?;
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            p2p::error::Error::HeadProvider(format!("failed to create transaction: {}", e))
+        })?;
 
-        let headstore = txn
-            .headstore()
-            .map_err(|e| format!("failed to get headstore: {}", e))?;
+        let headstore = txn.headstore().map_err(|e| {
+            p2p::error::Error::HeadProvider(format!("failed to get headstore: {}", e))
+        })?;
 
         // Query composite heads with prefix /d/{doc_id}/C/
         let prefix = HeadstoreDocKey::field_prefix(doc_id, "C");
         let opts = IterOptions::new().with_prefix(prefix);
 
-        let mut iter = headstore
-            .iterator(opts)
-            .await
-            .map_err(|e| format!("failed to iterate headstore: {}", e))?;
+        let mut iter = headstore.iterator(opts).await.map_err(|e| {
+            p2p::error::Error::HeadProvider(format!("failed to iterate headstore: {}", e))
+        })?;
 
         let mut cids = Vec::new();
 
-        while let Some(pair) = iter
-            .next()
-            .await
-            .map_err(|e| format!("headstore iteration error: {}", e))?
-        {
+        while let Some(pair) = iter.next().await.map_err(|e| {
+            p2p::error::Error::HeadProvider(format!("headstore iteration error: {}", e))
+        })? {
             // Parse CID from key: /d/{doc_id}/C/{cid}
             let key_str = String::from_utf8_lossy(&pair.key);
             let parts: Vec<&str> = key_str.split('/').collect();
@@ -79,29 +74,32 @@ impl<S: Store + 'static> DocumentHeadProvider for DbHeadProvider<S> {
             }
         }
 
-        iter.close()
-            .await
-            .map_err(|e| format!("headstore close error: {}", e))?;
+        iter.close().await.map_err(|e| {
+            p2p::error::Error::HeadProvider(format!("headstore close error: {}", e))
+        })?;
 
         if cids.is_empty() {
-            let blockstore = txn
-                .blockstore()
-                .map_err(|e| format!("failed to get blockstore: {}", e))?;
+            let blockstore = txn.blockstore().map_err(|e| {
+                p2p::error::Error::HeadProvider(format!("failed to get blockstore: {}", e))
+            })?;
             let mut priority_iter = headstore
                 .iterator(
                     IterOptions::new().with_prefix(HeadstorePriorityKey::document_prefix(doc_id)),
                 )
                 .await
-                .map_err(|e| format!("failed to iterate priority index: {}", e))?;
+                .map_err(|e| {
+                    p2p::error::Error::HeadProvider(format!(
+                        "failed to iterate priority index: {}",
+                        e
+                    ))
+                })?;
 
             let cid_offset = HeadstorePriorityKey::cid_offset(doc_id);
             let mut max_priority: Option<u64> = None;
 
-            while let Some(pair) = priority_iter
-                .next()
-                .await
-                .map_err(|e| format!("priority index iteration error: {}", e))?
-            {
+            while let Some(pair) = priority_iter.next().await.map_err(|e| {
+                p2p::error::Error::HeadProvider(format!("priority index iteration error: {}", e))
+            })? {
                 let cid_bytes = match pair.key.get(cid_offset..) {
                     Some(bytes) => bytes,
                     None => continue,
@@ -111,7 +109,10 @@ impl<S: Store + 'static> DocumentHeadProvider for DbHeadProvider<S> {
                 };
 
                 let Some(block_bytes) = blockstore.get(&cid.to_bytes()).await.map_err(|e| {
-                    format!("failed to read blockstore for priority index CID: {}", e)
+                    p2p::error::Error::HeadProvider(format!(
+                        "failed to read blockstore for priority index CID: {}",
+                        e
+                    ))
                 })?
                 else {
                     continue;
@@ -136,27 +137,23 @@ impl<S: Store + 'static> DocumentHeadProvider for DbHeadProvider<S> {
                 }
             }
 
-            priority_iter
-                .close()
-                .await
-                .map_err(|e| format!("priority index close error: {}", e))?;
+            priority_iter.close().await.map_err(|e| {
+                p2p::error::Error::HeadProvider(format!("priority index close error: {}", e))
+            })?;
         }
 
         if cids.is_empty() {
-            let blockstore = txn
-                .blockstore()
-                .map_err(|e| format!("failed to get blockstore: {}", e))?;
-            let mut block_iter = blockstore
-                .iterator(IterOptions::new())
-                .await
-                .map_err(|e| format!("failed to iterate blockstore: {}", e))?;
+            let blockstore = txn.blockstore().map_err(|e| {
+                p2p::error::Error::HeadProvider(format!("failed to get blockstore: {}", e))
+            })?;
+            let mut block_iter = blockstore.iterator(IterOptions::new()).await.map_err(|e| {
+                p2p::error::Error::HeadProvider(format!("failed to iterate blockstore: {}", e))
+            })?;
 
             let mut max_priority: Option<u64> = None;
-            while let Some(pair) = block_iter
-                .next()
-                .await
-                .map_err(|e| format!("blockstore iteration error: {}", e))?
-            {
+            while let Some(pair) = block_iter.next().await.map_err(|e| {
+                p2p::error::Error::HeadProvider(format!("blockstore iteration error: {}", e))
+            })? {
                 let Ok(block) = Block::from_dag_cbor(&pair.value) else {
                     continue;
                 };
@@ -186,43 +183,37 @@ impl<S: Store + 'static> DocumentHeadProvider for DbHeadProvider<S> {
                 }
             }
 
-            block_iter
-                .close()
-                .await
-                .map_err(|e| format!("blockstore close error: {}", e))?;
+            block_iter.close().await.map_err(|e| {
+                p2p::error::Error::HeadProvider(format!("blockstore close error: {}", e))
+            })?;
         }
 
         Ok(cids)
     }
 
-    async fn get_collection_heads(&self, collection_id: &str) -> Result<Vec<Cid>, String> {
-        let txn = self
-            .db
-            .new_txn(true)
-            .await
-            .map_err(|e| format!("failed to create transaction: {}", e))?;
+    async fn get_collection_heads(&self, collection_id: &str) -> p2p::error::Result<Vec<Cid>> {
+        let txn = self.db.new_txn(true).await.map_err(|e| {
+            p2p::error::Error::HeadProvider(format!("failed to create transaction: {}", e))
+        })?;
 
-        let headstore = txn
-            .headstore()
-            .map_err(|e| format!("failed to get headstore: {}", e))?;
+        let headstore = txn.headstore().map_err(|e| {
+            p2p::error::Error::HeadProvider(format!("failed to get headstore: {}", e))
+        })?;
 
         // Derive short ID from collection_id string and query prefix /c/{short_id}/
         let short_id = collection_short_id(collection_id);
         let prefix = HeadstoreColKey::collection_prefix(short_id);
         let opts = IterOptions::new().with_prefix(prefix);
 
-        let mut iter = headstore
-            .iterator(opts)
-            .await
-            .map_err(|e| format!("failed to iterate headstore: {}", e))?;
+        let mut iter = headstore.iterator(opts).await.map_err(|e| {
+            p2p::error::Error::HeadProvider(format!("failed to iterate headstore: {}", e))
+        })?;
 
         let mut cids = Vec::new();
 
-        while let Some(pair) = iter
-            .next()
-            .await
-            .map_err(|e| format!("headstore iteration error: {}", e))?
-        {
+        while let Some(pair) = iter.next().await.map_err(|e| {
+            p2p::error::Error::HeadProvider(format!("headstore iteration error: {}", e))
+        })? {
             // Parse CID from key: /c/{short_id}/{cid}
             let key_str = String::from_utf8_lossy(&pair.key);
             let parts: Vec<&str> = key_str.split('/').collect();
@@ -235,9 +226,9 @@ impl<S: Store + 'static> DocumentHeadProvider for DbHeadProvider<S> {
             }
         }
 
-        iter.close()
-            .await
-            .map_err(|e| format!("headstore close error: {}", e))?;
+        iter.close().await.map_err(|e| {
+            p2p::error::Error::HeadProvider(format!("headstore close error: {}", e))
+        })?;
 
         Ok(cids)
     }
