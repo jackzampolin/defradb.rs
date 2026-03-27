@@ -1,5 +1,11 @@
 mod libp2p_adapter;
+mod libp2p_doc_pusher;
 mod node;
+mod node_acp;
+mod node_identity;
+mod node_p2p;
+mod node_recovery;
+mod node_tasks;
 mod transport_doc_pusher;
 mod transport_version_syncer;
 mod version_syncer;
@@ -11,16 +17,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-pub use libp2p_adapter::{CollectionLookup, DbDocPusher, DocPusher};
-pub use node::{build_with_store, BackgroundTasks, EmbeddedNode, NodeBuilder};
+pub use libp2p_adapter::{CollectionLookup, P2PAdapter, VersionSyncer};
+pub use libp2p_doc_pusher::{DbDocPusher, DocPusher};
+pub use node::{build_with_store, EmbeddedNode, NodeBuilder};
+pub use node_tasks::BackgroundTasks;
 pub use transport_doc_pusher::{DbTransportDocPusher, TransportDocPusher};
 pub use transport_version_syncer::{DbTransportVersionSyncer, TransportVersionSyncer};
 pub use version_syncer::DbVersionSyncer;
 
 #[cfg(feature = "iroh")]
 pub use iroh_adapter::IrohP2PAdapter;
-
-pub use libp2p_adapter::{P2PAdapter, VersionSyncer};
 
 /// Transport-agnostic P2P operations exposed by embedded nodes.
 #[async_trait]
