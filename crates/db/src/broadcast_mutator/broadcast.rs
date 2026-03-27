@@ -89,6 +89,18 @@ pub(crate) async fn broadcast_with_retry_with_creator<B: Blockstore + 'static, T
                     document_error
                 ));
             }
+            Ok(other) => {
+                tracing::warn!(
+                    doc_id = %block_result.doc_id,
+                    collection = %collection_name,
+                    result = ?other,
+                    "Unexpected broadcast result from P2P network"
+                );
+                return BroadcastStatus::Failed(format!(
+                    "Unexpected broadcast result: {:?}",
+                    other
+                ));
+            }
             Err(e) => {
                 let err_str = e.to_string();
                 let connected_peers = sync.peer_state().stats().connected_peers();

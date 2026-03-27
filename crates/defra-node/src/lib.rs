@@ -546,19 +546,9 @@ impl NodeBuilder {
         .map_err(|e| anyhow::anyhow!("SyncCoordinator creation failed: {}", e))?;
 
         // Failure channel (required by replication loop)
-        let (failure_tx, mut failure_rx) =
-            tokio::sync::mpsc::channel::<p2p::sync::PushFailure>(1024);
+        let (failure_tx, failure_rx) = tokio::sync::mpsc::channel::<p2p::sync::PushFailure>(1024);
         coordinator.set_failure_channel(failure_tx);
-        tokio::spawn(async move {
-            while let Some(failure) = failure_rx.recv().await {
-                tracing::warn!(
-                    peer_id = %failure.peer_id,
-                    doc_id = %failure.doc_id,
-                    collection_id = %failure.collection_id,
-                    "P2P push to replicator failed"
-                );
-            }
-        });
+        spawn_failure_recorder(store.clone(), failure_rx);
 
         let coordinator = Arc::new(coordinator);
 
@@ -588,6 +578,7 @@ impl NodeBuilder {
         tokio::spawn(async move {
             Self::run_event_handler(iroh_events, coord_for_events).await;
         });
+        spawn_iroh_retry_loop(store.clone(), database.clone(), transport.clone());
 
         // 11. Collection lookup (resolves names -> CIDs for gossip topics)
         let collection_lookup: Arc<dyn CollectionLookup> = database.clone();
@@ -632,6 +623,139 @@ impl NodeBuilder {
     }
 }
 
+#[cfg(feature = "p2p")]
+fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
+    store: Arc<S>,
+    mut failure_rx: tokio::sync::mpsc::Receiver<p2p::sync::PushFailure>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(failure) = failure_rx.recv().await {
+            tracing::warn!(
+                peer_id = %failure.peer_id,
+                doc_id = %failure.doc_id,
+                collection_id = %failure.collection_id,
+                "P2P push to replicator failed"
+            );
+
+            let peerstore = storage::stores::Peerstore::new(store.clone());
+            let retry_info = storage::stores::RetryInfo::new_initial();
+            let info_bytes = match retry_info.to_bytes() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!(error = %error, "failed to serialize retry info");
+                    continue;
+                }
+            };
+
+            if let Err(error) = peerstore
+                .record_push_failure(
+                    &failure.peer_id.to_string(),
+                    &failure.doc_id,
+                    &failure.collection_id,
+                    &info_bytes,
+                )
+                .await
+            {
+                tracing::warn!(error = %error, "failed to record push failure");
+            }
+        }
+    })
+}
+
+#[cfg(feature = "p2p")]
+fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
+    store: Arc<S>,
+    database: Arc<db::DB<S>>,
+    transport: p2p::iroh::IrohTransport,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let peerstore = storage::stores::Peerstore::new(store.clone());
+            let peers = match peerstore.get_all_retry_peers().await {
+                Ok(peers) => peers,
+                Err(error) => {
+                    tracing::debug!(error = %error, "failed to load retry peers");
+                    continue;
+                }
+            };
+
+            for (peer_id_str, info_bytes) in peers {
+                let mut retry_info = match storage::stores::RetryInfo::from_bytes(&info_bytes) {
+                    Ok(info) => info,
+                    Err(error) => {
+                        tracing::warn!(peer_id = %peer_id_str, error = %error, "invalid retry info");
+                        continue;
+                    }
+                };
+                if !retry_info.is_due() {
+                    continue;
+                }
+
+                let peer_id = p2p::transport::PeerId::new(peer_id_str.clone());
+                let connected = match transport.connected_peers().await {
+                    Ok(peers) => peers,
+                    Err(error) => {
+                        tracing::debug!(error = %error, "failed to load connected peers for retry");
+                        continue;
+                    }
+                };
+                if !connected.contains(&peer_id) {
+                    continue;
+                }
+
+                let docs = match peerstore.get_retry_doc_ids(&peer_id_str).await {
+                    Ok(docs) => docs,
+                    Err(error) => {
+                        tracing::debug!(peer_id = %peer_id_str, error = %error, "failed to load retry docs");
+                        continue;
+                    }
+                };
+                if docs.is_empty() {
+                    let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                    continue;
+                }
+
+                let mut all_succeeded = true;
+                for (doc_id, collection_id) in &docs {
+                    match db::retry_doc_via_transport(
+                        &transport,
+                        database.as_ref(),
+                        None,
+                        &peer_id,
+                        doc_id,
+                        collection_id,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            let _ = peerstore.remove_retry_doc(&peer_id_str, doc_id).await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                doc_id = %doc_id,
+                                peer_id = %peer_id,
+                                error = %error,
+                                "retry push failed"
+                            );
+                            all_succeeded = false;
+                        }
+                    }
+                }
+
+                if all_succeeded {
+                    let _ = peerstore.clear_retry_peer(&peer_id_str).await;
+                } else {
+                    retry_info.bump();
+                    if let Ok(bytes) = retry_info.to_bytes() {
+                        let _ = peerstore.update_retry_info(&peer_id_str, &bytes).await;
+                    }
+                }
+            }
+        }
+    })
+}
+
 /// Internal result from P2P setup, carrying the type-erased ops and mutator.
 #[cfg(feature = "p2p")]
 struct P2PSetupResult {
@@ -652,5 +776,180 @@ mod tests {
 
         assert_eq!(config.address.port(), 9182);
         assert!(config.extra_routes.is_some());
+    }
+}
+
+#[cfg(all(test, feature = "p2p"))]
+mod p2p_tests {
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Once;
+    use std::time::{Duration, Instant};
+
+    use serde_json::Value as JsonValue;
+
+    use super::{EmbeddedNode, P2PConfig};
+
+    fn init_tracing() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::from_default_env()
+                        .add_directive(tracing::Level::INFO.into()),
+                )
+                .with_test_writer()
+                .try_init();
+        });
+    }
+
+    fn test_p2p_config() -> P2PConfig {
+        P2PConfig {
+            port: 0,
+            bind_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            relay_mode: p2p::iroh::IrohRelayModeConfig::Disabled,
+            discovery: p2p::iroh::IrohDiscoveryConfig::Disabled,
+            secret_key_path: None,
+            load_persisted_collections: false,
+            max_concurrent_dag_fetches: p2p::sync::DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
+            max_concurrent_push_tasks: p2p::sync::DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+            rate_limit_burst: p2p::sync::DEFAULT_RATE_LIMIT_BURST,
+            rate_limit_rate: p2p::sync::DEFAULT_RATE_LIMIT_RATE,
+        }
+    }
+
+    async fn wait_for_listen_addr(node: &EmbeddedNode) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let addrs = node
+                .p2p()
+                .expect("P2P should be enabled")
+                .listen_addresses()
+                .await;
+            if let Some(addr) = addrs.first() {
+                return addr.clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "node never exposed a P2P listen address"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn wait_for_connected_peer(node: &EmbeddedNode) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let peers = node
+                .p2p()
+                .expect("P2P should be enabled")
+                .connected_peers()
+                .await
+                .expect("connected_peers should succeed");
+            if !peers.is_empty() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "node never reported a connected peer"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn collection_len(data: &JsonValue, collection: &str) -> usize {
+        data.get(collection)
+            .and_then(|v| v.as_array())
+            .map(|docs| docs.len())
+            .unwrap_or(0)
+    }
+
+    async fn wait_for_collection_len(node: &EmbeddedNode, collection: &str, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let response = node
+                .execute(&format!("query {{ {collection} {{ _docID name age }} }}"))
+                .await;
+            assert!(
+                response.errors.is_empty(),
+                "query returned errors: {:?}",
+                response.errors
+            );
+
+            let len = response
+                .data
+                .as_ref()
+                .map(|data| collection_len(data, collection))
+                .unwrap_or(0);
+            if len >= expected {
+                return;
+            }
+
+            assert!(
+                Instant::now() < deadline,
+                "collection {collection} never reached {expected} docs; last response: {:?}",
+                response.data
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn live_replicator_pushes_post_config_writes() {
+        init_tracing();
+
+        let node0 = EmbeddedNode::builder()
+            .with_p2p(test_p2p_config())
+            .build()
+            .await
+            .expect("build node0");
+        let node1 = EmbeddedNode::builder()
+            .with_p2p(test_p2p_config())
+            .build()
+            .await
+            .expect("build node1");
+
+        node0
+            .add_schema("type User { name: String age: Int }")
+            .await
+            .expect("schema on node0");
+        node1
+            .add_schema("type User { name: String age: Int }")
+            .await
+            .expect("schema on node1");
+
+        let addr1 = wait_for_listen_addr(&node1).await;
+
+        let p2p0 = node0.p2p().expect("node0 p2p");
+        let p2p1 = node1.p2p().expect("node1 p2p");
+
+        p2p0.connect_peer(&addr1)
+            .await
+            .expect("connect node0 -> node1");
+        wait_for_connected_peer(&node0).await;
+        wait_for_connected_peer(&node1).await;
+
+        p2p0.subscribe_collection("User")
+            .await
+            .expect("subscribe node0 User");
+        p2p1.subscribe_collection("User")
+            .await
+            .expect("subscribe node1 User");
+
+        p2p0.set_replicator(&addr1, vec!["User".to_string()])
+            .await
+            .expect("set replicator node0 -> node1");
+
+        let response = node0
+            .execute(
+                r#"mutation { add_User(input: {name: "Alice", age: 30}) { _docID name age } }"#,
+            )
+            .await;
+        assert!(
+            response.errors.is_empty(),
+            "mutation returned errors: {:?}",
+            response.errors
+        );
+
+        wait_for_collection_len(&node1, "User", 1).await;
     }
 }
