@@ -48,12 +48,10 @@ impl Did {
 
     /// Creates a DID without validation.
     ///
-    /// # Safety
-    ///
-    /// The caller must ensure the string is a valid did:key DID.
-    /// This is intended for internal use where the DID is known to be valid.
-    pub(crate) fn new_unchecked(s: String) -> Self {
-        debug_assert!(s.starts_with(DID_KEY_PREFIX));
+    /// The caller must ensure the string is a valid did:key DID or the
+    /// wildcard `"*"`.
+    pub fn new_unchecked(s: String) -> Self {
+        debug_assert!(s.starts_with(DID_KEY_PREFIX) || s == "*");
         Self(s)
     }
 

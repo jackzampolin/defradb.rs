@@ -11,5 +11,4 @@ mod acp;
 pub mod store;
 
 pub use acp::ZanzibarDocumentACP;
-pub(crate) use acp::{from_zdid, to_zdid};
 pub use store::PersistentZanzibarStore;

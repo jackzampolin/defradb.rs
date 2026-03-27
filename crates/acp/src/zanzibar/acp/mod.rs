@@ -5,7 +5,7 @@ mod document_acp;
 use async_lock::RwLock;
 use std::sync::Arc;
 
-use zanzibar::did::Did;
+use identity::Did;
 use zanzibar::engine::PermissionEngine;
 use zanzibar::expression::RelationExpression;
 use zanzibar::store::ZanzibarStore;
@@ -205,14 +205,4 @@ impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
         let mut engine = self.engine.write().await;
         engine.clear_cache();
     }
-}
-
-/// Convert an identity::Did to zanzibar::Did.
-pub(crate) fn to_zdid(did: &identity::Did) -> Did {
-    Did::new_unchecked(did.to_string())
-}
-
-/// Convert a zanzibar::Did to identity::Did.
-pub(crate) fn from_zdid(did: &Did) -> identity::Did {
-    identity::Did::new(did.as_str()).expect("zanzibar::Did should always be valid identity::Did")
 }

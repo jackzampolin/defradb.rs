@@ -27,8 +27,8 @@ fn test_did2() -> Did {
     Did::new("did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH").unwrap()
 }
 
-fn to_idid(did: &Did) -> identity::Did {
-    identity::Did::new(did.as_str()).unwrap()
+fn to_idid(did: &Did) -> Did {
+    did.clone()
 }
 
 // =============================================================================

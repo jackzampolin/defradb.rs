@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use zanzibar::did::Did;
+use identity::Did;
 use zanzibar::store::ZanzibarStore;
 use zanzibar::types::{Relationship, Subject};
 
@@ -12,17 +12,12 @@ use crate::error::{Error, Result};
 use crate::identity::Identity;
 use crate::permission::DocumentPermission;
 
-/// Convert an identity::Did to zanzibar::Did.
-fn to_zdid(did: &identity::Did) -> Did {
-    Did::new_unchecked(did.to_string())
-}
-
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
     async fn register_doc_object(
         &self,
-        identity: &identity::Did,
+        identity: &Did,
         policy_id: &str,
         resource_name: &str,
         doc_id: &str,
@@ -50,8 +45,8 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             )));
         }
 
-        let zdid = to_zdid(identity);
-        let rel = Relationship::with_entity(resource_name, doc_id, OWNER_RELATION, zdid);
+        let rel =
+            Relationship::with_entity(resource_name, doc_id, OWNER_RELATION, identity.clone());
         self.store.store_relationship(policy_id, &rel).await?;
 
         tracing::info!(
@@ -85,7 +80,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         policy_id: &str,
         resource_name: &str,
         doc_id: &str,
-    ) -> Result<Option<identity::Did>> {
+    ) -> Result<Option<Did>> {
         let owner = self
             .store
             .get_relation_subjects(policy_id, resource_name, doc_id, OWNER_RELATION)
@@ -93,12 +88,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             .into_iter()
             .next();
 
-        match owner.and_then(|subject| subject.as_entity().cloned()) {
-            Some(subject) => identity::Did::new(subject.as_str())
-                .map(Some)
-                .map_err(|error| Error::Storage(format!("invalid owner DID: {error}"))),
-            None => Ok(None),
-        }
+        Ok(owner.and_then(|subject| subject.as_entity().cloned()))
     }
 
     async fn check_doc_access(
@@ -134,14 +124,12 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
 
         self.ensure_policy(policy_id, resource_name).await?;
 
-        let zdid = to_zdid(did);
-
         let granted = if permission == DocumentPermission::Read {
             let engine = self.engine.read().await;
             let mut result = false;
             for perm_name in &["read", "update", "delete"] {
                 match engine
-                    .check(policy_id, resource_name, doc_id, perm_name, &zdid)
+                    .check(policy_id, resource_name, doc_id, perm_name, did)
                     .await
                 {
                     Ok(true) => {
@@ -157,7 +145,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             let relation = Self::permission_to_relation(permission);
             let engine = self.engine.read().await;
             engine
-                .check(policy_id, resource_name, doc_id, relation, &zdid)
+                .check(policy_id, resource_name, doc_id, relation, did)
                 .await?
         };
 
@@ -188,8 +176,8 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
 
     async fn add_actor_relationship(
         &self,
-        requestor: &identity::Did,
-        target: &identity::Did,
+        requestor: &Did,
+        target: &Did,
         _policy_id: &str,
         collection_id: &str,
         doc_id: &str,
@@ -204,11 +192,8 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             ));
         }
 
-        let zrequestor = to_zdid(requestor);
-        let ztarget = to_zdid(target);
-
         self.check_manage_relation(
-            &zrequestor,
+            requestor,
             collection_id,
             collection_id,
             doc_id,
@@ -224,7 +209,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
                 collection_id,
                 doc_id,
                 relation,
-                &Subject::Entity(ztarget.clone()),
+                &Subject::Entity(target.clone()),
             )
             .await?;
 
@@ -242,7 +227,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             return Ok(false);
         }
 
-        let rel = Relationship::with_entity(collection_id, doc_id, relation, ztarget);
+        let rel = Relationship::with_entity(collection_id, doc_id, relation, target.clone());
         self.store.store_relationship(collection_id, &rel).await?;
 
         tracing::info!(
@@ -261,8 +246,8 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
 
     async fn delete_actor_relationship(
         &self,
-        requestor: &identity::Did,
-        target: &identity::Did,
+        requestor: &Did,
+        target: &Did,
         _policy_id: &str,
         collection_id: &str,
         doc_id: &str,
@@ -277,11 +262,8 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
             ));
         }
 
-        let zrequestor = to_zdid(requestor);
-        let ztarget = to_zdid(target);
-
         self.check_manage_relation(
-            &zrequestor,
+            requestor,
             collection_id,
             collection_id,
             doc_id,
@@ -290,7 +272,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         )
         .await?;
 
-        let rel = Relationship::with_entity(collection_id, doc_id, relation, ztarget);
+        let rel = Relationship::with_entity(collection_id, doc_id, relation, target.clone());
         let deleted = self.store.delete_relationship(collection_id, &rel).await?;
 
         if deleted {

@@ -9,6 +9,7 @@ repository.workspace = true
 description = "Standalone Zanzibar permission engine with pluggable KV backend"
 
 [dependencies]
+identity = { path = "../identity" }
 async-trait.workspace = true
 async-lock.workspace = true
 thiserror.workspace = true

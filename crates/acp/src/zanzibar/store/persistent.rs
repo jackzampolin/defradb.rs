@@ -8,7 +8,7 @@ use storage::namespace::{Namespace, NamespacedStore};
 #[cfg(not(target_arch = "wasm32"))]
 use storage::RedbStore;
 
-use zanzibar::did::Did;
+use identity::Did;
 use zanzibar::error::{Error, Result};
 use zanzibar::store::ZanzibarStore;
 use zanzibar::types::{ObjectRef, Policy, Relationship, Subject};
