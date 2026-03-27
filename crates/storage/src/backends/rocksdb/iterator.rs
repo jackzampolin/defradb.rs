@@ -103,6 +103,8 @@ impl RocksDbMergingIterator {
     }
 }
 
+impl crate::corekv::private::Sealed for RocksDbMergingIterator {}
+
 #[async_trait]
 impl Iterator for RocksDbMergingIterator {
     async fn next(&mut self) -> Result<Option<KvPair>> {

@@ -19,6 +19,14 @@ use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
 
+/// Sealed trait module preventing external implementations of core storage traits.
+pub mod private {
+    pub trait Sealed {}
+
+    impl Sealed for Box<dyn super::Txn> {}
+    impl Sealed for Box<dyn super::super::iterator::Iterator> {}
+}
+
 use super::errors::Result;
 use super::iterator::Iterator;
 use super::types::IterOptions;
@@ -59,7 +67,7 @@ pub use defra_core::thread_bounds::{MaybeSend, MaybeSendSync, MaybeSync};
 /// All operations are asynchronous to support various backend implementations.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait Reader: MaybeSendSync {
+pub trait Reader: MaybeSendSync + private::Sealed {
     /// Retrieve the value associated with a key.
     ///
     /// # Arguments
@@ -136,7 +144,7 @@ pub trait Reader: MaybeSendSync {
 /// This trait provides the core write operations: set and delete.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait Writer: MaybeSendSync {
+pub trait Writer: MaybeSendSync + private::Sealed {
     /// Store a key-value pair.
     ///
     /// If the key already exists, its value is overwritten.
@@ -186,7 +194,7 @@ impl<T> ReaderWriter for T where T: Reader + Writer {}
 /// This trait defines the basic store interface with transaction support.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait Store: MaybeSendSync {
+pub trait Store: MaybeSendSync + private::Sealed {
     /// Create a new transaction.
     ///
     /// # Arguments
@@ -224,7 +232,7 @@ pub trait Store: MaybeSendSync {
 /// underlying store implementation, concurrent reads may or may not be blocked.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait Dropable: Store {
+pub trait Dropable: Store + private::Sealed {
     /// Delete all data stored in the store.
     ///
     /// This is a destructive operation that removes all key-value pairs.
@@ -282,7 +290,7 @@ pub trait Dropable: Store {
 /// ```
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait Txn: ReaderWriter {
+pub trait Txn: ReaderWriter + private::Sealed {
     /// Commit the transaction, making all changes permanent.
     ///
     /// On success, all on_success callbacks are executed. On failure, all

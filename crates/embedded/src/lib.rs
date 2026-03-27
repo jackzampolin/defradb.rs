@@ -245,6 +245,8 @@ pub enum EmbeddedStore {
     Redb(storage::RedbStore),
 }
 
+impl storage::corekv::private::Sealed for EmbeddedStore {}
+
 #[async_trait]
 impl storage::Store for EmbeddedStore {
     async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {

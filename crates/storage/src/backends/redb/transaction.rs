@@ -145,6 +145,8 @@ impl RedbTxn {
     }
 }
 
+impl crate::corekv::private::Sealed for RedbTxn {}
+
 #[async_trait]
 impl Reader for RedbTxn {
     #[instrument(level = "trace", skip(self))]

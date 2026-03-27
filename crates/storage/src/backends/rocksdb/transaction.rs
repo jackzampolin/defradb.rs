@@ -158,6 +158,8 @@ impl RocksDbTxn {
     }
 }
 
+impl crate::corekv::private::Sealed for RocksDbTxn {}
+
 #[async_trait]
 impl Reader for RocksDbTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {

@@ -91,7 +91,7 @@ impl KvPair {
 /// ```
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait Iterator: MaybeSend {
+pub trait Iterator: MaybeSend + super::traits::private::Sealed {
     /// Advance the iterator and return the next key-value pair.
     ///
     /// Returns:

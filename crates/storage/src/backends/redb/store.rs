@@ -274,6 +274,8 @@ impl RedbStore {
     }
 }
 
+impl crate::corekv::private::Sealed for RedbStore {}
+
 #[async_trait]
 impl Store for RedbStore {
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {

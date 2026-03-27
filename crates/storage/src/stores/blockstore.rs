@@ -31,6 +31,8 @@ impl<S: Store> Blockstore<S> {
     }
 }
 
+impl<S: Store> crate::corekv::private::Sealed for Blockstore<S> {}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for Blockstore<S> {
@@ -153,6 +155,8 @@ impl BlockstoreTxn {
         Ok(())
     }
 }
+
+impl crate::corekv::private::Sealed for BlockstoreTxn {}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

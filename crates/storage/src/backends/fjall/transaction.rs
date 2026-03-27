@@ -91,6 +91,8 @@ impl FjallTxn {
     }
 }
 
+impl crate::corekv::private::Sealed for FjallTxn {}
+
 #[async_trait]
 impl Reader for FjallTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {

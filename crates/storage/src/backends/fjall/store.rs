@@ -146,6 +146,8 @@ impl FjallStore {
     }
 }
 
+impl crate::corekv::private::Sealed for FjallStore {}
+
 #[async_trait]
 impl Store for FjallStore {
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {

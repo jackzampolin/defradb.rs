@@ -25,6 +25,8 @@ impl<S: Store> Datastore<S> {
     }
 }
 
+impl<S: Store> crate::corekv::private::Sealed for Datastore<S> {}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for Datastore<S> {
@@ -245,6 +247,8 @@ impl DatastoreTxn {
         }
     }
 }
+
+impl crate::corekv::private::Sealed for DatastoreTxn {}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

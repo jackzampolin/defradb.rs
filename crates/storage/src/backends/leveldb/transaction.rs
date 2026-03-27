@@ -63,6 +63,8 @@ impl LevelDbTxn {
     }
 }
 
+impl crate::corekv::private::Sealed for LevelDbTxn {}
+
 #[async_trait(?Send)]
 impl Reader for LevelDbTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {

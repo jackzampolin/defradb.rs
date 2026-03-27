@@ -3,9 +3,13 @@
 use crate::Result;
 use async_trait::async_trait;
 
+pub(crate) mod private {
+    pub trait Sealed {}
+}
+
 /// Key-value store trait - basic storage interface
 #[async_trait]
-pub trait Store: Send + Sync {
+pub trait Store: Send + Sync + private::Sealed {
     /// Get a value by key
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
 
@@ -21,7 +25,7 @@ pub trait Store: Send + Sync {
 
 /// Transaction trait for atomic operations
 #[async_trait]
-pub trait Transaction: Send + Sync {
+pub trait Transaction: Send + Sync + private::Sealed {
     /// Commit the transaction
     async fn commit(self) -> Result<()>;
 

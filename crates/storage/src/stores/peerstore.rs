@@ -244,6 +244,8 @@ impl<S: Store> Peerstore<S> {
     }
 }
 
+impl<S: Store> crate::corekv::private::Sealed for Peerstore<S> {}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for Peerstore<S> {

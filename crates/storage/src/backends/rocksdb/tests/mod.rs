@@ -13,6 +13,8 @@ mod shared_tests {
         _temp_dir: TempDir,
     }
 
+    impl crate::corekv::private::Sealed for TestRocksDbStore {}
+
     #[async_trait::async_trait]
     impl Store for TestRocksDbStore {
         async fn new_txn(&self, readonly: bool) -> crate::corekv::Result<Box<dyn Txn>> {

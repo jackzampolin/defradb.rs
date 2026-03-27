@@ -70,6 +70,8 @@ impl MemoryTxn {
     }
 }
 
+impl crate::corekv::private::Sealed for MemoryTxn {}
+
 #[async_trait]
 impl Reader for MemoryTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {

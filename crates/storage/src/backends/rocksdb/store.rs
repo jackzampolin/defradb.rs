@@ -141,6 +141,8 @@ impl RocksDbStore {
     }
 }
 
+impl crate::corekv::private::Sealed for RocksDbStore {}
+
 #[async_trait]
 impl Store for RocksDbStore {
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {

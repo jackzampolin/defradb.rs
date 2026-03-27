@@ -68,6 +68,8 @@ impl MemoryIterator {
     }
 }
 
+impl crate::corekv::private::Sealed for MemoryIterator {}
+
 #[async_trait]
 impl Iterator for MemoryIterator {
     async fn next(&mut self) -> Result<Option<KvPair>> {

@@ -37,6 +37,8 @@ pub enum FfiStore {
     RocksDb(storage::RocksDbStore),
 }
 
+impl storage::corekv::private::Sealed for FfiStore {}
+
 #[async_trait]
 impl storage::Store for FfiStore {
     async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {

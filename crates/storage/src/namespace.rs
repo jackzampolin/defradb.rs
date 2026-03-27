@@ -111,6 +111,8 @@ impl<S: Store> NamespacedStore<S> {
     }
 }
 
+impl<S: Store> crate::corekv::private::Sealed for NamespacedStore<S> {}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for NamespacedStore<S> {
@@ -139,6 +141,8 @@ impl NamespacedTxn {
         Self { txn, namespace }
     }
 }
+
+impl crate::corekv::private::Sealed for NamespacedTxn {}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -263,6 +267,8 @@ pub struct NamespacedIterator {
     iter: Box<dyn Iterator>,
     namespace: Namespace,
 }
+
+impl crate::corekv::private::Sealed for NamespacedIterator {}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

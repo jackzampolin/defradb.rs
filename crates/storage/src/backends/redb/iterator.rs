@@ -125,6 +125,8 @@ impl MergingIterator {
     }
 }
 
+impl crate::corekv::private::Sealed for MergingIterator {}
+
 #[async_trait]
 impl Iterator for MergingIterator {
     async fn next(&mut self) -> Result<Option<KvPair>> {

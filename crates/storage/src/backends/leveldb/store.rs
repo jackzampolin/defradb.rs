@@ -132,6 +132,8 @@ impl LevelDbStore {
     }
 }
 
+impl crate::corekv::private::Sealed for LevelDbStore {}
+
 #[async_trait(?Send)]
 impl Store for LevelDbStore {
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {

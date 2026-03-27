@@ -153,6 +153,8 @@ impl Clone for NamespaceView {
     }
 }
 
+impl storage::corekv::private::Sealed for NamespaceView {}
+
 /// Implement Reader trait for NamespaceView to enable index operations.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -269,6 +271,8 @@ struct NamespacedIterator {
     iter: Box<dyn Iterator>,
     namespace: Namespace,
 }
+
+impl storage::corekv::private::Sealed for NamespacedIterator {}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

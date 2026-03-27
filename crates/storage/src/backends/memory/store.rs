@@ -43,6 +43,8 @@ impl Default for MemoryStore {
     }
 }
 
+impl crate::corekv::private::Sealed for MemoryStore {}
+
 #[async_trait]
 impl Store for MemoryStore {
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {

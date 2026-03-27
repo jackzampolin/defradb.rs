@@ -69,6 +69,8 @@ impl LevelDbIterator {
     }
 }
 
+impl crate::corekv::private::Sealed for LevelDbIterator {}
+
 #[async_trait(?Send)]
 impl Iterator for LevelDbIterator {
     async fn next(&mut self) -> Result<Option<KvPair>> {
