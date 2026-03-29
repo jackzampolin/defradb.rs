@@ -25,7 +25,7 @@ pub(crate) use subscription::{
 
 /// Determine NAC permission based on query content.
 /// Delete mutations require DocumentDelete, other mutations require DocumentUpdate,
-/// and queries require DocumentRead.
+/// and queries require CollectionGet (matching Go's cbindings/query.go).
 pub(crate) fn nac_permission_for_query(query_str: &str) -> NodePermission {
     let trimmed = query_str.trim_start();
     if trimmed.starts_with("mutation") {
@@ -37,7 +37,7 @@ pub(crate) fn nac_permission_for_query(query_str: &str) -> NodePermission {
         }
         NodePermission::DocumentUpdate
     } else {
-        NodePermission::DocumentRead
+        NodePermission::CollectionGet
     }
 }
 

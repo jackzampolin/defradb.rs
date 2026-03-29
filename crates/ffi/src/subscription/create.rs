@@ -67,11 +67,11 @@ pub extern "C" fn create_merge_complete_subscription(node_ptr: usize) -> CreateS
         // Get the event bus from the node
         let subscription = match NODES.get(node_ptr, |state| {
             state.event_bus.subscribe(&[
+                events::EventName::Update,
                 events::EventName::MergeComplete,
                 events::EventName::ReplicatorCompleted,
                 events::EventName::TopicPeerEvent,
                 events::EventName::SEArtifactReceived,
-                events::EventName::Update,
             ])
         }) {
             Some(sub) => sub,
