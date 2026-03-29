@@ -92,7 +92,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         use crate::mapper::MutationType;
 
         let node_kind = match mutation.mutation_type {
-            MutationType::Create => "createNode",
+            MutationType::Create => "addNode",
             MutationType::Update => "updateNode",
             MutationType::Delete => "deleteNode",
             MutationType::Upsert => "upsertNode",
@@ -337,7 +337,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Get the mutation node kind name
         let node_kind = match mutation.mutation_type {
-            MutationType::Create => "createNode",
+            MutationType::Create => "addNode",
             MutationType::Update => "updateNode",
             MutationType::Delete => "deleteNode",
             MutationType::Upsert => "upsertNode",

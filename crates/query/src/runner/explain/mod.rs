@@ -101,7 +101,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Generate an explanation of the mutation plan.
     ///
     /// Used when mutations include the @explain directive.
-    /// Output format matches Go DefraDB with createNode/deleteNode/updateNode/upsertNode.
+    /// Output format matches Go DefraDB with addNode/deleteNode/updateNode/upsertNode.
     pub async fn explain_mutation_with_identity(
         &self,
         mutation_str: &str,
