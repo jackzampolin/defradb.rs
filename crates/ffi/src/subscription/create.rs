@@ -71,6 +71,7 @@ pub extern "C" fn create_merge_complete_subscription(node_ptr: usize) -> CreateS
                 events::EventName::ReplicatorCompleted,
                 events::EventName::TopicPeerEvent,
                 events::EventName::SEArtifactReceived,
+                events::EventName::Update,
             ])
         }) {
             Some(sub) => sub,
