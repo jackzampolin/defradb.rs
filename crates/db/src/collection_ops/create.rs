@@ -313,12 +313,86 @@ impl<S: Store> crate::database::DB<S> {
         &self,
         schemas: Vec<CollectionVersion>,
     ) -> Result<Vec<CollectionVersion>> {
+        // Track old collection_id -> new collection_id mappings.
+        // When views are created, create_collection_with_txn regenerates CIDs to include
+        // query source data. Sibling schemas' relation fields may reference the old CIDs
+        // and need to be updated afterward (mirrors Go's substituteSecondaryRelationFieldKinds).
+        let old_ids: Vec<(String, String)> = schemas
+            .iter()
+            .map(|s| (s.name.clone(), s.collection_id.clone()))
+            .collect();
+
         let mut txn = self.new_txn(false).await?;
         let mut finalized_schemas = Vec::with_capacity(schemas.len());
 
         for schema in schemas {
             let finalized = self.create_collection_with_txn(&mut txn, schema).await?;
             finalized_schemas.push(finalized);
+        }
+
+        // Build old_collection_id -> new_collection_id mapping
+        let mut id_remap: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for (name, old_id) in &old_ids {
+            if let Some(finalized) = finalized_schemas.iter().find(|s| &s.name == name) {
+                if *old_id != finalized.collection_id {
+                    id_remap.insert(old_id.clone(), finalized.collection_id.clone());
+                }
+            }
+        }
+
+        // Also map by name -> new collection_id for Named field kinds
+        let mut name_to_id: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for schema in &finalized_schemas {
+            name_to_id.insert(schema.name.clone(), schema.collection_id.clone());
+        }
+
+        // Update relation field kinds that reference old CIDs and re-save affected schemas
+        if !id_remap.is_empty() {
+            let systemstore = txn.systemstore()?;
+            for schema in &mut finalized_schemas {
+                let mut changed = false;
+                for field in &mut schema.fields {
+                    match &field.kind {
+                        schema::FieldKind::Relation {
+                            collection_id,
+                            is_array,
+                        } => {
+                            if let Some(new_id) = id_remap.get(collection_id) {
+                                field.kind = schema::FieldKind::Relation {
+                                    collection_id: new_id.clone(),
+                                    is_array: *is_array,
+                                };
+                                changed = true;
+                            }
+                        }
+                        schema::FieldKind::Named { name, is_array } => {
+                            if let Some(new_id) = name_to_id.get(name) {
+                                field.kind = schema::FieldKind::Relation {
+                                    collection_id: new_id.clone(),
+                                    is_array: *is_array,
+                                };
+                                changed = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if changed {
+                    let collection_key = CollectionKey::new(&schema.version_id);
+                    let data = serde_json::to_vec(&schema).map_err(|e| {
+                        Error::Serialization(format!(
+                            "failed to re-serialize schema for '{}': {}",
+                            schema.name, e
+                        ))
+                    })?;
+                    systemstore
+                        .set(&collection_key.bytes(), &data)
+                        .await
+                        .map_err(Error::Storage)?;
+                }
+            }
         }
 
         txn.commit().await?;

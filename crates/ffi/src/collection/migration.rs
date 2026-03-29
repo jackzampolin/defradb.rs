@@ -41,7 +41,7 @@ pub unsafe extern "C" fn set_migration(
             rt,
             node_ptr,
             identity_did,
-            NodePermission::CollectionPatch
+            NodePermission::MigrationSet
         ));
         let config_str = try_ffi!(require_c_str(config, "config"));
         let database = try_ffi!(get_node_database(node_ptr));
@@ -95,7 +95,7 @@ pub unsafe extern "C" fn set_migration_in_txn(
             rt,
             node_ptr,
             identity_did,
-            NodePermission::CollectionPatch
+            NodePermission::MigrationSet
         ));
         let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
         let config_str = try_ffi!(require_c_str(config, "config"));

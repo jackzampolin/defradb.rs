@@ -233,33 +233,47 @@ impl TypeJoinMany {
         // root = parent plan's execute explain
         inner_obj.insert("root".to_string(), self.parent_plan.explain_execute());
 
-        // subType = child plan's execute explain wrapped in selectTopNode > selectNode
+        // subType = child plan's execute explain wrapped in selectTopNode > selectNode.
+        // Go re-initializes the child scan per parent, so metrics accumulate across all
+        // parent scans. We use go_child_metrics (which simulates this accumulation) to
+        // override the child scanNode metrics, matching Go's explain output.
         let child_execute = self.child_plan.explain_execute();
         let child_is_select = self.child_plan.kind() == "selectNode";
 
         let select_node_content = if child_is_select {
             // Extract inner content to avoid double wrapping (selectNode > selectNode)
-            child_execute
+            let mut content = child_execute
                 .as_object()
                 .and_then(|o| o.get("selectNode"))
                 .cloned()
-                .unwrap_or(child_execute)
+                .unwrap_or(child_execute);
+            // Override scanNode metrics with accumulated go_child_metrics
+            if let Some(obj) = content.as_object_mut() {
+                obj.insert("scanNode".to_string(), self.go_child_metrics.to_json());
+            }
+            content
         } else {
             // Child is not a SelectNode (e.g., ScanNode or nested join).
-            // Synthesize selectNode metrics from captured child exec info.
+            // Synthesize selectNode metrics from go_child_metrics which accumulate
+            // across all parent scans, matching Go's per-parent re-scan behavior.
             let mut select_inner = serde_json::Map::new();
             select_inner.insert(
                 "iterations".to_string(),
-                serde_json::json!(self.child_exec_info.iterations),
+                serde_json::json!(self.go_child_metrics.iterations),
             );
             select_inner.insert(
                 "filterMatches".to_string(),
                 serde_json::json!(self.child_exec_info.docs_fetched),
             );
+            // Merge child plan's explain (e.g., nested typeIndexJoin or scanNode)
             if let Some(child_obj) = child_execute.as_object() {
                 for (key, value) in child_obj {
                     select_inner.insert(key.clone(), value.clone());
                 }
+            }
+            // Override scanNode metrics with accumulated go_child_metrics if present
+            if select_inner.contains_key("scanNode") {
+                select_inner.insert("scanNode".to_string(), self.go_child_metrics.to_json());
             }
             serde_json::Value::Object(select_inner)
         };

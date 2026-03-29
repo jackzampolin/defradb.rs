@@ -13,11 +13,11 @@ impl<S: ZanzibarStore> NodeACP<S> {
     /// The owner identity has full control over the node and can grant
     /// admin permissions to other identities.
     ///
-    /// Returns an error if NAC is already enabled.
+    /// Succeeds silently if NAC is already enabled (idempotent).
     pub async fn enable(&self, owner: &Did) -> Result<()> {
         let status = *self.status.read().await;
         if status == NacStatus::Enabled {
-            return Err(Error::InvalidPolicy("NAC is already enabled".into()));
+            return Ok(());
         }
 
         // Create and store the policy

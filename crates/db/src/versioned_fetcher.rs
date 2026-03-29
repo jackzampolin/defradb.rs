@@ -187,7 +187,7 @@ impl<S: Store> VersionedFetcher<S> {
 
     /// Parse a CID string, returning appropriate errors for invalid/unknown CIDs.
     fn parse_cid(cid_str: &str) -> Result<Cid> {
-        Cid::from_str(cid_str).map_err(|e| {
+        Cid::from_str(cid_str).map_err(|_e| {
             // Go's CID library is more lenient. If it looks like a valid CIDv1
             // format, treat as "not found" rather than "invalid".
             if Self::looks_like_cidv1(cid_str) {
