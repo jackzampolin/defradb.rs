@@ -176,9 +176,6 @@ impl DocumentACP for LocalDocumentACP {
                             || self
                                 .has_relation(&wildcard, resource_name, doc_id, DELETER_RELATION)
                                 .await?
-                            || self
-                                .has_relation(&wildcard, resource_name, doc_id, "admin")
-                                .await?
                     }
                     DocumentPermission::Update => {
                         self.has_relation(&wildcard, resource_name, doc_id, UPDATER_RELATION)
@@ -186,16 +183,10 @@ impl DocumentACP for LocalDocumentACP {
                             || self
                                 .has_relation(&wildcard, resource_name, doc_id, "writer")
                                 .await?
-                            || self
-                                .has_relation(&wildcard, resource_name, doc_id, "admin")
-                                .await?
                     }
                     DocumentPermission::Delete => {
                         self.has_relation(&wildcard, resource_name, doc_id, DELETER_RELATION)
                             .await?
-                            || self
-                                .has_relation(&wildcard, resource_name, doc_id, "admin")
-                                .await?
                     }
                 };
                 return Ok(granted);
@@ -224,9 +215,6 @@ impl DocumentACP for LocalDocumentACP {
                     || self
                         .has_relation(did, resource_name, doc_id, DELETER_RELATION)
                         .await?
-                    || self
-                        .has_relation(did, resource_name, doc_id, "admin")
-                        .await?
             }
             DocumentPermission::Update => {
                 self.has_relation(did, resource_name, doc_id, UPDATER_RELATION)
@@ -234,16 +222,10 @@ impl DocumentACP for LocalDocumentACP {
                     || self
                         .has_relation(did, resource_name, doc_id, "writer")
                         .await?
-                    || self
-                        .has_relation(did, resource_name, doc_id, "admin")
-                        .await?
             }
             DocumentPermission::Delete => {
                 self.has_relation(did, resource_name, doc_id, DELETER_RELATION)
                     .await?
-                    || self
-                        .has_relation(did, resource_name, doc_id, "admin")
-                        .await?
             }
         };
 
