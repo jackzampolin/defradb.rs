@@ -7,7 +7,7 @@
 use crate::collection::Collection;
 use crate::collection_cache::CollectionCache;
 use crate::error::{Error, Result};
-use datastore::{BasicTxn, NamespaceView, RootView, TxnCallback};
+use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};
 use schema::CollectionVersion;
 use std::sync::Arc;
 use storage::corekv::{IterOptions, Key, Store};
@@ -183,6 +183,18 @@ impl<S: Store> DbTxn<S> {
     pub fn on_error(&mut self, callback: TxnCallback) -> Result<()> {
         if let Some(txn) = &mut self.txn {
             txn.on_error(callback);
+            Ok(())
+        } else {
+            Err(Error::TxnNotActive)
+        }
+    }
+
+    /// Register an async callback for successful commit.
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn on_success_async(&mut self, callback: AsyncCallback) -> Result<()> {
+        if let Some(txn) = &mut self.txn {
+            txn.on_success_async(callback);
             Ok(())
         } else {
             Err(Error::TxnNotActive)

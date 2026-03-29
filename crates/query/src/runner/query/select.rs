@@ -388,23 +388,23 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mut allowed = Vec::with_capacity(doc_ids.len());
 
         for doc_id in doc_ids {
-            let has_access = acp
-                .check_doc_access(
-                    &identity,
-                    DocumentPermission::Read,
-                    &policy.id,
-                    &policy.resource_name,
-                    doc_id,
-                )
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        doc_id = %doc_id,
-                        error = %e,
-                        "ACP check failed for encrypted search result, denying access"
-                    );
-                    false
-                });
+            let has_access = crate::txn::check_doc_access_with_overlay(
+                acp.as_ref(),
+                &identity,
+                DocumentPermission::Read,
+                &policy.id,
+                &policy.resource_name,
+                doc_id,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    doc_id = %doc_id,
+                    error = %e,
+                    "ACP check failed for encrypted search result, denying access"
+                );
+                false
+            });
 
             if has_access {
                 allowed.push(doc_id.clone());
