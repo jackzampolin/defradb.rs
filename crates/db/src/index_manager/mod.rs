@@ -365,9 +365,12 @@ impl IndexManager {
         Ok(())
     }
 
-    /// Update indexes when a document is created, skipping unique constraint checks.
+    /// Update indexes when a document is created via blind create.
     ///
-    /// Used for blind creates where uniqueness is guaranteed by construction.
+    /// "Blind" means the document existence check was skipped (content-addressed IDs
+    /// are unique by construction). However, unique index constraints on field values
+    /// are still enforced — two different documents can share a content-addressed ID
+    /// scheme but have duplicate field values.
     pub async fn on_document_create_blind(
         &self,
         datastore: &NamespaceView,
@@ -385,7 +388,7 @@ impl IndexManager {
             let value_sets = self.extract_index_values(doc, index.description(), schema)?;
             for values in &value_sets {
                 index
-                    .save_blind(&mut mutable_datastore, &doc_id, values)
+                    .save(&mut mutable_datastore, &doc_id, values)
                     .await
                     .map_err(Error::Storage)?;
             }

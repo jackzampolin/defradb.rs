@@ -192,76 +192,79 @@ pub enum NodePermission {
 
 impl NodePermission {
     /// Returns the string representation used in policy definitions.
+    ///
+    /// These names match Go DefraDB's `RequiredResourcePermissionsForNode`
+    /// in `acp/types/types.go` (verb-noun format).
     pub fn as_str(&self) -> &'static str {
         match self {
             // DAC operations
-            Self::DacBypass => "dac-bypass",
-            Self::DacEnable => "dac-enable",
-            Self::DacDisable => "dac-disable",
-            Self::DacPurge => "dac-purge",
-            Self::DacStatus => "dac-status",
-            Self::DacRelationAdd => "dac-relation-add",
-            Self::DacRelationDelete => "dac-relation-delete",
-            Self::DacPolicyAdd => "dac-policy-add",
+            Self::DacBypass => "bypass-dac",
+            Self::DacEnable => "enable-dac",
+            Self::DacDisable => "disable-dac",
+            Self::DacPurge => "purge-dac",
+            Self::DacStatus => "get-dac-status",
+            Self::DacRelationAdd => "add-dac-relation",
+            Self::DacRelationDelete => "delete-dac-relation",
+            Self::DacPolicyAdd => "add-dac-policy",
 
             // NAC operations
-            Self::NacReEnable => "nac-re-enable",
-            Self::NacDisable => "nac-disable",
-            Self::NacPurge => "nac-purge",
-            Self::NacStatus => "nac-status",
-            Self::NacRelationAdd => "nac-relation-add",
-            Self::NacRelationDelete => "nac-relation-delete",
+            Self::NacReEnable => "re-enable-nac",
+            Self::NacDisable => "disable-nac",
+            Self::NacPurge => "purge-nac",
+            Self::NacStatus => "get-nac-status",
+            Self::NacRelationAdd => "add-nac-relation",
+            Self::NacRelationDelete => "delete-nac-relation",
 
             // Collection operations
-            Self::CollectionPatch => "collection-patch",
-            Self::CollectionGet => "collection-get",
-            Self::CollectionTruncate => "collection-truncate",
+            Self::CollectionPatch => "patch-collection",
+            Self::CollectionGet => "get-collection",
+            Self::CollectionTruncate => "truncate-collection",
 
             // Document operations
-            Self::DocumentRead => "document-read",
-            Self::DocumentUpdate => "document-update",
-            Self::DocumentDelete => "document-delete",
+            Self::DocumentRead => "read-document",
+            Self::DocumentUpdate => "update-document",
+            Self::DocumentDelete => "delete-document",
 
             // Index operations
-            Self::IndexList => "index-list",
-            Self::IndexCreate => "index-create",
-            Self::IndexDelete => "index-delete",
-            Self::EncryptedIndexAdd => "encrypted-index-add",
-            Self::EncryptedIndexList => "encrypted-index-list",
-            Self::EncryptedIndexListAll => "encrypted-index-list-all",
-            Self::EncryptedIndexDelete => "encrypted-index-delete",
+            Self::IndexList => "list-index",
+            Self::IndexCreate => "new-index",
+            Self::IndexDelete => "delete-index",
+            Self::EncryptedIndexAdd => "new-encrypted-index",
+            Self::EncryptedIndexList => "list-encrypted-index",
+            Self::EncryptedIndexListAll => "list-all-encrypted-index",
+            Self::EncryptedIndexDelete => "delete-encrypted-index",
 
             // P2P operations
-            Self::P2pPeerInfo => "p2p-peer-info",
-            Self::P2pPeerConnect => "p2p-peer-connect",
-            Self::P2pPeerActive => "p2p-peer-active",
-            Self::P2pReplicatorAdd => "p2p-replicator-add",
-            Self::P2pReplicatorDelete => "p2p-replicator-delete",
-            Self::P2pReplicatorList => "p2p-replicator-list",
-            Self::P2pCollectionAdd => "p2p-collection-add",
-            Self::P2pCollectionDelete => "p2p-collection-delete",
-            Self::P2pCollectionList => "p2p-collection-list",
-            Self::P2pDocumentAdd => "p2p-document-add",
-            Self::P2pDocumentDelete => "p2p-document-delete",
-            Self::P2pDocumentList => "p2p-document-list",
-            Self::P2pSyncDocuments => "p2p-sync-documents",
-            Self::P2pSyncCollectionVersions => "p2p-sync-collection-versions",
-            Self::P2pSyncBranchableCollection => "p2p-sync-branchable-collection",
+            Self::P2pPeerInfo => "get-p2p-peer-info",
+            Self::P2pPeerConnect => "connect-p2p-peer",
+            Self::P2pPeerActive => "get-p2p-active-peers",
+            Self::P2pReplicatorAdd => "add-p2p-replicator",
+            Self::P2pReplicatorDelete => "delete-p2p-replicator",
+            Self::P2pReplicatorList => "list-p2p-replicator",
+            Self::P2pCollectionAdd => "add-p2p-collection",
+            Self::P2pCollectionDelete => "delete-p2p-collection",
+            Self::P2pCollectionList => "list-p2p-collection",
+            Self::P2pDocumentAdd => "add-p2p-document",
+            Self::P2pDocumentDelete => "delete-p2p-document",
+            Self::P2pDocumentList => "list-p2p-document",
+            Self::P2pSyncDocuments => "sync-p2p-documents",
+            Self::P2pSyncCollectionVersions => "sync-p2p-collection-versions",
+            Self::P2pSyncBranchableCollection => "sync-p2p-branchable-collection",
 
             // Other
-            Self::SignatureVerify => "signature-verify",
+            Self::SignatureVerify => "verify-signature",
 
             // Lens
-            Self::LensCreate => "lens-create",
-            Self::LensList => "lens-list",
+            Self::LensCreate => "add-lens",
+            Self::LensList => "list-lens",
 
             // View
-            Self::ViewRefresh => "view-refresh",
+            Self::ViewRefresh => "refresh-view",
             Self::ViewGc => "view-gc",
-            Self::ViewAdd => "view-add",
+            Self::ViewAdd => "add-view",
 
             // Migration
-            Self::MigrationSet => "migration-set",
+            Self::MigrationSet => "set-migration",
         }
     }
 
@@ -331,67 +334,69 @@ impl NodePermission {
     }
 
     /// Parse a permission from its string representation.
+    ///
+    /// Accepts Go-compatible verb-noun format names.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             // DAC
-            "dac-bypass" => Self::DacBypass,
-            "dac-enable" => Self::DacEnable,
-            "dac-disable" => Self::DacDisable,
-            "dac-purge" => Self::DacPurge,
-            "dac-status" => Self::DacStatus,
-            "dac-relation-add" => Self::DacRelationAdd,
-            "dac-relation-delete" => Self::DacRelationDelete,
-            "dac-policy-add" => Self::DacPolicyAdd,
+            "bypass-dac" => Self::DacBypass,
+            "enable-dac" => Self::DacEnable,
+            "disable-dac" => Self::DacDisable,
+            "purge-dac" => Self::DacPurge,
+            "get-dac-status" => Self::DacStatus,
+            "add-dac-relation" => Self::DacRelationAdd,
+            "delete-dac-relation" => Self::DacRelationDelete,
+            "add-dac-policy" => Self::DacPolicyAdd,
             // NAC
-            "nac-re-enable" => Self::NacReEnable,
-            "nac-disable" => Self::NacDisable,
-            "nac-purge" => Self::NacPurge,
-            "nac-status" => Self::NacStatus,
-            "nac-relation-add" => Self::NacRelationAdd,
-            "nac-relation-delete" => Self::NacRelationDelete,
+            "re-enable-nac" => Self::NacReEnable,
+            "disable-nac" => Self::NacDisable,
+            "purge-nac" => Self::NacPurge,
+            "get-nac-status" => Self::NacStatus,
+            "add-nac-relation" => Self::NacRelationAdd,
+            "delete-nac-relation" => Self::NacRelationDelete,
             // Collection
-            "collection-patch" => Self::CollectionPatch,
-            "collection-get" => Self::CollectionGet,
-            "collection-truncate" => Self::CollectionTruncate,
+            "patch-collection" => Self::CollectionPatch,
+            "get-collection" => Self::CollectionGet,
+            "truncate-collection" => Self::CollectionTruncate,
             // Document
-            "document-read" => Self::DocumentRead,
-            "document-update" => Self::DocumentUpdate,
-            "document-delete" => Self::DocumentDelete,
+            "read-document" => Self::DocumentRead,
+            "update-document" => Self::DocumentUpdate,
+            "delete-document" => Self::DocumentDelete,
             // Index
-            "index-list" => Self::IndexList,
-            "index-create" => Self::IndexCreate,
-            "index-delete" => Self::IndexDelete,
-            "encrypted-index-add" => Self::EncryptedIndexAdd,
-            "encrypted-index-list" => Self::EncryptedIndexList,
-            "encrypted-index-list-all" => Self::EncryptedIndexListAll,
-            "encrypted-index-delete" => Self::EncryptedIndexDelete,
+            "list-index" => Self::IndexList,
+            "new-index" => Self::IndexCreate,
+            "delete-index" => Self::IndexDelete,
+            "new-encrypted-index" => Self::EncryptedIndexAdd,
+            "list-encrypted-index" => Self::EncryptedIndexList,
+            "list-all-encrypted-index" => Self::EncryptedIndexListAll,
+            "delete-encrypted-index" => Self::EncryptedIndexDelete,
             // P2P
-            "p2p-peer-info" => Self::P2pPeerInfo,
-            "p2p-peer-connect" => Self::P2pPeerConnect,
-            "p2p-peer-active" => Self::P2pPeerActive,
-            "p2p-replicator-add" => Self::P2pReplicatorAdd,
-            "p2p-replicator-delete" => Self::P2pReplicatorDelete,
-            "p2p-replicator-list" => Self::P2pReplicatorList,
-            "p2p-collection-add" => Self::P2pCollectionAdd,
-            "p2p-collection-delete" => Self::P2pCollectionDelete,
-            "p2p-collection-list" => Self::P2pCollectionList,
-            "p2p-document-add" => Self::P2pDocumentAdd,
-            "p2p-document-delete" => Self::P2pDocumentDelete,
-            "p2p-document-list" => Self::P2pDocumentList,
-            "p2p-sync-documents" => Self::P2pSyncDocuments,
-            "p2p-sync-collection-versions" => Self::P2pSyncCollectionVersions,
-            "p2p-sync-branchable-collection" => Self::P2pSyncBranchableCollection,
+            "get-p2p-peer-info" => Self::P2pPeerInfo,
+            "connect-p2p-peer" => Self::P2pPeerConnect,
+            "get-p2p-active-peers" => Self::P2pPeerActive,
+            "add-p2p-replicator" => Self::P2pReplicatorAdd,
+            "delete-p2p-replicator" => Self::P2pReplicatorDelete,
+            "list-p2p-replicator" => Self::P2pReplicatorList,
+            "add-p2p-collection" => Self::P2pCollectionAdd,
+            "delete-p2p-collection" => Self::P2pCollectionDelete,
+            "list-p2p-collection" => Self::P2pCollectionList,
+            "add-p2p-document" => Self::P2pDocumentAdd,
+            "delete-p2p-document" => Self::P2pDocumentDelete,
+            "list-p2p-document" => Self::P2pDocumentList,
+            "sync-p2p-documents" => Self::P2pSyncDocuments,
+            "sync-p2p-collection-versions" => Self::P2pSyncCollectionVersions,
+            "sync-p2p-branchable-collection" => Self::P2pSyncBranchableCollection,
             // Other
-            "signature-verify" => Self::SignatureVerify,
+            "verify-signature" => Self::SignatureVerify,
             // Lens
-            "lens-create" => Self::LensCreate,
-            "lens-list" => Self::LensList,
+            "add-lens" => Self::LensCreate,
+            "list-lens" => Self::LensList,
             // View
-            "view-refresh" => Self::ViewRefresh,
+            "refresh-view" => Self::ViewRefresh,
             "view-gc" => Self::ViewGc,
-            "view-add" => Self::ViewAdd,
+            "add-view" => Self::ViewAdd,
             // Migration
-            "migration-set" => Self::MigrationSet,
+            "set-migration" => Self::MigrationSet,
             _ => return None,
         })
     }
@@ -431,10 +436,10 @@ mod tests {
 
     #[test]
     fn test_permission_display() {
-        assert_eq!(format!("{}", NodePermission::DacBypass), "dac-bypass");
+        assert_eq!(format!("{}", NodePermission::DacBypass), "bypass-dac");
         assert_eq!(
             format!("{}", NodePermission::P2pReplicatorAdd),
-            "p2p-replicator-add"
+            "add-p2p-replicator"
         );
     }
 

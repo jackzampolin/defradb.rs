@@ -233,7 +233,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         Some(ek) => ek,
                         None => {
                             return Err(QueryError::execution(format!(
-                                "Unknown argument \"{}\" on field \"_similarity\" of type \"{}\".",
+                                "Unknown argument \"{}\" on field \"SIMILARITY\" of type \"{}\".",
                                 target, collection.name
                             )));
                         }

@@ -30,7 +30,7 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
         if let Requestable::Field(field) = requestable {
             if !field_exists(&field.name) {
                 return Err(QueryError::unknown_field(format!(
-                    "Cannot query field \"{}\" on type \"{}\".",
+                    "Cannot query field \"{}\" on type \"{}\". ",
                     field.name, select.collection_name
                 )));
             }

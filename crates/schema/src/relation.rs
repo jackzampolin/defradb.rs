@@ -217,7 +217,6 @@ impl CollectionVersion {
             // Find fields that need _id and/or auto-primary, and track one-to-one relations
             let mut updates = Vec::new();
             let mut one_to_one_fields = Vec::new();
-            let mut one_to_many_fields = Vec::new();
 
             for (idx, field) in collection.fields.iter().enumerate() {
                 if !field.kind.is_relation() {
@@ -261,7 +260,6 @@ impl CollectionVersion {
                     // If other side doesn't exist or is an array, this side is primary
                     if other_field.is_none() || other_is_array {
                         updates.push((idx, true)); // Mark as primary
-                        one_to_many_fields.push(field.name.clone());
                     } else {
                         // Other side exists and is non-array: this is a one-to-one relation
                         // Don't auto-mark as primary - rely on @primary directive from schema
@@ -278,16 +276,8 @@ impl CollectionVersion {
                 collection.fields[idx].is_primary = is_primary;
             }
 
-            one_to_many_fields.sort();
-            for field_name in one_to_many_fields {
-                if let Some(index) =
-                    collection.ensure_one_to_many_index(&field_name, &mut next_index_id)?
-                {
-                    collection.indexes.push(index);
-                }
-            }
-
             // Add unique indexes for one-to-one relations
+            // Note: one-to-many relations do NOT get auto-indexes (matching Go behavior)
             let mut indexes_to_add = Vec::new();
             for field_name in one_to_one_fields {
                 if let Some(index) =

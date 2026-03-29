@@ -82,8 +82,10 @@ impl Planner {
                     // _group is a virtual field - process its inner relation fields
                     for inner_requestable in &nested_select.fields {
                         if let Requestable::Select(inner_select) = inner_requestable {
-                            // Skip special fields
-                            if !inner_select.field.name.starts_with('_') {
+                            // Skip special fields and nested GROUP (inner groupBy)
+                            if !inner_select.field.name.starts_with('_')
+                                && inner_select.field.name != "GROUP"
+                            {
                                 selects_to_process.push((inner_select, group_index));
                             }
                         }

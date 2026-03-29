@@ -98,20 +98,11 @@ impl<S: Store> crate::database::DB<S> {
                     .and_then(|col| col.field_by_relation(rel_name, &new_schema.name, &field.name));
                 let other_is_array = other_field.map(|f| f.kind.is_array()).unwrap_or(false);
 
-                if field.is_primary {
-                    let ensure_index = if other_field.is_some() && !other_is_array {
-                        new_schema.ensure_one_to_one_unique_index(&field.name, &mut || {
-                            next_index_id += 1;
-                            next_index_id
-                        })
-                    } else {
-                        new_schema.ensure_one_to_many_index(&field.name, &mut || {
-                            next_index_id += 1;
-                            next_index_id
-                        })
-                    };
-
-                    match ensure_index {
+                if field.is_primary && other_field.is_some() && !other_is_array {
+                    match new_schema.ensure_one_to_one_unique_index(&field.name, &mut || {
+                        next_index_id += 1;
+                        next_index_id
+                    }) {
                         Ok(Some(index)) => indexes_to_add.push(index),
                         Ok(None) => {}
                         Err(e) => return Err(Error::InvalidPatch(e.to_string())),

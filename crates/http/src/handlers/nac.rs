@@ -253,7 +253,7 @@ pub async fn go_add_relationship(
         .add_relationship(&requestor, &target, &body.relation)
         .await
         .map_err(|e| {
-            let normalized = normalize_auth_error(e, "nac-relation-add");
+            let normalized = normalize_auth_error(e, "add-nac-relation");
             tracing::warn!(error = %normalized, "NAC add_relationship operation failed");
             HttpError::Forbidden(normalized)
         })?;
@@ -300,7 +300,7 @@ pub async fn go_remove_relationship(
         .remove_relationship(&requestor, &target, &body.relation)
         .await
         .map_err(|e| {
-            let normalized = normalize_auth_error(e, "nac-relation-delete");
+            let normalized = normalize_auth_error(e, "delete-nac-relation");
             tracing::warn!(error = %normalized, "NAC remove_relationship operation failed");
             HttpError::Forbidden(normalized)
         })?;
@@ -324,7 +324,7 @@ pub async fn disable(
         .ok_or_else(|| HttpError::Forbidden("authentication required to disable NAC".into()))?;
 
     nac.disable(&requestor).await.map_err(|e| {
-        let normalized = normalize_auth_error(e, "nac-disable");
+        let normalized = normalize_auth_error(e, "disable-nac");
         tracing::warn!(error = %normalized, "NAC disable operation failed");
         HttpError::Forbidden(normalized)
     })?;
@@ -348,7 +348,7 @@ pub async fn re_enable(
         .ok_or_else(|| HttpError::Forbidden("authentication required to re-enable NAC".into()))?;
 
     nac.re_enable(&requestor).await.map_err(|e| {
-        let normalized = normalize_auth_error(e, "nac-re-enable");
+        let normalized = normalize_auth_error(e, "re-enable-nac");
         tracing::warn!(error = %normalized, "NAC re-enable operation failed");
         HttpError::Forbidden(normalized)
     })?;
