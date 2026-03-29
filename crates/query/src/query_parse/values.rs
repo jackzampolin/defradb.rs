@@ -76,7 +76,7 @@ pub(crate) fn graphql_value_to_json(
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
                 QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
+                    "Variable \"${}\" was not provided.",
                     name
                 ))
             })?;
@@ -99,7 +99,7 @@ pub(crate) fn parse_int_value(
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
                 QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
+                    "Variable \"${}\" was not provided.",
                     name
                 ))
             })?;
@@ -129,7 +129,7 @@ pub(crate) fn parse_optional_int_value(
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
                 QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
+                    "Variable \"${}\" was not provided.",
                     name
                 ))
             })?;
@@ -160,7 +160,7 @@ pub(crate) fn resolve_string_value(
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
                 QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
+                    "Variable \"${}\" was not provided.",
                     name
                 ))
             })?;
@@ -192,7 +192,7 @@ pub(crate) fn parse_doc_ids_value(
                     Value::Variable(name) => {
                         let vars = variables.ok_or_else(|| {
                             QueryError::parse(format!(
-                                "variable '{}' used but no variables provided",
+                                "Variable \"${}\" was not provided.",
                                 name
                             ))
                         })?;
@@ -215,7 +215,7 @@ pub(crate) fn parse_doc_ids_value(
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
                 QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
+                    "Variable \"${}\" was not provided.",
                     name
                 ))
             })?;
@@ -259,7 +259,7 @@ pub(crate) fn parse_cid_value(
                     Value::Variable(name) => {
                         let vars = variables.ok_or_else(|| {
                             QueryError::parse(format!(
-                                "variable '{}' used but no variables provided",
+                                "Variable \"${}\" was not provided.",
                                 name
                             ))
                         })?;
@@ -282,7 +282,7 @@ pub(crate) fn parse_cid_value(
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
                 QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
+                    "Variable \"${}\" was not provided.",
                     name
                 ))
             })?;
@@ -321,7 +321,7 @@ pub(crate) fn resolve_bool_value(
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
                 QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
+                    "Variable \"${}\" was not provided.",
                     name
                 ))
             })?;

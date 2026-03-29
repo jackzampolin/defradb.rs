@@ -62,7 +62,7 @@ pub(super) fn parse_order_value(
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
                 QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
+                    "Variable \"${}\" was not provided.",
                     name
                 ))
             })?;
@@ -138,7 +138,7 @@ pub(super) fn parse_order_condition(
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
                 QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
+                    "Variable \"${}\" was not provided.",
                     name
                 ))
             })?;
@@ -190,6 +190,6 @@ pub(super) fn parse_order_condition(
                 None => Ok(None),
             }
         }
-        _ => Err(QueryError::parse("order direction must be ASC or DESC")),
+        _ => Err(QueryError::parse("invalid order input")),
     }
 }

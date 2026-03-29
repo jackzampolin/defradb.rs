@@ -35,7 +35,7 @@ pub(super) fn parse_group_by_value(
                     Value::Variable(name) => {
                         let vars = variables.ok_or_else(|| {
                             QueryError::parse(format!(
-                                "variable '{}' used but no variables provided",
+                                "Variable \"${}\" was not provided.",
                                 name
                             ))
                         })?;
@@ -57,7 +57,7 @@ pub(super) fn parse_group_by_value(
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
                 QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
+                    "Variable \"${}\" was not provided.",
                     name
                 ))
             })?;
@@ -122,7 +122,7 @@ pub(super) fn parse_aggregate_target_obj(
                 let order = match val {
                     Value::Enum(s) | Value::String(s) => {
                         let direction = OrderDirection::parse(s).ok_or_else(|| {
-                            QueryError::parse(format!("invalid order direction: {}", s))
+                            QueryError::parse("invalid order direction")
                         })?;
                         OrderBy::new().with_condition(OrderCondition::new("", direction))
                     }
@@ -203,7 +203,7 @@ pub(super) fn parse_aggregate_field(
                     Value::Variable(name) => {
                         let vars = variables.ok_or_else(|| {
                             QueryError::parse(format!(
-                                "variable '{}' used but no variables provided",
+                                "Variable \"${}\" was not provided.",
                                 name
                             ))
                         })?;
@@ -235,7 +235,7 @@ pub(super) fn parse_aggregate_field(
                     Value::Variable(name) => {
                         let vars = variables.ok_or_else(|| {
                             QueryError::parse(format!(
-                                "variable '{}' used but no variables provided",
+                                "Variable \"${}\" was not provided.",
                                 name
                             ))
                         })?;
@@ -280,25 +280,25 @@ pub(super) fn parse_aggregate_field(
             }
             AggregateType::Sum => {
                 let field_name = target_field.ok_or_else(|| {
-                    QueryError::parse("_sum requires a 'field' argument or relation targets")
+                    QueryError::parse("aggregate must be provided with a property to aggregate")
                 })?;
                 Aggregate::sum(AggregateTarget::with_field("", field_name))
             }
             AggregateType::Average => {
                 let field_name = target_field.ok_or_else(|| {
-                    QueryError::parse("_avg requires a 'field' argument or relation targets")
+                    QueryError::parse("aggregate must be provided with a property to aggregate")
                 })?;
                 Aggregate::avg(AggregateTarget::with_field("", field_name))
             }
             AggregateType::Min => {
                 let field_name = target_field.ok_or_else(|| {
-                    QueryError::parse("_min requires a 'field' argument or relation targets")
+                    QueryError::parse("aggregate must be provided with a property to aggregate")
                 })?;
                 Aggregate::min(AggregateTarget::with_field("", field_name))
             }
             AggregateType::Max => {
                 let field_name = target_field.ok_or_else(|| {
-                    QueryError::parse("_max requires a 'field' argument or relation targets")
+                    QueryError::parse("aggregate must be provided with a property to aggregate")
                 })?;
                 Aggregate::max(AggregateTarget::with_field("", field_name))
             }

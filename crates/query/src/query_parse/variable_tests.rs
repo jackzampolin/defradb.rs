@@ -152,7 +152,7 @@ fn test_no_variables_provided_error() {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("no variables provided"));
+        .contains("was not provided"));
 }
 
 #[test]

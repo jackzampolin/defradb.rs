@@ -267,8 +267,8 @@ fn test_parse_undefined_fragment_returns_error() {
         result
             .unwrap_err()
             .to_string()
-            .contains("undefined fragment"),
-        "Expected error about undefined fragment"
+            .contains("Unknown fragment"),
+        "Expected error about unknown fragment"
     );
 }
 

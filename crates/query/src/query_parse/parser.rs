@@ -116,7 +116,7 @@ fn parse_selection_to_selects<'a>(
 
             // Look up the fragment by name
             let frag = fragments.get(&spread.fragment_name).ok_or_else(|| {
-                QueryError::parse(format!("undefined fragment '{}'", spread.fragment_name))
+                QueryError::parse(format!("Unknown fragment \"{}\".", spread.fragment_name))
             })?;
 
             // Mark this fragment as being visited
@@ -760,7 +760,7 @@ pub(super) fn parse_selection_set(
 
                 // Look up the fragment by name
                 let frag = fragments.get(&spread.fragment_name).ok_or_else(|| {
-                    QueryError::parse(format!("undefined fragment '{}'", spread.fragment_name))
+                    QueryError::parse(format!("Unknown fragment \"{}\".", spread.fragment_name))
                 })?;
 
                 // Mark this fragment as being visited

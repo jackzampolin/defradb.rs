@@ -268,7 +268,7 @@ fn parse_create_input(
         Value::Variable(var_name) => {
             let vars = variables.ok_or_else(|| {
                 QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
+                    "Variable \"${}\" was not provided.",
                     var_name
                 ))
             })?;
@@ -355,7 +355,7 @@ pub(super) fn parse_bm25_field(
                     Value::Variable(var_name) => {
                         let vars = variables.ok_or_else(|| {
                             QueryError::parse(format!(
-                                "variable '{}' used but no variables provided",
+                                "Variable \"${}\" was not provided.",
                                 var_name
                             ))
                         })?;
@@ -433,7 +433,7 @@ pub(super) fn parse_similarity_field(
         Value::Variable(var_name) => {
             let vars = variables.ok_or_else(|| {
                 QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
+                    "Variable \"${}\" was not provided.",
                     var_name
                 ))
             })?;

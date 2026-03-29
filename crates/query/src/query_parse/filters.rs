@@ -26,7 +26,7 @@ pub(super) fn parse_filter_value(
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
                 QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
+                    "Variable \"${}\" was not provided.",
                     name
                 ))
             })?;
