@@ -24,11 +24,8 @@ pub(crate) use subscription::{
 };
 
 /// Determine NAC permission based on query content.
-///
-/// Go checks `GetCollectionByName` (which requires `CollectionGet`) before
-/// any document-level permissions. To match Go's error ordering, read
-/// queries check `CollectionGet` first. Mutations still use document-level
-/// permissions because Go's mutation path checks those before collection access.
+/// Delete mutations require DocumentDelete, other mutations require DocumentUpdate,
+/// and queries require CollectionGet (matching Go's collection-level permission check).
 pub(crate) fn nac_permission_for_query(query_str: &str) -> NodePermission {
     let trimmed = query_str.trim_start();
     if trimmed.starts_with("mutation") {

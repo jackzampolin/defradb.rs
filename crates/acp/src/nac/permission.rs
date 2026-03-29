@@ -192,9 +192,6 @@ pub enum NodePermission {
 
 impl NodePermission {
     /// Returns the string representation used in policy definitions.
-    ///
-    /// These names match Go DefraDB's `RequiredResourcePermissionsForNode`
-    /// in `acp/types/types.go` (verb-noun format).
     pub fn as_str(&self) -> &'static str {
         match self {
             // DAC operations
@@ -260,7 +257,7 @@ impl NodePermission {
 
             // View
             Self::ViewRefresh => "refresh-view",
-            Self::ViewGc => "view-gc",
+            Self::ViewGc => "gc-view",
             Self::ViewAdd => "add-view",
 
             // Migration
@@ -334,8 +331,6 @@ impl NodePermission {
     }
 
     /// Parse a permission from its string representation.
-    ///
-    /// Accepts Go-compatible verb-noun format names.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             // DAC
@@ -393,7 +388,7 @@ impl NodePermission {
             "list-lens" => Self::LensList,
             // View
             "refresh-view" => Self::ViewRefresh,
-            "view-gc" => Self::ViewGc,
+            "gc-view" => Self::ViewGc,
             "add-view" => Self::ViewAdd,
             // Migration
             "set-migration" => Self::MigrationSet,

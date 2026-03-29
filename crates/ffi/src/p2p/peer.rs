@@ -113,6 +113,7 @@ pub unsafe extern "C" fn p2p_notify_network_change(
 /// # Safety
 ///
 /// `identity_did` must be a valid null-terminated UTF-8 string when non-null.
+/// `node_ptr` must reference a live node handle created by this library.
 #[no_mangle]
 pub unsafe extern "C" fn p2p_active_peers(
     node_ptr: usize,

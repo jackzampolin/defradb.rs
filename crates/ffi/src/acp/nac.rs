@@ -81,7 +81,7 @@ pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_ch
 
             // Empty DID means no identity - not authorized
             if requestor_str.is_empty() {
-                return Err("not authorized to perform operation. Permission: disable-nac".to_string());
+                return Err("not authorized to perform operation. Permission: nac-disable".to_string());
             }
 
             let requestor = identity::Did::new(&requestor_str)
@@ -128,7 +128,7 @@ pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_
             // Empty DID means no identity - not authorized
             if requestor_str.is_empty() {
                 return Err(
-                    "not authorized to perform operation. Permission: re-enable-nac".to_string(),
+                    "not authorized to perform operation. Permission: nac-re-enable".to_string(),
                 );
             }
 
@@ -143,7 +143,7 @@ pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_
                 .unwrap_or(false);
             if !is_admin {
                 return Err(
-                    "not authorized to perform operation. Permission: re-enable-nac".to_string(),
+                    "not authorized to perform operation. Permission: nac-re-enable".to_string(),
                 );
             }
 
@@ -244,19 +244,19 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
                     return Err("node acp relationship operation requires identity".to_string());
                 } else {
                     return Err(
-                        "not authorized to perform operation. Permission: add-nac-relation".to_string(),
+                        "not authorized to perform operation. Permission: nac-relation-add".to_string(),
                     );
                 }
             }
 
             let requestor = identity::Did::new(&requestor_str).map_err(|_| {
-                "not authorized to perform operation. Permission: add-nac-relation".to_string()
+                "not authorized to perform operation. Permission: nac-relation-add".to_string()
             })?;
 
             // Check admin authorization BEFORE validating target DID
             if !nac_manager.is_admin(&requestor).await.unwrap_or(false) {
                 return Err(
-                    "not authorized to perform operation. Permission: add-nac-relation".to_string(),
+                    "not authorized to perform operation. Permission: nac-relation-add".to_string(),
                 );
             }
 
@@ -357,20 +357,20 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
                     return Err("node acp relationship operation requires identity".to_string());
                 } else {
                     return Err(
-                        "not authorized to perform operation. Permission: delete-nac-relation"
+                        "not authorized to perform operation. Permission: nac-relation-delete"
                             .to_string(),
                     );
                 }
             }
 
             let requestor = identity::Did::new(&requestor_str).map_err(|_| {
-                "not authorized to perform operation. Permission: delete-nac-relation".to_string()
+                "not authorized to perform operation. Permission: nac-relation-delete".to_string()
             })?;
 
             // Check admin authorization BEFORE validating target DID
             if !nac_manager.is_admin(&requestor).await.unwrap_or(false) {
                 return Err(
-                    "not authorized to perform operation. Permission: delete-nac-relation".to_string(),
+                    "not authorized to perform operation. Permission: nac-relation-delete".to_string(),
                 );
             }
 
