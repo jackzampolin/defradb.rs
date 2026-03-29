@@ -111,6 +111,13 @@ cd ../defradb.rs-bar     # Work on feature bar
 
 Each worktree is isolated, no branch switching overhead.
 
+## Build Dependencies
+
+- **Rust** (1.82+): `rustup`
+- **protoc**: `brew install protobuf` — required by `opentelemetry-proto` via `prost-build`
+- **cbindgen**: `cargo install cbindgen` — generates C headers for FFI
+- **Go** (1.25+): Required for FFI compatibility tests
+
 ## Common Commands
 
 ### Integration Tests (Primary Validation)
