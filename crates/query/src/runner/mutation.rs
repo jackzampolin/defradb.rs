@@ -263,16 +263,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         let mut visible_doc_ids = Vec::new();
                         for doc_id in doc_ids {
                             // Phase 1: Check if the identity can read the document
-                            let can_read = acp
-                                .check_doc_access(
-                                    &identity_for_acp,
-                                    DocumentPermission::Read,
-                                    &policy.id,
-                                    &policy.resource_name,
-                                    doc_id,
-                                )
-                                .await
-                                .unwrap_or(false);
+                            let can_read = crate::txn::check_doc_access_with_overlay(
+                                acp.as_ref(),
+                                &identity_for_acp,
+                                DocumentPermission::Read,
+                                &policy.id,
+                                &policy.resource_name,
+                                doc_id,
+                            )
+                            .await
+                            .unwrap_or(false);
 
                             if !can_read {
                                 // Document is invisible to this identity -- skip silently
@@ -280,16 +280,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             }
 
                             // Phase 2: Check if the identity can update the document
-                            let can_update = acp
-                                .check_doc_access(
-                                    &identity_for_acp,
-                                    DocumentPermission::Update,
-                                    &policy.id,
-                                    &policy.resource_name,
-                                    doc_id,
-                                )
-                                .await
-                                .map_err(|e| QueryError::acp_check_failed("update", doc_id, e))?;
+                            let can_update = crate::txn::check_doc_access_with_overlay(
+                                acp.as_ref(),
+                                &identity_for_acp,
+                                DocumentPermission::Update,
+                                &policy.id,
+                                &policy.resource_name,
+                                doc_id,
+                            )
+                            .await
+                            .map_err(|e| QueryError::acp_check_failed("update", doc_id, e))?;
 
                             if !can_update {
                                 return Err(QueryError::document_not_found(
@@ -307,16 +307,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         let mut visible_doc_ids = Vec::new();
                         for doc_id in doc_ids {
                             // Phase 1: Check if the identity can read the document
-                            let can_read = acp
-                                .check_doc_access(
-                                    &identity_for_acp,
-                                    DocumentPermission::Read,
-                                    &policy.id,
-                                    &policy.resource_name,
-                                    doc_id,
-                                )
-                                .await
-                                .unwrap_or(false);
+                            let can_read = crate::txn::check_doc_access_with_overlay(
+                                acp.as_ref(),
+                                &identity_for_acp,
+                                DocumentPermission::Read,
+                                &policy.id,
+                                &policy.resource_name,
+                                doc_id,
+                            )
+                            .await
+                            .unwrap_or(false);
 
                             if !can_read {
                                 // Document is invisible to this identity -- skip silently
@@ -324,16 +324,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             }
 
                             // Phase 2: Check if the identity can delete the document
-                            let can_delete = acp
-                                .check_doc_access(
-                                    &identity_for_acp,
-                                    DocumentPermission::Delete,
-                                    &policy.id,
-                                    &policy.resource_name,
-                                    doc_id,
-                                )
-                                .await
-                                .map_err(|e| QueryError::acp_check_failed("delete", doc_id, e))?;
+                            let can_delete = crate::txn::check_doc_access_with_overlay(
+                                acp.as_ref(),
+                                &identity_for_acp,
+                                DocumentPermission::Delete,
+                                &policy.id,
+                                &policy.resource_name,
+                                doc_id,
+                            )
+                            .await
+                            .map_err(|e| QueryError::acp_check_failed("delete", doc_id, e))?;
 
                             if !can_delete {
                                 return Err(QueryError::document_not_found(
@@ -633,63 +633,101 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 for result in &results {
                     if let Some(doc_id) = result.get("_docID").and_then(|v| v.as_str()) {
                         // Check if document is already registered (for upsert of existing doc)
-                        let is_registered = acp
-                            .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
-                            .await
-                            .map_err(|e| {
-                                tracing::warn!(
-                                    doc_id = %doc_id,
-                                    policy_id = %policy.id,
-                                    error = %e,
-                                    "Failed to check ACP registration status - propagating error"
-                                );
-                                QueryError::acp_registration_check_failed(doc_id, e)
-                            })?;
+                        let is_registered = crate::txn::is_doc_registered_with_overlay(
+                            acp.as_ref(),
+                            &policy.id,
+                            &policy.resource_name,
+                            doc_id,
+                        )
+                        .await
+                        .map_err(|e| {
+                            tracing::warn!(
+                                doc_id = %doc_id,
+                                policy_id = %policy.id,
+                                error = %e,
+                                "Failed to check ACP registration status - propagating error"
+                            );
+                            QueryError::acp_registration_check_failed(doc_id, e)
+                        })?;
 
                         // Only register if not already registered (new document)
                         if !is_registered {
-                            let acp_registration_start = Instant::now();
-                            acp.register_doc_object(
-                                identity_did,
-                                &policy.id,
-                                &policy.resource_name,
-                                doc_id,
-                            )
-                            .await
-                            .map_err(|e| {
-                                tracing::error!(
-                                    doc_id = %doc_id,
-                                    error = %e,
-                                    "Failed to register document with ACP - aborting mutation"
+                            if let Some(deferred_acp_mutations) =
+                                crate::txn::current_deferred_acp_mutations()
+                            {
+                                let request_bearer_token = defra_core::signing::get_request_bearer_token(
+                                    identity_did.as_str(),
                                 );
-                                QueryError::acp_registration_failed(doc_id, e)
-                            })?;
-                            tracing::info!(
-                                doc_id = %doc_id,
-                                elapsed = ?acp_registration_start.elapsed(),
-                                "ACP document registration completed"
-                            );
+                                deferred_acp_mutations
+                                    .schedule_register_doc_object(
+                                        acp.clone(),
+                                        identity_did.clone(),
+                                        policy.id.clone(),
+                                        policy.resource_name.clone(),
+                                        doc_id.to_string(),
+                                        request_bearer_token,
+                                    )
+                                    .map_err(QueryError::execution)?;
+                            } else {
+                                let acp_registration_start = Instant::now();
+                                acp.register_doc_object(
+                                    identity_did,
+                                    &policy.id,
+                                    &policy.resource_name,
+                                    doc_id,
+                                )
+                                .await
+                                .map_err(|e| {
+                                    tracing::error!(
+                                        doc_id = %doc_id,
+                                        error = %e,
+                                        "Failed to register document with ACP - aborting mutation"
+                                    );
+                                    QueryError::acp_registration_failed(doc_id, e)
+                                })?;
+                                tracing::info!(
+                                    doc_id = %doc_id,
+                                    elapsed = ?acp_registration_start.elapsed(),
+                                    "ACP document registration completed"
+                                );
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Clear request bearer token after ACP registration is complete
-        if let Some(ref identity_did) = caller_identity {
-            defra_core::signing::clear_request_bearer_token(identity_did.as_str());
-        }
-
         // For DELETE operations: unregister deleted docs from ACP
         // This cleans up ACP state to prevent orphaned registrations
         if matches!(mutation.mutation_type, MutationType::Delete) {
             if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+                let request_bearer_token = caller_identity
+                    .as_ref()
+                    .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
                 for result in &results {
                     if let Some(doc_id) = result.get("_docID").and_then(|v| v.as_str()) {
                         // Best-effort unregistration - log failures but don't fail the delete
                         // The document is already deleted from storage; ACP cleanup failure
                         // leaves orphaned metadata but doesn't affect data integrity
-                        if let Err(e) = acp
+                        if let Some(deferred_acp_mutations) =
+                            crate::txn::current_deferred_acp_mutations()
+                        {
+                            if let Err(err) = deferred_acp_mutations.schedule_unregister_doc_object(
+                                acp.clone(),
+                                policy.id.clone(),
+                                policy.resource_name.clone(),
+                                doc_id.to_string(),
+                                caller_identity.clone(),
+                                request_bearer_token.clone(),
+                            ) {
+                                tracing::warn!(
+                                    doc_id = %doc_id,
+                                    policy_id = %policy.id,
+                                    error = %err,
+                                    "Failed to defer ACP unregister for deleted document"
+                                );
+                            }
+                        } else if let Err(e) = acp
                             .unregister_doc_object(&policy.id, &policy.resource_name, doc_id)
                             .await
                         {
@@ -709,6 +747,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     }
                 }
             }
+        }
+
+        // Clear request bearer token after all ACP post-write work is queued or applied.
+        if let Some(ref identity_did) = caller_identity {
+            defra_core::signing::clear_request_bearer_token(identity_did.as_str());
         }
 
         // Enrich results with _version data if requested.

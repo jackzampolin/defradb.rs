@@ -391,14 +391,34 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
-        // If the transaction provides a collection provider, set it as the task-local
-        // override so all collection resolution within this execution uses the
-        // transaction's uncommitted state.
+        let deferred_acp_mutations = txn_ctx.deferred_acp_mutations();
+
+        // If the transaction provides a collection provider or deferred ACP
+        // projection, set them as task-local overrides so this execution sees
+        // the transaction's uncommitted schema and ACP state.
         #[cfg(not(target_arch = "wasm32"))]
         let result = if let Some(provider) = txn_provider {
-            super::TXN_COLLECTION_PROVIDER
-                .scope(provider, await_with_timeout(execution, self.query_timeout))
-                .await
+            if let Some(deferred_acp_mutations) = deferred_acp_mutations {
+                super::TXN_COLLECTION_PROVIDER
+                    .scope(
+                        provider,
+                        crate::txn::scope_deferred_acp_mutations(
+                            deferred_acp_mutations,
+                            await_with_timeout(execution, self.query_timeout),
+                        ),
+                    )
+                    .await
+            } else {
+                super::TXN_COLLECTION_PROVIDER
+                    .scope(provider, await_with_timeout(execution, self.query_timeout))
+                    .await
+            }
+        } else if let Some(deferred_acp_mutations) = deferred_acp_mutations {
+            crate::txn::scope_deferred_acp_mutations(
+                deferred_acp_mutations,
+                await_with_timeout(execution, self.query_timeout),
+            )
+            .await
         } else {
             await_with_timeout(execution, self.query_timeout).await
         };

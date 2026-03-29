@@ -10,7 +10,10 @@ mod registry;
 mod result;
 
 // Re-export all public types
-pub use context::TransactionContext;
+pub use context::{
+    check_doc_access_with_overlay, current_deferred_acp_mutations, is_doc_registered_with_overlay,
+    scope_deferred_acp_mutations, DeferredAcpMutations, TransactionContext,
+};
 pub use guard::TransactionGuard;
 pub use handle::TransactionHandle;
 pub use registry::{NoOpTransactionRegistry, TransactionRegistry};

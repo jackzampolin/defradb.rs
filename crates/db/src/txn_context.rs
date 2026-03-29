@@ -3,7 +3,7 @@
 use query::fetcher::CollectionProvider;
 use query::mutator::DocMutator;
 use query::runner::DocFetcher;
-use query::txn::TransactionContext;
+use query::txn::{DeferredAcpMutations, TransactionContext};
 use std::sync::Arc;
 use std::time::Instant;
 use storage::corekv::Store;
@@ -24,6 +24,7 @@ pub struct DbTransactionContext<S: Store> {
     id: String,
     readonly: bool,
     fetcher: Arc<LensedDocFetcher<S>>,
+    deferred_acp_mutations: Arc<DeferredAcpMutations>,
     created_at: Instant,
 }
 
@@ -34,12 +35,14 @@ impl<S: Store> DbTransactionContext<S> {
         id: String,
         readonly: bool,
         fetcher: Arc<LensedDocFetcher<S>>,
+        deferred_acp_mutations: Arc<DeferredAcpMutations>,
     ) -> Self {
         Self {
             db,
             id,
             readonly,
             fetcher,
+            deferred_acp_mutations,
             created_at: Instant::now(),
         }
     }
@@ -120,5 +123,9 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
             self.db.clone(),
             self.fetcher.shared_txn(),
         )))
+    }
+
+    fn deferred_acp_mutations(&self) -> Option<Arc<DeferredAcpMutations>> {
+        Some(self.deferred_acp_mutations.clone())
     }
 }
