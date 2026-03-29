@@ -138,11 +138,18 @@ async fn acp_transaction_rollback_test(cluster: TestCluster) {
         .query_with_identity(read_query, &bob.private_key_hex)
         .expect("Bob query before transaction");
     let bob_before_docs = bob_before["User"].as_array().expect("Bob User array");
-    assert_eq!(bob_before_docs.len(), 1, "Bob should see the shared document");
+    assert_eq!(
+        bob_before_docs.len(),
+        1,
+        "Bob should see the shared document"
+    );
     assert_eq!(bob_before_docs[0]["_docID"], doc_id);
 
     let tx_id = tx_create(&http, &api_url).await;
-    let delete_query = format!(r#"mutation {{ delete_User(docID: "{}") {{ _docID }} }}"#, doc_id);
+    let delete_query = format!(
+        r#"mutation {{ delete_User(docID: "{}") {{ _docID }} }}"#,
+        doc_id
+    );
     let delete_result = graphql_query(
         &http,
         &api_url,
@@ -154,7 +161,11 @@ async fn acp_transaction_rollback_test(cluster: TestCluster) {
     let deleted_docs = delete_result["delete_User"]
         .as_array()
         .expect("delete_User should be an array");
-    assert_eq!(deleted_docs.len(), 1, "delete in txn should affect one document");
+    assert_eq!(
+        deleted_docs.len(),
+        1,
+        "delete in txn should affect one document"
+    );
     assert_eq!(deleted_docs[0]["_docID"], doc_id);
 
     let inside_tx = graphql_query(
@@ -178,7 +189,11 @@ async fn acp_transaction_rollback_test(cluster: TestCluster) {
         .query_with_identity(read_query, &alice.private_key_hex)
         .expect("Alice query after rollback");
     let alice_after_docs = alice_after["User"].as_array().expect("Alice User array");
-    assert_eq!(alice_after_docs.len(), 1, "Alice should still see the document");
+    assert_eq!(
+        alice_after_docs.len(),
+        1,
+        "Alice should still see the document"
+    );
     assert_eq!(alice_after_docs[0]["_docID"], doc_id);
 
     let bob_after = node

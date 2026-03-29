@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use acp::{
+    policy_yaml::{build_policy, parse_policy_yaml, validate_policy_expressions},
     DocumentACP, DocumentPermission, Error, Identity, MemoryZanzibarStore, ZanzibarDocumentACP,
+    ZanzibarStore,
 };
 use identity::Did;
 
@@ -17,6 +19,25 @@ fn test_did2() -> Did {
 
 fn test_did3() -> Did {
     Did::new("did:key:z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi").unwrap()
+}
+
+fn test_did4() -> Did {
+    Did::new("did:key:z6Mkm6dQZfJ4rK5QJc1t8u8yKpWq2F6f4gL3r1m9u2Yt7n8Q").unwrap()
+}
+
+async fn create_custom_policy_acp(
+    yaml: &str,
+) -> (ZanzibarDocumentACP<MemoryZanzibarStore>, String) {
+    let parsed = parse_policy_yaml(yaml).unwrap();
+    validate_policy_expressions(&parsed).unwrap();
+
+    let policy = build_policy(&parsed, 1).unwrap();
+    let policy_id = policy.id.clone();
+
+    let store = Arc::new(MemoryZanzibarStore::new());
+    store.store_policy(&policy).await.unwrap();
+
+    (ZanzibarDocumentACP::new(store), policy_id)
 }
 
 #[tokio::test]
@@ -712,4 +733,259 @@ async fn test_revoking_admin_removes_management_capability() {
         )
         .await;
     assert!(matches!(result, Err(Error::NotManager { .. })));
+}
+
+#[tokio::test]
+async fn test_difference_policy_with_generated_id_evaluates_at_check_time() {
+    let yaml = r#"
+name: public_except_blocked
+resources:
+- name: document
+  permissions:
+  - name: read
+    expr: reader - blocked
+  - name: update
+    expr: writer - blocked
+  - name: delete
+    expr: admin
+  relations:
+  - name: reader
+    types: [actor]
+  - name: writer
+    types: [actor]
+  - name: blocked
+    types: [actor]
+  - name: admin
+    manages: [reader, writer, blocked]
+    types: [actor]
+"#;
+
+    let (acp, policy_id) = create_custom_policy_acp(yaml).await;
+    assert_ne!(policy_id, "document");
+
+    let owner = test_did();
+    let bob = test_did2();
+    let mallory = test_did3();
+    let stranger = test_did4();
+
+    acp.register_doc_object(&owner, &policy_id, "document", "employee_handbook")
+        .await
+        .unwrap();
+
+    acp.add_actor_relationship(
+        &owner,
+        &bob,
+        &policy_id,
+        "document",
+        "employee_handbook",
+        "reader",
+        &[],
+    )
+    .await
+    .unwrap();
+    acp.add_actor_relationship(
+        &owner,
+        &mallory,
+        &policy_id,
+        "document",
+        "employee_handbook",
+        "reader",
+        &[],
+    )
+    .await
+    .unwrap();
+    acp.add_actor_relationship(
+        &owner,
+        &mallory,
+        &policy_id,
+        "document",
+        "employee_handbook",
+        "blocked",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    assert!(acp
+        .check_doc_access(
+            &Identity::Authenticated(bob.clone()),
+            DocumentPermission::Read,
+            &policy_id,
+            "document",
+            "employee_handbook"
+        )
+        .await
+        .unwrap());
+    assert!(!acp
+        .check_doc_access(
+            &Identity::Authenticated(mallory.clone()),
+            DocumentPermission::Read,
+            &policy_id,
+            "document",
+            "employee_handbook"
+        )
+        .await
+        .unwrap());
+    assert!(!acp
+        .check_doc_access(
+            &Identity::Authenticated(stranger),
+            DocumentPermission::Read,
+            &policy_id,
+            "document",
+            "employee_handbook"
+        )
+        .await
+        .unwrap());
+
+    acp.add_actor_relationship(
+        &owner,
+        &owner,
+        &policy_id,
+        "document",
+        "employee_handbook",
+        "blocked",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert!(acp
+        .check_doc_access(
+            &Identity::Authenticated(owner.clone()),
+            DocumentPermission::Read,
+            &policy_id,
+            "document",
+            "employee_handbook"
+        )
+        .await
+        .unwrap());
+
+    assert!(acp
+        .delete_actor_relationship(
+            &owner,
+            &bob,
+            &policy_id,
+            "document",
+            "employee_handbook",
+            "reader",
+            &[],
+        )
+        .await
+        .unwrap());
+    assert!(!acp
+        .check_doc_access(
+            &Identity::Authenticated(bob),
+            DocumentPermission::Read,
+            &policy_id,
+            "document",
+            "employee_handbook"
+        )
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn test_nested_difference_policy_with_generated_id_handles_union_and_blocklist() {
+    let yaml = r#"
+name: nested_difference
+resources:
+- name: document
+  permissions:
+  - name: read
+    expr: (reader + writer) - blocked
+  - name: update
+    expr: writer - blocked
+  - name: delete
+    expr: admin
+  relations:
+  - name: reader
+    types: [actor]
+  - name: writer
+    types: [actor]
+  - name: blocked
+    types: [actor]
+  - name: admin
+    types: [actor]
+"#;
+
+    let (acp, policy_id) = create_custom_policy_acp(yaml).await;
+    assert_ne!(policy_id, "document");
+
+    let owner = test_did();
+    let reader = test_did2();
+    let writer = test_did3();
+    let blocked_writer = test_did4();
+
+    acp.register_doc_object(&owner, &policy_id, "document", "doc1")
+        .await
+        .unwrap();
+
+    for (target, relation) in [
+        (&reader, "reader"),
+        (&writer, "writer"),
+        (&blocked_writer, "writer"),
+        (&blocked_writer, "blocked"),
+    ] {
+        acp.add_actor_relationship(
+            &owner,
+            target,
+            &policy_id,
+            "document",
+            "doc1",
+            relation,
+            &[],
+        )
+        .await
+        .unwrap();
+    }
+
+    assert!(acp
+        .check_doc_access(
+            &Identity::Authenticated(reader),
+            DocumentPermission::Read,
+            &policy_id,
+            "document",
+            "doc1"
+        )
+        .await
+        .unwrap());
+    assert!(acp
+        .check_doc_access(
+            &Identity::Authenticated(writer.clone()),
+            DocumentPermission::Read,
+            &policy_id,
+            "document",
+            "doc1"
+        )
+        .await
+        .unwrap());
+    assert!(acp
+        .check_doc_access(
+            &Identity::Authenticated(writer),
+            DocumentPermission::Update,
+            &policy_id,
+            "document",
+            "doc1"
+        )
+        .await
+        .unwrap());
+    assert!(!acp
+        .check_doc_access(
+            &Identity::Authenticated(blocked_writer.clone()),
+            DocumentPermission::Read,
+            &policy_id,
+            "document",
+            "doc1"
+        )
+        .await
+        .unwrap());
+    assert!(!acp
+        .check_doc_access(
+            &Identity::Authenticated(blocked_writer),
+            DocumentPermission::Update,
+            &policy_id,
+            "document",
+            "doc1"
+        )
+        .await
+        .unwrap());
 }

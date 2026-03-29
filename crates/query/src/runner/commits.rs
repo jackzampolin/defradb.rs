@@ -23,6 +23,7 @@ use super::commits_numeric::{
 use super::{DocFetcher, QueryRunner};
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use serde_json::json;

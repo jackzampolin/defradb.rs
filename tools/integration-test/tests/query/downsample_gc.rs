@@ -161,6 +161,7 @@ fn aggregate_commit_field(
     rows[0].clone()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assert_rollup_row(
     row: &Value,
     source_doc_id: &str,
@@ -185,6 +186,7 @@ fn assert_rollup_row(
     assert_eq!(row["max"].as_i64(), Some(expected_max));
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_rollup(
     client: &integration_test::DefraClient,
     collection: &str,

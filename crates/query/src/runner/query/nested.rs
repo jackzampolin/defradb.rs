@@ -338,10 +338,12 @@ mod tests {
     use crate::fetcher::FetchByIdsResult;
     use crate::planner::Planner;
 
+    type ScoreMap = HashMap<(String, String, String), HashMap<String, f64>>;
+
     #[derive(Default)]
     struct FullTextTestFetcher {
         docs: Mutex<HashMap<String, Vec<Document>>>,
-        scores: Mutex<HashMap<(String, String, String), HashMap<String, f64>>>,
+        scores: Mutex<ScoreMap>,
     }
 
     impl FullTextTestFetcher {

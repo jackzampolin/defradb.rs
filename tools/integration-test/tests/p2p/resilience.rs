@@ -115,7 +115,7 @@ async fn car_bomb_protection_test(cluster: TestCluster) {
 
     // All burst docs must arrive on node1 — neither node may crash
     poll_until(
-        || count_docs(&cluster, 1, "Packet") >= BURST_SIZE + 1,
+        || count_docs(&cluster, 1, "Packet") > BURST_SIZE,
         Duration::from_secs(60),
         Duration::from_millis(500),
         "burst docs did not all replicate to node1",
@@ -342,7 +342,7 @@ async fn dag_semaphore_exhaustion_test(cluster: TestCluster) {
 
     // All flood docs must also eventually arrive on node0
     poll_until(
-        || count_docs(&cluster, 0, "Block") >= FLOOD_COUNT + 1,
+        || count_docs(&cluster, 0, "Block") > FLOOD_COUNT,
         Duration::from_secs(60),
         Duration::from_millis(500),
         "not all flood docs reached node0",

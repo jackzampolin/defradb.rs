@@ -655,9 +655,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             if let Some(deferred_acp_mutations) =
                                 crate::txn::current_deferred_acp_mutations()
                             {
-                                let request_bearer_token = defra_core::signing::get_request_bearer_token(
-                                    identity_did.as_str(),
-                                );
+                                let request_bearer_token =
+                                    defra_core::signing::get_request_bearer_token(
+                                        identity_did.as_str(),
+                                    );
                                 deferred_acp_mutations
                                     .schedule_register_doc_object(
                                         acp.clone(),
