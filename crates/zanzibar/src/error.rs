@@ -35,7 +35,7 @@ pub enum Error {
     #[error("DPI violation: permission '{relation}' on resource '{resource}' must include 'owner' in its expression")]
     DpiExpressionMissingOwner { resource: String, relation: String },
 
-    #[error("DPI violation: resource '{resource}' relation '{relation}' uses disallowed operation '{operation}' (only union allowed)")]
+    #[error("DPI violation: resource '{resource}' relation '{relation}' uses disallowed operation '{operation}'")]
     DpiDisallowedOperation {
         resource: String,
         relation: String,

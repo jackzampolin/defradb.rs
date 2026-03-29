@@ -4,8 +4,8 @@ use super::ParsedPolicy;
 ///
 /// Checks:
 /// 1. Expressions cannot reference the reserved `owner` relation
-/// 2. Expression operators must be valid (`+` and `-` only)
-/// 3. Expressions can only reference relations declared in the same resource
+/// 2. Expressions can use Zanzibar operators, including TTU (`->`)
+/// 3. Direct relation references and TTU tuple relations must exist in the same resource
 pub fn validate_policy_expressions(policy: &ParsedPolicy) -> Result<(), String> {
     for resource in &policy.resources {
         // 'owner' is a reserved relation name, auto-injected by the system
@@ -26,6 +26,7 @@ pub fn validate_policy_expressions(policy: &ParsedPolicy) -> Result<(), String> 
             }
 
             let tokens = tokenize_expression(&permission.expr)?;
+            let mut skip_local_relation_check = false;
 
             for token in &tokens {
                 match token {
@@ -33,6 +34,11 @@ pub fn validate_policy_expressions(policy: &ParsedPolicy) -> Result<(), String> 
                         // Check for owner reference
                         if name == "owner" {
                             return Err("permission cannot reference `owner` relation".to_string());
+                        }
+
+                        if skip_local_relation_check {
+                            skip_local_relation_check = false;
+                            continue;
                         }
 
                         // Check that the relation exists in this resource
@@ -48,6 +54,9 @@ pub fn validate_policy_expressions(policy: &ParsedPolicy) -> Result<(), String> 
                             return Err("BAD_INPUT".to_string());
                         }
                     }
+                    ExprToken::TupleToUserset => {
+                        skip_local_relation_check = true;
+                    }
                     ExprToken::Operator | ExprToken::Paren => {}
                 }
             }
@@ -60,11 +69,12 @@ pub fn validate_policy_expressions(policy: &ParsedPolicy) -> Result<(), String> 
 enum ExprToken {
     Identifier(String),
     Operator,
+    TupleToUserset,
     Paren,
 }
 
 /// Tokenize a permission expression like "reader + writer - admin".
-/// Valid operators: +, -
+/// Valid operators: +, -, ->, &
 /// Valid tokens: identifiers (alphanumeric + underscore), operators, parentheses
 fn tokenize_expression(expr: &str) -> Result<Vec<ExprToken>, String> {
     let mut tokens = Vec::new();
@@ -84,7 +94,7 @@ fn tokenize_expression(expr: &str) -> Result<Vec<ExprToken>, String> {
                         // This is a TTU operator "->", consume both
                         chars.next();
                         chars.next();
-                        tokens.push(ExprToken::Operator);
+                        tokens.push(ExprToken::TupleToUserset);
                         continue;
                     }
                 }
@@ -123,7 +133,16 @@ fn tokenize_expression(expr: &str) -> Result<Vec<ExprToken>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy_yaml::parse_policy_yaml;
+    use crate::policy_yaml::{build_policy, parse_policy_yaml};
+
+    fn assert_policy_loads(yaml: &str) {
+        let parsed = parse_policy_yaml(yaml).unwrap();
+        validate_policy_expressions(&parsed).unwrap();
+
+        let policy = build_policy(&parsed, 1).unwrap();
+        assert!(policy.validate().is_ok());
+        assert!(policy.validate_dpi().is_ok());
+    }
 
     #[test]
     fn test_owner_reference_error() {
@@ -211,5 +230,134 @@ resources:
         let result = validate_policy_expressions(&policy);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("BAD_INPUT"));
+    }
+
+    #[test]
+    fn test_difference_expression_loads() {
+        let yaml = r#"
+name: public_except_blocked
+resources:
+- name: document
+  permissions:
+  - name: read
+    expr: reader - blocked
+  - name: update
+    expr: writer - blocked
+  - name: delete
+    expr: admin
+  relations:
+  - name: reader
+    types: [actor]
+  - name: writer
+    types: [actor]
+  - name: blocked
+    types: [actor]
+  - name: admin
+    manages: [reader, writer, blocked]
+    types: [actor]
+"#;
+
+        assert_policy_loads(yaml);
+    }
+
+    #[test]
+    fn test_ttu_expression_loads() {
+        let yaml = r#"
+name: filesystem
+resources:
+- name: file
+  permissions:
+  - name: read
+    expr: parent->read
+  - name: update
+    expr: writer
+  - name: delete
+    expr: writer
+  relations:
+  - name: parent
+    types: [directory]
+  - name: writer
+    types: [actor]
+- name: directory
+  permissions:
+  - name: read
+    expr: reader + writer
+  - name: update
+    expr: writer
+  - name: delete
+    expr: writer
+  relations:
+  - name: reader
+    types: [actor]
+  - name: writer
+    types: [actor]
+"#;
+
+        assert_policy_loads(yaml);
+    }
+
+    #[test]
+    fn test_nested_difference_expression_loads() {
+        let yaml = r#"
+name: nested_difference
+resources:
+- name: document
+  permissions:
+  - name: read
+    expr: (reader + writer) - blocked
+  - name: update
+    expr: writer
+  - name: delete
+    expr: admin
+  relations:
+  - name: reader
+    types: [actor]
+  - name: writer
+    types: [actor]
+  - name: blocked
+    types: [actor]
+  - name: admin
+    types: [actor]
+"#;
+
+        assert_policy_loads(yaml);
+    }
+
+    #[test]
+    fn test_nested_ttu_expression_loads() {
+        let yaml = r#"
+name: filesystem
+resources:
+- name: file
+  permissions:
+  - name: read
+    expr: reader + parent->read
+  - name: update
+    expr: writer + parent->update
+  - name: delete
+    expr: writer
+  relations:
+  - name: parent
+    types: [directory]
+  - name: reader
+    types: [actor]
+  - name: writer
+    types: [actor]
+- name: directory
+  permissions:
+  - name: read
+    expr: reader + writer
+  - name: update
+    expr: writer
+  - name: delete
+    expr: writer
+  relations:
+  - name: reader
+    types: [actor]
+  - name: writer
+    types: [actor]
+"#;
+
+        assert_policy_loads(yaml);
     }
 }
