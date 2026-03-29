@@ -1,3 +1,5 @@
+#![allow(clippy::module_inception)]
+
 mod acp;
 mod dac;
 mod nac;
