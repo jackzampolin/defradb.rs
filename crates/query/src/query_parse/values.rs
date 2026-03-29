@@ -75,10 +75,7 @@ pub(crate) fn graphql_value_to_json(
         }
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "Variable \"${}\" was not provided.",
-                    name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", name))
             })?;
             vars.get(name).cloned().ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))
@@ -98,10 +95,7 @@ pub(crate) fn parse_int_value(
             .ok_or_else(|| QueryError::parse("integer out of range")),
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "Variable \"${}\" was not provided.",
-                    name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", name))
             })?;
             let json_val = vars.get(name).ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))
@@ -128,10 +122,7 @@ pub(crate) fn parse_optional_int_value(
             .ok_or_else(|| QueryError::parse("integer out of range")),
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "Variable \"${}\" was not provided.",
-                    name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", name))
             })?;
             let json_val = vars.get(name).ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))
@@ -159,10 +150,7 @@ pub(crate) fn resolve_string_value(
         Value::String(s) => Ok(s.clone()),
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "Variable \"${}\" was not provided.",
-                    name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", name))
             })?;
             let json_val = vars.get(name).ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))
@@ -191,10 +179,7 @@ pub(crate) fn parse_doc_ids_value(
                     Value::String(s) => Ok(s.clone()),
                     Value::Variable(name) => {
                         let vars = variables.ok_or_else(|| {
-                            QueryError::parse(format!(
-                                "Variable \"${}\" was not provided.",
-                                name
-                            ))
+                            QueryError::parse(format!("Variable \"${}\" was not provided.", name))
                         })?;
                         let json_val = vars.get(name).ok_or_else(|| {
                             QueryError::parse(format!("Variable \"${}\" was not provided", name))
@@ -214,10 +199,7 @@ pub(crate) fn parse_doc_ids_value(
         Value::String(s) => Ok(vec![s.clone()]),
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "Variable \"${}\" was not provided.",
-                    name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", name))
             })?;
             let json_val = vars.get(name).ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))
@@ -258,10 +240,7 @@ pub(crate) fn parse_cid_value(
                     Value::String(s) => Ok(s.clone()),
                     Value::Variable(name) => {
                         let vars = variables.ok_or_else(|| {
-                            QueryError::parse(format!(
-                                "Variable \"${}\" was not provided.",
-                                name
-                            ))
+                            QueryError::parse(format!("Variable \"${}\" was not provided.", name))
                         })?;
                         let json_val = vars.get(name).ok_or_else(|| {
                             QueryError::parse(format!("Variable \"${}\" was not provided", name))
@@ -281,10 +260,7 @@ pub(crate) fn parse_cid_value(
         Value::String(s) => Ok(vec![s.clone()]),
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "Variable \"${}\" was not provided.",
-                    name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", name))
             })?;
             let json_val = vars.get(name).ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))
@@ -320,10 +296,7 @@ pub(crate) fn resolve_bool_value(
         Value::Boolean(b) => Ok(*b),
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "Variable \"${}\" was not provided.",
-                    name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", name))
             })?;
             let json_val = vars.get(name).ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))

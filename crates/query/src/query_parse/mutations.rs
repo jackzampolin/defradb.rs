@@ -267,10 +267,7 @@ fn parse_create_input(
         // Variable reference - resolve from variables map
         Value::Variable(var_name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "Variable \"${}\" was not provided.",
-                    var_name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", var_name))
             })?;
             let json_val = vars.get(var_name).ok_or_else(|| {
                 QueryError::parse(format!("variable '{}' not found in variables", var_name))
@@ -432,10 +429,7 @@ pub(super) fn parse_similarity_field(
         }
         Value::Variable(var_name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "Variable \"${}\" was not provided.",
-                    var_name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", var_name))
             })?;
             let json_val = vars.get(var_name.as_str()).ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", var_name))

@@ -264,10 +264,7 @@ fn test_parse_undefined_fragment_returns_error() {
     let result = parse_query(query);
     assert!(result.is_err());
     assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("Unknown fragment"),
+        result.unwrap_err().to_string().contains("Unknown fragment"),
         "Expected error about unknown fragment"
     );
 }

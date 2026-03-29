@@ -149,10 +149,7 @@ fn test_no_variables_provided_error() {
 
     let result = parse_request_with_variables(query, None, None);
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("was not provided"));
+    assert!(result.unwrap_err().to_string().contains("was not provided"));
 }
 
 #[test]

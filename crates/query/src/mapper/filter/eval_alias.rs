@@ -70,9 +70,9 @@ impl Filter {
             }
 
             // Look up by render_key (alias) instead of field name
-            let field_index = mapping
-                .try_find_index_from_render_key(key)
-                .ok_or_else(|| QueryError::unknown_field(format!("field or alias not found. Name: {}", key)))?;
+            let field_index = mapping.try_find_index_from_render_key(key).ok_or_else(|| {
+                QueryError::unknown_field(format!("field or alias not found. Name: {}", key))
+            })?;
 
             let field_value = fields
                 .get(field_index)

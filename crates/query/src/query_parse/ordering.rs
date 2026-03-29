@@ -61,10 +61,7 @@ pub(super) fn parse_order_value(
         }
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "Variable \"${}\" was not provided.",
-                    name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", name))
             })?;
             let json_val = vars.get(name).ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))
@@ -126,17 +123,13 @@ pub(super) fn parse_order_condition(
         // Null order direction means skip this field (Go compatibility)
         Value::Null => Ok(None),
         Value::Enum(s) | Value::String(s) => {
-            let direction = OrderDirection::parse(s).ok_or_else(|| {
-                QueryError::parse("invalid order direction")
-            })?;
+            let direction = OrderDirection::parse(s)
+                .ok_or_else(|| QueryError::parse("invalid order direction"))?;
             Ok(Some(OrderCondition::new(field_name, direction)))
         }
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "Variable \"${}\" was not provided.",
-                    name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", name))
             })?;
             let json_val = vars.get(name).ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))
@@ -147,9 +140,8 @@ pub(super) fn parse_order_condition(
                     name
                 ))
             })?;
-            let direction = OrderDirection::parse(s).ok_or_else(|| {
-                QueryError::parse("invalid order direction")
-            })?;
+            let direction = OrderDirection::parse(s)
+                .ok_or_else(|| QueryError::parse("invalid order direction"))?;
             Ok(Some(OrderCondition::new(field_name, direction)))
         }
         Value::Object(nested_obj) => {

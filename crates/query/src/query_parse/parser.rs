@@ -342,10 +342,7 @@ pub fn parse_request_with_variables(
                         // Extract default values from variable definitions and merge with provided variables
                         let defaults = extract_variable_defaults(&q.variable_definitions)?;
                         let effective_variables = merge_variables(variables, &defaults);
-                        validate_required_variables(
-                            &q.variable_definitions,
-                            &effective_variables,
-                        )?;
+                        validate_required_variables(&q.variable_definitions, &effective_variables)?;
                         // If variables was provided (even empty) or we have defaults, use the merged map
                         // Otherwise preserve None to get appropriate "no variables provided" error
                         let effective_vars_ref = if variables.is_some() || !defaults.is_empty() {
@@ -389,10 +386,7 @@ pub fn parse_request_with_variables(
                         // Extract default values from variable definitions and merge with provided variables
                         let defaults = extract_variable_defaults(&m.variable_definitions)?;
                         let effective_variables = merge_variables(variables, &defaults);
-                        validate_required_variables(
-                            &m.variable_definitions,
-                            &effective_variables,
-                        )?;
+                        validate_required_variables(&m.variable_definitions, &effective_variables)?;
                         // If variables was provided (even empty) or we have defaults, use the merged map
                         // Otherwise preserve None to get appropriate "no variables provided" error
                         let effective_vars_ref = if variables.is_some() || !defaults.is_empty() {
@@ -414,10 +408,7 @@ pub fn parse_request_with_variables(
                         // Extract default values from variable definitions and merge with provided variables
                         let defaults = extract_variable_defaults(&s.variable_definitions)?;
                         let effective_variables = merge_variables(variables, &defaults);
-                        validate_required_variables(
-                            &s.variable_definitions,
-                            &effective_variables,
-                        )?;
+                        validate_required_variables(&s.variable_definitions, &effective_variables)?;
                         let effective_vars_ref = if variables.is_some() || !defaults.is_empty() {
                             Some(&effective_variables)
                         } else {

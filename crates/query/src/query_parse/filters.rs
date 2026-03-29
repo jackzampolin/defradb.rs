@@ -25,10 +25,7 @@ pub(super) fn parse_filter_value(
         }
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "Variable \"${}\" was not provided.",
-                    name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", name))
             })?;
             let json_val = vars.get(name.as_str()).ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))
