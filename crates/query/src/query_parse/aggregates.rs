@@ -340,6 +340,14 @@ pub(super) fn parse_top_level_aggregate(
         }
     }
 
+    // Top-level aggregates require at least one target (collection argument).
+    // query { COUNT } with no arguments should return this error.
+    if aggregate.targets.is_empty() {
+        return Err(QueryError::parse(
+            "aggregate must be provided with a property to aggregate",
+        ));
+    }
+
     // Set alias if provided
     if let Some(ref a) = field.alias {
         aggregate = aggregate.with_alias(a.clone());

@@ -41,14 +41,6 @@ impl Planner {
             mapping.add(i, &field.name);
         }
 
-        // Add _docID so that docID/docIDs filters on child relations work.
-        // _docID is a virtual field not in the schema, so allocate a new index
-        // after all schema fields to avoid collisions with schema positions.
-        if mapping.first_index_of_name("_docID").is_none() {
-            let doc_id_index = mapping.next_index();
-            mapping.add(doc_id_index, "_docID");
-        }
-
         // Track which schema indices already have render_keys assigned
         let mut indices_with_render_keys = HashSet::new();
 

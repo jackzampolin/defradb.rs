@@ -213,6 +213,19 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)
     }
 
+    /// Get all peers known to GossipSub for a topic (mesh + non-mesh).
+    pub async fn topic_peers(&self, topic: DefraTopic) -> Result<Vec<PeerId>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::TopicPeers {
+                topic,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)
+    }
+
     /// Shutdown the P2P host.
     pub async fn shutdown(&self) -> Result<()> {
         self.command_tx

@@ -420,6 +420,18 @@ impl<S: Store> DefraBehaviour<S> {
         }
     }
 
+    /// Get all peers known to GossipSub for a topic (mesh + non-mesh).
+    pub fn topic_peers(&self, topic_hash: &gossipsub::TopicHash) -> Vec<PeerId> {
+        match self.gossipsub.as_ref() {
+            Some(gs) => gs
+                .all_peers()
+                .filter(|(_, topics)| topics.contains(&topic_hash))
+                .map(|(peer_id, _)| *peer_id)
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
     // === Bitswap operations ===
     // Note: iroh-bitswap uses a client/server model. The Bitswap behaviour
     // handles protocol negotiation, but block fetching is done through the client.
