@@ -25,57 +25,15 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
             || collection.fields.iter().any(|f| f.name == name)
     };
 
-    // Validate that all requested simple fields exist in schema
-    for requestable in &select.fields {
-        if let Requestable::Field(field) = requestable {
-            if !field_exists(&field.name) {
-                return Err(QueryError::unknown_field(format!(
-                    "Cannot query field \"{}\" on type \"{}\". ",
-                    field.name, select.collection_name
-                )));
-            }
-        }
-    }
-
-    // Validate aggregate target fields exist in schema
-    // Note: For relation-based aggregates (e.g., _sum(books: {field: score})),
-    // the field belongs to the related collection, not the current one.
-    // We skip validation here; it will be checked during execution.
-    for requestable in &select.fields {
-        if let Requestable::Aggregate(agg) = requestable {
-            for target in &agg.targets {
-                if let Some(ref field_name) = target.field_name {
-                    // Skip validation for:
-                    // 1. Relation-based aggregates (non-empty host_name that's a relation field)
-                    // 2. _group aggregates (host_name is "GROUP") - targets grouped results
-                    // 3. Nested aggregates (field_name starts with "_") - targets other aggregate results
-                    let is_relation_aggregate = !target.host_name.is_empty()
-                        && collection.fields.iter().any(|f| f.name == target.host_name);
-                    let is_group_aggregate = target.host_name == "GROUP";
-                    let is_nested_aggregate = field_name.starts_with('_');
-
-                    if !is_relation_aggregate
-                        && !is_group_aggregate
-                        && !is_nested_aggregate
-                        && !field_exists(field_name)
-                    {
-                        return Err(QueryError::unknown_field(format!(
-                            "aggregate target field '{}' not found in collection '{}'",
-                            field_name, select.collection_name
-                        )));
-                    }
-                }
-            }
-        }
-    }
-
     // Validate GROUP BY fields exist in schema and are groupable
+    // This must run before field selection validation so that invalid groupBy
+    // fields produce the correct Go-compatible error message.
     if let Some(ref group_by) = select.group_by {
         for field_name in &group_by.fields {
             if !field_exists(field_name) {
-                return Err(QueryError::unknown_field(format!(
-                    "GROUP BY field '{}' not found in collection '{}'",
-                    field_name, select.collection_name
+                return Err(QueryError::parse(format!(
+                    "Argument \"groupBy\" has invalid value [{}].\nIn element #1: Expected type \"{}Field\", found {}.",
+                    field_name, select.collection_name, field_name
                 )));
             }
             // Reject array relation fields (one-to-many) - can't group by a list value
@@ -127,6 +85,50 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
                 }
                 Requestable::FullTextSearch(_) => {
                     // Full-text search is allowed at group level
+                }
+            }
+        }
+    }
+
+    // Validate that all requested simple fields exist in schema
+    for requestable in &select.fields {
+        if let Requestable::Field(field) = requestable {
+            if !field_exists(&field.name) {
+                return Err(QueryError::unknown_field(format!(
+                    "Cannot query field \"{}\" on type \"{}\". ",
+                    field.name, select.collection_name
+                )));
+            }
+        }
+    }
+
+    // Validate aggregate target fields exist in schema
+    // Note: For relation-based aggregates (e.g., _sum(books: {field: score})),
+    // the field belongs to the related collection, not the current one.
+    // We skip validation here; it will be checked during execution.
+    for requestable in &select.fields {
+        if let Requestable::Aggregate(agg) = requestable {
+            for target in &agg.targets {
+                if let Some(ref field_name) = target.field_name {
+                    // Skip validation for:
+                    // 1. Relation-based aggregates (non-empty host_name that's a relation field)
+                    // 2. _group aggregates (host_name is "GROUP") - targets grouped results
+                    // 3. Nested aggregates (field_name starts with "_") - targets other aggregate results
+                    let is_relation_aggregate = !target.host_name.is_empty()
+                        && collection.fields.iter().any(|f| f.name == target.host_name);
+                    let is_group_aggregate = target.host_name == "GROUP";
+                    let is_nested_aggregate = field_name.starts_with('_');
+
+                    if !is_relation_aggregate
+                        && !is_group_aggregate
+                        && !is_nested_aggregate
+                        && !field_exists(field_name)
+                    {
+                        return Err(QueryError::unknown_field(format!(
+                            "aggregate target field '{}' not found in collection '{}'",
+                            field_name, select.collection_name
+                        )));
+                    }
                 }
             }
         }

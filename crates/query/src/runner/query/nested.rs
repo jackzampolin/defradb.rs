@@ -47,6 +47,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let collections: Vec<CollectionVersion> =
             collections_map.values().map(|c| (**c).clone()).collect();
 
+        // Validate groupBy, field references, and aggregates against the root collection schema.
+        // This catches invalid groupBy fields with Go-compatible error messages before the
+        // planner builds the join plan.
+        if let Some(collection) = collections_map.get(&select.collection_name) {
+            super::super::plan::validate_select(select, collection)?;
+        }
+
         // Pre-compute FTS scores from the inverted index before planning.
         // Supports dotted relation paths like `file.name` and `functions.content`
         // by querying the leaf collection's BM25 index and lifting scores back

@@ -127,11 +127,7 @@ pub(super) fn parse_order_condition(
         Value::Null => Ok(None),
         Value::Enum(s) | Value::String(s) => {
             let direction = OrderDirection::parse(s).ok_or_else(|| {
-                // Match Go DefraDB error format
-                QueryError::parse(format!(
-                    "Argument \"order\" has invalid value {{{}: {}}}",
-                    field_name, s
-                ))
+                QueryError::parse("invalid order direction")
             })?;
             Ok(Some(OrderCondition::new(field_name, direction)))
         }
@@ -152,11 +148,7 @@ pub(super) fn parse_order_condition(
                 ))
             })?;
             let direction = OrderDirection::parse(s).ok_or_else(|| {
-                // Match Go DefraDB error format
-                QueryError::parse(format!(
-                    "Argument \"order\" has invalid value {{{}: {}}}",
-                    field_name, s
-                ))
+                QueryError::parse("invalid order direction")
             })?;
             Ok(Some(OrderCondition::new(field_name, direction)))
         }

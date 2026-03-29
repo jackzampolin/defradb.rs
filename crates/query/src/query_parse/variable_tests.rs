@@ -320,7 +320,7 @@ fn test_variable_invalid_order_direction() {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("Argument \"order\" has invalid value"));
+        .contains("invalid order direction"));
 }
 
 // =========================================================================

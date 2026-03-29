@@ -61,41 +61,17 @@ impl TypeJoinMany {
         };
 
         // Build the subType structure based on order/limit presence
-        // Structure: selectTopNode > [orderNode >] [limitNode >] selectNode > scanNode
+        // Structure: selectTopNode > [limitNode >] [orderNode >] selectNode > scanNode
+        // Go wraps order around selectNode first, then limit around order.
         let has_order = self.child_order_by.is_some();
         let has_limit = self.child_limit.is_some() || self.child_offset > 0;
 
-        // Start with selectNode content, then wrap with limitNode, then orderNode
+        // Start with selectNode content, then wrap with orderNode, then limitNode
         let mut inner_content = select_node_content;
 
-        if has_limit {
-            // Wrap selectNode in limitNode
-            let mut limit_node = serde_json::Map::new();
-            // Go always includes limit field, even when null
-            limit_node.insert(
-                "limit".to_string(),
-                match self.child_limit {
-                    Some(limit) => serde_json::Value::Number(limit.into()),
-                    None => serde_json::Value::Null,
-                },
-            );
-            // Go always includes offset
-            limit_node.insert(
-                "offset".to_string(),
-                serde_json::Value::Number(self.child_offset.into()),
-            );
-            limit_node.insert("selectNode".to_string(), inner_content);
-            inner_content =
-                serde_json::json!({ "limitNode": serde_json::Value::Object(limit_node) });
-        } else {
-            // No limit, wrap selectNode directly
-            inner_content = serde_json::json!({ "selectNode": inner_content });
-        }
-
         if has_order {
-            // Wrap in orderNode
+            // Wrap selectNode in orderNode first (innermost wrapper)
             let mut order_node = serde_json::Map::new();
-            // Add order attributes from child_order_by
             if let Some(ref order_by) = self.child_order_by {
                 let orderings: Vec<JsonValue> = order_by
                     .conditions
@@ -112,14 +88,35 @@ impl TypeJoinMany {
                     .collect();
                 order_node.insert("orderings".to_string(), serde_json::json!(orderings));
             }
-            // Add the child (limitNode or selectNode)
+            order_node.insert("selectNode".to_string(), inner_content);
+            inner_content =
+                serde_json::json!({ "orderNode": serde_json::Value::Object(order_node) });
+        } else {
+            // No order, wrap selectNode directly
+            inner_content = serde_json::json!({ "selectNode": inner_content });
+        }
+
+        if has_limit {
+            // Wrap orderNode (or selectNode) in limitNode (outermost wrapper)
+            let mut limit_node = serde_json::Map::new();
+            limit_node.insert(
+                "limit".to_string(),
+                match self.child_limit {
+                    Some(limit) => serde_json::Value::Number(limit.into()),
+                    None => serde_json::Value::Null,
+                },
+            );
+            limit_node.insert(
+                "offset".to_string(),
+                serde_json::Value::Number(self.child_offset.into()),
+            );
             if let Some(inner_obj) = inner_content.as_object() {
                 for (key, value) in inner_obj {
-                    order_node.insert(key.clone(), value.clone());
+                    limit_node.insert(key.clone(), value.clone());
                 }
             }
             inner_content =
-                serde_json::json!({ "orderNode": serde_json::Value::Object(order_node) });
+                serde_json::json!({ "limitNode": serde_json::Value::Object(limit_node) });
         }
 
         // Wrap everything in selectTopNode
@@ -161,36 +158,47 @@ impl TypeJoinMany {
         };
 
         // Build the subType structure based on order/limit presence
-        // Structure: selectTopNode > [orderNode >] [limitNode >] selectNode > scanNode
+        // Structure: selectTopNode > [limitNode >] [orderNode >] selectNode > scanNode
+        // Go wraps order around selectNode first, then limit around order.
         let has_order = self.child_order_by.is_some();
         let has_limit = self.child_limit.is_some() || self.child_offset > 0;
 
-        // Start with selectNode content, then wrap with limitNode, then orderNode
+        // Start with selectNode content, then wrap with orderNode, then limitNode
         let mut inner_content = select_node_content;
 
-        if has_limit {
-            // Wrap selectNode in limitNode (debug mode: no attributes, just structure)
+        if has_order {
+            // Wrap selectNode in orderNode first (debug mode: no attributes, just structure)
+            let mut order_node_content = serde_json::Map::new();
+            order_node_content.insert(
+                "selectNode".to_string(),
+                serde_json::Value::Object({
+                    let mut m = serde_json::Map::new();
+                    if let Some(obj) = inner_content.as_object() {
+                        for (k, v) in obj {
+                            m.insert(k.clone(), v.clone());
+                        }
+                    }
+                    m
+                }),
+            );
             inner_content = serde_json::json!({
-                "limitNode": {
-                    "selectNode": inner_content
-                }
+                "orderNode": serde_json::Value::Object(order_node_content)
             });
         } else {
-            // No limit, wrap selectNode directly
+            // No order, wrap selectNode directly
             inner_content = serde_json::json!({ "selectNode": inner_content });
         }
 
-        if has_order {
-            // Wrap in orderNode (debug mode: no attributes, just structure)
-            let mut order_node_content = serde_json::Map::new();
-            // Add the child (limitNode or selectNode)
+        if has_limit {
+            // Wrap orderNode (or selectNode) in limitNode (debug mode: no attributes, just structure)
+            let mut limit_node_content = serde_json::Map::new();
             if let Some(inner_obj) = inner_content.as_object() {
                 for (key, value) in inner_obj {
-                    order_node_content.insert(key.clone(), value.clone());
+                    limit_node_content.insert(key.clone(), value.clone());
                 }
             }
             inner_content = serde_json::json!({
-                "orderNode": serde_json::Value::Object(order_node_content)
+                "limitNode": serde_json::Value::Object(limit_node_content)
             });
         }
 

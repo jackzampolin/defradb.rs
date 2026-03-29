@@ -23,7 +23,7 @@ use super::ordering::parse_order_value;
 use super::values::{
     parse_cid_value, parse_doc_ids_value, parse_optional_int_value, resolve_bool_value,
 };
-use super::variables::{extract_variable_defaults, merge_variables};
+use super::variables::{extract_variable_defaults, merge_variables, validate_required_variables};
 
 /// Type of explain output requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -342,6 +342,10 @@ pub fn parse_request_with_variables(
                         // Extract default values from variable definitions and merge with provided variables
                         let defaults = extract_variable_defaults(&q.variable_definitions)?;
                         let effective_variables = merge_variables(variables, &defaults);
+                        validate_required_variables(
+                            &q.variable_definitions,
+                            &effective_variables,
+                        )?;
                         // If variables was provided (even empty) or we have defaults, use the merged map
                         // Otherwise preserve None to get appropriate "no variables provided" error
                         let effective_vars_ref = if variables.is_some() || !defaults.is_empty() {
@@ -385,6 +389,10 @@ pub fn parse_request_with_variables(
                         // Extract default values from variable definitions and merge with provided variables
                         let defaults = extract_variable_defaults(&m.variable_definitions)?;
                         let effective_variables = merge_variables(variables, &defaults);
+                        validate_required_variables(
+                            &m.variable_definitions,
+                            &effective_variables,
+                        )?;
                         // If variables was provided (even empty) or we have defaults, use the merged map
                         // Otherwise preserve None to get appropriate "no variables provided" error
                         let effective_vars_ref = if variables.is_some() || !defaults.is_empty() {
@@ -406,6 +414,10 @@ pub fn parse_request_with_variables(
                         // Extract default values from variable definitions and merge with provided variables
                         let defaults = extract_variable_defaults(&s.variable_definitions)?;
                         let effective_variables = merge_variables(variables, &defaults);
+                        validate_required_variables(
+                            &s.variable_definitions,
+                            &effective_variables,
+                        )?;
                         let effective_vars_ref = if variables.is_some() || !defaults.is_empty() {
                             Some(&effective_variables)
                         } else {

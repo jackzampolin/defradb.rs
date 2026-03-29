@@ -251,12 +251,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             _ => unreachable!(),
         };
 
+        // For update mutations, Go uses phase1 metrics for both outer and inner selectNode
+        // (the pre-mutation scan), NOT the combined sum.
+        let inner_explain = if mutation.mutation_type == MutationType::Update {
+            if let Some((p1, _, _)) = &phase1 {
+                p1.clone()
+            } else {
+                combined_explain
+            }
+        } else {
+            combined_explain
+        };
+
         // Wrap in selectTopNode
-        let select_node_content = Self::ensure_select_node_wrapper(
-            combined_explain,
-            &metric_select,
-            ExplainType::Execute,
-        );
+        let select_node_content =
+            Self::ensure_select_node_wrapper(inner_explain, &metric_select, ExplainType::Execute);
 
         // Build mutation node
         let mut mutation_inner = serde_json::Map::new();
@@ -290,13 +299,40 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             node_kind: mutation_inner
         });
 
+        // Go wraps updateNode inside selectTopNode -> selectNode for execute explain too.
+        // The outer selectNode gets phase1 metrics (pre-mutation scan iterations/filterMatches).
+        let wrapped_node = if mutation.mutation_type == MutationType::Update {
+            if let Some((p1_explain, _, p1_execs)) = &phase1 {
+                let filter_matches = p1_explain
+                    .as_object()
+                    .and_then(|o| o.get("selectNode"))
+                    .and_then(|sn| sn.as_object())
+                    .and_then(|o| o.get("filterMatches"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                serde_json::json!({
+                    "selectTopNode": {
+                        "selectNode": {
+                            "filterMatches": filter_matches,
+                            "iterations": *p1_execs,
+                            node_kind: mutation_inner
+                        }
+                    }
+                })
+            } else {
+                mutation_node
+            }
+        } else {
+            mutation_node
+        };
+
         let doc_count = match (&phase1, &phase2) {
             (_, Some((_, count, _))) => *count,
             (Some((_, count, _)), None) => *count,
             _ => 0,
         };
 
-        Ok((mutation_node, doc_count, 1))
+        Ok((wrapped_node, doc_count, 1))
     }
 
     /// Recursively merge two execute explain JSON trees by summing numeric values.
@@ -486,6 +522,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             node_kind: JsonValue::Object(mutation_attrs)
         });
 
-        Ok(mutation_node)
+        // Go wraps updateNode inside selectTopNode -> selectNode because
+        // the update plan reads results through a selectNode pipeline.
+        // Other mutations (create, delete, upsert) are top-level operation nodes.
+        if mutation.mutation_type == MutationType::Update {
+            Ok(serde_json::json!({
+                "selectTopNode": {
+                    "selectNode": mutation_node
+                }
+            }))
+        } else {
+            Ok(mutation_node)
+        }
     }
 }

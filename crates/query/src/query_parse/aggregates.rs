@@ -321,6 +321,13 @@ pub(super) fn parse_top_level_aggregate(
 ) -> Result<Select> {
     let mut aggregate = parse_aggregate_field(field, agg_type, variables)?;
 
+    // Top-level aggregates must have at least one collection argument
+    if aggregate.targets.is_empty() {
+        return Err(QueryError::parse(
+            "aggregate must be provided with a property to aggregate",
+        ));
+    }
+
     // Top-level numeric aggregates require a field argument on each target.
     // This matches Go's GraphQL schema validation where collection args require
     // the "field" key (e.g., _avg(Users: {field: Age}) not _avg(Users: {})).
