@@ -252,8 +252,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         // Go's upsert replaces the scanNode with a non-explainable valuesNode
-        // during execution, so the scanNode is absent from its explain output.
-        if mutation.mutation_type == MutationType::Upsert {
+        // when the filter matches (update path). When no match is found (create path),
+        // the scanNode remains in the plan and appears in the explain output.
+        let upsert_matched = phase1
+            .as_ref()
+            .map(|(_, doc_count, _)| *doc_count > 0)
+            .unwrap_or(false);
+        if mutation.mutation_type == MutationType::Upsert && upsert_matched {
             Self::strip_scan_node(&mut combined_explain);
         }
 
