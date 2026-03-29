@@ -29,9 +29,10 @@ type MigrationContext = (bool, Option<HashMap<String, TargetedHistoryLink>>);
 /// migration support from LensedDocFetcher.
 pub struct LensedAutoCommitFetcher<S: Store> {
     db: Arc<DB<S>>,
-    /// Cache of migration contexts keyed by collection_id.
-    /// Populated on first access per collection; never invalidated since
-    /// schema migrations don't change during normal runtime.
+    /// Cache of migration contexts keyed by `"{collection_id}:{version_id}"`.
+    /// The version-aware key ensures the cache is automatically bypassed when
+    /// the active collection version changes (via set_active_collection_version
+    /// or patch_collection), avoiding stale `has_migrations=false` entries.
     migration_cache: Mutex<HashMap<String, MigrationContext>>,
 }
 
