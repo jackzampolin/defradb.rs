@@ -53,6 +53,16 @@ pub fn build_introspection_schema(
         .map(|c| (c.collection_id.clone(), c.name.clone()))
         .collect();
 
+    // Add version_id → name entries so that CID-based relation references
+    // (common in views with embedded schemas) can resolve to collection names.
+    for c in collections {
+        if !c.version_id.is_empty() {
+            id_to_name
+                .entry(c.version_id.clone())
+                .or_insert_with(|| c.name.clone());
+        }
+    }
+
     // Add relative_id → name entries for collections in collection sets.
     // This allows SelfRef fields (which use relative_id as their identifier)
     // to resolve to the correct collection name during introspection.

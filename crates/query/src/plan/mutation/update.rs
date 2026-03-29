@@ -407,24 +407,9 @@ impl PlanNode for UpdateNode {
                     // Convert to plan Doc
                     let plan_doc = self.update_result_to_doc(&result)?;
 
-                    // Re-filter: if a filter was used, the updated document must still
-                    // match the filter to be included in results (Go compatibility).
-                    // Use the full document with a collection-based mapping since the
-                    // filter may reference fields not in the mutation result mapping.
-                    if let Some(ref filter) = self.filter {
-                        if let Some(ref col) = self.collection {
-                            let mut filter_mapping = DocumentMapping::new();
-                            for field in &col.fields {
-                                let idx = filter_mapping.next_index();
-                                filter_mapping.add(idx, &field.name);
-                            }
-                            let full_doc = document_to_plan_doc(&result.document, &filter_mapping)?;
-                            if !filter.matches(full_doc.fields(), &filter_mapping)? {
-                                continue;
-                            }
-                        }
-                    }
-
+                    // Go does NOT re-filter after update: the filter is only used to
+                    // find documents to update, and all updated documents are returned
+                    // regardless of whether they still match the filter.
                     self.updated_docs.push(plan_doc);
                 } else {
                     // Track and log missing documents instead of silently skipping

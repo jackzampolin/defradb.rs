@@ -250,8 +250,8 @@ pub fn parse_mutation_name(name: &str) -> Result<(MutationType, String), String>
 
     let mutation_type = MutationType::from_prefix(prefix).ok_or_else(|| {
         format!(
-            "Invalid mutation prefix '{}': expected 'add', 'update', 'delete', or 'upsert'",
-            prefix
+            "Cannot query field \"{}\" on type \"Mutation\".",
+            name
         )
     })?;
 
