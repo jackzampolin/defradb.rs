@@ -37,13 +37,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<JsonValue> {
         let mut profile = NestedQueryProfile::default();
 
-        // Create a fetcher wrapper that can be shared across plan nodes
-        // We need to wrap the reference in an Arc-compatible struct
-        let fetcher_arc = FetcherWrapper::new(fetcher);
-
         // Build the plan using the Planner with fetcher support
         // Get all collections from provider for join planning
         let collections_map = self.collections_map().await?;
+
+        // Validate groupBy and field references before planning
+        let collection = self.get_collection(&select.collection_name).await?;
+        super::super::plan::validate_select(select, &collection)?;
+
+        // Create a fetcher wrapper that can be shared across plan nodes
+        // We need to wrap the reference in an Arc-compatible struct
+        let fetcher_arc = FetcherWrapper::new(fetcher);
         let collections: Vec<CollectionVersion> =
             collections_map.values().map(|c| (**c).clone()).collect();
 

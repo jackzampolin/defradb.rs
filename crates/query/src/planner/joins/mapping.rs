@@ -32,6 +32,10 @@ impl Planner {
     ) -> DocumentMapping {
         let mut mapping = DocumentMapping::new();
 
+        // _docID is ALWAYS at index 0 so filters referencing _docID (from docID/docIDs
+        // arguments on child relations) can evaluate against the document's ID.
+        mapping.add(0, "_docID");
+
         // Add ALL fields from the schema at their schema indices
         for (i, field) in collection.fields.iter().enumerate() {
             mapping.add(i, &field.name);
