@@ -206,7 +206,7 @@ fn test_rest_error_from_query_error() {
     let err = QueryError::unknown_field("foo");
     let rest_err: RestError = err.into();
     assert!(matches!(rest_err, RestError::InvalidInput(_)));
-    assert!(rest_err.to_string().contains("unknown field"));
+    assert!(rest_err.to_string().contains("foo"));
 
     let err = QueryError::TypeMismatch {
         expected: "String".into(),

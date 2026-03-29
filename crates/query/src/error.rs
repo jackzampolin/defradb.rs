@@ -103,7 +103,7 @@ pub enum QueryError {
     FilterFieldNotSelected { field: String, collection: String },
 
     /// Unknown field referenced in query
-    #[error("unknown field: {0}")]
+    #[error("{0}")]
     UnknownField(String),
 
     /// Collection not found
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(err.to_string(), "parse error: unexpected token");
 
         let err = QueryError::unknown_field("foo");
-        assert_eq!(err.to_string(), "unknown field: foo");
+        assert_eq!(err.to_string(), "foo");
 
         let err = QueryError::TypeMismatch {
             expected: "String".into(),

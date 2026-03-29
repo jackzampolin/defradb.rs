@@ -57,7 +57,7 @@ pub unsafe extern "C" fn add_view(
             rt,
             node_ptr,
             identity_did,
-            NodePermission::CollectionPatch
+            NodePermission::ViewAdd
         ));
         let query_str = try_ffi!(require_c_str(gql_query, "gql_query"));
         let sdl_str = try_ffi!(require_c_str(sdl, "sdl"));
@@ -189,19 +189,9 @@ pub unsafe extern "C" fn add_view(
 ///
 /// `options` must be null or a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn refresh_views(
-    node_ptr: usize,
-    identity_did: *const c_char,
-    options: *const c_char,
-) -> FfiResult {
+pub unsafe extern "C" fn refresh_views(node_ptr: usize, options: *const c_char) -> FfiResult {
     ffi_entry! {
         let rt = try_ffi!(get_rt());
-        try_ffi!(check_nac_for_node(
-            rt,
-            node_ptr,
-            identity_did,
-            NodePermission::ViewRefresh
-        ));
         let database = try_ffi!(get_node_database(node_ptr));
 
         let refresh_options =

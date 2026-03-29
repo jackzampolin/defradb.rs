@@ -123,7 +123,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 return QueryResponse {
                     data: None,
                     errors: vec![QueryResponseError {
-                        message: format!("parse error: {}", e),
+                        message: e.to_string(),
                         path: None,
                         locations: None,
                     }],
@@ -277,7 +277,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 return QueryResponse {
                     data: None,
                     errors: vec![QueryResponseError {
-                        message: format!("parse error: {}", e),
+                        message: e.to_string(),
                         path: None,
                         locations: None,
                     }],

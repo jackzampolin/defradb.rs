@@ -82,9 +82,7 @@ impl From<QueryError> for RestError {
                     field, collection
                 ))
             }
-            QueryError::UnknownField(name) => {
-                Self::InvalidInput(format!("unknown field: {}", name))
-            }
+            QueryError::UnknownField(name) => Self::InvalidInput(name.to_string()),
             QueryError::TypeMismatch { expected, actual } => Self::InvalidInput(format!(
                 "type mismatch: expected {}, got {}",
                 expected, actual
