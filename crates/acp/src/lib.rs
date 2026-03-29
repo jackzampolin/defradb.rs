@@ -21,8 +21,9 @@
 //! # DPI Rules (DefraDB Policy Interface)
 //!
 //! - Every resource MUST have `owner` relation
-//! - Every permission expression MUST start with `owner`
-//! - Only union (`+`) operations allowed: `owner + reader`
+//! - Every permission expression MUST include `owner` access
+//! - Difference (`-`) and tuple-to-userset (`->`) are allowed
+//! - Intersection (`&`) is not allowed in DPI-enforced policies
 
 mod auth_error;
 mod dac;
