@@ -470,9 +470,17 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
     async fn remove_collections(&self, collections: Vec<String>) -> Result<(), String> {
         if let Some(ref coordinator) = self.sync_coordinator {
-            for collection_id in collections {
+            for collection_name in collections {
+                let topic_id = if let Some(ref pusher) = self.doc_pusher {
+                    pusher
+                        .get_collection_id(&collection_name)
+                        .unwrap_or(collection_name)
+                } else {
+                    collection_name
+                };
+
                 coordinator
-                    .unsubscribe_collection(&collection_id)
+                    .unsubscribe_collection(&topic_id)
                     .await
                     .map_err(|error| error.to_string())?;
             }

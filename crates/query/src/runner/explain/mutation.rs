@@ -241,7 +241,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         // Combine metrics from phases
-        let combined_explain = match (&phase1, &phase2) {
+        let mut combined_explain = match (&phase1, &phase2) {
             (Some((p1, _, _)), Some((p2, _, _))) => {
                 // Two-pass (update/upsert): merge by summing all numeric values
                 Self::merge_execute_metrics(p1, p2)
@@ -250,6 +250,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             (None, Some((p2, _, _))) => p2.clone(),
             _ => unreachable!(),
         };
+
+        // Go's upsert replaces the scanNode with a non-explainable valuesNode
+        // during execution, so the scanNode is absent from its explain output.
+        if mutation.mutation_type == MutationType::Upsert {
+            Self::strip_scan_node(&mut combined_explain);
+        }
 
         // For update mutations, Go uses phase1 metrics for both outer and inner selectNode
         // (the pre-mutation scan), NOT the combined sum.
@@ -360,6 +366,19 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 serde_json::json!(sum)
             }
             _ => phase2.clone(),
+        }
+    }
+
+    /// Recursively remove `scanNode` from the explain JSON tree.
+    ///
+    /// Go's upsert replaces the scanNode with a non-explainable valuesNode
+    /// during execution, so the scanNode is absent from its explain output.
+    fn strip_scan_node(value: &mut JsonValue) {
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("scanNode");
+            for child in obj.values_mut() {
+                Self::strip_scan_node(child);
+            }
         }
     }
 
