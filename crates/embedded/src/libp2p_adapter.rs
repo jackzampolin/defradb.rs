@@ -470,12 +470,33 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
     async fn remove_collections(&self, collections: Vec<String>) -> Result<(), String> {
         if let Some(ref coordinator) = self.sync_coordinator {
-            for collection_id in collections {
+            for collection_name in collections {
+                let topic_id = if let Some(ref pusher) = self.doc_pusher {
+                    if let Some(collection_id) = pusher.get_collection_id(&collection_name) {
+                        collection_id
+                    } else {
+                        return Err(format!("collection '{}' not found", collection_name));
+                    }
+                } else {
+                    collection_name
+                };
+
                 coordinator
-                    .unsubscribe_collection(&collection_id)
+                    .unsubscribe_collection(&topic_id)
                     .await
                     .map_err(|error| error.to_string())?;
             }
+
+            if let Some(ref pusher) = self.doc_pusher {
+                let all_cols = coordinator
+                    .get_subscribed_collections()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if let Err(error) = pusher.persist_p2p_collections(&all_cols).await {
+                    tracing::warn!(error = %error, "failed to persist P2P collections after removal");
+                }
+            }
+
             Ok(())
         } else {
             Err("p2p collections functionality requires sync coordinator".to_string())
@@ -561,29 +582,17 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .as_ref()
             .ok_or_else(|| "no event bus for sync".to_string())?;
 
-        let topic_peers = self
-            .handle
-            .topic_peers(p2p::topics::DefraTopic::DocSync)
-            .await
-            .map_err(|error| format!("failed to get topic peers: {error}"))?;
         let connected_peers = self
             .handle
             .connected_peers()
             .await
             .map_err(|error| format!("failed to get connected peers: {error}"))?;
-
-        let mut all_peers: Vec<_> = topic_peers;
-        for peer in connected_peers {
-            if !all_peers.contains(&peer) {
-                all_peers.push(peer);
-            }
-        }
-        if all_peers.is_empty() {
+        if connected_peers.is_empty() {
             return Ok(());
         }
 
         let mut sub = event_bus.subscribe(&[events::EventName::MergeComplete]);
-        let total_expected = all_peers.len() * doc_ids.len();
+        let total_expected = connected_peers.len() * doc_ids.len();
         let mut total_received = 0;
         let overall_timeout = std::time::Duration::from_secs(30);
         let idle_timeout = std::time::Duration::from_secs(3);
@@ -601,7 +610,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 return Err(format!("failed to sign DocSync request: {error}"));
             }
 
-            for peer_id in &all_peers {
+            for peer_id in &connected_peers {
                 if let Err(error) = self
                     .handle
                     .send_doc_sync_request(*peer_id, request.clone())
