@@ -109,9 +109,7 @@ impl DeferredAcpMutations {
         resource_name: &str,
         doc_id: &str,
     ) -> AcpResult<Option<ProjectedDocRegistration>> {
-        let state = self
-            .lock_state()
-            .map_err(AcpError::Storage)?;
+        let state = self.lock_state().map_err(AcpError::Storage)?;
         Ok(state
             .projected_registrations
             .get(&Self::doc_key(policy_id, resource_name, doc_id))
@@ -217,9 +215,7 @@ impl DeferredAcpMutations {
 
         for hook in hooks {
             let description = hook.description;
-            let result = AssertUnwindSafe((hook.callback)())
-                .catch_unwind()
-                .await;
+            let result = AssertUnwindSafe((hook.callback)()).catch_unwind().await;
             match result {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => {
@@ -314,13 +310,18 @@ pub async fn is_doc_registered_with_overlay(
     doc_id: &str,
 ) -> AcpResult<bool> {
     if let Some(mutations) = current_deferred_acp_mutations() {
-        if let Some(projected) = mutations.projected_registration(policy_id, resource_name, doc_id)?
+        if let Some(projected) =
+            mutations.projected_registration(policy_id, resource_name, doc_id)?
         {
-            return Ok(matches!(projected, ProjectedDocRegistration::Registered { .. }));
+            return Ok(matches!(
+                projected,
+                ProjectedDocRegistration::Registered { .. }
+            ));
         }
     }
 
-    acp.is_doc_registered(policy_id, resource_name, doc_id).await
+    acp.is_doc_registered(policy_id, resource_name, doc_id)
+        .await
 }
 
 /// Check document access while honoring any ACP mutations buffered in the current txn.
@@ -333,7 +334,8 @@ pub async fn check_doc_access_with_overlay(
     doc_id: &str,
 ) -> AcpResult<bool> {
     if let Some(mutations) = current_deferred_acp_mutations() {
-        if let Some(projected) = mutations.projected_registration(policy_id, resource_name, doc_id)?
+        if let Some(projected) =
+            mutations.projected_registration(policy_id, resource_name, doc_id)?
         {
             return Ok(match projected {
                 ProjectedDocRegistration::Unregistered => true,
