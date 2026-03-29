@@ -12,8 +12,8 @@ use crate::query_parse::ParsedOperation;
 /// Validate that all collections referenced in a parsed operation exist.
 ///
 /// This runs after parsing but before execution, giving clear errors
-/// like "Cannot query collection 'Articel': collection not found"
-/// instead of opaque execution failures.
+/// like `Cannot query field "Articel" on type "Query".`
+/// matching Go's GraphQL schema validation error format.
 pub async fn validate_parsed_operation(
     op: &ParsedOperation,
     provider: &dyn CollectionProvider,
@@ -21,7 +21,7 @@ pub async fn validate_parsed_operation(
     match op {
         ParsedOperation::Query { selects, .. } => {
             for select in selects {
-                validate_select_collection(select, provider).await?;
+                validate_select_collection(select, provider, "Query").await?;
             }
         }
         ParsedOperation::Mutation { mutations, .. } => {
@@ -30,7 +30,7 @@ pub async fn validate_parsed_operation(
             }
         }
         ParsedOperation::Subscription { select, .. } => {
-            validate_select_collection(select, provider).await?;
+            validate_select_collection(select, provider, "Subscription").await?;
         }
         ParsedOperation::Introspection { .. } => {}
     }
@@ -41,9 +41,14 @@ pub async fn validate_parsed_operation(
 ///
 /// Skips internal collections (`_commits`) and nested relation selects
 /// (those are field names resolved later by the planner).
+///
+/// The `gql_type` parameter is the GraphQL root type name ("Query" or "Subscription")
+/// used to produce Go-compatible error messages like:
+///   `Cannot query field "Users" on type "Query".`
 async fn validate_select_collection(
     select: &Select,
     provider: &dyn CollectionProvider,
+    gql_type: &str,
 ) -> Result<()> {
     let name = &select.collection_name;
 
@@ -53,9 +58,13 @@ async fn validate_select_collection(
 
     if provider.get_collection(name).await?.is_none() {
         let suggestion = suggest_collection(name, provider).await;
-        let mut msg = format!("Cannot query collection '{}': collection not found", name);
+        // Produce Go-compatible GraphQL-style error message.
+        // Go removes deactivated collections from the GQL schema, so the GQL
+        // parser returns: Cannot query field "X" on type "Query".
+        // We match this format so Go integration tests pass via substring match.
+        let mut msg = format!("Cannot query field \"{}\" on type \"{}\".", name, gql_type);
         if let Some(suggested) = suggestion {
-            msg.push_str(&format!(". Did you mean '{}'?", suggested));
+            msg.push_str(&format!(" Did you mean '{}'?", suggested));
         }
         return Err(QueryError::collection_not_found(msg));
     }
@@ -64,6 +73,9 @@ async fn validate_select_collection(
 }
 
 /// Validate that the collection referenced by a Mutation exists.
+///
+/// Produces Go-compatible GraphQL-style error messages like:
+///   `Cannot query field "add_Users" on type "Mutation".`
 async fn validate_mutation_collection(
     mutation: &Mutation,
     provider: &dyn CollectionProvider,
@@ -72,15 +84,18 @@ async fn validate_mutation_collection(
 
     if provider.get_collection(name).await?.is_none() {
         let suggestion = suggest_collection(name, provider).await;
-        let op = match mutation.mutation_type {
-            crate::mapper::MutationType::Create => "create documents in",
-            crate::mapper::MutationType::Update => "update documents in",
-            crate::mapper::MutationType::Delete => "delete documents from",
-            crate::mapper::MutationType::Upsert => "upsert documents in",
+        // Produce Go-compatible error. Go's GQL schema uses prefixed field names
+        // for mutations (add_X, update_X, delete_X), so the error references
+        // the prefixed name on the Mutation type.
+        let gql_field = match mutation.mutation_type {
+            crate::mapper::MutationType::Create => format!("add_{}", name),
+            crate::mapper::MutationType::Update => format!("update_{}", name),
+            crate::mapper::MutationType::Delete => format!("delete_{}", name),
+            crate::mapper::MutationType::Upsert => format!("upsert_{}", name),
         };
-        let mut msg = format!("Cannot {} collection '{}': collection not found", op, name);
+        let mut msg = format!("Cannot query field \"{}\" on type \"Mutation\".", gql_field);
         if let Some(suggested) = suggestion {
-            msg.push_str(&format!(". Did you mean '{}'?", suggested));
+            msg.push_str(&format!(" Did you mean '{}'?", suggested));
         }
         return Err(QueryError::collection_not_found(msg));
     }
@@ -174,8 +189,14 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("Uzr"), "error should contain collection name");
         assert!(
-            msg.contains("collection not found"),
-            "error should mention not found"
+            msg.contains("Cannot query field"),
+            "error should use GQL-style message, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("on type \"Query\""),
+            "error should reference Query type, got: {}",
+            msg
         );
         assert!(
             msg.contains("Did you mean 'User'"),
@@ -216,8 +237,16 @@ mod tests {
         };
         let err = validate_parsed_operation(&op, &provider).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("create documents in"));
-        assert!(msg.contains("Usr"));
+        assert!(
+            msg.contains("add_Usr"),
+            "error should contain GQL mutation field name, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("on type \"Mutation\""),
+            "error should reference Mutation type, got: {}",
+            msg
+        );
         assert!(msg.contains("Did you mean 'User'"));
     }
 

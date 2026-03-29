@@ -275,8 +275,8 @@ pub fn parse_request_with_variables(
     variables: Option<&HashMap<String, JsonValue>>,
     operation_name: Option<&str>,
 ) -> Result<ParsedOperation> {
-    let doc: Document<'_, String> =
-        graphql_parser::parse_query(query).map_err(|e| QueryError::parse(e.to_string()))?;
+    let doc: Document<'_, String> = graphql_parser::parse_query(query)
+        .map_err(|e| QueryError::parse(format!("Syntax Error GraphQL: {}", e)))?;
 
     // Check for introspection queries (__schema, __type) before normal parsing
     // These are handled separately by executing against the GraphQL schema

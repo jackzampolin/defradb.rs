@@ -180,6 +180,9 @@ proptest! {
             CType::Unknown(_) => {
                 // No assertion - unknown types have undefined compatibility
             }
+            _ => {
+                // Future CType variants - no assertion
+            }
         }
     }
 

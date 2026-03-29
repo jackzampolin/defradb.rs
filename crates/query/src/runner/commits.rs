@@ -367,17 +367,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         doc_id: &str,
         version_select: &Select,
         target_cid: Option<&str>,
-        heads_only: bool,
     ) -> Result<JsonValue> {
         use crate::fetcher::CommitsQueryOptions;
 
         // For CID queries, traverse deeply from the specific CID block.
-        // For heads_only (mutation results), depth=1 returns only current heads.
-        // For regular queries, None means unlimited DAG traversal from heads.
+        // For all other cases (mutation results, regular queries), None means
+        // unlimited DAG traversal from heads - returning all versions.
         let depth = if target_cid.is_some() {
             Some(1000)
-        } else if heads_only {
-            Some(1)
         } else {
             None
         };

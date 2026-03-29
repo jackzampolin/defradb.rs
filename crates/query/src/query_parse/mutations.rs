@@ -57,7 +57,7 @@ pub(super) fn parse_field_to_mutation(
             (MutationType::Create, "input") => {
                 has_input_arg = true;
                 if !matches!(arg_value, Value::Null) {
-                    let input = parse_create_input(arg_value, variables)?;
+                    let input = parse_create_input(arg_value, variables, &collection_name)?;
                     mutation.create_input = input;
                 }
                 // null input is valid - leaves create_input empty for empty result
@@ -235,6 +235,7 @@ pub(super) fn parse_field_to_mutation(
 fn parse_create_input(
     value: &Value<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
+    collection_name: &str,
 ) -> Result<Vec<HashMap<String, JsonValue>>> {
     match value {
         Value::List(items) => {
@@ -244,6 +245,12 @@ fn parse_create_input(
                     Value::Object(obj) => {
                         let doc = parse_document_input(obj, variables)?;
                         docs.push(doc);
+                    }
+                    Value::Null => {
+                        return Err(QueryError::parse(format!(
+                            "Expected \"{}MutationInputArg!\", found null.",
+                            collection_name
+                        )))
                     }
                     _ => return Err(QueryError::parse("CREATE input items must be objects")),
                 }
@@ -277,6 +284,11 @@ fn parse_create_input(
                             let doc: HashMap<String, JsonValue> =
                                 obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                             docs.push(doc);
+                        } else if item.is_null() {
+                            return Err(QueryError::parse(format!(
+                                "Expected \"{}MutationInputArg!\", found null.",
+                                collection_name
+                            )));
                         } else {
                             return Err(QueryError::parse("CREATE input items must be objects"));
                         }
