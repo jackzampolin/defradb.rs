@@ -319,7 +319,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Validate collection has encrypted indexes (Go-compatible error)
         if collection.encrypted_indexes.is_empty() {
-            return Err(QueryError::internal("collection has no encrypted indexes"));
+            return Err(QueryError::execution(format!(
+                "Cannot query field \"encrypted_{}\" on type \"Query\".",
+                collection.name
+            )));
         }
 
         // Extract filtered field names and validate they have encrypted indexes
@@ -331,10 +334,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     .iter()
                     .any(|idx| idx.field_name == *field_name);
                 if !has_index {
-                    return Err(QueryError::internal(format!(
-                        "no encrypted index found for field: {}",
-                        field_name
-                    )));
+                    return Err(QueryError::execution(
+                        "Argument \"filter\" has invalid value".to_string(),
+                    ));
                 }
             }
         }
