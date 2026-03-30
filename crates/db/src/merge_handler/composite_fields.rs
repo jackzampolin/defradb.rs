@@ -4,6 +4,7 @@ use super::*;
 enum EffectiveLinkedDelta {
     Delta(CrdtDelta),
     Skip(MergeOutcome),
+    SkipField,
 }
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
@@ -97,6 +98,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         {
             EffectiveLinkedDelta::Delta(delta) => delta,
             EffectiveLinkedDelta::Skip(outcome) => return Ok(Some(outcome)),
+            EffectiveLinkedDelta::SkipField => return Ok(None),
         };
 
         match &effective_linked_delta {
@@ -181,7 +183,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         decrypted_payload.data = decrypted;
                         CrdtDelta::Lww(decrypted_payload)
                     }
-                    Err(_) => linked_block.delta.clone(),
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            "Cannot decrypt LWW field block, skipping field (canRead=false)"
+                        );
+                        return Ok(EffectiveLinkedDelta::SkipField);
+                    }
                 }
             }
             CrdtDelta::Counter(payload) if linked_block.encryption.is_some() => {
@@ -194,7 +202,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         decrypted_payload.data = decrypted;
                         CrdtDelta::Counter(decrypted_payload)
                     }
-                    Err(_) => linked_block.delta.clone(),
+                    Err(e) => {
+                        tracing::debug!(
+                            error = %e,
+                            "Cannot decrypt Counter field block, skipping field (canRead=false)"
+                        );
+                        return Ok(EffectiveLinkedDelta::SkipField);
+                    }
                 }
             }
             other => other.clone(),
