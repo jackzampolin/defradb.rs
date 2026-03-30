@@ -107,15 +107,6 @@ pub async fn import_database<S: Store>(
                 None => continue,
             };
 
-            // Capture the original doc ID before removing it. When the same
-            // content is imported twice, the content-addressed ID will match
-            // and we must detect the duplicate (Go errors on AddDocument).
-            let original_doc_id = doc_map
-                .get("_docIDNew")
-                .or_else(|| doc_map.get("_docID"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
             doc_map.remove("_docID");
             doc_map.remove("_docIDNew");
 
@@ -132,31 +123,6 @@ pub async fn import_database<S: Store>(
                 if let Some(value) = doc_map.remove(fk_name) {
                     if !value.is_null() {
                         self_ref_values.push((fk_name.clone(), value));
-                    }
-                }
-            }
-
-            // Check if a document with this ID already exists before creating.
-            // The add_ mutation uses blind create for content-addressed IDs,
-            // which skips the existence check. We must detect duplicates here
-            // to match Go's BasicImport behavior.
-            if let Some(ref doc_id) = original_doc_id {
-                let check_query = format!(
-                    "{{ {}(docID: \"{}\") {{ _docID }} }}",
-                    collection_name, doc_id
-                );
-                let check_request = query::QueryRequest::new(check_query);
-                let check_response = runner.execute(check_request).await;
-                if check_response.errors.is_empty() {
-                    // Check if any documents were returned
-                    let has_doc = check_response
-                        .data
-                        .get(collection_name)
-                        .and_then(|v| v.as_array())
-                        .map(|arr| !arr.is_empty())
-                        .unwrap_or(false);
-                    if has_doc {
-                        return Err("a document with the given ID already exists".to_string());
                     }
                 }
             }
