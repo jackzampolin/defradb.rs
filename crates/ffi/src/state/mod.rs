@@ -108,6 +108,9 @@ pub struct NodeState {
     /// Node identity DID (set when signing is enabled).
     /// Used as fallback identity for signing blocks when no explicit identity is provided.
     pub node_identity_did: Option<String>,
+    /// Whether block signing is enabled on this node.
+    /// When true, anonymous requests still sign with node identity (matching Go).
+    pub signing_enabled: bool,
     /// SourceHub ACP (optional - only set when using SourceHub for document ACP).
     /// Used by add_dac_policy to route policy creation through SourceHub transactions.
     pub sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,

@@ -247,21 +247,38 @@ pub fn find_remote_signer_did() -> Option<String> {
 
 /// Resolve signing config for a request identity.
 ///
-/// Returns signing config only when the caller provides an explicit identity DID
-/// that has a registered signing config. Anonymous requests (no identity) produce
-/// unsigned blocks, matching Go DefraDB behavior.
+/// When an explicit identity DID is provided, uses that identity's signing config
+/// (falling back to node identity for JWT-authenticated users without local keys).
 ///
-/// If the explicit DID has no registered signing config, falls back to the node
-/// identity (needed when a user authenticates via JWT but has no local private key).
+/// When no identity is provided (anonymous request):
+/// - If signing is enabled on the node, uses the node identity to sign
+///   (matching Go's `!signingDisabled` check)
+/// - Otherwise, produces unsigned blocks
 pub fn resolve_signing_config(
     identity_did: Option<&str>,
     node_identity_did: Option<&str>,
+) -> Option<SigningConfig> {
+    resolve_signing_config_with_flag(identity_did, node_identity_did, false)
+}
+
+/// Like `resolve_signing_config` but with explicit signing-enabled flag.
+/// When `signing_enabled` is true, anonymous requests still sign with the node identity.
+pub fn resolve_signing_config_with_flag(
+    identity_did: Option<&str>,
+    node_identity_did: Option<&str>,
+    signing_enabled: bool,
 ) -> Option<SigningConfig> {
     match identity_did {
         Some(did) if !did.is_empty() => {
             get_identity(did).or_else(|| node_identity_did.and_then(get_identity))
         }
-        _ => None,
+        _ => {
+            if signing_enabled {
+                node_identity_did.and_then(get_identity)
+            } else {
+                None
+            }
+        }
     }
 }
 

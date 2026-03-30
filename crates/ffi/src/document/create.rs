@@ -90,11 +90,14 @@ pub unsafe extern "C" fn collection_create(
         // Set up thread-local signing config and batch session key (same as exec_request)
         let identity_str = c_str_to_string(identity_did);
         let batch_session = c_str_to_string(batch_session_id);
-        let node_did = NODES
-            .get(node_ptr, |state| state.node_identity_did.clone())
-            .flatten();
-        let signing =
-            defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
+        let (node_did, signing_enabled) = NODES
+            .get(node_ptr, |state| (state.node_identity_did.clone(), state.signing_enabled))
+            .unwrap_or((None, false));
+        let signing = defra_core::signing::resolve_signing_config_with_flag(
+            identity_str.as_deref(),
+            node_did.as_deref(),
+            signing_enabled,
+        );
         let session_key = batch_session.or_else(|| signing.as_ref().map(|s| s.public_key_hex.clone()));
         defra_core::batch_signing::set_batch_session_key(session_key);
         defra_core::signing::set_signing_config(signing);
