@@ -11,7 +11,7 @@ mod set_migration;
 use std::sync::Arc;
 
 use lens::{LensConfig, TransformId, TransformStore};
-use storage::corekv::{IterOptions, Key, Store};
+use storage::corekv::{IterOptions, Store};
 use storage::keys::systemstore::LensConfigKey;
 
 use crate::error::{Error, Result};
@@ -67,8 +67,6 @@ impl<S: Store> DB<S> {
             defra_core::build_lens_ipld_blocks(&wasm_bytes, first_lens.inverse, &arguments)
                 .map_err(|e| Error::Lens(format!("failed to build lens IPLD blocks: {}", e)))?;
 
-        let transform_id = TransformId::new(config_cid.to_string());
-
         let txn = self.new_txn(false).await?;
         {
             let blockstore = txn.blockstore()?;
@@ -79,18 +77,9 @@ impl<S: Store> DB<S> {
                     .map_err(Error::Storage)?;
             }
         }
-        {
-            let systemstore = txn.systemstore()?;
-            let lens_key = LensConfigKey::new(transform_id.to_string());
-            let lens_data = serde_json::to_vec(&config).map_err(|e| {
-                Error::Serialization(format!("failed to serialize lens config: {}", e))
-            })?;
-            systemstore
-                .set(&lens_key.bytes(), &lens_data)
-                .await
-                .map_err(Error::Storage)?;
-        }
         txn.commit().await?;
+
+        let transform_id = TransformId::new(config_cid.to_string());
 
         self.lens_store
             .add_with_id(transform_id.clone(), config)
