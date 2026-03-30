@@ -3688,6 +3688,7 @@ dependencies = [
  "identity",
  "p2p",
  "query",
+ "reqwest 0.12.28",
  "schema",
  "serde",
  "serde_json",
