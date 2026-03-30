@@ -245,10 +245,14 @@ pub fn find_remote_signer_did() -> Option<String> {
     })
 }
 
-/// Resolve signing config for a request identity with node-identity fallback.
+/// Resolve signing config for a request identity.
 ///
-/// - If `identity_did` is `Some(non-empty)`, look up that DID's signing config.
-/// - Otherwise, fall back to `node_identity_did` (the node's default identity).
+/// Returns signing config only when the caller provides an explicit identity DID
+/// that has a registered signing config. Anonymous requests (no identity) produce
+/// unsigned blocks, matching Go DefraDB behavior.
+///
+/// If the explicit DID has no registered signing config, falls back to the node
+/// identity (needed when a user authenticates via JWT but has no local private key).
 pub fn resolve_signing_config(
     identity_did: Option<&str>,
     node_identity_did: Option<&str>,
@@ -257,7 +261,7 @@ pub fn resolve_signing_config(
         Some(did) if !did.is_empty() => {
             get_identity(did).or_else(|| node_identity_did.and_then(get_identity))
         }
-        _ => node_identity_did.and_then(get_identity),
+        _ => None,
     }
 }
 
