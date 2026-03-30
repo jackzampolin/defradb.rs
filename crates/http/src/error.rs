@@ -88,7 +88,6 @@ impl From<RestError> for HttpError {
             // Use Unauthorized (401) for permission denied to match Go DefraDB behavior
             RestError::PermissionDenied(msg) => HttpError::Unauthorized(msg),
             RestError::Internal(msg) => HttpError::Internal(msg),
-            _ => HttpError::Internal("unexpected error variant".to_string()),
         }
     }
 }

@@ -106,7 +106,6 @@ impl<S: Store> DB<S> {
         {
             let systemstore = txn.systemstore()?;
             let prefix = LensConfigKey::prefix();
-            let prefix_str = String::from_utf8_lossy(&prefix).into_owned();
             let opts = IterOptions::new().with_prefix(prefix);
             let mut iter = systemstore.iterator(opts).await.map_err(Error::Storage)?;
 

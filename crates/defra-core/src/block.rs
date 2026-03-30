@@ -78,7 +78,7 @@ impl Block {
     pub fn new(delta: CrdtDelta, heads: Vec<Cid>, links: Vec<DAGLink>) -> Self {
         // Sort and normalize heads
         let mut sorted_heads = heads;
-        sorted_heads.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+        sorted_heads.sort_by_key(|a| a.to_string());
         let heads = if sorted_heads.is_empty() {
             None
         } else {
