@@ -662,6 +662,203 @@ fn test_secondary_relation_id_field_detection() {
     );
 }
 
+// ========================================================================
+// Index + Relation Filter Tests (Go parity: typeIndexJoin for FK filters)
+// ========================================================================
+
+/// User collection for index-relation tests (one-to-many: User has [Device])
+fn make_user_with_name_index() -> CollectionVersion {
+    CollectionVersion::new(
+        "User",
+        "v1",
+        "coll-user",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            // One-to-many relation to Device (array)
+            FieldDescription::new("3", "devices", FieldKind::relation("Device", true))
+                .with_relation_name("owner_devices"),
+        ],
+    )
+    .with_index(IndexDescription {
+        id: 1,
+        name: "User_name_ASC".to_string(),
+        unique: false,
+        fields: vec![IndexedFieldDescription {
+            name: "name".to_string(),
+            descending: false,
+        }],
+    })
+}
+
+/// Device collection: `owner: User @index` creates index on `_ownerID`
+fn make_device_with_owner_index() -> CollectionVersion {
+    CollectionVersion::new(
+        "Device",
+        "v1",
+        "coll-device",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "model", FieldKind::string()),
+            FieldDescription::new("3", "manufacturer", FieldKind::string()),
+            // Many-to-one relation to User
+            FieldDescription::new("4", "owner", FieldKind::relation("User", false))
+                .with_relation_name("owner_devices")
+                .as_primary(),
+            // Auto-generated FK field
+            FieldDescription::new("5", "_ownerID", FieldKind::doc_id())
+                .with_relation_name("owner_devices")
+                .as_primary(),
+        ],
+    )
+    // `owner: User @index` creates a non-unique index on _ownerID
+    .with_index(IndexDescription {
+        id: 1,
+        name: "Device__ownerID_ASC".to_string(),
+        unique: false,
+        fields: vec![IndexedFieldDescription {
+            name: "_ownerID".to_string(),
+            descending: false,
+        }],
+    })
+}
+
+#[tokio::test]
+async fn test_plan_fk_filter_eq_null_uses_index() {
+    // Go: TestQueryWithIndexOnOneToMany_IfIndexedRelationIsNil_EqNilFilterShouldUseIndex
+    // Filter: {_ownerID: {_eq: null}} — direct FK filter should use _ownerID index
+    let planner = Planner::new(vec![
+        make_user_with_name_index(),
+        make_device_with_owner_index(),
+    ]);
+
+    let filter = Filter::from_conditions(map([(
+        "_ownerID".to_string(),
+        serde_json::json!({"_eq": null}),
+    )]));
+
+    let select = Select::new("Device")
+        .with_field(Field::new("model"))
+        .with_filter(filter);
+
+    let result = planner.plan_with_index_info(&select).unwrap();
+    assert!(
+        result.uses_index(),
+        "Filter on _ownerID should use index on _ownerID"
+    );
+    assert_eq!(
+        result.index_scan.as_ref().unwrap().index_name,
+        "Device__ownerID_ASC"
+    );
+}
+
+#[tokio::test]
+async fn test_plan_fk_filter_ne_null_uses_index() {
+    // Go: TestQueryWithIndexOnOneToMany_IfIndexedRelationIsNil_NeNilFilterShouldUseIndex
+    // Filter: {_ownerID: {_neq: null}} — should use full index scan
+    let planner = Planner::new(vec![
+        make_user_with_name_index(),
+        make_device_with_owner_index(),
+    ]);
+
+    let filter = Filter::from_conditions(map([(
+        "_ownerID".to_string(),
+        serde_json::json!({"_ne": null}),
+    )]));
+
+    let select = Select::new("Device")
+        .with_field(Field::new("model"))
+        .with_filter(filter);
+
+    let result = planner.plan_with_index_info(&select).unwrap();
+    assert!(
+        result.uses_index(),
+        "Filter on _ownerID with _ne should use index"
+    );
+    assert_eq!(
+        result.index_scan.as_ref().unwrap().index_name,
+        "Device__ownerID_ASC"
+    );
+}
+
+#[tokio::test]
+async fn test_plan_relation_filter_still_uses_fk_index() {
+    // Go: TestQueryWithIndexOnManyToOne_IfFilterOnIndexedRelation_ShouldFilterWithExplain
+    // Filter: {owner: {name: {_eq: "Keenan"}}} — relation filter.
+    // Even with a relation filter, the FK index on _ownerID should still be usable.
+    // Go produces typeIndexJoin where root uses _ownerID index.
+    // The `has_relation_filter` guard must not block FK-based index selection.
+    let planner = Planner::new(vec![
+        make_user_with_name_index(),
+        make_device_with_owner_index(),
+    ]);
+
+    let filter = Filter::from_conditions(map([(
+        "owner".to_string(),
+        serde_json::json!({"name": {"_eq": "Keenan"}}),
+    )]));
+
+    let select = Select::new("Device")
+        .with_field(Field::new("model"))
+        .with_filter(filter);
+
+    let result = planner.plan_with_index_info(&select).unwrap();
+
+    // The plan should still produce a typeIndexJoin (join node)
+    // even though we have a relation filter
+    let plan = result.plan;
+    assert_eq!(plan.kind(), "selectNode");
+    let source = plan.source().unwrap();
+    assert_eq!(
+        source.kind(),
+        "typeIndexJoin",
+        "Relation filter should produce a typeIndexJoin node"
+    );
+}
+
+#[tokio::test]
+async fn test_plan_mixed_scalar_and_relation_filter_uses_index() {
+    // Go: TestQueryWithIndex_WithMultipleScalarsAndRelationFilter_ShouldApplyAllAsAnd
+    // Filter has both scalar (_ownerID or model) and relation (owner: {...}) conditions.
+    // Scalar conditions on indexed fields should still use the index.
+    // Add a model index for this test
+    let mut device = make_device_with_owner_index();
+    device.indexes.push(IndexDescription {
+        id: 2,
+        name: "Device_model_ASC".to_string(),
+        unique: false,
+        fields: vec![IndexedFieldDescription {
+            name: "model".to_string(),
+            descending: false,
+        }],
+    });
+
+    let planner = Planner::new(vec![make_user_with_name_index(), device]);
+
+    let filter = Filter::from_conditions(map([
+        ("model".to_string(), serde_json::json!({"_eq": "iPhone"})),
+        (
+            "owner".to_string(),
+            serde_json::json!({"name": {"_eq": "Keenan"}}),
+        ),
+    ]));
+
+    let select = Select::new("Device")
+        .with_field(Field::new("model"))
+        .with_filter(filter);
+
+    let result = planner.plan_with_index_info(&select).unwrap();
+
+    // Should use an index for the scalar part (model)
+    // even though there's also a relation filter
+    assert!(
+        result.uses_index(),
+        "Mixed scalar+relation filter should use index for scalar part"
+    );
+}
+
+// === Secondary Relation ID Field Tests ===
+
 #[tokio::test]
 async fn test_plan_secondary_relation_id_field() {
     // Test that selecting _authorID on Book (secondary side) creates a TypeJoin

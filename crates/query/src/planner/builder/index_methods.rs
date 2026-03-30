@@ -29,51 +29,40 @@ impl super::Planner {
         let limit = select.limit.as_ref().and_then(|l| l.limit);
         let offset = select.limit.as_ref().map(|l| l.offset).unwrap_or(0);
 
-        // Check if filter has any true relation field conditions (using schema info).
-        // When relation filters are present, Go skips parent filter-based index selection
-        // because the relation join already narrows the parent set.
-        // This check uses schema field_kind.is_relation() to avoid confusing JSON field
-        // access ({custom: {title: ...}}) with relation traversal ({devices: {model: ...}}).
-        let has_relation_filter = select.filter.as_ref().is_some_and(|f| {
-            f.conditions().keys().any(|field_name| {
-                collection
-                    .field_by_name(field_name)
-                    .is_some_and(|field| field.kind.is_relation())
-            })
-        });
-
-        // Try filter-based index selection first (skip when relation filters are present)
-        if !has_relation_filter {
-            if let Some(filter) = select.filter.as_ref() {
-                if let Some(best_index) = select_best_index(filter, &collection.indexes) {
-                    if let Some(params) = filter_to_index_scan(
-                        filter,
-                        best_index,
-                        select.order_by.as_ref(),
-                        &collection.fields,
-                        limit,
-                        offset,
-                    ) {
-                        // Check if this index also provides ordering
-                        let provides_ordering = select
-                            .order_by
-                            .as_ref()
-                            .map(|o| can_be_ordered_by_index(o, best_index).0)
-                            .unwrap_or(false);
-                        return Some((params, provides_ordering));
-                    }
+        // Try filter-based index selection.
+        // Relation fields in the filter (e.g., `owner: {name: {_eq: "X"}}`) are
+        // handled by TypeJoin nodes, but scalar/FK field conditions in the same
+        // filter can still use indexes. `extract_field_conditions` only extracts
+        // leaf-level conditions with operator values, so relation sub-objects
+        // naturally map to their field names (not index field names) and won't
+        // match any index. This means `select_best_index` safely ignores them.
+        if let Some(filter) = select.filter.as_ref() {
+            if let Some(best_index) = select_best_index(filter, &collection.indexes) {
+                if let Some(params) = filter_to_index_scan(
+                    filter,
+                    best_index,
+                    select.order_by.as_ref(),
+                    &collection.fields,
+                    limit,
+                    offset,
+                ) {
+                    // Check if this index also provides ordering
+                    let provides_ordering = select
+                        .order_by
+                        .as_ref()
+                        .map(|o| can_be_ordered_by_index(o, best_index).0)
+                        .unwrap_or(false);
+                    return Some((params, provides_ordering));
                 }
             }
         }
 
         // Try OR filter index selection (e.g., {_or: [{age: {_eq: 55}}, {age: {_eq: 19}}]})
-        if !has_relation_filter {
-            if let Some(filter) = select.filter.as_ref() {
-                if let Some(params) =
-                    or_filter_to_index_scan(filter, &collection.indexes, &collection.fields)
-                {
-                    return Some((params, false));
-                }
+        if let Some(filter) = select.filter.as_ref() {
+            if let Some(params) =
+                or_filter_to_index_scan(filter, &collection.indexes, &collection.fields)
+            {
+                return Some((params, false));
             }
         }
 

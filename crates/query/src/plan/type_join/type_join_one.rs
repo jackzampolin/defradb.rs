@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use document::NormalValue;
 use serde_json::Value as JsonValue;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -85,6 +85,11 @@ pub struct TypeJoinOne {
     parent_scan_mapping: Option<DocumentMapping>,
     /// For InvertedIndex mode: queue of parent docs to yield
     docs_to_yield: Vec<Doc>,
+    /// Parent docIDs already yielded during child-driven scan (InvertedIndex/OrderedInvertedPrimary).
+    /// Used to identify orphan parents (those without any child relation).
+    yielded_parent_ids: HashSet<String>,
+    /// Whether the child-driven scan is exhausted and we're now yielding orphans.
+    orphan_phase: bool,
 }
 
 /// A filter condition on a relation field.
@@ -151,6 +156,8 @@ impl TypeJoinOne {
             parent_collection: None,
             parent_scan_mapping: None,
             docs_to_yield: Vec::new(),
+            yielded_parent_ids: HashSet::new(),
+            orphan_phase: false,
         }
     }
 
@@ -433,6 +440,9 @@ impl TypeJoinOne {
                     }
                 }
 
+                if let Some(pid) = parent_doc.doc_id() {
+                    self.yielded_parent_ids.insert(pid.to_string());
+                }
                 self.merge_child(&mut parent_doc, Some(child_doc.deep_clone()));
                 self.docs_to_yield.push(parent_doc);
             }
@@ -443,7 +453,8 @@ impl TypeJoinOne {
             }
         }
 
-        Ok(false)
+        // Child-driven scan exhausted: yield orphan parents (no matching child)
+        self.next_orphan().await
     }
 
     /// Execute one step of the ordered inverted primary join.
@@ -505,7 +516,42 @@ impl TypeJoinOne {
                 }
             }
 
+            if let Some(pid) = parent_doc.doc_id() {
+                self.yielded_parent_ids.insert(pid.to_string());
+            }
             self.merge_child(&mut parent_doc, Some(child_doc));
+            self.current_doc = parent_doc;
+            return Ok(true);
+        }
+
+        // Child-driven scan exhausted: yield orphan parents (no matching child)
+        self.next_orphan().await
+    }
+
+    /// Yield orphan parents (those without any child relation) after child-driven scan.
+    ///
+    /// Initializes the parent plan, iterates all parents, and yields those whose
+    /// docID was not seen during the child-driven phase. Each orphan gets a null
+    /// child merged in.
+    async fn next_orphan(&mut self) -> Result<bool> {
+        if !self.orphan_phase {
+            self.orphan_phase = true;
+            self.parent_plan.init().await?;
+            self.parent_plan.start().await?;
+        }
+
+        while self.parent_plan.next().await? {
+            let mut parent_doc = self.parent_plan.value().deep_clone();
+            let parent_id = match parent_doc.doc_id() {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+
+            if self.yielded_parent_ids.contains(&parent_id) {
+                continue;
+            }
+
+            self.merge_child(&mut parent_doc, None);
             self.current_doc = parent_doc;
             return Ok(true);
         }
@@ -622,6 +668,8 @@ impl PlanNode for TypeJoinOne {
         self.child_exec_info = ExecInfo::default();
         self.go_child_metrics.reset();
         self.docs_to_yield.clear();
+        self.yielded_parent_ids.clear();
+        self.orphan_phase = false;
 
         if matches!(
             self.direction,
@@ -740,14 +788,20 @@ impl PlanNode for TypeJoinOne {
             self.direction,
             JoinDirection::InvertedIndex { .. } | JoinDirection::OrderedInvertedPrimary { .. }
         ) {
-            // Inverted/ordered modes: child_plan is still open, parent_plan was never used
+            // Inverted/ordered modes: child_plan is still open
             self.child_plan.close().await?;
+            // If orphan phase was entered, parent_plan was also initialized
+            if self.orphan_phase {
+                self.parent_plan.close().await?;
+            }
         } else {
             self.parent_plan.close().await?;
             // child_plan was already closed in build_child_cache()
         }
         self.child_cache.clear();
         self.docs_to_yield.clear();
+        self.yielded_parent_ids.clear();
+        self.orphan_phase = false;
         self.initialized = false;
         Ok(())
     }
@@ -911,47 +965,34 @@ impl PlanNode for TypeJoinOne {
             // root = parent plan's execute explain
             inner_obj.insert("root".to_string(), self.parent_plan.explain_execute());
 
-            // subType = child plan's execute explain wrapped in selectTopNode > selectNode.
-            // Go re-scans the child per parent, so metrics accumulate. We use
-            // go_child_metrics (which simulates this accumulation) to override the
-            // child scanNode metrics, matching Go's explain output.
+            // subType = child plan's execute explain wrapped in selectTopNode > selectNode
             let child_execute = self.child_plan.explain_execute();
             let child_is_select = self.child_plan.kind() == "selectNode";
 
             let select_node_content = if child_is_select {
                 // Extract inner content to avoid double wrapping (selectNode > selectNode)
-                let mut content = child_execute
+                child_execute
                     .as_object()
                     .and_then(|o| o.get("selectNode"))
                     .cloned()
-                    .unwrap_or(child_execute);
-                // Override scanNode metrics with accumulated go_child_metrics
-                if let Some(obj) = content.as_object_mut() {
-                    obj.insert("scanNode".to_string(), self.go_child_metrics.to_json());
-                }
-                content
+                    .unwrap_or(child_execute)
             } else {
                 // Child is not a SelectNode (e.g., ScanNode or nested TypeJoinOne).
-                // Synthesize selectNode metrics from go_child_metrics which accumulate
-                // across all parent scans, matching Go's per-parent re-scan behavior.
+                // Synthesize selectNode metrics from captured child exec info,
+                // matching Go's selectNode wrapper which tracks its own iterations.
                 let mut select_inner = serde_json::Map::new();
                 select_inner.insert(
                     "iterations".to_string(),
-                    serde_json::json!(self.go_child_metrics.iterations),
+                    serde_json::json!(self.child_exec_info.iterations),
                 );
                 select_inner.insert(
                     "filterMatches".to_string(),
                     serde_json::json!(self.child_exec_info.docs_fetched),
                 );
-                // Merge child plan's explain (e.g., nested typeIndexJoin or scanNode)
                 if let Some(child_obj) = child_execute.as_object() {
                     for (key, value) in child_obj {
                         select_inner.insert(key.clone(), value.clone());
                     }
-                }
-                // Override scanNode metrics with accumulated go_child_metrics if present
-                if select_inner.contains_key("scanNode") {
-                    select_inner.insert("scanNode".to_string(), self.go_child_metrics.to_json());
                 }
                 serde_json::Value::Object(select_inner)
             };
