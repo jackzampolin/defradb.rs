@@ -5,9 +5,6 @@
 //! - Listing lens transforms
 
 use std::ffi::c_char;
-use std::sync::Arc;
-
-use blockstore::{Blockstore, DefraBlockstore};
 
 use acp::nac::NodePermission;
 
@@ -18,38 +15,7 @@ use crate::state::NODES;
 use crate::types::FfiResult;
 use crate::{ffi_async, try_ffi, ERR_INVALID_NODE_HANDLE};
 
-use lens::{LensConfig, LensModule, TransformId};
-
-/// Read WASM bytes from a LensModule (from path or embedded bytes).
-fn read_wasm_bytes(module: &LensModule) -> Result<Vec<u8>, String> {
-    if let Some(ref bytes) = module.module {
-        return Ok(bytes.clone());
-    }
-    if let Some(ref path_str) = module.path {
-        let clean_path = path_str.strip_prefix("file://").unwrap_or(path_str);
-        std::fs::read(clean_path)
-            .map_err(|e| format!("failed to read WASM file {}: {}", clean_path, e))
-    } else {
-        Err("lens module has neither path nor module bytes".to_string())
-    }
-}
-
-/// Extract arguments from a LensModule as key-value pairs for IPLD blocks.
-fn extract_arguments(module: &LensModule) -> Vec<(String, String)> {
-    match &module.arguments {
-        Some(serde_json::Value::Object(map)) => map
-            .iter()
-            .map(|(k, v)| {
-                let val = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                (k.clone(), val)
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
-}
+use lens::{LensConfig, LensModule};
 
 /// Add a lens transform to the database.
 ///
@@ -113,14 +79,10 @@ pub unsafe extern "C" fn lens_add(
         }
 
         // No version IDs — register as standalone lens module(s).
-        // Get both the lens store and the database store for blockstore access.
-        let (lens_store, db_store) = match NODES.get(node_ptr, |state| {
-            (
-                state.database.lens_store().clone(),
-                state.database.store().clone(),
-            )
-        }) {
-            Some(pair) => pair,
+        // Use the database's add_lens method which handles IPLD block storage,
+        // systemstore persistence (for restart survival), and lens store registration.
+        let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+            Some(db) => db,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
@@ -146,43 +108,15 @@ pub unsafe extern "C" fn lens_add(
                         .map_err(|e| format!("failed to parse lens config: {}", e))?]
                 };
 
-            // Create a blockstore for storing IPLD blocks (non-P2P mode, no merge tracking)
-            let blockstore = Arc::new(DefraBlockstore::new(db_store, false));
-
             let mut all_ids = Vec::new();
             for lens_module in &modules {
-                // Read WASM bytes from file or embedded bytes
-                let wasm_bytes = read_wasm_bytes(lens_module)?;
-                let arguments = extract_arguments(lens_module);
-
-                // Build the 3-level IPLD block hierarchy matching Go's format
-                let (config_cid, blocks) =
-                    defra_core::build_lens_ipld_blocks(&wasm_bytes, lens_module.inverse, &arguments)?;
-
-                // Store all blocks in the blockstore for Bitswap availability
-                for (cid, data) in &blocks {
-                    tracing::debug!(cid = %cid, bytes = data.len(), "storing lens block");
-                    blockstore
-                        .put(cid, data)
-                        .await
-                        .map_err(|e| format!("failed to store lens block: {}", e))?;
-                    // Verify the block was stored
-                    let has = blockstore
-                        .has(cid)
-                        .await
-                        .map_err(|e| format!("failed to check block: {}", e))?;
-                    tracing::debug!(cid = %cid, stored = has, "lens block storage verified");
-                }
-
-                // Register the transform under the real IPLD CID
                 let config = LensConfig::new("", "", lens_module.clone());
-                let transform_id = TransformId::new(config_cid.to_string());
-                lens_store
-                    .add_with_id(transform_id, config)
+                let transform_id = database
+                    .add_lens(config)
                     .await
                     .map_err(|e| format!("failed to add lens: {}", e))?;
 
-                all_ids.push(config_cid.to_string());
+                all_ids.push(transform_id.to_string());
             }
 
             // Return comma-joined IDs so chained transforms are preserved
