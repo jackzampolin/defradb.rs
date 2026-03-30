@@ -25,7 +25,7 @@
 
 mod doc_id;
 mod document;
-mod encoding;
+pub mod encoding;
 mod encoding_cbor;
 mod error;
 mod field;

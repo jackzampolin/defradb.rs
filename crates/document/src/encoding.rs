@@ -33,7 +33,7 @@ pub fn format_time_rfc3339_nano(t: &DateTime<FixedOffset>) -> String {
 /// Trim trailing zeros from the fractional seconds portion of an RFC3339 string.
 /// "2024-01-01T00:00:00.123000000Z" -> "2024-01-01T00:00:00.123Z"
 /// "2024-01-01T00:00:00.100000000Z" -> "2024-01-01T00:00:00.1Z"
-fn trim_rfc3339_trailing_zeros(s: &str) -> String {
+pub fn trim_rfc3339_trailing_zeros(s: &str) -> String {
     // Find the '.' that starts fractional seconds
     if let Some(dot_pos) = s.rfind('.') {
         // Find where the fractional digits end (before timezone Z or +/-)

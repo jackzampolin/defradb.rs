@@ -5959,6 +5959,7 @@ dependencies = [
  "crypto",
  "ctor",
  "defra-harness",
+ "document",
  "futures",
  "hex",
  "hub-harness",

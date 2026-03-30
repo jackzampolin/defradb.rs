@@ -43,7 +43,8 @@ fn format_timestamp(timestamp: DateTime<Utc>) -> String {
     if timestamp.timestamp_subsec_nanos() == 0 {
         timestamp.to_rfc3339_opts(SecondsFormat::Secs, true)
     } else {
-        timestamp.to_rfc3339_opts(SecondsFormat::Nanos, true)
+        let s = timestamp.to_rfc3339_opts(SecondsFormat::Nanos, true);
+        document::encoding::trim_rfc3339_trailing_zeros(&s)
     }
 }
 
