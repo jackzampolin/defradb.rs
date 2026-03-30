@@ -125,7 +125,7 @@ pub(super) fn parse_order_condition(
         Value::Enum(s) | Value::String(s) => {
             let direction = OrderDirection::parse(s).ok_or_else(|| {
                 QueryError::parse(format!(
-                    "Argument \"order\" has invalid value {{{}: {}}}",
+                    "invalid order direction: {{{}: {}}}",
                     field_name, s
                 ))
             })?;
@@ -146,7 +146,7 @@ pub(super) fn parse_order_condition(
             })?;
             let direction = OrderDirection::parse(s).ok_or_else(|| {
                 QueryError::parse(format!(
-                    "Argument \"order\" has invalid value {{{}: {}}}",
+                    "invalid order direction: {{{}: {}}}",
                     field_name, s
                 ))
             })?;

@@ -2,10 +2,10 @@
 
 use std::collections::HashMap;
 
-use graphql_parser::query::VariableDefinition;
+use graphql_parser::query::{Type, VariableDefinition};
 use serde_json::Value as JsonValue;
 
-use crate::error::Result;
+use crate::error::{QueryError, Result};
 
 use super::values::graphql_value_to_json_no_vars;
 
@@ -41,4 +41,35 @@ pub(crate) fn extract_variable_defaults(
         }
     }
     Ok(defaults)
+}
+
+/// Format a GraphQL type as a string (e.g. `Int!`, `[String]`, `[Int!]!`).
+fn format_type(ty: &Type<'_, String>) -> String {
+    match ty {
+        Type::NamedType(name) => name.clone(),
+        Type::NonNullType(inner) => format!("{}!", format_type(inner)),
+        Type::ListType(inner) => format!("[{}]", format_type(inner)),
+    }
+}
+
+/// Validate that all required (non-null) variables have been provided.
+///
+/// Returns an error for the first required variable that is missing from
+/// the effective variables map.
+pub(crate) fn validate_required_variables(
+    var_defs: &[VariableDefinition<'_, String>],
+    effective_variables: &HashMap<String, JsonValue>,
+) -> Result<()> {
+    for var_def in var_defs {
+        if matches!(&var_def.var_type, Type::NonNullType(_))
+            && !effective_variables.contains_key(&var_def.name)
+        {
+            let type_str = format_type(&var_def.var_type);
+            return Err(QueryError::parse(format!(
+                "Variable \"${}\" of required type \"{}\" was not provided.",
+                var_def.name, type_str
+            )));
+        }
+    }
+    Ok(())
 }

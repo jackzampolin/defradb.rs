@@ -25,7 +25,7 @@ use super::ordering::parse_order_value;
 use super::values::{
     parse_cid_value, parse_doc_ids_value, parse_optional_int_value, resolve_bool_value,
 };
-use super::variables::{extract_variable_defaults, merge_variables};
+use super::variables::{extract_variable_defaults, merge_variables, validate_required_variables};
 
 /// Type of explain output requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -100,6 +100,12 @@ fn parse_selection_to_selects<'a>(
         Selection::Field(field) => {
             // Check for @explain directive on field (invalid - must be on operation)
             check_field_explain_directive(&field.directives)?;
+            // SIMILARITY is only valid as a sub-field, not at the query root
+            if field.name == "SIMILARITY" {
+                return Err(QueryError::parse(
+                    "Cannot query field \"SIMILARITY\" on type \"Query\".".to_string(),
+                ));
+            }
             // Check if this is a top-level aggregate (e.g., _avg(Users: {field: Age}))
             if let Some(agg_type) = AggregateType::parse(&field.name) {
                 let select = parse_top_level_aggregate(field, agg_type, variables)?;
@@ -120,7 +126,7 @@ fn parse_selection_to_selects<'a>(
 
             // Look up the fragment by name
             let frag = fragments.get(&spread.fragment_name).ok_or_else(|| {
-                QueryError::parse(format!("undefined fragment '{}'", spread.fragment_name))
+                QueryError::parse(format!("Unknown fragment \"{}\".", spread.fragment_name))
             })?;
 
             // Mark this fragment as being visited
@@ -350,6 +356,8 @@ pub fn parse_request_with_variables(
                         // Extract default values from variable definitions and merge with provided variables
                         let defaults = extract_variable_defaults(&q.variable_definitions)?;
                         let effective_variables = merge_variables(variables, &defaults);
+                        // Validate that all required (non-null) variables have been provided
+                        validate_required_variables(&q.variable_definitions, &effective_variables)?;
                         // If variables was provided (even empty) or we have defaults, use the merged map
                         // Otherwise preserve None to get appropriate "no variables provided" error
                         let effective_vars_ref = if variables.is_some() || !defaults.is_empty() {
@@ -393,6 +401,7 @@ pub fn parse_request_with_variables(
                         // Extract default values from variable definitions and merge with provided variables
                         let defaults = extract_variable_defaults(&m.variable_definitions)?;
                         let effective_variables = merge_variables(variables, &defaults);
+                        validate_required_variables(&m.variable_definitions, &effective_variables)?;
                         // If variables was provided (even empty) or we have defaults, use the merged map
                         // Otherwise preserve None to get appropriate "no variables provided" error
                         let effective_vars_ref = if variables.is_some() || !defaults.is_empty() {
@@ -414,6 +423,7 @@ pub fn parse_request_with_variables(
                         // Extract default values from variable definitions and merge with provided variables
                         let defaults = extract_variable_defaults(&s.variable_definitions)?;
                         let effective_variables = merge_variables(variables, &defaults);
+                        validate_required_variables(&s.variable_definitions, &effective_variables)?;
                         let effective_vars_ref = if variables.is_some() || !defaults.is_empty() {
                             Some(&effective_variables)
                         } else {
@@ -772,7 +782,7 @@ pub(super) fn parse_selection_set(
 
                 // Look up the fragment by name
                 let frag = fragments.get(&spread.fragment_name).ok_or_else(|| {
-                    QueryError::parse(format!("undefined fragment '{}'", spread.fragment_name))
+                    QueryError::parse(format!("Unknown fragment \"{}\".", spread.fragment_name))
                 })?;
 
                 // Mark this fragment as being visited
