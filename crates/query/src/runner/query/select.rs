@@ -233,7 +233,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         Some(ek) => ek,
                         None => {
                             return Err(QueryError::execution(format!(
-                                "Unknown argument \"{}\" on field \"SIMILARITY\" of type \"{}\".",
+                                "Unknown argument \"{}\" on field \"_similarity\" of type \"{}\".",
                                 target, collection.name
                             )));
                         }
@@ -317,12 +317,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Get collection to check for encrypted indexes
         let collection = self.get_collection(&select.collection_name).await?;
 
-        // Validate collection has encrypted indexes (Go-compatible error)
+        // Validate collection has encrypted indexes (Go-compatible error).
+        // Go removes the encrypted_ query type from the GQL schema when there are no indexes,
+        // so the GQL validation itself fails. We match that error message for parity.
         if collection.encrypted_indexes.is_empty() {
-            return Err(QueryError::internal("collection has no encrypted indexes"));
+            return Err(QueryError::internal(format!(
+                "Cannot query field \"encrypted_{}\" on type \"Query\".",
+                select.collection_name
+            )));
         }
 
-        // Extract filtered field names and validate they have encrypted indexes
+        // Extract filtered field names and validate they have encrypted indexes.
+        // Go validates this at the GQL argument level, producing a filter validation error.
         if let Some(ref filter) = select.filter {
             let filtered_fields = filter.referenced_fields();
             for field_name in &filtered_fields {
@@ -331,10 +337,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     .iter()
                     .any(|idx| idx.field_name == *field_name);
                 if !has_index {
-                    return Err(QueryError::internal(format!(
-                        "no encrypted index found for field: {}",
-                        field_name
-                    )));
+                    return Err(QueryError::internal(
+                        "Argument \"filter\" has invalid value",
+                    ));
                 }
             }
         }

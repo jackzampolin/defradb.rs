@@ -209,6 +209,14 @@ impl<S: Store> crate::database::DB<S> {
                         let is_top_level_path = path.starts_with('/') && !path[1..].contains('/');
                         if is_top_level_path {
                             let key = &path[1..];
+
+                            // Encrypted indexes cannot be mutated via patch (Go parity).
+                            if key == "EncryptedIndexes" {
+                                return Err(Error::InvalidPatch(
+                                    "collection encrypted indexes cannot be mutated".to_string(),
+                                ));
+                            }
+
                             let key_exists = schema_json
                                 .as_object()
                                 .map(|m| m.contains_key(key))
@@ -261,12 +269,18 @@ impl<S: Store> crate::database::DB<S> {
                             // Root-level remove = deactivate collection
                             is_deactivation = true;
                         } else {
-                            // Go compatibility: For top-level keys that don't exist (like
-                            // EncryptedIndexes), produce Go-compatible error message.
                             let is_top_level_path =
                                 path.starts_with('/') && !path[1..].contains('/');
                             if is_top_level_path {
                                 let key = &path[1..];
+
+                                // Encrypted indexes cannot be mutated via patch (Go parity).
+                                if key == "EncryptedIndexes" {
+                                    return Err(Error::InvalidPatch(
+                                        "collection encrypted indexes cannot be mutated"
+                                            .to_string(),
+                                    ));
+                                }
                                 let key_exists = schema_json
                                     .as_object()
                                     .map(|m| m.contains_key(key))
