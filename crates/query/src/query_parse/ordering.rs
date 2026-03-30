@@ -123,8 +123,12 @@ pub(super) fn parse_order_condition(
         // Null order direction means skip this field (Go compatibility)
         Value::Null => Ok(None),
         Value::Enum(s) | Value::String(s) => {
-            let direction = OrderDirection::parse(s)
-                .ok_or_else(|| QueryError::parse("invalid order direction"))?;
+            let direction = OrderDirection::parse(s).ok_or_else(|| {
+                QueryError::parse(format!(
+                    "Argument \"order\" has invalid value {{{}: {}}}",
+                    field_name, s
+                ))
+            })?;
             Ok(Some(OrderCondition::new(field_name, direction)))
         }
         Value::Variable(name) => {
@@ -140,8 +144,12 @@ pub(super) fn parse_order_condition(
                     name
                 ))
             })?;
-            let direction = OrderDirection::parse(s)
-                .ok_or_else(|| QueryError::parse("invalid order direction"))?;
+            let direction = OrderDirection::parse(s).ok_or_else(|| {
+                QueryError::parse(format!(
+                    "Argument \"order\" has invalid value {{{}: {}}}",
+                    field_name, s
+                ))
+            })?;
             Ok(Some(OrderCondition::new(field_name, direction)))
         }
         Value::Object(nested_obj) => {
