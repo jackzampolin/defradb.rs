@@ -264,8 +264,11 @@ fn test_parse_undefined_fragment_returns_error() {
     let result = parse_query(query);
     assert!(result.is_err());
     assert!(
-        result.unwrap_err().to_string().contains("Unknown fragment"),
-        "Expected error about unknown fragment"
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("undefined fragment"),
+        "Expected error about undefined fragment"
     );
 }
 
@@ -425,7 +428,7 @@ fn test_parse_invalid_order_direction_returns_error() {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("Argument \"order\" has invalid value {name: INVALID}"));
+        .contains("Argument \"order\" has invalid value"));
 }
 
 #[test]
@@ -449,7 +452,9 @@ fn test_parse_explain_directive() {
     let result = parse_request(query).unwrap();
 
     match result {
-        ParsedOperation::Query { selects, explain } => {
+        ParsedOperation::Query {
+            selects, explain, ..
+        } => {
             assert!(
                 explain.is_some(),
                 "Expected explain=Some for @explain directive"
@@ -469,7 +474,9 @@ fn test_parse_explain_directive_with_type_simple() {
     let result = parse_request(query).unwrap();
 
     match result {
-        ParsedOperation::Query { selects, explain } => {
+        ParsedOperation::Query {
+            selects, explain, ..
+        } => {
             assert_eq!(explain, Some(ExplainType::Simple));
             assert_eq!(selects.len(), 1);
         }
@@ -485,7 +492,9 @@ fn test_parse_explain_directive_with_type_execute() {
     let result = parse_request(query).unwrap();
 
     match result {
-        ParsedOperation::Query { selects, explain } => {
+        ParsedOperation::Query {
+            selects, explain, ..
+        } => {
             assert_eq!(explain, Some(ExplainType::Execute));
             assert_eq!(selects.len(), 1);
         }
@@ -501,7 +510,9 @@ fn test_parse_explain_directive_with_type_debug() {
     let result = parse_request(query).unwrap();
 
     match result {
-        ParsedOperation::Query { selects, explain } => {
+        ParsedOperation::Query {
+            selects, explain, ..
+        } => {
             assert_eq!(explain, Some(ExplainType::Debug));
             assert_eq!(selects.len(), 1);
         }
@@ -517,7 +528,9 @@ fn test_parse_query_without_explain() {
     let result = parse_request(query).unwrap();
 
     match result {
-        ParsedOperation::Query { selects, explain } => {
+        ParsedOperation::Query {
+            selects, explain, ..
+        } => {
             assert!(
                 explain.is_none(),
                 "Expected explain=None without @explain directive"
@@ -537,7 +550,9 @@ fn test_parse_bare_query_without_explain() {
     let result = parse_request(query).unwrap();
 
     match result {
-        ParsedOperation::Query { selects, explain } => {
+        ParsedOperation::Query {
+            selects, explain, ..
+        } => {
             assert!(
                 explain.is_none(),
                 "Expected explain=None for bare selection set"

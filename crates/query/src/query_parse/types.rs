@@ -36,6 +36,8 @@ pub enum ParsedOperation {
         selects: Vec<Select>,
         /// Whether @explain directive was used and which type
         explain: Option<ExplainType>,
+        /// Whether @exhaustive directive was used
+        exhaustive: bool,
     },
     /// Mutation operations (CREATE, UPDATE, DELETE)
     Mutation {

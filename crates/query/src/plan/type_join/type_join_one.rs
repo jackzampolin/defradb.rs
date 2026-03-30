@@ -85,10 +85,11 @@ pub struct TypeJoinOne {
     parent_scan_mapping: Option<DocumentMapping>,
     /// For InvertedIndex mode: queue of parent docs to yield
     docs_to_yield: Vec<Doc>,
-    /// Parent docIDs already yielded during child-driven scan (InvertedIndex/OrderedInvertedPrimary).
-    /// Used to identify orphan parents (those without any child relation).
+    /// Whether to include orphan parents (for @exhaustive directive)
+    include_orphans: bool,
+    /// Parent docIDs already yielded during child-driven scan
     yielded_parent_ids: HashSet<String>,
-    /// Whether the child-driven scan is exhausted and we're now yielding orphans.
+    /// Whether the child-driven scan is exhausted and we're now yielding orphans
     orphan_phase: bool,
 }
 
@@ -156,6 +157,7 @@ impl TypeJoinOne {
             parent_collection: None,
             parent_scan_mapping: None,
             docs_to_yield: Vec::new(),
+            include_orphans: false,
             yielded_parent_ids: HashSet::new(),
             orphan_phase: false,
         }
@@ -209,6 +211,12 @@ impl TypeJoinOne {
         self.parent_collection = Some(parent_collection);
         self.parent_scan_mapping = Some(parent_scan_mapping);
         self.fetcher = Some(fetcher);
+        self
+    }
+
+    /// Enable orphan inclusion (for @exhaustive directive).
+    pub fn with_include_orphans(mut self) -> Self {
+        self.include_orphans = true;
         self
     }
 
@@ -453,8 +461,10 @@ impl TypeJoinOne {
             }
         }
 
-        // Child-driven scan exhausted: yield orphan parents (no matching child)
-        self.next_orphan().await
+        if self.include_orphans {
+            return self.next_orphan().await;
+        }
+        Ok(false)
     }
 
     /// Execute one step of the ordered inverted primary join.
@@ -524,15 +534,13 @@ impl TypeJoinOne {
             return Ok(true);
         }
 
-        // Child-driven scan exhausted: yield orphan parents (no matching child)
-        self.next_orphan().await
+        if self.include_orphans {
+            return self.next_orphan().await;
+        }
+        Ok(false)
     }
 
-    /// Yield orphan parents (those without any child relation) after child-driven scan.
-    ///
-    /// Initializes the parent plan, iterates all parents, and yields those whose
-    /// docID was not seen during the child-driven phase. Each orphan gets a null
-    /// child merged in.
+    /// Yield orphan parents after child-driven scan exhausts.
     async fn next_orphan(&mut self) -> Result<bool> {
         if !self.orphan_phase {
             self.orphan_phase = true;
@@ -788,15 +796,12 @@ impl PlanNode for TypeJoinOne {
             self.direction,
             JoinDirection::InvertedIndex { .. } | JoinDirection::OrderedInvertedPrimary { .. }
         ) {
-            // Inverted/ordered modes: child_plan is still open
             self.child_plan.close().await?;
-            // If orphan phase was entered, parent_plan was also initialized
             if self.orphan_phase {
                 self.parent_plan.close().await?;
             }
         } else {
             self.parent_plan.close().await?;
-            // child_plan was already closed in build_child_cache()
         }
         self.child_cache.clear();
         self.docs_to_yield.clear();

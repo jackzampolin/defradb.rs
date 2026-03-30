@@ -55,3 +55,8 @@ pub(crate) fn check_field_explain_directive(directives: &[Directive<'_, String>]
     }
     Ok(())
 }
+
+/// Check if a directive list contains @exhaustive.
+pub(crate) fn parse_exhaustive_directive(directives: &[Directive<'_, String>]) -> bool {
+    directives.iter().any(|d| d.name == "exhaustive")
+}

@@ -439,6 +439,8 @@ pub struct Select {
     pub selection_type: SelectionType,
     /// Document mapping for this select
     pub document_mapping: DocumentMapping,
+    /// Whether @exhaustive directive is active
+    pub exhaustive: bool,
 }
 
 impl Select {
@@ -460,6 +462,7 @@ impl Select {
             is_encrypted: false,
             selection_type: SelectionType::Object,
             document_mapping: DocumentMapping::new(),
+            exhaustive: false,
         }
     }
 

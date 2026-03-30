@@ -255,6 +255,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             depth: None,
             show_deleted: false,
             is_encrypted: false,
+            exhaustive: false,
             selection_type: crate::mapper::SelectionType::Object,
             document_mapping: crate::document::DocumentMapping::default(),
         };

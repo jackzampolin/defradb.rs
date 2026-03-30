@@ -123,7 +123,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 return QueryResponse {
                     data: None,
                     errors: vec![QueryResponseError {
-                        message: e.to_string(),
+                        message: format!("parse error: {}", e),
                         path: None,
                         locations: None,
                     }],
@@ -157,9 +157,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         // Pass identity and variables through for ACP permission checks and variable substitution
         let execution = async {
             match parsed {
-                ParsedOperation::Query { selects, explain } => {
+                ParsedOperation::Query {
+                    mut selects,
+                    explain,
+                    exhaustive,
+                } => {
+                    if exhaustive {
+                        for s in &mut selects {
+                            s.exhaustive = true;
+                        }
+                    }
                     if let Some(explain_type) = explain {
-                        // Return query plan instead of executing
                         self.explain_query_with_identity_and_vars(
                             &request.query,
                             identity,
@@ -277,7 +285,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 return QueryResponse {
                     data: None,
                     errors: vec![QueryResponseError {
-                        message: e.to_string(),
+                        message: format!("parse error: {}", e),
                         path: None,
                         locations: None,
                     }],
@@ -326,11 +334,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         // Route to appropriate handler based on operation type
         let execution = async {
             match parsed {
-                ParsedOperation::Query { selects, explain } => {
-                    // Get the transaction-scoped fetcher and execute with identity for ACP
+                ParsedOperation::Query {
+                    mut selects,
+                    explain,
+                    exhaustive,
+                } => {
+                    if exhaustive {
+                        for s in &mut selects {
+                            s.exhaustive = true;
+                        }
+                    }
                     let fetcher = txn_ctx.doc_fetcher();
                     if let Some(explain_type) = explain {
-                        // Return query plan instead of executing
                         self.explain_query_with_identity_and_vars(
                             &request.query,
                             identity,

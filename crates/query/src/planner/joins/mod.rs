@@ -82,10 +82,8 @@ impl Planner {
                     // _group is a virtual field - process its inner relation fields
                     for inner_requestable in &nested_select.fields {
                         if let Requestable::Select(inner_select) = inner_requestable {
-                            // Skip special fields and nested GROUP (inner groupBy)
-                            if !inner_select.field.name.starts_with('_')
-                                && inner_select.field.name != "GROUP"
-                            {
+                            // Skip special fields
+                            if !inner_select.field.name.starts_with('_') {
                                 selects_to_process.push((inner_select, group_index));
                             }
                         }
@@ -1257,7 +1255,7 @@ impl Planner {
                         let parent_col = parent_collection.clone();
                         let fetcher = self.fetcher.clone().unwrap();
 
-                        let join = TypeJoinOne::new(
+                        let mut join = TypeJoinOne::new(
                             plan,
                             child_plan,
                             parent_side,
@@ -1270,6 +1268,9 @@ impl Planner {
                             parent_scan_mapping,
                             fetcher,
                         );
+                        if select.exhaustive {
+                            join = join.with_include_orphans();
+                        }
                         plan = Box::new(join);
                         join_provides_ordering = true;
                     } else {
@@ -1292,7 +1293,7 @@ impl Planner {
                                 .unwrap_or(0);
                             let fetcher = self.fetcher.clone().unwrap();
 
-                            let join = TypeJoinOne::new(
+                            let mut join = TypeJoinOne::new(
                                 plan,
                                 child_plan,
                                 parent_side,
@@ -1306,6 +1307,9 @@ impl Planner {
                                 parent_scan_mapping,
                                 fetcher,
                             );
+                            if select.exhaustive {
+                                join = join.with_include_orphans();
+                            }
                             plan = Box::new(join);
                             join_provides_ordering = true;
                         } else {
