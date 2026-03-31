@@ -25,14 +25,21 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
             || collection.fields.iter().any(|f| f.name == name)
     };
 
-    // Validate that all requested simple fields exist in schema
+    // Validate that all requested simple fields exist in schema.
+    // Skip _<relation>ID fields here; they are validated separately below
+    // with a more specific error message for array relations.
     for requestable in &select.fields {
         if let Requestable::Field(field) = requestable {
             if !field_exists(&field.name) {
-                return Err(QueryError::unknown_field(format!(
-                    "Cannot query field \"{}\" on type \"{}\".",
-                    field.name, select.collection_name
-                )));
+                let is_relation_id = field.name.starts_with('_')
+                    && field.name.ends_with("ID")
+                    && field.name.len() > 3;
+                if !is_relation_id {
+                    return Err(QueryError::unknown_field(format!(
+                        "Cannot query field \"{}\" on type \"{}\".",
+                        field.name, select.collection_name
+                    )));
+                }
             }
         }
     }
@@ -69,13 +76,17 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
         }
     }
 
-    // Reject _<relation>ID fields that reference array (one-to-many) relations.
+    // Reject _<relation>ID fields that reference array (one-to-many) relations
+    // or that don't correspond to any known relation.
     // For example, if Author has `published: [Book]`, then `_publishedID` does not exist
     // because the FK is on the Book side (_authorID), not the Author side.
     // Go catches this at the GraphQL schema validation level; we catch it here.
     for requestable in &select.fields {
         if let Requestable::Field(field) = requestable {
             if field.name.starts_with('_') && field.name.ends_with("ID") && field.name.len() > 3 {
+                if field_exists(&field.name) {
+                    continue;
+                }
                 let relation_name = &field.name[1..field.name.len() - 2];
                 if let Some(rel_field) = collection.field_by_name(relation_name) {
                     if rel_field.kind.is_relation() && rel_field.kind.is_array() {
@@ -84,6 +95,11 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
                             field.name, select.collection_name
                         )));
                     }
+                } else {
+                    return Err(QueryError::unknown_field(format!(
+                        "Cannot query field \"{}\" on type \"{}\".",
+                        field.name, select.collection_name
+                    )));
                 }
             }
         }

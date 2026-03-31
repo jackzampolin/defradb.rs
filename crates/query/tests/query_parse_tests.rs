@@ -425,7 +425,7 @@ fn test_parse_invalid_order_direction_returns_error() {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("invalid order direction"));
+        .contains("has invalid value"));
 }
 
 #[test]
