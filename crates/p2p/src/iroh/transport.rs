@@ -129,6 +129,12 @@ impl P2PTransport for IrohTransport {
             .await
     }
 
+    async fn topic_peers(&self, _topic: DefraTopic) -> Result<Vec<PeerId>> {
+        // Iroh doesn't have topic-based peer tracking like GossipSub.
+        // Return connected peers as best-effort approximation.
+        self.connected_peers().await
+    }
+
     async fn subscribe(&self, topic: DefraTopic) -> Result<bool> {
         self.send_command(|reply| IrohCommand::Subscribe { topic, reply })
             .await

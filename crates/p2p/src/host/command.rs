@@ -203,4 +203,10 @@ pub enum HostCommand {
     PeerAddresses {
         response: oneshot::Sender<Vec<String>>,
     },
+
+    /// Get all peers known to GossipSub for a topic (mesh + non-mesh).
+    TopicPeers {
+        topic: DefraTopic,
+        response: oneshot::Sender<Vec<PeerId>>,
+    },
 }

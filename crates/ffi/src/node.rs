@@ -57,6 +57,7 @@ pub(crate) async fn build_node_state(
             .clone()
             .map(|system| Arc::new(P2PState::new(system))),
         node_identity_did: node.node_identity_did.clone(),
+        signing_enabled: node.node_identity_did.is_some(),
         sourcehub_acp: node.sourcehub_acp.clone(),
         se_encryption_key: None,
     })

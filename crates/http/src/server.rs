@@ -415,6 +415,7 @@ impl Server {
         }
         if let Some(ref did) = self.node_identity_did {
             builder = builder.with_node_identity_did(did.clone());
+            builder = builder.with_signing_enabled(true);
         }
         builder = builder.with_dev_mode(self.dev_mode);
         let state = builder.build();

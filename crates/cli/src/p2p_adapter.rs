@@ -637,12 +637,33 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
     async fn remove_collections(&self, collections: Vec<String>) -> Result<(), String> {
         if let Some(ref coordinator) = self.sync_coordinator {
-            for collection_id in collections {
+            for collection_name in collections {
+                let topic_id = if let Some(ref pusher) = self.doc_pusher {
+                    if let Some(collection_id) = pusher.get_collection_id(&collection_name) {
+                        collection_id
+                    } else {
+                        return Err(format!("collection '{}' not found", collection_name));
+                    }
+                } else {
+                    collection_name
+                };
+
                 coordinator
-                    .unsubscribe_collection(&collection_id)
+                    .unsubscribe_collection(&topic_id)
                     .await
                     .map_err(|e| e.to_string())?;
             }
+
+            if let Some(ref pusher) = self.doc_pusher {
+                let all_cols = coordinator
+                    .get_subscribed_collections()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if let Err(e) = pusher.persist_p2p_collections(&all_cols).await {
+                    tracing::warn!(error = %e, "failed to persist P2P collections after removal");
+                }
+            }
+
             Ok(())
         } else {
             Err("p2p collections functionality requires sync coordinator".to_string())

@@ -1,5 +1,7 @@
 //! Join direction types for type joins
 
+use crate::mapper::OrderDirection;
+
 /// Represents the direction of a join operation.
 ///
 /// Join direction is determined by which side holds the foreign key (FK):
@@ -27,6 +29,8 @@ pub enum JoinDirection {
         parent_fk_index_name: String,
         /// Index of the FK field in the parent's document mapping
         parent_fk_field_index: usize,
+        /// Sort direction for orphan placement in sequenceNode debug explain
+        sort_direction: OrderDirection,
     },
     /// Ordered inverted join (primary-first): child has FK and drives iteration
     /// in sorted order via index. Parent is looked up by docID for each child.

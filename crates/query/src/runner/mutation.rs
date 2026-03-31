@@ -539,7 +539,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     .with_collection(collection.clone())
                     .with_request_time(request_time);
 
-                // Set create_input (from Go's 'create' argument)
+                // Set create_input (from Go's 'add' argument)
                 if !mutation.create_input.is_empty() {
                     let create_input =
                         self.build_upsert_input_from_map(&mutation.create_input[0])?;
@@ -781,7 +781,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         obj.get("_docID").and_then(|v| v.as_str()).map(String::from)
                     {
                         let version_data = self
-                            .fetch_version_data(fetcher, &doc_id, version_sel, None, true)
+                            .fetch_version_data(fetcher, &doc_id, version_sel, None)
                             .await?;
                         obj.insert(output_name.clone(), version_data);
                     }

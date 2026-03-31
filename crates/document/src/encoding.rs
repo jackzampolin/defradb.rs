@@ -22,8 +22,37 @@ pub fn format_time_rfc3339_nano(t: &DateTime<FixedOffset>) -> String {
         // No fractional seconds - use Secs format
         t.to_rfc3339_opts(SecondsFormat::Secs, true)
     } else {
-        // Has fractional seconds - use full nanosecond precision
-        t.to_rfc3339_opts(SecondsFormat::Nanos, true)
+        // Has fractional seconds - format with nanos then trim trailing zeros
+        // to match Go's time.RFC3339Nano which omits unnecessary trailing zeros.
+        // e.g., ".123000000" becomes ".123"
+        let s = t.to_rfc3339_opts(SecondsFormat::Nanos, true);
+        trim_rfc3339_trailing_zeros(&s)
+    }
+}
+
+/// Trim trailing zeros from the fractional seconds portion of an RFC3339 string.
+/// "2024-01-01T00:00:00.123000000Z" -> "2024-01-01T00:00:00.123Z"
+/// "2024-01-01T00:00:00.100000000Z" -> "2024-01-01T00:00:00.1Z"
+pub fn trim_rfc3339_trailing_zeros(s: &str) -> String {
+    // Find the '.' that starts fractional seconds
+    if let Some(dot_pos) = s.rfind('.') {
+        // Find where the fractional digits end (before timezone Z or +/-)
+        let tz_start = s[dot_pos..].find(['Z', '+', '-']);
+        if let Some(tz_offset) = tz_start {
+            let tz_pos = dot_pos + tz_offset;
+            let frac = &s[dot_pos + 1..tz_pos];
+            let trimmed = frac.trim_end_matches('0');
+            if trimmed.is_empty() {
+                // All zeros — drop the dot entirely
+                format!("{}{}", &s[..dot_pos], &s[tz_pos..])
+            } else {
+                format!("{}.{}{}", &s[..dot_pos], trimmed, &s[tz_pos..])
+            }
+        } else {
+            s.to_string()
+        }
+    } else {
+        s.to_string()
     }
 }
 

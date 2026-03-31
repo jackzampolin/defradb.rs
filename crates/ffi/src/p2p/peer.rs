@@ -109,10 +109,24 @@ pub unsafe extern "C" fn p2p_notify_network_change(
 }
 
 /// Get connected peers.
+///
+/// # Safety
+///
+/// `identity_did` must be a valid null-terminated UTF-8 string when non-null.
+/// `node_ptr` must reference a live node handle created by this library.
 #[no_mangle]
-pub extern "C" fn p2p_active_peers(node_ptr: usize) -> FfiResult {
+pub unsafe extern "C" fn p2p_active_peers(
+    node_ptr: usize,
+    identity_did: *const c_char,
+) -> FfiResult {
     ffi_entry! {
         let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::P2pPeerActive
+        ));
 
         let result = NODES
             .get(node_ptr, |state| {

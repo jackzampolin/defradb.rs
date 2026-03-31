@@ -201,7 +201,30 @@ impl super::Planner {
                 // Go adds {field: {_neq: null}} to childSelects filter for average aggregates.
                 // Average excludes null values, so the filter is needed on the group's child select.
                 // Collect field names from average aggregates targeting _group.
-                // Only regular fields (not aggregate refs like _avg) get the neq filter.
+                // Only regular data fields get the neq filter - skip:
+                // - Aggregate refs starting with '_' (like _avg, _count)
+                // - Aggregate output names that are inner aggregate results (like AVG, SUM)
+                //   These are computed aggregates, not raw data fields.
+                let inner_aggregate_outputs: Vec<String> = select
+                    .fields
+                    .iter()
+                    .filter_map(|f| {
+                        if let Requestable::Select(nested) = f {
+                            if nested.field.name == "GROUP" {
+                                return Some(nested.fields.iter().filter_map(|inner_f| {
+                                    if let Requestable::Aggregate(inner_agg) = inner_f {
+                                        Some(inner_agg.output_name().to_string())
+                                    } else {
+                                        None
+                                    }
+                                }));
+                            }
+                        }
+                        None
+                    })
+                    .flatten()
+                    .collect();
+
                 let mut avg_group_fields: Vec<String> = Vec::new();
                 for field in &select.fields {
                     if let Requestable::Aggregate(agg) = field {
@@ -209,7 +232,9 @@ impl super::Planner {
                             for target in &agg.targets {
                                 if target.host_name == "GROUP" {
                                     if let Some(ref field_name) = target.field_name {
-                                        if !field_name.starts_with('_') {
+                                        if !field_name.starts_with('_')
+                                            && !inner_aggregate_outputs.contains(field_name)
+                                        {
                                             avg_group_fields.push(field_name.clone());
                                         }
                                     }

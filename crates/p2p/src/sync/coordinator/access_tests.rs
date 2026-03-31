@@ -302,7 +302,7 @@ async fn branchable_sync_controlled_mode_allows_replicator() {
 }
 
 #[tokio::test]
-async fn branchable_sync_controlled_mode_allows_subscribed_connected_peer() {
+async fn branchable_sync_controlled_mode_allows_connected_peer() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
 
@@ -312,20 +312,16 @@ async fn branchable_sync_controlled_mode_allows_subscribed_connected_peer() {
     let (coordinator, _events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
 
-    // Add collection to subscribed set
-    coordinator
-        .subscribed_collections
-        .write()
-        .await
-        .insert("collection1".to_string());
-
+    // Connected peers are allowed without explicit collection subscription.
+    // This matches Go DefraDB behavior where replicator targets accept
+    // push-logs from any connected peer.
     let result = coordinator
         .handle_transport_event(branchable_sync_event(connected_peer, "collection1"))
         .await;
 
     assert!(
         !matches!(&result, Err(Error::AccessDenied { .. })),
-        "Connected peer on subscribed collection should not get AccessDenied, got {:?}",
+        "Connected peer should not get AccessDenied, got {:?}",
         result
     );
 }
@@ -349,7 +345,7 @@ async fn branchable_sync_open_mode_allows_any_peer() {
 }
 
 #[tokio::test]
-async fn pushlog_connected_subscribed_peer_is_not_marked_explicit_replicator() {
+async fn pushlog_connected_peer_is_not_marked_explicit_replicator() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
@@ -357,11 +353,6 @@ async fn pushlog_connected_subscribed_peer_is_not_marked_explicit_replicator() {
 
     let (coordinator, mut events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
-    coordinator
-        .subscribed_collections
-        .write()
-        .await
-        .insert("collection1".to_string());
 
     coordinator
         .handle_transport_event(pushlog_event(peer.clone(), "collection1"))
@@ -377,7 +368,7 @@ async fn pushlog_connected_subscribed_peer_is_not_marked_explicit_replicator() {
             assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
             assert!(
                 !is_explicit_replicator,
-                "connected subscribed peer must not get explicit replicator trust"
+                "connected peer must not get explicit replicator trust"
             );
         }
         other => panic!("expected BlockReceived, got {:?}", other),
@@ -416,7 +407,7 @@ async fn pushlog_registered_replicator_is_marked_explicit_replicator() {
 }
 
 #[tokio::test]
-async fn two_stream_connected_subscribed_peer_is_not_marked_explicit_replicator() {
+async fn two_stream_connected_peer_is_not_marked_explicit_replicator() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let peer = random_peer_id();
@@ -424,11 +415,6 @@ async fn two_stream_connected_subscribed_peer_is_not_marked_explicit_replicator(
 
     let (coordinator, mut events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
-    coordinator
-        .subscribed_collections
-        .write()
-        .await
-        .insert("collection1".to_string());
 
     coordinator
         .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
@@ -444,7 +430,7 @@ async fn two_stream_connected_subscribed_peer_is_not_marked_explicit_replicator(
             assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
             assert!(
                 !is_explicit_replicator,
-                "connected subscribed peer must not get explicit replicator trust on two-stream ingress"
+                "connected peer must not get explicit replicator trust on two-stream ingress"
             );
         }
         other => panic!("expected BlockReceived, got {:?}", other),
@@ -460,11 +446,6 @@ async fn two_stream_authenticated_explicit_replicator_is_marked_explicit_replica
 
     let (coordinator, mut events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
-    coordinator
-        .subscribed_collections
-        .write()
-        .await
-        .insert("collection1".to_string());
 
     coordinator
         .handle_transport_event(two_stream_event(peer.clone(), "collection1", true))

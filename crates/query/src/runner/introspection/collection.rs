@@ -199,19 +199,6 @@ pub(super) fn build_collection_type(
         named_fields.push(("SIMILARITY".to_string(), similarity_field));
     }
 
-    // BM25 full-text search: takes query and fields arguments
-    {
-        let bm25_field = Field::new("BM25", TypeRef::named("Float"), |_| {
-            FieldFuture::new(async { Ok(Some(GqlValue::Null)) })
-        })
-        .argument(InputValue::new("query", TypeRef::named_nn(TypeRef::STRING)))
-        .argument(InputValue::new(
-            "fields",
-            TypeRef::named_nn_list_nn(TypeRef::STRING),
-        ));
-        named_fields.push(("BM25".to_string(), bm25_field));
-    }
-
     // Add user-defined fields
     for field in &collection.fields {
         if field.name == "_docID" {

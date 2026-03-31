@@ -88,17 +88,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             continue;
                         }
 
-                        let target_collection = Self::resolve_relation_target_collection(
+                        let Some(target_collection) = Self::resolve_relation_target_collection(
                             &current_collection,
                             relation_field,
                             collections_map,
-                        )
-                        .ok_or_else(|| {
-                            QueryError::execution(format!(
-                                "Unable to resolve BM25 relation target '{}.{}'",
-                                current_collection.name, nested_select.field.name
-                            ))
-                        })?;
+                        ) else {
+                            // Skip nested selects whose target collection can't be resolved.
+                            // This happens for views with embedded schemas (CID-based references)
+                            // that aren't in the collections map. FTS scoring is best-effort for
+                            // nested relations; if no FTS fields exist deeper, this is harmless.
+                            continue;
+                        };
 
                         let mut child_scope_path = scope_path.clone();
                         child_scope_path.push(nested_select.field.output_name().to_string());

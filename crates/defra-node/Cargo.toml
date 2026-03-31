@@ -33,6 +33,7 @@ async-trait = "0.1"
 serde.workspace = true
 serde_json.workspace = true
 axum = { workspace = true, optional = true }
+reqwest = { version = "0.12", features = ["json"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Optional — HTTP server
@@ -41,3 +42,6 @@ defra-http = { path = "../http", optional = true }
 # Optional — P2P replication (IROH transport)
 p2p = { path = "../p2p", optional = true, features = ["iroh-transport"] }
 blockstore = { path = "../blockstore", optional = true }
+
+[dev-dependencies]
+axum.workspace = true

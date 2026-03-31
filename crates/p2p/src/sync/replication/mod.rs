@@ -155,6 +155,10 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn topic_peers(&self, _topic: DefraTopic) -> P2PResult<Vec<PeerId>> {
+            Ok(Vec::new())
+        }
+
         async fn subscribe(&self, _topic: DefraTopic) -> P2PResult<bool> {
             Ok(true)
         }

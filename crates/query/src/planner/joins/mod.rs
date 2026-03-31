@@ -28,9 +28,11 @@ use tracing::{debug, warn};
 
 use crate::document::DocumentMapping;
 use crate::error::QueryError;
+use crate::mapper::OrderDirection;
 use crate::mapper::{Field, Filter, OrderBy, OrderCondition, Requestable, Select};
 use crate::plan::{
-    IndexScanNode, JoinSide, RelationFilter, ScanNode, SelectNode, TypeJoinMany, TypeJoinOne,
+    IndexScanNode, JoinSide, OrphanNode, RelationFilter, ScanNode, SelectNode, TypeJoinMany,
+    TypeJoinOne,
 };
 use crate::planner::PlanNode;
 
@@ -82,8 +84,10 @@ impl Planner {
                     // _group is a virtual field - process its inner relation fields
                     for inner_requestable in &nested_select.fields {
                         if let Requestable::Select(inner_select) = inner_requestable {
-                            // Skip special fields
-                            if !inner_select.field.name.starts_with('_') {
+                            // Skip special fields and nested GROUP selects
+                            if !inner_select.field.name.starts_with('_')
+                                && inner_select.field.name != "GROUP"
+                            {
                                 selects_to_process.push((inner_select, group_index));
                             }
                         }
@@ -1253,7 +1257,12 @@ impl Planner {
 
                         let parent_scan_mapping = plan.document_map().clone();
                         let parent_col = parent_collection.clone();
-                        let fetcher = self.fetcher.clone().unwrap();
+                        let fetcher = self.fetcher.clone();
+
+                        // Save copies for orphan node before values move into join
+                        let orphan_col = parent_col.clone();
+                        let orphan_mapping = parent_scan_mapping.clone();
+                        let orphan_fetcher = fetcher.clone();
 
                         let join = TypeJoinOne::new(
                             plan,
@@ -1268,7 +1277,32 @@ impl Planner {
                             parent_scan_mapping,
                             fetcher,
                         );
-                        plan = Box::new(join);
+                        if select.exhaustive {
+                            let shared_ids: crate::plan::SharedYieldedIds = std::sync::Arc::new(
+                                tokio::sync::RwLock::new(std::collections::HashSet::new()),
+                            );
+                            let orphan_scan = ScanNode::new(orphan_col, orphan_mapping)
+                                .with_fetcher(orphan_fetcher.unwrap());
+                            let orphan = OrphanNode::secondary_side(
+                                Box::new(orphan_scan),
+                                shared_ids.clone(),
+                                mapping.clone(),
+                            );
+                            let direction = parent_order_for_child
+                                .as_ref()
+                                .and_then(|o| o.conditions.first())
+                                .map(|c| c.direction)
+                                .unwrap_or(OrderDirection::Asc);
+                            let join = join.with_orphan_config(
+                                orphan,
+                                direction,
+                                shared_ids,
+                                child_has_fk,
+                            );
+                            plan = Box::new(join);
+                        } else {
+                            plan = Box::new(join);
+                        }
                         join_provides_ordering = true;
                     } else {
                         // Case 2: Parent has FK → use InvertedIndex with FK index scan on parent.
@@ -1288,7 +1322,17 @@ impl Planner {
                             let fk_field_index = parent_scan_mapping
                                 .first_index_of_name(&parent_fk_field_name)
                                 .unwrap_or(0);
-                            let fetcher = self.fetcher.clone().unwrap();
+                            let fetcher = self.fetcher.clone();
+                            let sort_dir = parent_order_for_child
+                                .as_ref()
+                                .and_then(|o| o.conditions.first())
+                                .map(|c| c.direction)
+                                .unwrap_or_default();
+
+                            // Save copies for orphan node before values move into join
+                            let orphan_col = parent_col.clone();
+                            let orphan_mapping = parent_scan_mapping.clone();
+                            let orphan_fetcher = fetcher.clone();
 
                             let join = TypeJoinOne::new(
                                 plan,
@@ -1303,8 +1347,39 @@ impl Planner {
                                 parent_col,
                                 parent_scan_mapping,
                                 fetcher,
+                                sort_dir,
                             );
-                            plan = Box::new(join);
+                            if select.exhaustive {
+                                let null_filter =
+                                    Filter::from_conditions(serde_json::Map::from_iter([(
+                                        parent_fk_field_name.clone(),
+                                        serde_json::json!({"_eq": null}),
+                                    )]));
+                                let orphan_scan = ScanNode::new(orphan_col, orphan_mapping)
+                                    .with_filter(null_filter)
+                                    .with_fetcher(orphan_fetcher.unwrap());
+                                let orphan = OrphanNode::primary_side(
+                                    Box::new(orphan_scan),
+                                    mapping.clone(),
+                                );
+                                let direction = parent_order_for_child
+                                    .as_ref()
+                                    .and_then(|o| o.conditions.first())
+                                    .map(|c| c.direction)
+                                    .unwrap_or(OrderDirection::Asc);
+                                let shared_ids: crate::plan::SharedYieldedIds = std::sync::Arc::new(
+                                    tokio::sync::RwLock::new(std::collections::HashSet::new()),
+                                );
+                                let join = join.with_orphan_config(
+                                    orphan,
+                                    direction,
+                                    shared_ids,
+                                    child_has_fk,
+                                );
+                                plan = Box::new(join);
+                            } else {
+                                plan = Box::new(join);
+                            }
                             join_provides_ordering = true;
                         } else {
                             // No FK index on parent → fall back to normal join + OrderByNode

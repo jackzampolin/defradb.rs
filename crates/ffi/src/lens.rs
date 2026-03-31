@@ -71,9 +71,19 @@ fn extract_arguments(module: &LensModule) -> Vec<(String, String)> {
 ///
 /// `lens_json` must be a valid null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn lens_add(node_ptr: usize, lens_json: *const c_char) -> FfiResult {
+pub unsafe extern "C" fn lens_add(
+    node_ptr: usize,
+    identity_did: *const c_char,
+    lens_json: *const c_char,
+) -> FfiResult {
     ffi_entry! {
         let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::LensCreate
+        ));
         let lens_str = try_ffi!(require_c_str(lens_json, "lens_json"));
 
         // If the JSON contains version IDs, this is a full migration config — delegate to
@@ -235,7 +245,7 @@ mod tests {
         assert!(crate::runtime::init_runtime());
 
         let lens_json = CString::new(r#"{"Path": "/path/to/transform.wasm"}"#).unwrap();
-        let result = unsafe { lens_add(0, lens_json.as_ptr()) };
+        let result = unsafe { lens_add(0, std::ptr::null(), lens_json.as_ptr()) };
         assert_eq!(result.status, 1);
         assert!(!result.error.is_null());
         unsafe { crate::types::defra_free_string(result.error) };
@@ -250,7 +260,7 @@ mod tests {
         assert_eq!(result.status, 0);
         let node = result.node_ptr;
 
-        let result = unsafe { lens_add(node, std::ptr::null()) };
+        let result = unsafe { lens_add(node, std::ptr::null(), std::ptr::null()) };
         assert_eq!(result.status, 1);
         assert!(!result.error.is_null());
         unsafe { crate::types::defra_free_string(result.error) };

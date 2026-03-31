@@ -15,12 +15,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Access rules:
     /// 1. If mode is Open → allow all
     /// 2. If peer is a replicator for the collection → allow
-    /// 3. If peer is connected and the collection is subscribed → allow
+    /// 3. If peer is connected → allow (matches Go DefraDB behavior)
     /// 4. Otherwise → deny
     ///
     /// Rule 3 matches Go DefraDB behavior: replicator registration is
-    /// one-directional (source registers target), but both sides accept
-    /// messages from connected peers on subscribed topics. Document-level
+    /// one-directional (source registers target), but the target accepts
+    /// push-log requests from any connected peer. Connected peers are
+    /// already authenticated via transport-level crypto. Document-level
     /// ACP still applies independently at merge time.
     ///
     /// Important: collection access is broader than explicit replicator trust.
@@ -42,15 +43,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return Ok(());
         }
 
-        // Accept messages from connected peers for collections we're subscribed to.
-        // Connected peers are already authenticated via transport-level crypto. The
-        // replicator registry controls what WE push; it shouldn't gate what we ACCEPT
-        // from authenticated peers on topics we've subscribed to.
+        // Accept messages from any connected peer. Connected peers are already
+        // authenticated via transport-level crypto. The replicator registry
+        // controls what WE push; it should not gate what we ACCEPT from
+        // authenticated peers. This matches Go DefraDB where the replicator
+        // target accepts push-logs without explicit subscription.
         if self.peer_state.is_connected(peer_id_str) {
-            let subscribed = self.subscribed_collections.read().await;
-            if subscribed.contains(collection_id) {
-                return Ok(());
-            }
+            return Ok(());
         }
 
         tracing::warn!(

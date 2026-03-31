@@ -96,25 +96,26 @@ impl<S: Store> crate::database::DB<S> {
 
                 let other_field = other_col
                     .and_then(|col| col.field_by_relation(rel_name, &new_schema.name, &field.name));
-                let other_is_array = other_field.map(|f| f.kind.is_array()).unwrap_or(false);
-
                 if field.is_primary {
-                    let ensure_index = if other_field.is_some() && !other_is_array {
-                        new_schema.ensure_one_to_one_unique_index(&field.name, &mut || {
+                    // Go's getOneToOneIndexRequestsForPatch only creates unique
+                    // indexes for one-to-one relations added via patch. One-to-many
+                    // indexes are NOT auto-created during patching (only during
+                    // initial schema creation via finalizeRelations).
+                    //
+                    // When the other side doesn't exist yet (multi-collection patch
+                    // where collections are patched sequentially), skip index creation
+                    // here. The missing index will be created when the other collection
+                    // is patched (see cross-collection index check below).
+                    let is_one_to_one = other_field.map(|f| !f.kind.is_array()).unwrap_or(false);
+                    if is_one_to_one {
+                        match new_schema.ensure_one_to_one_unique_index(&field.name, &mut || {
                             next_index_id += 1;
                             next_index_id
-                        })
-                    } else {
-                        new_schema.ensure_one_to_many_index(&field.name, &mut || {
-                            next_index_id += 1;
-                            next_index_id
-                        })
-                    };
-
-                    match ensure_index {
-                        Ok(Some(index)) => indexes_to_add.push(index),
-                        Ok(None) => {}
-                        Err(e) => return Err(Error::InvalidPatch(e.to_string())),
+                        }) {
+                            Ok(Some(index)) => indexes_to_add.push(index),
+                            Ok(None) => {}
+                            Err(e) => return Err(Error::InvalidPatch(e.to_string())),
+                        }
                     }
                 }
             }
@@ -462,6 +463,18 @@ impl<S: Store> crate::database::DB<S> {
             // If new version is inactive, old version stays in cache (already there)
         }
 
+        // Cross-collection one-to-one index creation.
+        // When collections are patched sequentially (e.g., Author then Book), the
+        // primary side (Author) may not get its unique index during its own patch
+        // because the other side (Book) didn't have the relation field yet. Now that
+        // this collection is stored, check if any OTHER collection has a primary
+        // non-array relation that targets this collection and now forms a one-to-one,
+        // and add the missing unique index.
+        if new_schema.is_active {
+            self.create_cross_collection_one_to_one_indexes(&new_schema)
+                .await?;
+        }
+
         // After switching active versions, reindex if the new version's history has migrations
         if new_schema.is_active {
             if let Err(e) = self.maybe_reindex_on_version_switch(actual_name).await {
@@ -474,5 +487,106 @@ impl<S: Store> crate::database::DB<S> {
         }
 
         Ok(new_schema)
+    }
+
+    /// Check other active collections for primary relation fields that target
+    /// `just_patched` and now form one-to-one relations needing unique indexes.
+    async fn create_cross_collection_one_to_one_indexes(
+        &self,
+        just_patched: &CollectionVersion,
+    ) -> Result<()> {
+        // Collect candidates from the cache: other collections with primary non-array
+        // relation fields pointing at just_patched.
+        let candidates: Vec<(String, CollectionVersion)> = {
+            let cache = self
+                .collections
+                .read()
+                .map_err(|_| Error::LockPoisoned("collection cache lock poisoned".into()))?;
+            cache
+                .iter()
+                .filter(|(name, _)| name.as_str() != just_patched.name)
+                .map(|(name, col)| (name.clone(), col.schema().clone()))
+                .collect()
+        };
+
+        for (coll_name, other_schema) in &candidates {
+            let mut needs_update = false;
+            let mut updated_schema = other_schema.clone();
+
+            let max_index_id = updated_schema
+                .indexes
+                .iter()
+                .map(|idx| idx.id)
+                .max()
+                .unwrap_or(0);
+            let mut next_id = max_index_id;
+
+            for field in &other_schema.fields {
+                if !field.kind.is_relation() || field.kind.is_array() || !field.is_primary {
+                    continue;
+                }
+                let rel_name = match field.relation_name.as_ref() {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let target_col_id = match field.kind.relation_collection_id() {
+                    Some(id) => id,
+                    None => continue,
+                };
+                // Only interested in relations targeting the just-patched collection
+                if target_col_id != just_patched.name && target_col_id != just_patched.collection_id
+                {
+                    continue;
+                }
+                // Find the matching field on just_patched
+                let matching_field =
+                    just_patched.field_by_relation(rel_name, &other_schema.name, &field.name);
+                let is_one_to_one = matching_field.map(|f| !f.kind.is_array()).unwrap_or(false);
+                if !is_one_to_one {
+                    continue;
+                }
+                // Check if unique index already exists
+                match updated_schema.ensure_one_to_one_unique_index(&field.name, &mut || {
+                    next_id += 1;
+                    next_id
+                }) {
+                    Ok(Some(index)) => {
+                        updated_schema.indexes.push(index);
+                        needs_update = true;
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Err(Error::InvalidPatch(e.to_string())),
+                }
+            }
+
+            if needs_update {
+                // Store updated schema with new indexes
+                let txn = self.new_txn(false).await?;
+                let key = CollectionKey::new(&updated_schema.version_id);
+                let data = serde_json::to_vec(&updated_schema).map_err(|e| {
+                    Error::Serialization(format!(
+                        "failed to serialize updated schema '{}': {}",
+                        updated_schema.version_id, e
+                    ))
+                })?;
+                {
+                    let systemstore = txn.systemstore()?;
+                    systemstore
+                        .set(&key.bytes(), &data)
+                        .await
+                        .map_err(Error::Storage)?;
+                }
+                txn.commit().await?;
+
+                // Update cache
+                let mut cache = self
+                    .collections
+                    .write()
+                    .map_err(|_| Error::LockPoisoned("collection cache lock poisoned".into()))?;
+                cache.insert(coll_name.clone(), Collection::new(updated_schema));
+            }
+        }
+
+        Ok(())
     }
 }

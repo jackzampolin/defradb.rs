@@ -187,13 +187,13 @@ impl<S: Store> VersionedFetcher<S> {
 
     /// Parse a CID string, returning appropriate errors for invalid/unknown CIDs.
     fn parse_cid(cid_str: &str) -> Result<Cid> {
-        Cid::from_str(cid_str).map_err(|e| {
+        Cid::from_str(cid_str).map_err(|_e| {
             // Go's CID library is more lenient. If it looks like a valid CIDv1
             // format, treat as "not found" rather than "invalid".
             if Self::looks_like_cidv1(cid_str) {
                 Error::Serialization("cid either does not exist or belong to document".to_string())
             } else {
-                Error::Serialization(format!("invalid cid: {}", e))
+                Error::Serialization("invalid cid: selected encoding not supported".to_string())
             }
         })
     }
@@ -300,7 +300,7 @@ impl<S: Store> VersionedFetcher<S> {
             .map_err(Error::Storage)?
             .ok_or_else(|| {
                 Error::Serialization(
-                    "failed to get block in blockstore: ipld: could not find".to_string(),
+                    "seek failed: (version fetcher) failed to get block in blockstore: ipld: could not find".to_string(),
                 )
             })?;
 

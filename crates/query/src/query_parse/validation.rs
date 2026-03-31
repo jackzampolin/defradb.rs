@@ -159,6 +159,7 @@ mod tests {
         let op = ParsedOperation::Query {
             selects: vec![Select::new("User")],
             explain: None,
+            exhaustive: false,
         };
         assert!(validate_parsed_operation(&op, &provider).await.is_ok());
     }
@@ -169,6 +170,7 @@ mod tests {
         let op = ParsedOperation::Query {
             selects: vec![Select::new("Uzr")],
             explain: None,
+            exhaustive: false,
         };
         let err = validate_parsed_operation(&op, &provider).await.unwrap_err();
         let msg = err.to_string();
@@ -190,6 +192,7 @@ mod tests {
         let op = ParsedOperation::Query {
             selects: vec![Select::new("_commits")],
             explain: None,
+            exhaustive: false,
         };
         assert!(validate_parsed_operation(&op, &provider).await.is_ok());
     }
@@ -236,6 +239,7 @@ mod tests {
         let op = ParsedOperation::Query {
             selects: vec![Select::new("CompletelyDifferent")],
             explain: None,
+            exhaustive: false,
         };
         let err = validate_parsed_operation(&op, &provider).await.unwrap_err();
         let msg = err.to_string();

@@ -71,9 +71,13 @@ async fn acp_multi_role_test(cluster: TestCluster) {
             .unwrap_or(0)
     };
 
-    // Alice sees 2 (owner of both), Bob=1 (admin on doc1), Carol=1, Dave=1
+    // Alice sees 2 (owner of both), Bob=0 (admin grants management not read), Carol=1, Dave=1
     assert_eq!(count(&alice.private_key_hex), 2, "Alice=2");
-    assert_eq!(count(&bob.private_key_hex), 1, "Bob=1 (admin on doc1)");
+    assert_eq!(
+        count(&bob.private_key_hex),
+        0,
+        "Bob=0 (admin does not grant doc read)"
+    );
     assert_eq!(count(&carol.private_key_hex), 1, "Carol=1 (writer on doc1)");
     assert_eq!(count(&dave.private_key_hex), 1, "Dave=1 (reader on doc1)");
 

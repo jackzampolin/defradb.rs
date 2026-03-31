@@ -57,7 +57,7 @@ pub(super) fn parse_field_to_mutation(
             (MutationType::Create, "input") => {
                 has_input_arg = true;
                 if !matches!(arg_value, Value::Null) {
-                    let input = parse_create_input(arg_value, variables)?;
+                    let input = parse_create_input(arg_value, variables, &collection_name)?;
                     mutation.create_input = input;
                 }
                 // null input is valid - leaves create_input empty for empty result
@@ -72,11 +72,12 @@ pub(super) fn parse_field_to_mutation(
                 }
             }
 
-            // UPSERT: create is the document to create if no match (single object, not array)
-            (MutationType::Upsert, "create") => {
+            // UPSERT: add is the document to create if no match (single object, not array)
+            // Go uses "add" as the argument name for upsert create input
+            (MutationType::Upsert, "add") => {
                 if matches!(arg_value, Value::Null) {
                     return Err(QueryError::parse(
-                        "Argument \"create\" has invalid value <nil>.".to_string(),
+                        "Argument \"add\" has invalid value <nil>.".to_string(),
                     ));
                 }
                 let input = parse_update_input(arg_value, variables)?;
@@ -104,13 +105,24 @@ pub(super) fn parse_field_to_mutation(
                 }
             }
 
-            // UPDATE/DELETE/UPSERT: filter to find documents
-            (MutationType::Update | MutationType::Delete | MutationType::Upsert, "filter") => {
+            // UPDATE/DELETE: filter to find documents
+            (MutationType::Update | MutationType::Delete, "filter") => {
                 // Null filter is valid and means "no filter" (operate on all docs)
                 if !matches!(arg_value, Value::Null) {
                     let filter = parse_filter_value(arg_value, variables)?;
                     mutation.filter = Some(filter);
                 }
+            }
+
+            // UPSERT: filter is required and cannot be null
+            (MutationType::Upsert, "filter") => {
+                if matches!(arg_value, Value::Null) {
+                    return Err(QueryError::parse(
+                        "Argument \"filter\" has invalid value <nil>.".to_string(),
+                    ));
+                }
+                let filter = parse_filter_value(arg_value, variables)?;
+                mutation.filter = Some(filter);
             }
 
             // Encryption: encrypt entire document
@@ -180,7 +192,7 @@ pub(super) fn parse_field_to_mutation(
             }
             if mutation.create_input.is_empty() {
                 return Err(QueryError::parse(format!(
-                    "upsert_{} mutation requires 'create' argument with document to create if no match",
+                    "upsert_{} mutation requires 'add' argument with document to create if no match",
                     collection_name
                 )));
             }
@@ -223,6 +235,7 @@ pub(super) fn parse_field_to_mutation(
 fn parse_create_input(
     value: &Value<'_, String>,
     variables: Option<&HashMap<String, JsonValue>>,
+    collection_name: &str,
 ) -> Result<Vec<HashMap<String, JsonValue>>> {
     match value {
         Value::List(items) => {
@@ -232,6 +245,12 @@ fn parse_create_input(
                     Value::Object(obj) => {
                         let doc = parse_document_input(obj, variables)?;
                         docs.push(doc);
+                    }
+                    Value::Null => {
+                        return Err(QueryError::parse(format!(
+                            "Expected \"{}MutationInputArg!\", found null.",
+                            collection_name
+                        )))
                     }
                     _ => return Err(QueryError::parse("CREATE input items must be objects")),
                 }
@@ -248,10 +267,7 @@ fn parse_create_input(
         // Variable reference - resolve from variables map
         Value::Variable(var_name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
-                    var_name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", var_name))
             })?;
             let json_val = vars.get(var_name).ok_or_else(|| {
                 QueryError::parse(format!("variable '{}' not found in variables", var_name))
@@ -265,6 +281,11 @@ fn parse_create_input(
                             let doc: HashMap<String, JsonValue> =
                                 obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                             docs.push(doc);
+                        } else if item.is_null() {
+                            return Err(QueryError::parse(format!(
+                                "Expected \"{}MutationInputArg!\", found null.",
+                                collection_name
+                            )));
                         } else {
                             return Err(QueryError::parse("CREATE input items must be objects"));
                         }
@@ -331,7 +352,7 @@ pub(super) fn parse_bm25_field(
                     Value::Variable(var_name) => {
                         let vars = variables.ok_or_else(|| {
                             QueryError::parse(format!(
-                                "variable '{}' used but no variables provided",
+                                "Variable \"${}\" was not provided.",
                                 var_name
                             ))
                         })?;
@@ -408,10 +429,7 @@ pub(super) fn parse_similarity_field(
         }
         Value::Variable(var_name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
-                    var_name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", var_name))
             })?;
             let json_val = vars.get(var_name.as_str()).ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", var_name))

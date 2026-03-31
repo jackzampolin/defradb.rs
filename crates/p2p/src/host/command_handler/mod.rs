@@ -184,6 +184,15 @@ impl<S: Store> P2PHost<S> {
             HostCommand::BitswapCancel { query_id, response } => {
                 self.handle_bitswap_cancel(query_id, response);
             }
+            HostCommand::TopicPeers { topic: _, response } => {
+                // Return all connected peers as a best-effort approximation.
+                // GossipSub's all_peers() is behind a Toggle wrapper and not easily
+                // accessible. Connected peers is sufficient for DocSync use case.
+                let peers: Vec<_> = self.swarm.connected_peers().cloned().collect();
+                if response.send(peers).is_err() {
+                    debug!("TopicPeers command response dropped - caller cancelled");
+                }
+            }
         }
         true
     }

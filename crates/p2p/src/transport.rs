@@ -255,6 +255,9 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
 
     async fn publish(&self, topic: DefraTopic, msg: PushLogBroadcast) -> Result<MessageId>;
 
+    /// Get all peers known to GossipSub for a topic (mesh + non-mesh).
+    async fn topic_peers(&self, topic: DefraTopic) -> Result<Vec<PeerId>>;
+
     // ---- Messaging ----
 
     async fn send_pushlog_response(&self, token: ResponseToken, reply: PushLogReply) -> Result<()>;

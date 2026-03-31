@@ -149,7 +149,9 @@ impl AverageNode {
         let is_aggregate_ref = source
             .child_field_name
             .as_ref()
-            .map(|n| n.starts_with('_'))
+            .map(|n| {
+                n.starts_with('_') || matches!(n.as_str(), "AVG" | "SUM" | "COUNT" | "MIN" | "MAX")
+            })
             .unwrap_or(false);
 
         match (&source.child_field_name, &source.filter) {

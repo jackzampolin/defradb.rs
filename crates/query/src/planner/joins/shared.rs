@@ -27,6 +27,7 @@ pub(in crate::planner) fn can_use_direct_indexed_child_cache(nested_select: &Sel
     use crate::mapper::Requestable;
 
     nested_select.filter.is_none()
+        && nested_select.doc_ids.is_none()
         && nested_select.group_by.is_none()
         && nested_select
             .order_by

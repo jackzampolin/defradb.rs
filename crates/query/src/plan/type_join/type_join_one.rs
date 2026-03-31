@@ -10,12 +10,26 @@ use tracing::warn;
 use crate::document::{documents_to_plan_docs, DocumentMapping};
 use crate::error::{QueryError, Result};
 use crate::fetcher::DocFetcher;
-use crate::mapper::Filter;
+use crate::mapper::{Filter, OrderDirection};
 use crate::plan::IndexScanNode;
+use crate::plan::OrphanNode;
 use crate::planner::index_selection::{IndexScanParams, IndexScanType};
 use crate::planner::{Doc, ExecInfo, PlanNode};
 
 use super::{JoinChildMetrics, JoinDirection, JoinSide};
+
+/// Configuration for internal orphan handling in TypeJoinOne.
+///
+/// When an exhaustive join is requested, orphan documents (parents with no
+/// matching child) are yielded either before (ASC) or after (DESC) the
+/// normal join results, depending on the order direction.
+pub struct OrphanConfig {
+    pub orphan_node: OrphanNode,
+    pub direction: OrderDirection,
+    /// True when parent doesn't store FK (secondary side).
+    /// Affects explain output structure.
+    pub is_secondary_side: bool,
+}
 
 /// TypeJoinOne implements one-to-one relation joins.
 ///
@@ -85,6 +99,20 @@ pub struct TypeJoinOne {
     parent_scan_mapping: Option<DocumentMapping>,
     /// For InvertedIndex mode: queue of parent docs to yield
     docs_to_yield: Vec<Doc>,
+    /// Optional orphan handling for exhaustive joins
+    orphan_config: Option<OrphanConfig>,
+    /// Whether the orphan phase is currently active
+    orphan_phase_active: bool,
+    /// Whether the orphan phase has completed
+    orphan_phase_done: bool,
+    /// Shared set of parent docIDs yielded during the join.
+    /// Written by TypeJoinOne, read by OrphanNode::SecondarySide.
+    shared_yielded_ids: Option<crate::plan::SharedYieldedIds>,
+    /// For InvertedIndex mode: scalar filter from the parent plan that must be
+    /// applied to parent docs fetched via FK index lookup. Without this, queries
+    /// combining scalar and relation filters (e.g., `{genre: "thriller", author: {name: "X"}}`)
+    /// would skip the scalar conditions.
+    parent_residual_filter: Option<Filter>,
 }
 
 /// A filter condition on a relation field.
@@ -151,6 +179,38 @@ impl TypeJoinOne {
             parent_collection: None,
             parent_scan_mapping: None,
             docs_to_yield: Vec::new(),
+            orphan_config: None,
+            orphan_phase_active: false,
+            orphan_phase_done: false,
+            shared_yielded_ids: None,
+            parent_residual_filter: None,
+        }
+    }
+
+    /// Configure internal orphan handling for exhaustive joins.
+    ///
+    /// When set, orphan documents (parents with no matching child) are yielded
+    /// before (ASC) or after (DESC) the normal join results.
+    pub fn with_orphan_config(
+        mut self,
+        orphan_node: OrphanNode,
+        direction: OrderDirection,
+        shared_ids: crate::plan::SharedYieldedIds,
+        is_secondary_side: bool,
+    ) -> Self {
+        self.shared_yielded_ids = Some(shared_ids);
+        self.orphan_config = Some(OrphanConfig {
+            orphan_node,
+            direction,
+            is_secondary_side,
+        });
+        self
+    }
+
+    /// Record a yielded parent docID in the shared set (for orphan exclusion).
+    async fn record_yielded_id(&self, doc_id: &str) {
+        if let Some(ref ids) = self.shared_yielded_ids {
+            ids.write().await.insert(doc_id.to_string());
         }
     }
 
@@ -174,15 +234,28 @@ impl TypeJoinOne {
         fk_field_index: usize,
         parent_collection: schema::CollectionVersion,
         parent_scan_mapping: DocumentMapping,
-        fetcher: Arc<dyn DocFetcher>,
+        fetcher: Option<Arc<dyn DocFetcher>>,
+        sort_direction: crate::mapper::OrderDirection,
     ) -> Self {
         self.direction = JoinDirection::InvertedIndex {
             parent_fk_index_name: fk_index_name,
             parent_fk_field_index: fk_field_index,
+            sort_direction,
         };
         self.parent_collection = Some(parent_collection);
         self.parent_scan_mapping = Some(parent_scan_mapping);
-        self.fetcher = Some(fetcher);
+        self.fetcher = fetcher;
+        self
+    }
+
+    /// Set a residual scalar filter for parent docs fetched in inverted index mode.
+    ///
+    /// When a query combines scalar and relation filters (e.g.,
+    /// `Book(filter: {genre: "thriller", author: {name: "X"}})`),
+    /// the inverted index join bypasses the original parent ScanNode.
+    /// This filter ensures the scalar conditions are still applied.
+    pub fn with_parent_residual_filter(mut self, filter: Filter) -> Self {
+        self.parent_residual_filter = Some(filter);
         self
     }
 
@@ -196,18 +269,59 @@ impl TypeJoinOne {
         child_fk_index: usize,
         parent_collection: schema::CollectionVersion,
         parent_scan_mapping: DocumentMapping,
-        fetcher: Arc<dyn DocFetcher>,
+        fetcher: Option<Arc<dyn DocFetcher>>,
     ) -> Self {
         self.direction = JoinDirection::OrderedInvertedPrimary { child_fk_index };
         self.parent_collection = Some(parent_collection);
         self.parent_scan_mapping = Some(parent_scan_mapping);
-        self.fetcher = Some(fetcher);
+        self.fetcher = fetcher;
         self
     }
 
     /// Returns the direction of this join.
     pub fn direction(&self) -> &JoinDirection {
         &self.direction
+    }
+
+    /// Build the core `{ "typeJoinOne": { "root": ..., "subType": ... } }` debug structure.
+    fn build_debug_type_join_one(&self) -> JsonValue {
+        let mut inner_obj = serde_json::Map::new();
+
+        let root_explain = self.parent_plan.explain_debug();
+        inner_obj.insert("root".to_string(), root_explain);
+
+        let child_explain = self.child_plan.explain_debug();
+        let child_is_select = self.child_plan.kind() == "selectNode";
+
+        let select_node_content = if child_is_select {
+            child_explain
+                .as_object()
+                .and_then(|o| o.get("selectNode"))
+                .cloned()
+                .unwrap_or(child_explain.clone())
+        } else {
+            let mut select_node_inner = serde_json::Map::new();
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    select_node_inner.insert(key.clone(), value.clone());
+                }
+            }
+            serde_json::Value::Object(select_node_inner)
+        };
+        let sub_type = serde_json::json!({
+            "selectTopNode": {
+                "selectNode": select_node_content
+            }
+        });
+        inner_obj.insert("subType".to_string(), sub_type);
+
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "typeJoinOne".to_string(),
+            serde_json::Value::Object(inner_obj),
+        );
+
+        serde_json::Value::Object(obj)
     }
 
     /// Extract the foreign key value from the parent document.
@@ -343,8 +457,31 @@ impl TypeJoinOne {
     /// the outer loop. For each child, we look up the parent by creating an
     /// IndexScanNode on the parent's FK field (FK == child._docID).
     async fn next_inverted_index(&mut self) -> Result<bool> {
-        // If we have queued parent docs from a previous child, yield one
-        if let Some(doc) = self.docs_to_yield.pop() {
+        // For ASC with primary-side orphans: yield orphans first since
+        // FK IS NULL scan is independent of the join.
+        if let Some(ref mut config) = self.orphan_config {
+            if config.direction == OrderDirection::Asc && !self.orphan_phase_done {
+                if !self.orphan_phase_active {
+                    self.orphan_phase_active = true;
+                    config.orphan_node.init().await?;
+                    config.orphan_node.start().await?;
+                }
+                if config.orphan_node.next().await? {
+                    let mut orphan_doc = config.orphan_node.value().deep_clone();
+                    orphan_doc.set(
+                        self.parent_side.relation_field_index(),
+                        serde_json::Value::Null,
+                    );
+                    self.current_doc = orphan_doc;
+                    return Ok(true);
+                }
+                self.orphan_phase_done = true;
+            }
+        }
+
+        // If we have queued parent docs from a previous child, yield one (FIFO)
+        if !self.docs_to_yield.is_empty() {
+            let doc = self.docs_to_yield.remove(0);
             self.current_doc = doc;
             return Ok(true);
         }
@@ -402,6 +539,9 @@ impl TypeJoinOne {
 
             let mut index_scan =
                 IndexScanNode::new(parent_collection, parent_mapping, params).with_fetcher(fetcher);
+            if let Some(ref filter) = self.parent_residual_filter {
+                index_scan = index_scan.with_residual_filter(filter.clone());
+            }
 
             index_scan.init().await?;
             index_scan.start().await?;
@@ -437,9 +577,34 @@ impl TypeJoinOne {
                 self.docs_to_yield.push(parent_doc);
             }
 
-            if let Some(doc) = self.docs_to_yield.pop() {
+            if !self.docs_to_yield.is_empty() {
+                let doc = self.docs_to_yield.remove(0);
+                if let Some(pid) = doc.doc_id() {
+                    self.record_yielded_id(pid).await;
+                }
                 self.current_doc = doc;
                 return Ok(true);
+            }
+        }
+
+        // Yield orphans after join results exhausted
+        if let Some(ref mut config) = self.orphan_config {
+            if !self.orphan_phase_done {
+                if !self.orphan_phase_active {
+                    self.orphan_phase_active = true;
+                    config.orphan_node.init().await?;
+                    config.orphan_node.start().await?;
+                }
+                if config.orphan_node.next().await? {
+                    let mut orphan_doc = config.orphan_node.value().deep_clone();
+                    orphan_doc.set(
+                        self.parent_side.relation_field_index(),
+                        serde_json::Value::Null,
+                    );
+                    self.current_doc = orphan_doc;
+                    return Ok(true);
+                }
+                self.orphan_phase_done = true;
             }
         }
 
@@ -452,6 +617,59 @@ impl TypeJoinOne {
     /// For each child doc, we read its FK field (which contains the parent's _docID),
     /// then fetch the parent directly by docID using the fetcher.
     async fn next_ordered_primary(&mut self) -> Result<bool> {
+        // For ASC with orphans: we need orphans first, but can't know orphans until
+        // the join runs. So on first call, pre-run the entire join to populate
+        // shared_yielded_ids, then yield orphans, then buffered join results.
+        if self.orphan_config.is_some() && !self.orphan_phase_active {
+            let is_asc = self
+                .orphan_config
+                .as_ref()
+                .map(|c| c.direction == OrderDirection::Asc)
+                .unwrap_or(false);
+            if is_asc {
+                self.orphan_phase_active = true;
+                // Pre-run the join to collect results and populate yielded IDs
+                let mut buffered = Vec::new();
+                while let Ok(true) = self.next_ordered_primary_inner().await {
+                    buffered.push(self.current_doc.deep_clone());
+                }
+                // Now init and start orphan node (shared_yielded_ids is populated)
+                let config = self.orphan_config.as_mut().unwrap();
+                config.orphan_node.init().await?;
+                config.orphan_node.start().await?;
+                // Store buffered join results
+                self.docs_to_yield = buffered;
+            }
+        }
+
+        // Yield orphans (for ASC: before buffered results; for DESC: handled at end)
+        if let Some(ref mut config) = self.orphan_config {
+            if config.direction == OrderDirection::Asc && !self.orphan_phase_done {
+                if config.orphan_node.next().await? {
+                    let mut orphan_doc = config.orphan_node.value().deep_clone();
+                    orphan_doc.set(
+                        self.parent_side.relation_field_index(),
+                        serde_json::Value::Null,
+                    );
+                    self.current_doc = orphan_doc;
+                    return Ok(true);
+                }
+                self.orphan_phase_done = true;
+            }
+        }
+
+        // Yield buffered join results (ASC pre-run)
+        if !self.docs_to_yield.is_empty() {
+            self.current_doc = self.docs_to_yield.remove(0);
+            return Ok(true);
+        }
+
+        // Normal iteration (DESC or no orphans)
+        self.next_ordered_primary_inner().await
+    }
+
+    /// Core ordered primary iteration without orphan handling.
+    async fn next_ordered_primary_inner(&mut self) -> Result<bool> {
         let child_fk_index = match &self.direction {
             JoinDirection::OrderedInvertedPrimary { child_fk_index } => *child_fk_index,
             _ => unreachable!(),
@@ -505,9 +723,33 @@ impl TypeJoinOne {
                 }
             }
 
+            if let Some(pid) = parent_doc.doc_id() {
+                self.record_yielded_id(pid).await;
+            }
             self.merge_child(&mut parent_doc, Some(child_doc));
             self.current_doc = parent_doc;
             return Ok(true);
+        }
+
+        // Yield orphans after join results exhausted (DESC only — ASC handled in wrapper)
+        if let Some(ref mut config) = self.orphan_config {
+            if config.direction == OrderDirection::Desc && !self.orphan_phase_done {
+                if !self.orphan_phase_active {
+                    self.orphan_phase_active = true;
+                    config.orphan_node.init().await?;
+                    config.orphan_node.start().await?;
+                }
+                if config.orphan_node.next().await? {
+                    let mut orphan_doc = config.orphan_node.value().deep_clone();
+                    orphan_doc.set(
+                        self.parent_side.relation_field_index(),
+                        serde_json::Value::Null,
+                    );
+                    self.current_doc = orphan_doc;
+                    return Ok(true);
+                }
+                self.orphan_phase_done = true;
+            }
         }
 
         Ok(false)
@@ -582,6 +824,62 @@ impl TypeJoinOne {
         }
     }
 
+    /// Build the explain content for the typeJoinOne inner structure.
+    ///
+    /// Returns the attributes and tree structure without the outer wrapper,
+    /// so it can be used both directly and inside a sequenceNode.
+    fn explain_join_one_inner(&self) -> JsonValue {
+        let mut obj = serde_json::Map::new();
+
+        let direction = match self.direction {
+            JoinDirection::Primary { .. } => "primary",
+            JoinDirection::Inverted
+            | JoinDirection::InvertedIndex { .. }
+            | JoinDirection::OrderedInvertedPrimary { .. } => "secondary",
+        };
+        obj.insert("direction".to_string(), serde_json::json!(direction));
+        obj.insert("joinType".to_string(), serde_json::json!("typeJoinOne"));
+
+        let root_name = self.child_side.relation_field().name.clone();
+        obj.insert("rootName".to_string(), serde_json::json!(root_name));
+        obj.insert(
+            "subTypeName".to_string(),
+            serde_json::json!(self.parent_side.relation_field().name),
+        );
+
+        let root_explain = self.parent_plan.explain();
+        obj.insert("root".to_string(), root_explain);
+
+        let child_explain = self.child_plan.explain();
+        let child_is_select = self.child_plan.kind() == "selectNode";
+
+        let select_node_content = if child_is_select {
+            child_explain
+                .as_object()
+                .and_then(|o| o.get("selectNode"))
+                .cloned()
+                .unwrap_or(child_explain.clone())
+        } else {
+            let mut select_node_inner = serde_json::Map::new();
+            select_node_inner.insert("docID".to_string(), serde_json::Value::Null);
+            select_node_inner.insert("filter".to_string(), serde_json::Value::Null);
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    select_node_inner.insert(key.clone(), value.clone());
+                }
+            }
+            serde_json::Value::Object(select_node_inner)
+        };
+        let sub_type = serde_json::json!({
+            "selectTopNode": {
+                "selectNode": select_node_content
+            }
+        });
+        obj.insert("subType".to_string(), sub_type);
+
+        serde_json::Value::Object(obj)
+    }
+
     /// Check if the child document passes the relation filter.
     ///
     /// Returns true if:
@@ -622,6 +920,8 @@ impl PlanNode for TypeJoinOne {
         self.child_exec_info = ExecInfo::default();
         self.go_child_metrics.reset();
         self.docs_to_yield.clear();
+        self.orphan_phase_active = false;
+        self.orphan_phase_done = false;
 
         if matches!(
             self.direction,
@@ -748,6 +1048,9 @@ impl PlanNode for TypeJoinOne {
         }
         self.child_cache.clear();
         self.docs_to_yield.clear();
+        if let Some(ref mut config) = self.orphan_config {
+            config.orphan_node.close().await?;
+        }
         self.initialized = false;
         Ok(())
     }
@@ -766,113 +1069,61 @@ impl PlanNode for TypeJoinOne {
     }
 
     fn explain_inner(&self) -> JsonValue {
-        // Simple/Default mode: typeIndexJoin contains both attributes and tree structure
-        let mut obj = serde_json::Map::new();
+        let normal_explain = self.explain_join_one_inner();
 
-        // direction: primary or secondary (Go uses "secondary" not "inverted")
-        let direction = match self.direction {
-            JoinDirection::Primary { .. } => "primary",
-            JoinDirection::Inverted
-            | JoinDirection::InvertedIndex { .. }
-            | JoinDirection::OrderedInvertedPrimary { .. } => "secondary",
-        };
-        obj.insert("direction".to_string(), serde_json::json!(direction));
+        if let Some(ref config) = self.orphan_config {
+            let orphan_explain = config.orphan_node.explain_inner();
+            let join_entry = serde_json::json!({ "typeJoinOne": normal_explain });
 
-        // joinType: "typeJoinOne" for one-to-one joins
-        obj.insert("joinType".to_string(), serde_json::json!("typeJoinOne"));
-
-        // rootName: the child side's relation field name (points back to parent)
-        // Go uses immutable.Option[string], but areResultOptionsEqual compares the inner value
-        let root_name = self.child_side.relation_field().name.clone();
-        obj.insert("rootName".to_string(), serde_json::json!(root_name));
-
-        // subTypeName: the child side's relation field name (from parent perspective)
-        obj.insert(
-            "subTypeName".to_string(),
-            serde_json::json!(self.parent_side.relation_field().name),
-        );
-
-        // root: the parent plan's explain (contains scanNode)
-        let root_explain = self.parent_plan.explain();
-        obj.insert("root".to_string(), root_explain);
-
-        // subType: the child plan's explain wrapped in selectTopNode > selectNode
-        // selectNode must include docID and filter attributes (Go always includes these)
-        let child_explain = self.child_plan.explain();
-        let child_is_select = self.child_plan.kind() == "selectNode";
-
-        let select_node_content = if child_is_select {
-            // Child is SelectNode - extract inner content to avoid double wrapping
-            child_explain
-                .as_object()
-                .and_then(|o| o.get("selectNode"))
-                .cloned()
-                .unwrap_or(child_explain.clone())
+            if config.is_secondary_side {
+                // Secondary side: orphanNode wraps typeJoinOne directly
+                // Go uses orphanPointLookupNode which reports as "orphanNode"
+                let mut orphan_obj = match orphan_explain {
+                    JsonValue::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+                orphan_obj.insert("typeJoinOne".to_string(), serde_json::json!(normal_explain));
+                serde_json::json!({ "orphanNode": JsonValue::Object(orphan_obj) })
+            } else {
+                // Primary side: sequenceNode wraps [orphanNode, typeJoinOne]
+                let orphan_entry = serde_json::json!({ "orphanNode": orphan_explain });
+                let sequence = if config.direction == OrderDirection::Asc {
+                    serde_json::json!([orphan_entry, join_entry])
+                } else {
+                    serde_json::json!([join_entry, orphan_entry])
+                };
+                serde_json::json!({ "sequenceNode": sequence })
+            }
         } else {
-            let mut select_node_inner = serde_json::Map::new();
-            select_node_inner.insert("docID".to_string(), serde_json::Value::Null);
-            select_node_inner.insert("filter".to_string(), serde_json::Value::Null);
-            // Merge child explain (e.g., scanNode) into selectNode
-            if let Some(child_obj) = child_explain.as_object() {
-                for (key, value) in child_obj {
-                    select_node_inner.insert(key.clone(), value.clone());
-                }
-            }
-            serde_json::Value::Object(select_node_inner)
-        };
-        let sub_type = serde_json::json!({
-            "selectTopNode": {
-                "selectNode": select_node_content
-            }
-        });
-        obj.insert("subType".to_string(), sub_type);
-
-        serde_json::Value::Object(obj)
+            normal_explain
+        }
     }
 
     fn explain_debug_inner(&self) -> JsonValue {
-        // Debug mode: typeIndexJoin contains typeJoinOne wrapper with full tree structure
-        let mut inner_obj = serde_json::Map::new();
+        let type_join_one = self.build_debug_type_join_one();
 
-        // root: the parent plan's explain_debug (contains scanNode)
-        let root_explain = self.parent_plan.explain_debug();
-        inner_obj.insert("root".to_string(), root_explain);
-
-        // subType: the child plan's explain_debug wrapped in selectTopNode > selectNode
-        let child_explain = self.child_plan.explain_debug();
-        let child_is_select = self.child_plan.kind() == "selectNode";
-
-        let select_node_content = if child_is_select {
-            child_explain
-                .as_object()
-                .and_then(|o| o.get("selectNode"))
-                .cloned()
-                .unwrap_or(child_explain.clone())
-        } else {
-            let mut select_node_inner = serde_json::Map::new();
-            // Merge child explain into selectNode
-            if let Some(child_obj) = child_explain.as_object() {
-                for (key, value) in child_obj {
-                    select_node_inner.insert(key.clone(), value.clone());
-                }
+        match &self.direction {
+            JoinDirection::InvertedIndex { sort_direction, .. } => {
+                // Primary parent with FK IS NULL orphan path: wrap in sequenceNode.
+                // ASC: orphans first, DESC: orphans last (Go convention).
+                let orphan = serde_json::json!({ "orphanNode": {} });
+                let join_entry = type_join_one;
+                let children = match sort_direction {
+                    crate::mapper::OrderDirection::Asc => {
+                        vec![orphan, join_entry]
+                    }
+                    crate::mapper::OrderDirection::Desc => {
+                        vec![join_entry, orphan]
+                    }
+                };
+                serde_json::json!({ "sequenceNode": children })
             }
-            serde_json::Value::Object(select_node_inner)
-        };
-        let sub_type = serde_json::json!({
-            "selectTopNode": {
-                "selectNode": select_node_content
+            JoinDirection::OrderedInvertedPrimary { .. } => {
+                // Secondary parent exclusion path: orphanNode wraps the join.
+                serde_json::json!({ "orphanNode": type_join_one })
             }
-        });
-        inner_obj.insert("subType".to_string(), sub_type);
-
-        // Wrap in typeJoinOne
-        let mut obj = serde_json::Map::new();
-        obj.insert(
-            "typeJoinOne".to_string(),
-            serde_json::Value::Object(inner_obj),
-        );
-
-        serde_json::Value::Object(obj)
+            _ => type_join_one,
+        }
     }
 
     fn exec_info(&self) -> ExecInfo {
@@ -894,15 +1145,36 @@ impl PlanNode for TypeJoinOne {
             JoinDirection::InvertedIndex { .. } | JoinDirection::OrderedInvertedPrimary { .. }
         ) {
             // Inverted/ordered modes: child drives the loop, parent is looked up per-child.
-            // root = child plan's execute explain (the driving scan)
-            inner_obj.insert("root".to_string(), self.child_plan.explain_execute());
+            // Go always shows parentPlan for root, childPlan for subType.
+            // root = parent lookup metrics (accumulated per-child)
+            inner_obj.insert(
+                "root".to_string(),
+                serde_json::json!({
+                    "scanNode": self.go_child_metrics.scan_node_json()
+                }),
+            );
 
-            // subType = parent lookup metrics as a synthetic scanNode
+            // subType = child plan's execute explain (the driving scan)
+            // Wrap in selectTopNode > selectNode with iterations + filterMatches
+            let child_execute = self.child_plan.explain_execute();
+            let mut select_node = serde_json::Map::new();
+            select_node.insert(
+                "filterMatches".to_string(),
+                serde_json::json!(self.child_exec_info.docs_fetched),
+            );
+            select_node.insert(
+                "iterations".to_string(),
+                serde_json::json!(self.child_exec_info.iterations),
+            );
+            // Merge child execute content into selectNode
+            if let Some(child_obj) = child_execute.as_object() {
+                for (k, v) in child_obj {
+                    select_node.insert(k.clone(), v.clone());
+                }
+            }
             let sub_type = serde_json::json!({
                 "selectTopNode": {
-                    "selectNode": {
-                        "scanNode": self.go_child_metrics.to_json()
-                    }
+                    "selectNode": serde_json::Value::Object(select_node)
                 }
             });
             inner_obj.insert("subType".to_string(), sub_type);
@@ -956,6 +1228,39 @@ impl PlanNode for TypeJoinOne {
             serde_json::Value::Object(inner_obj),
         );
 
-        serde_json::Value::Object(obj)
+        let join_explain = serde_json::Value::Object(obj);
+
+        // Wrap with orphan structure if configured
+        if let Some(ref config) = self.orphan_config {
+            let orphan_explain = config.orphan_node.explain_execute_inner();
+
+            if config.is_secondary_side {
+                // Secondary: orphanNode wraps typeJoinOne directly
+                let mut orphan_obj = match orphan_explain {
+                    JsonValue::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+                orphan_obj.insert(
+                    "typeJoinOne".to_string(),
+                    join_explain
+                        .as_object()
+                        .and_then(|o| o.get("typeJoinOne"))
+                        .cloned()
+                        .unwrap_or(JsonValue::Null),
+                );
+                serde_json::json!({ "orphanNode": JsonValue::Object(orphan_obj) })
+            } else {
+                // Primary: sequenceNode wraps [orphanNode, typeJoinOne]
+                let orphan_entry = serde_json::json!({ "orphanNode": orphan_explain });
+                let sequence = if config.direction == OrderDirection::Asc {
+                    serde_json::json!([orphan_entry, join_explain])
+                } else {
+                    serde_json::json!([join_explain, orphan_entry])
+                };
+                serde_json::json!({ "sequenceNode": sequence })
+            }
+        } else {
+            join_explain
+        }
     }
 }

@@ -254,12 +254,12 @@ fn test_cannot_mix_query_and_mutation() {
 
 #[test]
 fn test_parse_upsert_mutation_go_style() {
-    // Go DefraDB upsert syntax: filter, create, update (all required)
+    // Go DefraDB upsert syntax: filter, add, update (all required)
     let query = r#"
         mutation {
             upsert_Users(
                 filter: {name: {_eq: "Bob"}},
-                create: {name: "Bob", age: 40},
+                add: {name: "Bob", age: 40},
                 update: {age: 40}
             ) {
                 _docID
@@ -295,7 +295,7 @@ fn test_upsert_missing_filter_error() {
     let query = r#"
         mutation {
             upsert_Users(
-                create: {name: "Bob", age: 40},
+                add: {name: "Bob", age: 40},
                 update: {age: 40}
             ) {
                 _docID
@@ -309,8 +309,8 @@ fn test_upsert_missing_filter_error() {
 }
 
 #[test]
-fn test_upsert_missing_create_error() {
-    // Go style requires create
+fn test_upsert_missing_add_error() {
+    // Go style requires add
     let query = r#"
         mutation {
             upsert_Users(
@@ -324,7 +324,7 @@ fn test_upsert_missing_create_error() {
 
     let result = parse_mutations(query);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("create"));
+    assert!(result.unwrap_err().to_string().contains("add"));
 }
 
 #[test]
@@ -334,7 +334,7 @@ fn test_upsert_missing_update_error() {
         mutation {
             upsert_Users(
                 filter: {name: {_eq: "Bob"}},
-                create: {name: "Bob", age: 40}
+                add: {name: "Bob", age: 40}
             ) {
                 _docID
             }

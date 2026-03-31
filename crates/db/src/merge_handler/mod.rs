@@ -356,7 +356,10 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
             metadata.verified_creator = verified;
         }
 
-        // Decrypt delta data if the block has encryption
+        // Decrypt delta data if the block has encryption.
+        // If decryption fails (encryption key block unavailable), skip the
+        // standalone field merge -- the composite merge will re-attempt
+        // decryption when it processes the linked field blocks.
         let decrypted_block;
         let effective_block = if block.encryption.is_some() {
             match &block.delta {
@@ -377,7 +380,16 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                             };
                             &decrypted_block
                         }
-                        Err(_) => &block, // Decryption failed (no key) — use encrypted data
+                        Err(e) => {
+                            tracing::debug!(
+                                cid = %cid,
+                                error = %e,
+                                "Cannot decrypt standalone LWW block, skipping (canRead=false)"
+                            );
+                            return Ok(MergeOutcome::terminal_skip(
+                                "encryption key unavailable for standalone field block",
+                            ));
+                        }
                     }
                 }
                 CrdtDelta::Counter(payload) => {
@@ -397,7 +409,16 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                             };
                             &decrypted_block
                         }
-                        Err(_) => &block,
+                        Err(e) => {
+                            tracing::debug!(
+                                cid = %cid,
+                                error = %e,
+                                "Cannot decrypt standalone Counter block, skipping (canRead=false)"
+                            );
+                            return Ok(MergeOutcome::terminal_skip(
+                                "encryption key unavailable for standalone field block",
+                            ));
+                        }
                     }
                 }
                 _ => &block,

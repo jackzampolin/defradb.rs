@@ -81,7 +81,7 @@ pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_ch
 
             // Empty DID means no identity - not authorized
             if requestor_str.is_empty() {
-                return Err("not authorized to perform operation. Permission: nac-disable".to_string());
+                return Err(format!("not authorized to perform operation. Permission: {}", NodePermission::NacDisable));
             }
 
             let requestor = identity::Did::new(&requestor_str)
@@ -90,7 +90,7 @@ pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_ch
             nac_manager
                 .disable(&requestor)
                 .await
-                .map_err(|e| normalize_auth_error(e.to_string(), "nac-disable"))?;
+                .map_err(|e| normalize_auth_error(e.to_string(), "disable-nac"))?;
 
             Ok(())
         })
@@ -128,7 +128,7 @@ pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_
             // Empty DID means no identity - not authorized
             if requestor_str.is_empty() {
                 return Err(
-                    "not authorized to perform operation. Permission: nac-re-enable".to_string(),
+                    format!("not authorized to perform operation. Permission: {}", NodePermission::NacReEnable),
                 );
             }
 
@@ -143,14 +143,14 @@ pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_
                 .unwrap_or(false);
             if !is_admin {
                 return Err(
-                    "not authorized to perform operation. Permission: nac-re-enable".to_string(),
+                    format!("not authorized to perform operation. Permission: {}", NodePermission::NacReEnable),
                 );
             }
 
             nac_manager
                 .re_enable(&requestor)
                 .await
-                .map_err(|e| normalize_auth_error(e.to_string(), "nac-re-enable"))?;
+                .map_err(|e| normalize_auth_error(e.to_string(), "re-enable-nac"))?;
 
             Ok(())
         })
@@ -193,7 +193,7 @@ pub unsafe extern "C" fn enable_nac(node_ptr: usize, owner_did: *const c_char) -
 /// Add a NAC actor relationship.
 ///
 /// The requestor must be an admin. The relation can be "admin" or a
-/// specific permission name (e.g., "document-read").
+/// specific permission name (e.g., "read-document").
 ///
 /// Returns JSON with success status:
 /// ```json
@@ -244,19 +244,19 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
                     return Err("node acp relationship operation requires identity".to_string());
                 } else {
                     return Err(
-                        "not authorized to perform operation. Permission: nac-relation-add".to_string(),
+                        format!("not authorized to perform operation. Permission: {}", NodePermission::NacRelationAdd),
                     );
                 }
             }
 
             let requestor = identity::Did::new(&requestor_str).map_err(|_| {
-                "not authorized to perform operation. Permission: nac-relation-add".to_string()
+                format!("not authorized to perform operation. Permission: {}", NodePermission::NacRelationAdd)
             })?;
 
             // Check admin authorization BEFORE validating target DID
             if !nac_manager.is_admin(&requestor).await.unwrap_or(false) {
                 return Err(
-                    "not authorized to perform operation. Permission: nac-relation-add".to_string(),
+                    format!("not authorized to perform operation. Permission: {}", NodePermission::NacRelationAdd),
                 );
             }
 
@@ -287,13 +287,13 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
                 nac_manager
                     .add_admin(&requestor, &target)
                     .await
-                    .map_err(|e| normalize_auth_error(e.to_string(), "nac-relation-add"))?
+                    .map_err(|e| normalize_auth_error(e.to_string(), "add-nac-relation"))?
             } else if let Some(perm) = NodePermission::parse(&relation_str) {
                 // Grant specific permission
                 nac_manager
                     .add_permission_grant(&requestor, &target, perm)
                     .await
-                    .map_err(|e| normalize_auth_error(e.to_string(), "nac-relation-add"))?
+                    .map_err(|e| normalize_auth_error(e.to_string(), "add-nac-relation"))?
             } else {
                 return Err("relation not in resource".to_string());
             };
@@ -357,20 +357,19 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
                     return Err("node acp relationship operation requires identity".to_string());
                 } else {
                     return Err(
-                        "not authorized to perform operation. Permission: nac-relation-delete"
-                            .to_string(),
+                        format!("not authorized to perform operation. Permission: {}", NodePermission::NacRelationDelete),
                     );
                 }
             }
 
             let requestor = identity::Did::new(&requestor_str).map_err(|_| {
-                "not authorized to perform operation. Permission: nac-relation-delete".to_string()
+                format!("not authorized to perform operation. Permission: {}", NodePermission::NacRelationDelete)
             })?;
 
             // Check admin authorization BEFORE validating target DID
             if !nac_manager.is_admin(&requestor).await.unwrap_or(false) {
                 return Err(
-                    "not authorized to perform operation. Permission: nac-relation-delete".to_string(),
+                    format!("not authorized to perform operation. Permission: {}", NodePermission::NacRelationDelete),
                 );
             }
 
@@ -401,12 +400,12 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
                 nac_manager
                     .remove_admin(&requestor, &target)
                     .await
-                    .map_err(|e| normalize_auth_error(e.to_string(), "nac-relation-delete"))?
+                    .map_err(|e| normalize_auth_error(e.to_string(), "delete-nac-relation"))?
             } else if let Some(perm) = NodePermission::parse(&relation_str) {
                 nac_manager
                     .remove_permission_grant(&requestor, &target, perm)
                     .await
-                    .map_err(|e| normalize_auth_error(e.to_string(), "nac-relation-delete"))?
+                    .map_err(|e| normalize_auth_error(e.to_string(), "delete-nac-relation"))?
             } else {
                 return Err("relation not in resource".to_string());
             };

@@ -33,12 +33,15 @@ pub unsafe extern "C" fn batch_start(
         let identity_str = c_str_to_string(identity_did);
         let session_str = c_str_to_string(session_id);
 
-        let node_did = NODES
-            .get(node_ptr, |state| state.node_identity_did.clone())
-            .flatten();
+        let (node_did, signing_enabled) = NODES
+            .get(node_ptr, |state| (state.node_identity_did.clone(), state.signing_enabled))
+            .unwrap_or((None, false));
 
-        let signing =
-            defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
+        let signing = defra_core::signing::resolve_signing_config_with_flag(
+            identity_str.as_deref(),
+            node_did.as_deref(),
+            signing_enabled,
+        );
 
         match signing {
             Some(config) => {
@@ -76,12 +79,15 @@ pub unsafe extern "C" fn batch_sign(
         let identity_str = c_str_to_string(identity_did);
         let session_str = c_str_to_string(session_id);
 
-        let node_did = NODES
-            .get(node_ptr, |state| state.node_identity_did.clone())
-            .flatten();
+        let (node_did, signing_enabled) = NODES
+            .get(node_ptr, |state| (state.node_identity_did.clone(), state.signing_enabled))
+            .unwrap_or((None, false));
 
-        let signing =
-            defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
+        let signing = defra_core::signing::resolve_signing_config_with_flag(
+            identity_str.as_deref(),
+            node_did.as_deref(),
+            signing_enabled,
+        );
 
         let config = match signing {
             Some(c) => c,

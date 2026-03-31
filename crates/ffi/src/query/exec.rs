@@ -67,12 +67,16 @@ pub unsafe extern "C" fn exec_request(
         };
 
         // Set up thread-local signer for block signing during mutations.
-        // Matches Go's behavior: if no explicit identity, fall back to node identity.
-        let node_did = NODES
-            .get(node_ptr, |state| state.node_identity_did.clone())
-            .flatten();
-        let signing =
-            defra_core::signing::resolve_signing_config(identity_str.as_deref(), node_did.as_deref());
+        // Matches Go's behavior: if signing is enabled and no explicit identity,
+        // fall back to node identity for block signing.
+        let (node_did, signing_enabled) = NODES
+            .get(node_ptr, |state| (state.node_identity_did.clone(), state.signing_enabled))
+            .unwrap_or((None, false));
+        let signing = defra_core::signing::resolve_signing_config_with_flag(
+            identity_str.as_deref(),
+            node_did.as_deref(),
+            signing_enabled,
+        );
         // Use caller-provided session ID if available; otherwise fall back to public key.
         let session_key = batch_session.or_else(|| signing.as_ref().map(|s| s.public_key_hex.clone()));
         defra_core::batch_signing::set_batch_session_key(session_key);

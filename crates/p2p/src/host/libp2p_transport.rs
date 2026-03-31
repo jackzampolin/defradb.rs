@@ -125,6 +125,14 @@ impl P2PTransport for Libp2pTransport {
         Ok(MessageId::from(gossip_id))
     }
 
+    async fn topic_peers(&self, topic: DefraTopic) -> Result<Vec<PeerId>> {
+        let libp2p_peers = self.handle.topic_peers(topic).await?;
+        Ok(libp2p_peers
+            .into_iter()
+            .map(|pid| PeerId::new(pid.to_string()))
+            .collect())
+    }
+
     async fn send_pushlog_response(&self, token: ResponseToken, reply: PushLogReply) -> Result<()> {
         let channel: ResponseChannel = token
             .downcast::<ResponseChannel>()

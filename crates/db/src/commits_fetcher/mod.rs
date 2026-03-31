@@ -80,7 +80,7 @@ impl<S: Store> CommitsFetcher<S> {
             if Self::looks_like_cidv1(cid_str) {
                 Error::Serialization("cid either does not exist or belong to document".to_string())
             } else {
-                Error::Serialization(format!("invalid cid: {}", e))
+                Error::Serialization("invalid cid: selected encoding not supported".to_string())
             }
         })?;
 

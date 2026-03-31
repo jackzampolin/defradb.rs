@@ -122,7 +122,10 @@ pub(super) fn parse_aggregate_target_obj(
                 let order = match val {
                     Value::Enum(s) | Value::String(s) => {
                         let direction = OrderDirection::parse(s).ok_or_else(|| {
-                            QueryError::parse(format!("invalid order direction: {}", s))
+                            QueryError::parse(format!(
+                                "Argument \"order\" has invalid value {{order: {}}}",
+                                s
+                            ))
                         })?;
                         OrderBy::new().with_condition(OrderCondition::new("", direction))
                     }
@@ -280,25 +283,25 @@ pub(super) fn parse_aggregate_field(
             }
             AggregateType::Sum => {
                 let field_name = target_field.ok_or_else(|| {
-                    QueryError::parse("_sum requires a 'field' argument or relation targets")
+                    QueryError::parse("aggregate must be provided with a property to aggregate")
                 })?;
                 Aggregate::sum(AggregateTarget::with_field("", field_name))
             }
             AggregateType::Average => {
                 let field_name = target_field.ok_or_else(|| {
-                    QueryError::parse("_avg requires a 'field' argument or relation targets")
+                    QueryError::parse("aggregate must be provided with a property to aggregate")
                 })?;
                 Aggregate::avg(AggregateTarget::with_field("", field_name))
             }
             AggregateType::Min => {
                 let field_name = target_field.ok_or_else(|| {
-                    QueryError::parse("_min requires a 'field' argument or relation targets")
+                    QueryError::parse("aggregate must be provided with a property to aggregate")
                 })?;
                 Aggregate::min(AggregateTarget::with_field("", field_name))
             }
             AggregateType::Max => {
                 let field_name = target_field.ok_or_else(|| {
-                    QueryError::parse("_max requires a 'field' argument or relation targets")
+                    QueryError::parse("aggregate must be provided with a property to aggregate")
                 })?;
                 Aggregate::max(AggregateTarget::with_field("", field_name))
             }
@@ -335,6 +338,14 @@ pub(super) fn parse_top_level_aggregate(
                 )));
             }
         }
+    }
+
+    // Top-level aggregates require at least one target (collection argument).
+    // query { COUNT } with no arguments should return this error.
+    if aggregate.targets.is_empty() {
+        return Err(QueryError::parse(
+            "aggregate must be provided with a property to aggregate",
+        ));
     }
 
     // Set alias if provided

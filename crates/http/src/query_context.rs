@@ -116,9 +116,10 @@ pub(crate) fn resolve_signing_config(
     state: &AppState,
     identity: &ExtractIdentity,
 ) -> Option<defra_core::signing::SigningConfig> {
-    defra_core::signing::resolve_signing_config(
+    defra_core::signing::resolve_signing_config_with_flag(
         identity.did().map(|d| d.as_str()),
         state.node_identity_did.as_deref(),
+        state.signing_enabled,
     )
 }
 

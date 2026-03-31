@@ -13,11 +13,11 @@ pub(super) fn is_crdt_type_supported(crdt: CType) -> bool {
 }
 
 /// Check if a field kind is valid for vector embedding storage.
+/// Only Float32Array is supported (matches Go's IsVectorEmbeddingCompatible).
 pub(super) fn is_valid_embedding_kind(kind: &FieldKind) -> bool {
     matches!(
         kind,
         FieldKind::ScalarArray(schema::ScalarArrayKind::Float32Array)
-            | FieldKind::ScalarArray(schema::ScalarArrayKind::Float64Array)
     )
 }
 

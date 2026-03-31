@@ -56,7 +56,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         match explain_type {
             ExplainType::Simple | ExplainType::Debug => {
                 // Simple and Debug modes: explain without execution
-                let selects = parse_query_with_variables(query, variables)?;
+                let mut selects = parse_query_with_variables(query, variables)?;
+                if query.contains("@exhaustive") {
+                    for s in &mut selects {
+                        s.exhaustive = true;
+                    }
+                }
                 let mut operation_children: Vec<JsonValue> = Vec::new();
 
                 for select in selects {

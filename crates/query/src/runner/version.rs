@@ -212,7 +212,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let doc_id = document.id().map(|id| id.to_string());
                 if let Some(doc_id_str) = doc_id {
                     let version_data = self
-                        .fetch_version_data(fetcher, &doc_id_str, version_select, Some(cid), false)
+                        .fetch_version_data(fetcher, &doc_id_str, version_select, Some(cid))
                         .await?;
                     let output_name = version_select.field.output_name();
                     obj.insert(output_name.to_string(), version_data);
@@ -347,7 +347,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
             if let Some(doc_id_str) = doc_id {
                 let version_data = self
-                    .fetch_version_data(fetcher, &doc_id_str, version_select, None, false)
+                    .fetch_version_data(fetcher, &doc_id_str, version_select, None)
                     .await?;
                 let output_name = version_select.field.output_name();
                 doc_obj.insert(output_name.to_string(), version_data);

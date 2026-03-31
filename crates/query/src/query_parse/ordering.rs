@@ -61,10 +61,7 @@ pub(super) fn parse_order_value(
         }
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
-                    name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", name))
             })?;
             let json_val = vars.get(name).ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))
@@ -127,7 +124,6 @@ pub(super) fn parse_order_condition(
         Value::Null => Ok(None),
         Value::Enum(s) | Value::String(s) => {
             let direction = OrderDirection::parse(s).ok_or_else(|| {
-                // Match Go DefraDB error format
                 QueryError::parse(format!(
                     "Argument \"order\" has invalid value {{{}: {}}}",
                     field_name, s
@@ -137,10 +133,7 @@ pub(super) fn parse_order_condition(
         }
         Value::Variable(name) => {
             let vars = variables.ok_or_else(|| {
-                QueryError::parse(format!(
-                    "variable '{}' used but no variables provided",
-                    name
-                ))
+                QueryError::parse(format!("Variable \"${}\" was not provided.", name))
             })?;
             let json_val = vars.get(name).ok_or_else(|| {
                 QueryError::parse(format!("Variable \"${}\" was not provided", name))
@@ -152,7 +145,6 @@ pub(super) fn parse_order_condition(
                 ))
             })?;
             let direction = OrderDirection::parse(s).ok_or_else(|| {
-                // Match Go DefraDB error format
                 QueryError::parse(format!(
                     "Argument \"order\" has invalid value {{{}: {}}}",
                     field_name, s
@@ -190,6 +182,6 @@ pub(super) fn parse_order_condition(
                 None => Ok(None),
             }
         }
-        _ => Err(QueryError::parse("order direction must be ASC or DESC")),
+        _ => Err(QueryError::parse("invalid order input")),
     }
 }

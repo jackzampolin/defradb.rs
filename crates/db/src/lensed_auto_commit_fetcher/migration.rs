@@ -25,15 +25,20 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         collection: &Collection,
     ) -> query::error::Result<(bool, Option<HashMap<String, TargetedHistoryLink>>)> {
         let collection_id = collection.schema().collection_id.clone();
+        let target_version_id = &collection.schema().version_id;
 
-        // Fast path: return cached result
+        // Check if cached entry is still valid: the cache key includes the target
+        // version ID so that when the active collection version changes (via
+        // set_active_collection_version or patch_collection), the stale entry is
+        // bypassed and a fresh migration context is computed.
+        let cache_key = format!("{}:{}", collection_id, target_version_id);
+
         if let Ok(cache) = self.migration_cache.lock() {
-            if let Some(cached) = cache.get(&collection_id) {
+            if let Some(cached) = cache.get(&cache_key) {
                 return Ok(cached.clone());
             }
         }
 
-        // Slow path: compute migration context
         let history = self.load_collection_history(collection).await.ok();
 
         let has_migrations = history
@@ -42,9 +47,9 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
 
         let result = (has_migrations, if has_migrations { history } else { None });
 
-        // Store in cache
+        // Store in cache using version-aware key
         if let Ok(mut cache) = self.migration_cache.lock() {
-            cache.insert(collection_id, result.clone());
+            cache.insert(cache_key, result.clone());
         }
 
         Ok(result)

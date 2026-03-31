@@ -32,7 +32,7 @@ impl Planner {
                 }
                 let field = collection.field_by_name(field_name).ok_or_else(|| {
                     QueryError::unknown_field(format!(
-                        "Cannot query field \"{}\" on type \"{}\".",
+                        "Cannot query field \"{}\" on type \"{}\". ",
                         field_name, collection.name
                     ))
                 })?;

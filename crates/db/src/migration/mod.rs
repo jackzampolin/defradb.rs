@@ -109,6 +109,8 @@ impl<S: Store> DB<S> {
             let opts = IterOptions::new().with_prefix(prefix);
             let mut iter = systemstore.iterator(opts).await.map_err(Error::Storage)?;
 
+            let prefix_str = "/lens/config/";
+
             while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
                 let config: LensConfig = match serde_json::from_slice(&pair.value) {
                     Ok(c) => c,
@@ -122,7 +124,16 @@ impl<S: Store> DB<S> {
                     }
                 };
 
-                if let Err(e) = self.lens_store.add(config).await {
+                let key_str = String::from_utf8_lossy(&pair.key);
+                let transform_id = key_str.strip_prefix(prefix_str).map(TransformId::new);
+
+                let result = if let Some(id) = transform_id {
+                    self.lens_store.add_with_id(id, config).await
+                } else {
+                    self.lens_store.add(config).await.map(|_| ())
+                };
+
+                if let Err(e) = result {
                     tracing::warn!(
                         error = %e,
                         key = ?String::from_utf8_lossy(&pair.key),

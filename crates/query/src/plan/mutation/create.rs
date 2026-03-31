@@ -352,7 +352,7 @@ impl PlanNode for CreateNode {
     }
 
     fn kind(&self) -> &'static str {
-        "createNode"
+        "addNode"
     }
 
     fn explain_inner(&self) -> JsonValue {

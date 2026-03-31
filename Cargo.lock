@@ -3513,6 +3513,7 @@ name = "db"
 version = "0.5.0"
 dependencies = [
  "acp",
+ "anyhow",
  "async-lock",
  "async-trait",
  "base64 0.22.1",
@@ -3688,6 +3689,7 @@ dependencies = [
  "identity",
  "p2p",
  "query",
+ "reqwest 0.12.28",
  "schema",
  "serde",
  "serde_json",
@@ -5959,6 +5961,7 @@ dependencies = [
  "crypto",
  "ctor",
  "defra-harness",
+ "document",
  "futures",
  "hex",
  "hub-harness",

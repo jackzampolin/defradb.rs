@@ -33,6 +33,7 @@ pub struct AppState {
     pub txn_ops: Option<Arc<dyn TransactionOperations>>,
     pub event_bus: Option<Arc<dyn events::Bus>>,
     pub node_identity_did: Option<String>,
+    pub signing_enabled: bool,
     pub dev_mode: bool,
 }
 
@@ -236,6 +237,7 @@ pub struct AppStateBuilder {
     txn_ops: Option<Arc<dyn TransactionOperations>>,
     event_bus: Option<Arc<dyn events::Bus>>,
     node_identity_did: Option<String>,
+    signing_enabled: bool,
     dev_mode: bool,
 }
 
@@ -261,6 +263,7 @@ impl AppStateBuilder {
             txn_ops: None,
             event_bus: None,
             node_identity_did: None,
+            signing_enabled: false,
             dev_mode: false,
         }
     }
@@ -373,6 +376,12 @@ impl AppStateBuilder {
         self
     }
 
+    /// Enable block signing for anonymous requests.
+    pub fn with_signing_enabled(mut self, enabled: bool) -> Self {
+        self.signing_enabled = enabled;
+        self
+    }
+
     /// Enable development mode (allows purge and other dev-only operations).
     pub fn with_dev_mode(mut self, dev_mode: bool) -> Self {
         self.dev_mode = dev_mode;
@@ -400,6 +409,7 @@ impl AppStateBuilder {
             txn_ops: self.txn_ops,
             event_bus: self.event_bus,
             node_identity_did: self.node_identity_did,
+            signing_enabled: self.signing_enabled,
             dev_mode: self.dev_mode,
         }
     }
