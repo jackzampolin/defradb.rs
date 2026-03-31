@@ -28,9 +28,11 @@ use tracing::{debug, warn};
 
 use crate::document::DocumentMapping;
 use crate::error::QueryError;
+use crate::mapper::OrderDirection;
 use crate::mapper::{Field, Filter, OrderBy, OrderCondition, Requestable, Select};
 use crate::plan::{
-    IndexScanNode, JoinSide, RelationFilter, ScanNode, SelectNode, TypeJoinMany, TypeJoinOne,
+    IndexScanNode, JoinSide, OrphanNode, RelationFilter, ScanNode, SelectNode, SequenceNode,
+    TypeJoinMany, TypeJoinOne,
 };
 use crate::planner::PlanNode;
 
@@ -1257,6 +1259,11 @@ impl Planner {
                         let parent_col = parent_collection.clone();
                         let fetcher = self.fetcher.clone().unwrap();
 
+                        // Save copies for orphan node before values move into join
+                        let orphan_col = parent_col.clone();
+                        let orphan_mapping = parent_scan_mapping.clone();
+                        let orphan_fetcher = fetcher.clone();
+
                         let join = TypeJoinOne::new(
                             plan,
                             child_plan,
@@ -1270,8 +1277,35 @@ impl Planner {
                             parent_scan_mapping,
                             fetcher,
                         );
-                        // TODO: Wire SequenceNode(OrphanNode, TypeJoinOne) for @exhaustive
-                        plan = Box::new(join);
+                        if select.exhaustive {
+                            let orphan_scan = ScanNode::new(orphan_col, orphan_mapping)
+                                .with_fetcher(orphan_fetcher);
+                            let orphan = OrphanNode::secondary_side(
+                                Box::new(orphan_scan),
+                                std::collections::HashSet::new(),
+                                mapping.clone(),
+                            );
+                            let is_desc = parent_order_for_child
+                                .as_ref()
+                                .and_then(|o| o.conditions.first())
+                                .map(|c| c.direction == OrderDirection::Desc)
+                                .unwrap_or(false);
+                            plan = if is_desc {
+                                Box::new(SequenceNode::new(
+                                    Box::new(orphan),
+                                    Box::new(join),
+                                    mapping.clone(),
+                                ))
+                            } else {
+                                Box::new(SequenceNode::new(
+                                    Box::new(join),
+                                    Box::new(orphan),
+                                    mapping.clone(),
+                                ))
+                            };
+                        } else {
+                            plan = Box::new(join);
+                        }
                         join_provides_ordering = true;
                     } else {
                         // Case 2: Parent has FK → use InvertedIndex with FK index scan on parent.
@@ -1293,6 +1327,11 @@ impl Planner {
                                 .unwrap_or(0);
                             let fetcher = self.fetcher.clone().unwrap();
 
+                            // Save copies for orphan node before values move into join
+                            let orphan_col = parent_col.clone();
+                            let orphan_mapping = parent_scan_mapping.clone();
+                            let orphan_fetcher = fetcher.clone();
+
                             let join = TypeJoinOne::new(
                                 plan,
                                 child_plan,
@@ -1307,8 +1346,40 @@ impl Planner {
                                 parent_scan_mapping,
                                 fetcher,
                             );
-                            // TODO: Wire SequenceNode(OrphanNode, TypeJoinOne) for @exhaustive
-                            plan = Box::new(join);
+                            if select.exhaustive {
+                                let null_filter =
+                                    Filter::from_conditions(serde_json::Map::from_iter([(
+                                        parent_fk_field_name.clone(),
+                                        serde_json::json!({"_eq": null}),
+                                    )]));
+                                let orphan_scan = ScanNode::new(orphan_col, orphan_mapping)
+                                    .with_filter(null_filter)
+                                    .with_fetcher(orphan_fetcher);
+                                let orphan = OrphanNode::primary_side(
+                                    Box::new(orphan_scan),
+                                    mapping.clone(),
+                                );
+                                let is_desc = parent_order_for_child
+                                    .as_ref()
+                                    .and_then(|o| o.conditions.first())
+                                    .map(|c| c.direction == OrderDirection::Desc)
+                                    .unwrap_or(false);
+                                plan = if is_desc {
+                                    Box::new(SequenceNode::new(
+                                        Box::new(join),
+                                        Box::new(orphan),
+                                        mapping.clone(),
+                                    ))
+                                } else {
+                                    Box::new(SequenceNode::new(
+                                        Box::new(orphan),
+                                        Box::new(join),
+                                        mapping.clone(),
+                                    ))
+                                };
+                            } else {
+                                plan = Box::new(join);
+                            }
                             join_provides_ordering = true;
                         } else {
                             // No FK index on parent → fall back to normal join + OrderByNode

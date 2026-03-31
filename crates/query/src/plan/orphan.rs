@@ -10,9 +10,7 @@ use crate::planner::{Doc, ExecInfo, PlanNode};
 
 enum Inner {
     /// Parent stores FK: wraps a scan with FK IS NULL filter, just delegates.
-    PrimarySide {
-        scan: Box<dyn PlanNode>,
-    },
+    PrimarySide { scan: Box<dyn PlanNode> },
     /// Parent doesn't store FK: wraps a parent scan, skips docs already yielded by the join.
     SecondarySide {
         parent_scan: Box<dyn PlanNode>,
