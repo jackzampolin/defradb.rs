@@ -1,4 +1,5 @@
 use crate::EmbeddingClientConfig;
+use anyhow::{anyhow, bail, Result as AnyhowResult};
 use document::{Document, NormalValue};
 use schema::VectorEmbeddingDescription;
 use std::collections::HashSet;
@@ -106,6 +107,35 @@ pub async fn set_embedding(
     }
 
     Ok(generated)
+}
+
+/// Embed free-form text using DefraDB's v1 embedding contract.
+///
+/// This expects an OpenAI-compatible `/embeddings` endpoint and sends:
+/// `{ "model": "...", "input": "..." }`.
+pub async fn embed_text(
+    embedding_config: &EmbeddingClientConfig,
+    text: &str,
+    model: Option<&str>,
+) -> AnyhowResult<Vec<f64>> {
+    let url = embedding_config.url.trim();
+    if url.is_empty() {
+        bail!("embedding URL is empty");
+    }
+
+    let resolved_model = model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .or_else(|| {
+            let default_model = embedding_config.model.trim();
+            (!default_model.is_empty()).then_some(default_model)
+        })
+        .ok_or_else(|| anyhow!("embedding model is empty"))?;
+
+    let vector = call_embedding(url, resolved_model, &embedding_config.api_key, text)
+        .await
+        .map_err(|err| anyhow!(err.to_string()))?;
+    Ok(vector)
 }
 
 fn normal_value_to_string(val: &NormalValue) -> String {

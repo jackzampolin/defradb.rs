@@ -15,6 +15,7 @@ from transformers import AutoModel, AutoTokenizer
 DEFAULT_ALIASES = {
     "coding-message-model": "sentence-transformers/all-MiniLM-L6-v2",
     "coding-action-model": "BAAI/bge-small-en-v1.5",
+    "coding-search-chunk-model": "BAAI/bge-small-en-v1.5",
 }
 
 

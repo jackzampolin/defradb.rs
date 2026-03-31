@@ -34,6 +34,7 @@ bytes.workspace = true
 zeroize = "1"
 
 # Error handling
+anyhow.workspace = true
 thiserror.workspace = true
 
 # Logging

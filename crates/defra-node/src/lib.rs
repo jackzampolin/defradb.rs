@@ -17,6 +17,7 @@ mod db_impls;
 pub mod dense_search;
 #[cfg(feature = "p2p")]
 mod p2p_handle;
+pub mod search_chunks;
 pub mod version;
 
 use std::path::PathBuf;

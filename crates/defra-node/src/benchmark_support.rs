@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::benchmark_data_gen::{
-    create_actions, create_messages, create_session, ensure_success, scale_bytes,
+    create_actions, create_messages, create_project, create_search_chunks, create_session,
+    ensure_success, scale_bytes,
 };
 use crate::benchmark_queries::{
     render_action_ranked_query, render_message_ranked_query, RankedQueryOrder,
@@ -20,13 +21,40 @@ pub use crate::benchmark_queries::{
 };
 pub use crate::benchmark_stats::BenchmarkSummary;
 
-pub const CODING_SESSION_FIXTURE_SDL: &str = r#"
+pub const CODING_DATA_FIXTURE_SDL: &str = r#"
+type CodingProject {
+    path: String @index(unique: true)
+    repo_name: String @index
+    repo_owner: String @index
+    sessions: [CodingSession]
+    search_chunks: [CodingSearchChunk]
+}
+
 type CodingSession {
     session_id: String @index(unique: true)
+    project: CodingProject
+    git_branch: String @index
+    source: String @index
+    model_primary: String @index
+    claude_version: String
+    title: String @fulltext
+    archived: Boolean @index
+    git_sha: String
+    git_origin_url: String
+    agent_role: String @index
+    reasoning_effort: String @index
+    created_at: DateTime @index(direction: DESC)
+    finished_at: DateTime
     message_count: Int
     user_message_count: Int
+    input_tokens: Int
+    output_tokens: Int
+    tools_used: [String]
+    first_prompt: String
+    summary: String @fulltext
     messages: [CodingMessage] @relation(name: "coding_session_messages")
     actions: [CodingAction] @relation(name: "coding_session_actions")
+    search_chunks: [CodingSearchChunk]
 }
 
 type CodingMessage {
@@ -34,26 +62,82 @@ type CodingMessage {
     session: CodingSession @relation(name: "coding_session_messages")
     sequence: Int @index
     role: String @index
+    model: String
     created_at: DateTime @index(direction: DESC)
     content: String @fulltext
+    tool_uses: [String]
+    files_referenced: [String]
+    input_tokens: Int
+    output_tokens: Int
+    search_chunks: [CodingSearchChunk]
 }
 
 type CodingAction {
+    message: CodingMessage
     session: CodingSession @relation(name: "coding_session_actions")
     action_type: String @index
     target: String @index
+    tags: [String]
     created_at: DateTime @index(direction: DESC)
     command: String @fulltext
+    search_chunks: [CodingSearchChunk]
+}
+
+type CodingSearchChunk {
+    chunk_id: String @index(unique: true)
+    project: CodingProject
+    session: CodingSession
+    message: CodingMessage
+    action: CodingAction
+    target_kind: String @index
+    source_field: String @index
+    session_id: String @index
+    project_path: String @index
+    parent_external_id: String @index
+    role: String @index
+    action_type: String @index
+    target: String @index
+    chunk_index: Int @index
+    chunk_count: Int
+    created_at: DateTime @index(direction: DESC)
+    content: String @fulltext
 }
 "#;
 
-pub const CODING_SESSION_EMBEDDING_FIXTURE_SDL: &str = r#"
+pub const CODING_DATA_EMBEDDING_FIXTURE_SDL: &str = r#"
+type CodingProject {
+    path: String @index(unique: true)
+    repo_name: String @index
+    repo_owner: String @index
+    sessions: [CodingSession]
+    search_chunks: [CodingSearchChunk]
+}
+
 type CodingSession {
     session_id: String @index(unique: true)
+    project: CodingProject
+    git_branch: String @index
+    source: String @index
+    model_primary: String @index
+    claude_version: String
+    title: String @fulltext
+    archived: Boolean @index
+    git_sha: String
+    git_origin_url: String
+    agent_role: String @index
+    reasoning_effort: String @index
+    created_at: DateTime @index(direction: DESC)
+    finished_at: DateTime
     message_count: Int
     user_message_count: Int
+    input_tokens: Int
+    output_tokens: Int
+    tools_used: [String]
+    first_prompt: String
+    summary: String @fulltext
     messages: [CodingMessage] @relation(name: "coding_session_messages")
     actions: [CodingAction] @relation(name: "coding_session_actions")
+    search_chunks: [CodingSearchChunk]
 }
 
 type CodingMessage {
@@ -61,20 +145,53 @@ type CodingMessage {
     session: CodingSession @relation(name: "coding_session_messages")
     sequence: Int @index
     role: String @index
+    model: String
     created_at: DateTime @index(direction: DESC)
     content: String @fulltext
+    tool_uses: [String]
+    files_referenced: [String]
+    input_tokens: Int
+    output_tokens: Int
     content_v: [Float32!] @embedding(provider: "openai", model: "coding-message-model", fields: ["content"])
+    search_chunks: [CodingSearchChunk]
 }
 
 type CodingAction {
+    message: CodingMessage
     session: CodingSession @relation(name: "coding_session_actions")
     action_type: String @index
     target: String @index
+    tags: [String]
     created_at: DateTime @index(direction: DESC)
     command: String @fulltext
     command_v: [Float32!] @embedding(provider: "openai", model: "coding-action-model", fields: ["command"])
+    search_chunks: [CodingSearchChunk]
+}
+
+type CodingSearchChunk {
+    chunk_id: String @index(unique: true)
+    project: CodingProject
+    session: CodingSession
+    message: CodingMessage
+    action: CodingAction
+    target_kind: String @index
+    source_field: String @index
+    session_id: String @index
+    project_path: String @index
+    parent_external_id: String @index
+    role: String @index
+    action_type: String @index
+    target: String @index
+    chunk_index: Int @index
+    chunk_count: Int
+    created_at: DateTime @index(direction: DESC)
+    content: String @fulltext
+    content_v: [Float32!] @embedding(provider: "openai", model: "coding-search-chunk-model", fields: ["content"])
 }
 "#;
+
+pub const CODING_SESSION_FIXTURE_SDL: &str = CODING_DATA_FIXTURE_SDL;
+pub const CODING_SESSION_EMBEDDING_FIXTURE_SDL: &str = CODING_DATA_EMBEDDING_FIXTURE_SDL;
 
 const DEFAULT_SEARCH_LIMIT: usize = 10;
 
@@ -144,20 +261,28 @@ impl CodingSessionFixtureConfig {
         let hot_session = FixtureSession::new(
             SessionKind::Hot,
             "fixture-hot-session",
+            "/Users/johnzampolin/go/src/github.com/sourcenetwork/defradb.rs",
             self.hot_session_messages,
             self.hot_session_actions,
         );
         let medium_session = FixtureSession::new(
             SessionKind::Medium,
             "fixture-medium-session",
+            "/Users/johnzampolin/go/src/github.com/jackzampolin/amygdala",
             self.medium_session_messages,
             self.medium_session_actions,
         );
+        let background_projects = [
+            "/Users/johnzampolin/go/src/github.com/sourcenetwork/hub-rs",
+            "/Users/johnzampolin/go/src/github.com/jackzampolin/amygdala",
+            "/Users/johnzampolin/go/src/github.com/mizufinance/bankd",
+        ];
         let background_sessions = (0..self.background_sessions)
             .map(|index| {
                 FixtureSession::new(
                     SessionKind::Background,
                     format!("fixture-background-session-{index:02}"),
+                    background_projects[index % background_projects.len()],
                     self.background_session_messages,
                     self.background_session_actions,
                 )
@@ -290,6 +415,7 @@ impl CodingSessionFixture {
 pub struct FixtureSession {
     pub kind: SessionKind,
     pub session_id: String,
+    pub project_path: String,
     pub message_count: usize,
     pub action_count: usize,
 }
@@ -298,14 +424,40 @@ impl FixtureSession {
     pub(crate) fn new(
         kind: SessionKind,
         session_id: impl Into<String>,
+        project_path: impl Into<String>,
         message_count: usize,
         action_count: usize,
     ) -> Self {
         Self {
             kind,
             session_id: session_id.into(),
+            project_path: project_path.into(),
             message_count,
             action_count,
+        }
+    }
+
+    pub(crate) fn source_label(&self) -> &'static str {
+        match self.kind {
+            SessionKind::Hot => "codex",
+            SessionKind::Medium => "claude",
+            SessionKind::Background => "gemini",
+        }
+    }
+
+    pub(crate) fn model_primary(&self) -> &'static str {
+        match self.kind {
+            SessionKind::Hot => "gpt-5.4",
+            SessionKind::Medium => "claude-sonnet-4.5",
+            SessionKind::Background => "gemini-2.5-pro",
+        }
+    }
+
+    pub(crate) fn git_branch(&self) -> &'static str {
+        match self.kind {
+            SessionKind::Hot => "feat/coding-hybrid-search-api",
+            SessionKind::Medium => "main",
+            SessionKind::Background => "feat/indexing-playground",
         }
     }
 }
@@ -1171,13 +1323,30 @@ async fn seed_coding_session_fixture_with_schema(
     config: &CodingSessionFixtureConfig,
     sdl: &str,
 ) -> Result<CodingSessionFixture> {
+    let mut project_doc_ids: HashMap<String, String> = HashMap::new();
     node.add_schema(sdl).await?;
 
     let fixture = config.layout();
     for session in fixture.all_sessions() {
-        let session_doc_id = create_session(node, session).await?;
-        create_messages(node, config, session, &session_doc_id).await?;
-        create_actions(node, config, session, &session_doc_id).await?;
+        let project_doc_id = if let Some(doc_id) = project_doc_ids.get(&session.project_path) {
+            doc_id.clone()
+        } else {
+            let doc_id = create_project(node, &session.project_path).await?;
+            project_doc_ids.insert(session.project_path.clone(), doc_id.clone());
+            doc_id
+        };
+        let session_doc_id = create_session(node, session, &project_doc_id).await?;
+        let messages = create_messages(node, config, session, &session_doc_id).await?;
+        let actions = create_actions(node, config, session, &session_doc_id, &messages).await?;
+        create_search_chunks(
+            node,
+            session,
+            &project_doc_id,
+            &session_doc_id,
+            &messages,
+            &actions,
+        )
+        .await?;
     }
 
     Ok(fixture)
@@ -1433,6 +1602,7 @@ mod tests {
         let model_bias = match model {
             "coding-message-model" => [1.0, 0.0],
             "coding-action-model" => [0.0, 1.0],
+            "coding-search-chunk-model" => [0.5, 0.5],
             _ => [0.0, 0.0],
         };
         vector.extend(model_bias);
@@ -1491,6 +1661,53 @@ mod tests {
         }
 
         request
+    }
+
+    fn dense_chunk_request(
+        target_kind: &str,
+        query: &str,
+        session_id: Option<&str>,
+        project_path: Option<&str>,
+    ) -> crate::DenseHybridSearchRequest {
+        let mut filter = serde_json::Map::new();
+        filter.insert(
+            "target_kind".to_string(),
+            serde_json::json!({ "_eq": target_kind }),
+        );
+        if let Some(session_id) = session_id {
+            filter.insert(
+                "session_id".to_string(),
+                serde_json::json!({ "_eq": session_id }),
+            );
+        }
+        if let Some(project_path) = project_path {
+            filter.insert(
+                "project_path".to_string(),
+                serde_json::json!({ "_eq": project_path }),
+            );
+        }
+
+        crate::DenseHybridSearchRequest::new(
+            "CodingSearchChunk",
+            query,
+            "content_v",
+            vec!["content"],
+        )
+        .with_return_fields(vec![
+            "chunk_id",
+            "target_kind",
+            "session_id",
+            "project_path",
+            "parent_external_id",
+            "role",
+            "action_type",
+            "target",
+            "content",
+            "chunk_index",
+            "chunk_count",
+        ])
+        .with_filter(JsonValue::Object(filter))
+        .with_embedding_model("coding-search-chunk-model")
     }
 
     #[derive(Debug, Clone)]
@@ -1626,10 +1843,27 @@ mod tests {
         )
     }
 
-    fn total_embedding_documents(fixture: &CodingSessionFixture) -> usize {
-        fixture
-            .all_sessions()
-            .map(|session| session.message_count + session.action_count)
+    async fn total_embedding_documents(node: &crate::EmbeddedNode) -> usize {
+        let data = ensure_success(
+            node.execute(
+                r#"{
+  CodingMessage { _docID }
+  CodingAction { _docID }
+  CodingSearchChunk { _docID }
+}"#,
+            )
+            .await,
+            "count embedding documents",
+        )
+        .unwrap();
+
+        ["CodingMessage", "CodingAction", "CodingSearchChunk"]
+            .into_iter()
+            .map(|collection_name| {
+                data.get(collection_name)
+                    .and_then(JsonValue::as_array)
+                    .map_or(0, Vec::len)
+            })
             .sum()
     }
 
@@ -2052,12 +2286,12 @@ mod tests {
             .await
             .unwrap();
 
-        let fixture = seed_coding_session_embedding_fixture(&node, &config)
+        let _fixture = seed_coding_session_embedding_fixture(&node, &config)
             .await
             .unwrap();
 
         let requests = server.requests();
-        assert_eq!(requests.len(), total_embedding_documents(&fixture));
+        assert_eq!(requests.len(), total_embedding_documents(&node).await);
         assert!(requests
             .iter()
             .any(|request| request.model == "coding-message-model"));
@@ -2261,7 +2495,7 @@ mod tests {
         }
 
         let requests = server.requests();
-        assert_eq!(requests.len(), total_embedding_documents(&fixture) + 2);
+        assert_eq!(requests.len(), total_embedding_documents(&node).await + 2);
         assert_eq!(
             requests
                 .iter()
@@ -2355,7 +2589,165 @@ mod tests {
 
         assert_eq!(
             server.requests().len(),
-            total_embedding_documents(&fixture) + 2
+            total_embedding_documents(&node).await + 2
+        );
+    }
+
+    #[tokio::test]
+    async fn coding_data_fixture_materializes_search_chunks_for_large_messages() {
+        let node = crate::EmbeddedNode::builder().build().await.unwrap();
+        let mut config = CodingSessionFixtureConfig::smoke_test();
+        config.hot_session_messages = 24;
+        config.hot_session_actions = 10;
+        config.assistant_message_bytes = 1_600;
+        config.action_command_bytes = 420;
+
+        let fixture = seed_coding_session_fixture(&node, &config).await.unwrap();
+        let data = ensure_success(
+            node.execute(&format!(
+                r#"{{
+  CodingSearchChunk(
+    filter: {{
+      session_id: {{ _eq: "{session_id}" }}
+      target_kind: {{ _eq: "message" }}
+      chunk_count: {{ _gt: 1 }}
+    }}
+    order: {{ chunk_count: DESC }}
+    limit: 20
+  ) {{
+    chunk_id
+    session_id
+    project_path
+    parent_external_id
+    role
+    chunk_index
+    chunk_count
+    content
+  }}
+}}"#,
+                session_id =
+                    crate::benchmark_queries::escape_graphql(&fixture.hot_session.session_id),
+            ))
+            .await,
+            "coding search chunk materialization",
+        )
+        .unwrap();
+
+        let chunks = data["CodingSearchChunk"].as_array().unwrap();
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().all(|chunk| {
+            chunk["session_id"].as_str() == Some(fixture.hot_session.session_id.as_str())
+                && chunk["project_path"].as_str() == Some(fixture.hot_session.project_path.as_str())
+                && chunk["role"].as_str() == Some("assistant")
+        }));
+        assert!(chunks
+            .iter()
+            .any(|chunk| chunk["chunk_index"].as_i64() == Some(1)));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk["chunk_count"].as_i64().unwrap_or_default() > 1));
+    }
+
+    #[tokio::test]
+    async fn dense_search_v1_supports_production_coding_search_chunks() {
+        let server = MockEmbeddingServer::start().await;
+
+        let mut config = CodingSessionFixtureConfig::smoke_test();
+        config.hot_session_messages = 48;
+        config.hot_session_actions = 24;
+        config.assistant_message_bytes = 1_600;
+        config.action_command_bytes = 480;
+
+        let node = crate::EmbeddedNode::builder()
+            .with_embedding_url(server.base_url.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let fixture = seed_coding_session_embedding_fixture(&node, &config)
+            .await
+            .unwrap();
+
+        let message_response = node
+            .hybrid_search_dense(
+                &dense_chunk_request(
+                    "message",
+                    "relation narrowing bm25 pushdown",
+                    Some(&fixture.hot_session.session_id),
+                    Some(&fixture.hot_session.project_path),
+                )
+                .with_limit(6),
+            )
+            .await
+            .unwrap();
+        assert_eq!(message_response.collection_name, "CodingSearchChunk");
+        assert_eq!(
+            message_response.embedding_model,
+            "coding-search-chunk-model"
+        );
+        assert!(message_response.query_vector_dimensions > 0);
+        assert!(!message_response.hits.is_empty());
+        assert!(message_response.hits.iter().all(|hit| {
+            hit.fields["target_kind"].as_str() == Some("message")
+                && hit.fields["session_id"].as_str()
+                    == Some(fixture.hot_session.session_id.as_str())
+                && hit.fields["project_path"].as_str()
+                    == Some(fixture.hot_session.project_path.as_str())
+        }));
+        assert!(message_response.hits.iter().any(|hit| {
+            hit.fields["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("relation narrowing"))
+        }));
+
+        let action_response = node
+            .hybrid_search_dense(
+                &dense_chunk_request(
+                    "action",
+                    "rg pushdown planner joins",
+                    Some(&fixture.hot_session.session_id),
+                    Some(&fixture.hot_session.project_path),
+                )
+                .with_limit(6),
+            )
+            .await
+            .unwrap();
+        assert_eq!(action_response.collection_name, "CodingSearchChunk");
+        assert!(!action_response.hits.is_empty());
+        assert!(action_response.hits.iter().all(|hit| {
+            hit.fields["target_kind"].as_str() == Some("action")
+                && hit.fields["session_id"].as_str()
+                    == Some(fixture.hot_session.session_id.as_str())
+                && hit.fields["project_path"].as_str()
+                    == Some(fixture.hot_session.project_path.as_str())
+        }));
+        assert!(action_response.hits.iter().any(|hit| {
+            hit.fields["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("rg"))
+        }));
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), total_embedding_documents(&node).await + 2);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| {
+                    request.model == "coding-search-chunk-model"
+                        && request.input == "relation narrowing bm25 pushdown"
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| {
+                    request.model == "coding-search-chunk-model"
+                        && request.input == "rg pushdown planner joins"
+                })
+                .count(),
+            1
         );
     }
 
@@ -2443,7 +2835,7 @@ mod tests {
         }
 
         let requests = server.requests();
-        assert_eq!(requests.len(), total_embedding_documents(&fixture) + 2);
+        assert_eq!(requests.len(), total_embedding_documents(&node).await + 2);
         assert_eq!(
             requests
                 .iter()
@@ -2544,7 +2936,7 @@ mod tests {
 
         assert_eq!(
             server.requests().len(),
-            total_embedding_documents(&fixture) + 2
+            total_embedding_documents(&node).await + 2
         );
     }
 
@@ -2684,10 +3076,10 @@ mod tests {
             .await
             .unwrap();
 
-        let fixture = seed_coding_session_embedding_fixture(&node, &config)
+        let _fixture = seed_coding_session_embedding_fixture(&node, &config)
             .await
             .unwrap();
-        assert_eq!(total_embedding_documents(&fixture), 102);
+        assert!(total_embedding_documents(&node).await > 102);
 
         let message_vector = request_real_embedding(
             &server.base_url,
