@@ -392,26 +392,6 @@ impl TypeJoinOne {
     /// the outer loop. For each child, we look up the parent by creating an
     /// IndexScanNode on the parent's FK field (FK == child._docID).
     async fn next_inverted_index(&mut self) -> Result<bool> {
-        // ASC: yield orphans before join results
-        if let Some(ref mut config) = self.orphan_config {
-            if config.direction == OrderDirection::Asc && !self.orphan_phase_done {
-                if !self.orphan_phase_active {
-                    self.orphan_phase_active = true;
-                    config.orphan_node.init().await?;
-                    config.orphan_node.start().await?;
-                }
-                if config.orphan_node.next().await? {
-                    let mut orphan_doc = config.orphan_node.value().deep_clone();
-                    orphan_doc.set(
-                        self.parent_side.relation_field_index(),
-                        serde_json::Value::Null,
-                    );
-                    self.current_doc = orphan_doc;
-                    return Ok(true);
-                }
-                self.orphan_phase_done = true;
-            }
-        }
 
         // If we have queued parent docs from a previous child, yield one
         if let Some(doc) = self.docs_to_yield.pop() {
@@ -516,7 +496,7 @@ impl TypeJoinOne {
             }
         }
 
-        // DESC: yield orphans after join results
+        // Yield orphans after join results (DESC only — ASC handles in wrapper)
         if let Some(ref mut config) = self.orphan_config {
             if config.direction == OrderDirection::Desc && !self.orphan_phase_done {
                 if !self.orphan_phase_active {
@@ -546,14 +526,34 @@ impl TypeJoinOne {
     /// For each child doc, we read its FK field (which contains the parent's _docID),
     /// then fetch the parent directly by docID using the fetcher.
     async fn next_ordered_primary(&mut self) -> Result<bool> {
-        // ASC: yield orphans before join results
+        // For ASC with orphans: we need orphans first, but can't know orphans until
+        // the join runs. So on first call, pre-run the entire join to populate
+        // shared_yielded_ids, then yield orphans, then buffered join results.
+        if self.orphan_config.is_some() && !self.orphan_phase_active {
+            let is_asc = self
+                .orphan_config
+                .as_ref()
+                .map(|c| c.direction == OrderDirection::Asc)
+                .unwrap_or(false);
+            if is_asc {
+                self.orphan_phase_active = true;
+                // Pre-run the join to collect results and populate yielded IDs
+                let mut buffered = Vec::new();
+                while let Ok(true) = self.next_ordered_primary_inner().await {
+                    buffered.push(self.current_doc.deep_clone());
+                }
+                // Now init and start orphan node (shared_yielded_ids is populated)
+                let config = self.orphan_config.as_mut().unwrap();
+                config.orphan_node.init().await?;
+                config.orphan_node.start().await?;
+                // Store buffered join results
+                self.docs_to_yield = buffered;
+            }
+        }
+
+        // Yield orphans (for ASC: before buffered results; for DESC: handled at end)
         if let Some(ref mut config) = self.orphan_config {
             if config.direction == OrderDirection::Asc && !self.orphan_phase_done {
-                if !self.orphan_phase_active {
-                    self.orphan_phase_active = true;
-                    config.orphan_node.init().await?;
-                    config.orphan_node.start().await?;
-                }
                 if config.orphan_node.next().await? {
                     let mut orphan_doc = config.orphan_node.value().deep_clone();
                     orphan_doc.set(
@@ -567,6 +567,18 @@ impl TypeJoinOne {
             }
         }
 
+        // Yield buffered join results (ASC pre-run)
+        if !self.docs_to_yield.is_empty() {
+            self.current_doc = self.docs_to_yield.remove(0);
+            return Ok(true);
+        }
+
+        // Normal iteration (DESC or no orphans)
+        self.next_ordered_primary_inner().await
+    }
+
+    /// Core ordered primary iteration without orphan handling.
+    async fn next_ordered_primary_inner(&mut self) -> Result<bool> {
         let child_fk_index = match &self.direction {
             JoinDirection::OrderedInvertedPrimary { child_fk_index } => *child_fk_index,
             _ => unreachable!(),
@@ -628,7 +640,7 @@ impl TypeJoinOne {
             return Ok(true);
         }
 
-        // DESC: yield orphans after join results
+        // Yield orphans after join results (DESC only — ASC handles in wrapper)
         if let Some(ref mut config) = self.orphan_config {
             if config.direction == OrderDirection::Desc && !self.orphan_phase_done {
                 if !self.orphan_phase_active {
