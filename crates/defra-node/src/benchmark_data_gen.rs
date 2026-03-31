@@ -583,10 +583,7 @@ fn action_tags(action_type: &str, target: &str) -> Vec<String> {
     tags
 }
 
-fn parent_message_for_action<'a>(
-    messages: &'a [InsertedMessageDoc],
-    index: usize,
-) -> &'a InsertedMessageDoc {
+fn parent_message_for_action(messages: &[InsertedMessageDoc], index: usize) -> &InsertedMessageDoc {
     let assistant_messages = messages
         .iter()
         .filter(|message| message.role == "assistant")
