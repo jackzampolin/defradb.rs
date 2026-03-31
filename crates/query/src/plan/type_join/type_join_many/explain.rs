@@ -249,7 +249,10 @@ impl TypeJoinMany {
                 .unwrap_or(child_execute);
             // Override scanNode metrics with accumulated go_child_metrics
             if let Some(obj) = content.as_object_mut() {
-                obj.insert("scanNode".to_string(), self.go_child_metrics.scan_node_json());
+                obj.insert(
+                    "scanNode".to_string(),
+                    self.go_child_metrics.scan_node_json(),
+                );
             }
             content
         } else {
@@ -273,7 +276,10 @@ impl TypeJoinMany {
             }
             // Override scanNode metrics with accumulated go_child_metrics if present
             if select_inner.contains_key("scanNode") {
-                select_inner.insert("scanNode".to_string(), self.go_child_metrics.scan_node_json());
+                select_inner.insert(
+                    "scanNode".to_string(),
+                    self.go_child_metrics.scan_node_json(),
+                );
             }
             serde_json::Value::Object(select_inner)
         };

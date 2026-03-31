@@ -1278,10 +1278,9 @@ impl Planner {
                             fetcher,
                         );
                         if select.exhaustive {
-                            let shared_ids: crate::plan::SharedYieldedIds =
-                                std::sync::Arc::new(tokio::sync::RwLock::new(
-                                    std::collections::HashSet::new(),
-                                ));
+                            let shared_ids: crate::plan::SharedYieldedIds = std::sync::Arc::new(
+                                tokio::sync::RwLock::new(std::collections::HashSet::new()),
+                            );
                             let orphan_scan = ScanNode::new(orphan_col, orphan_mapping)
                                 .with_fetcher(orphan_fetcher);
                             let orphan = OrphanNode::secondary_side(
@@ -1294,8 +1293,12 @@ impl Planner {
                                 .and_then(|o| o.conditions.first())
                                 .map(|c| c.direction)
                                 .unwrap_or(OrderDirection::Asc);
-                            let join =
-                                join.with_orphan_config(orphan, direction, shared_ids, child_has_fk);
+                            let join = join.with_orphan_config(
+                                orphan,
+                                direction,
+                                shared_ids,
+                                child_has_fk,
+                            );
                             plan = Box::new(join);
                         } else {
                             plan = Box::new(join);
@@ -1358,12 +1361,15 @@ impl Planner {
                                     .and_then(|o| o.conditions.first())
                                     .map(|c| c.direction)
                                     .unwrap_or(OrderDirection::Asc);
-                                let shared_ids: crate::plan::SharedYieldedIds =
-                                    std::sync::Arc::new(tokio::sync::RwLock::new(
-                                        std::collections::HashSet::new(),
-                                    ));
-                                let join =
-                                    join.with_orphan_config(orphan, direction, shared_ids, child_has_fk);
+                                let shared_ids: crate::plan::SharedYieldedIds = std::sync::Arc::new(
+                                    tokio::sync::RwLock::new(std::collections::HashSet::new()),
+                                );
+                                let join = join.with_orphan_config(
+                                    orphan,
+                                    direction,
+                                    shared_ids,
+                                    child_has_fk,
+                                );
                                 plan = Box::new(join);
                             } else {
                                 plan = Box::new(join);

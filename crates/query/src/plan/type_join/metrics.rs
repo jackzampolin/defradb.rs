@@ -49,6 +49,7 @@ impl JoinChildMetrics {
     /// In Go, the parent side plan is a selectNode wrapping a scanNode.
     /// The selectNode tracks its own iterations (same as scanNode iterations
     /// when no filter rejection) and filterMatches.
+    #[allow(dead_code)]
     pub fn to_select_node_json(&self) -> serde_json::Value {
         serde_json::json!({
             "selectTopNode": {
