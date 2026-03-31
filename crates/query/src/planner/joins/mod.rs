@@ -31,7 +31,7 @@ use crate::error::QueryError;
 use crate::mapper::OrderDirection;
 use crate::mapper::{Field, Filter, OrderBy, OrderCondition, Requestable, Select};
 use crate::plan::{
-    IndexScanNode, JoinSide, OrphanNode, RelationFilter, ScanNode, SelectNode, SequenceNode,
+    IndexScanNode, JoinSide, OrphanNode, RelationFilter, ScanNode, SelectNode,
     TypeJoinMany, TypeJoinOne,
 };
 use crate::planner::PlanNode;
@@ -1285,24 +1285,13 @@ impl Planner {
                                 std::collections::HashSet::new(),
                                 mapping.clone(),
                             );
-                            let is_desc = parent_order_for_child
+                            let direction = parent_order_for_child
                                 .as_ref()
                                 .and_then(|o| o.conditions.first())
-                                .map(|c| c.direction == OrderDirection::Desc)
-                                .unwrap_or(false);
-                            plan = if is_desc {
-                                Box::new(SequenceNode::new(
-                                    Box::new(orphan),
-                                    Box::new(join),
-                                    mapping.clone(),
-                                ))
-                            } else {
-                                Box::new(SequenceNode::new(
-                                    Box::new(join),
-                                    Box::new(orphan),
-                                    mapping.clone(),
-                                ))
-                            };
+                                .map(|c| c.direction)
+                                .unwrap_or(OrderDirection::Asc);
+                            let join = join.with_orphan_config(orphan, direction);
+                            plan = Box::new(join);
                         } else {
                             plan = Box::new(join);
                         }
@@ -1359,24 +1348,13 @@ impl Planner {
                                     Box::new(orphan_scan),
                                     mapping.clone(),
                                 );
-                                let is_desc = parent_order_for_child
+                                let direction = parent_order_for_child
                                     .as_ref()
                                     .and_then(|o| o.conditions.first())
-                                    .map(|c| c.direction == OrderDirection::Desc)
-                                    .unwrap_or(false);
-                                plan = if is_desc {
-                                    Box::new(SequenceNode::new(
-                                        Box::new(join),
-                                        Box::new(orphan),
-                                        mapping.clone(),
-                                    ))
-                                } else {
-                                    Box::new(SequenceNode::new(
-                                        Box::new(orphan),
-                                        Box::new(join),
-                                        mapping.clone(),
-                                    ))
-                                };
+                                    .map(|c| c.direction)
+                                    .unwrap_or(OrderDirection::Asc);
+                                let join = join.with_orphan_config(orphan, direction);
+                                plan = Box::new(join);
                             } else {
                                 plan = Box::new(join);
                             }
