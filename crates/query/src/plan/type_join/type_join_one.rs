@@ -108,6 +108,11 @@ pub struct TypeJoinOne {
     /// Shared set of parent docIDs yielded during the join.
     /// Written by TypeJoinOne, read by OrphanNode::SecondarySide.
     shared_yielded_ids: Option<crate::plan::SharedYieldedIds>,
+    /// For InvertedIndex mode: scalar filter from the parent plan that must be
+    /// applied to parent docs fetched via FK index lookup. Without this, queries
+    /// combining scalar and relation filters (e.g., `{genre: "thriller", author: {name: "X"}}`)
+    /// would skip the scalar conditions.
+    parent_residual_filter: Option<Filter>,
 }
 
 /// A filter condition on a relation field.
@@ -178,6 +183,7 @@ impl TypeJoinOne {
             orphan_phase_active: false,
             orphan_phase_done: false,
             shared_yielded_ids: None,
+            parent_residual_filter: None,
         }
     }
 
@@ -237,6 +243,17 @@ impl TypeJoinOne {
         self.parent_collection = Some(parent_collection);
         self.parent_scan_mapping = Some(parent_scan_mapping);
         self.fetcher = Some(fetcher);
+        self
+    }
+
+    /// Set a residual scalar filter for parent docs fetched in inverted index mode.
+    ///
+    /// When a query combines scalar and relation filters (e.g.,
+    /// `Book(filter: {genre: "thriller", author: {name: "X"}})`),
+    /// the inverted index join bypasses the original parent ScanNode.
+    /// This filter ensures the scalar conditions are still applied.
+    pub fn with_parent_residual_filter(mut self, filter: Filter) -> Self {
+        self.parent_residual_filter = Some(filter);
         self
     }
 
@@ -419,8 +436,9 @@ impl TypeJoinOne {
             }
         }
 
-        // If we have queued parent docs from a previous child, yield one
-        if let Some(doc) = self.docs_to_yield.pop() {
+        // If we have queued parent docs from a previous child, yield one (FIFO)
+        if !self.docs_to_yield.is_empty() {
+            let doc = self.docs_to_yield.remove(0);
             self.current_doc = doc;
             return Ok(true);
         }
@@ -478,6 +496,9 @@ impl TypeJoinOne {
 
             let mut index_scan =
                 IndexScanNode::new(parent_collection, parent_mapping, params).with_fetcher(fetcher);
+            if let Some(ref filter) = self.parent_residual_filter {
+                index_scan = index_scan.with_residual_filter(filter.clone());
+            }
 
             index_scan.init().await?;
             index_scan.start().await?;
@@ -513,7 +534,8 @@ impl TypeJoinOne {
                 self.docs_to_yield.push(parent_doc);
             }
 
-            if let Some(doc) = self.docs_to_yield.pop() {
+            if !self.docs_to_yield.is_empty() {
+                let doc = self.docs_to_yield.remove(0);
                 if let Some(pid) = doc.doc_id() {
                     self.record_yielded_id(pid).await;
                 }
@@ -1100,9 +1122,12 @@ impl PlanNode for TypeJoinOne {
             // Inverted/ordered modes: child drives the loop, parent is looked up per-child.
             // Go always shows parentPlan for root, childPlan for subType.
             // root = parent lookup metrics (accumulated per-child)
-            inner_obj.insert("root".to_string(), serde_json::json!({
-                "scanNode": self.go_child_metrics.scan_node_json()
-            }));
+            inner_obj.insert(
+                "root".to_string(),
+                serde_json::json!({
+                    "scanNode": self.go_child_metrics.scan_node_json()
+                }),
+            );
 
             // subType = child plan's execute explain (the driving scan)
             // Wrap in selectTopNode > selectNode with iterations + filterMatches
@@ -1190,11 +1215,14 @@ impl PlanNode for TypeJoinOne {
                     JsonValue::Object(m) => m,
                     _ => serde_json::Map::new(),
                 };
-                orphan_obj.insert("typeJoinOne".to_string(), join_explain
-                    .as_object()
-                    .and_then(|o| o.get("typeJoinOne"))
-                    .cloned()
-                    .unwrap_or(JsonValue::Null));
+                orphan_obj.insert(
+                    "typeJoinOne".to_string(),
+                    join_explain
+                        .as_object()
+                        .and_then(|o| o.get("typeJoinOne"))
+                        .cloned()
+                        .unwrap_or(JsonValue::Null),
+                );
                 serde_json::json!({ "orphanNode": JsonValue::Object(orphan_obj) })
             } else {
                 // Primary: sequenceNode wraps [orphanNode, typeJoinOne]
