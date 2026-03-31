@@ -104,10 +104,13 @@ impl super::Planner {
         if collection.indexes.is_empty() {
             return None;
         }
-        // Require a fetcher that supports index queries (matches top-level logic)
-        match self.fetcher {
-            Some(ref fetcher) if fetcher.supports_index_queries() => {}
-            _ => return None,
+        // When a fetcher is available, require it to support index queries.
+        // When no fetcher is present (explain-only mode), allow index selection
+        // so the plan structure matches Go's explain output.
+        if let Some(ref fetcher) = self.fetcher {
+            if !fetcher.supports_index_queries() {
+                return None;
+            }
         }
         // Try filter-based index first
         if let Some(filter) = filter {

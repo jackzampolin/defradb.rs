@@ -234,15 +234,17 @@ impl TypeJoinOne {
         fk_field_index: usize,
         parent_collection: schema::CollectionVersion,
         parent_scan_mapping: DocumentMapping,
-        fetcher: Arc<dyn DocFetcher>,
+        fetcher: Option<Arc<dyn DocFetcher>>,
+        sort_direction: crate::mapper::OrderDirection,
     ) -> Self {
         self.direction = JoinDirection::InvertedIndex {
             parent_fk_index_name: fk_index_name,
             parent_fk_field_index: fk_field_index,
+            sort_direction,
         };
         self.parent_collection = Some(parent_collection);
         self.parent_scan_mapping = Some(parent_scan_mapping);
-        self.fetcher = Some(fetcher);
+        self.fetcher = fetcher;
         self
     }
 
@@ -267,18 +269,59 @@ impl TypeJoinOne {
         child_fk_index: usize,
         parent_collection: schema::CollectionVersion,
         parent_scan_mapping: DocumentMapping,
-        fetcher: Arc<dyn DocFetcher>,
+        fetcher: Option<Arc<dyn DocFetcher>>,
     ) -> Self {
         self.direction = JoinDirection::OrderedInvertedPrimary { child_fk_index };
         self.parent_collection = Some(parent_collection);
         self.parent_scan_mapping = Some(parent_scan_mapping);
-        self.fetcher = Some(fetcher);
+        self.fetcher = fetcher;
         self
     }
 
     /// Returns the direction of this join.
     pub fn direction(&self) -> &JoinDirection {
         &self.direction
+    }
+
+    /// Build the core `{ "typeJoinOne": { "root": ..., "subType": ... } }` debug structure.
+    fn build_debug_type_join_one(&self) -> JsonValue {
+        let mut inner_obj = serde_json::Map::new();
+
+        let root_explain = self.parent_plan.explain_debug();
+        inner_obj.insert("root".to_string(), root_explain);
+
+        let child_explain = self.child_plan.explain_debug();
+        let child_is_select = self.child_plan.kind() == "selectNode";
+
+        let select_node_content = if child_is_select {
+            child_explain
+                .as_object()
+                .and_then(|o| o.get("selectNode"))
+                .cloned()
+                .unwrap_or(child_explain.clone())
+        } else {
+            let mut select_node_inner = serde_json::Map::new();
+            if let Some(child_obj) = child_explain.as_object() {
+                for (key, value) in child_obj {
+                    select_node_inner.insert(key.clone(), value.clone());
+                }
+            }
+            serde_json::Value::Object(select_node_inner)
+        };
+        let sub_type = serde_json::json!({
+            "selectTopNode": {
+                "selectNode": select_node_content
+            }
+        });
+        inner_obj.insert("subType".to_string(), sub_type);
+
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "typeJoinOne".to_string(),
+            serde_json::Value::Object(inner_obj),
+        );
+
+        serde_json::Value::Object(obj)
     }
 
     /// Extract the foreign key value from the parent document.
@@ -1057,48 +1100,30 @@ impl PlanNode for TypeJoinOne {
     }
 
     fn explain_debug_inner(&self) -> JsonValue {
-        // Debug mode: typeIndexJoin contains typeJoinOne wrapper with full tree structure
-        let mut inner_obj = serde_json::Map::new();
+        let type_join_one = self.build_debug_type_join_one();
 
-        // root: the parent plan's explain_debug (contains scanNode)
-        let root_explain = self.parent_plan.explain_debug();
-        inner_obj.insert("root".to_string(), root_explain);
-
-        // subType: the child plan's explain_debug wrapped in selectTopNode > selectNode
-        let child_explain = self.child_plan.explain_debug();
-        let child_is_select = self.child_plan.kind() == "selectNode";
-
-        let select_node_content = if child_is_select {
-            child_explain
-                .as_object()
-                .and_then(|o| o.get("selectNode"))
-                .cloned()
-                .unwrap_or(child_explain.clone())
-        } else {
-            let mut select_node_inner = serde_json::Map::new();
-            // Merge child explain into selectNode
-            if let Some(child_obj) = child_explain.as_object() {
-                for (key, value) in child_obj {
-                    select_node_inner.insert(key.clone(), value.clone());
-                }
+        match &self.direction {
+            JoinDirection::InvertedIndex { sort_direction, .. } => {
+                // Primary parent with FK IS NULL orphan path: wrap in sequenceNode.
+                // ASC: orphans first, DESC: orphans last (Go convention).
+                let orphan = serde_json::json!({ "orphanNode": {} });
+                let join_entry = type_join_one;
+                let children = match sort_direction {
+                    crate::mapper::OrderDirection::Asc => {
+                        vec![orphan, join_entry]
+                    }
+                    crate::mapper::OrderDirection::Desc => {
+                        vec![join_entry, orphan]
+                    }
+                };
+                serde_json::json!({ "sequenceNode": children })
             }
-            serde_json::Value::Object(select_node_inner)
-        };
-        let sub_type = serde_json::json!({
-            "selectTopNode": {
-                "selectNode": select_node_content
+            JoinDirection::OrderedInvertedPrimary { .. } => {
+                // Secondary parent exclusion path: orphanNode wraps the join.
+                serde_json::json!({ "orphanNode": type_join_one })
             }
-        });
-        inner_obj.insert("subType".to_string(), sub_type);
-
-        // Wrap in typeJoinOne
-        let mut obj = serde_json::Map::new();
-        obj.insert(
-            "typeJoinOne".to_string(),
-            serde_json::Value::Object(inner_obj),
-        );
-
-        serde_json::Value::Object(obj)
+            _ => type_join_one,
+        }
     }
 
     fn exec_info(&self) -> ExecInfo {

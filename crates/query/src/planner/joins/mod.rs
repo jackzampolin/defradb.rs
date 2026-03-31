@@ -1257,7 +1257,7 @@ impl Planner {
 
                         let parent_scan_mapping = plan.document_map().clone();
                         let parent_col = parent_collection.clone();
-                        let fetcher = self.fetcher.clone().unwrap();
+                        let fetcher = self.fetcher.clone();
 
                         // Save copies for orphan node before values move into join
                         let orphan_col = parent_col.clone();
@@ -1282,7 +1282,7 @@ impl Planner {
                                 tokio::sync::RwLock::new(std::collections::HashSet::new()),
                             );
                             let orphan_scan = ScanNode::new(orphan_col, orphan_mapping)
-                                .with_fetcher(orphan_fetcher);
+                                .with_fetcher(orphan_fetcher.unwrap());
                             let orphan = OrphanNode::secondary_side(
                                 Box::new(orphan_scan),
                                 shared_ids.clone(),
@@ -1322,7 +1322,12 @@ impl Planner {
                             let fk_field_index = parent_scan_mapping
                                 .first_index_of_name(&parent_fk_field_name)
                                 .unwrap_or(0);
-                            let fetcher = self.fetcher.clone().unwrap();
+                            let fetcher = self.fetcher.clone();
+                            let sort_dir = parent_order_for_child
+                                .as_ref()
+                                .and_then(|o| o.conditions.first())
+                                .map(|c| c.direction)
+                                .unwrap_or_default();
 
                             // Save copies for orphan node before values move into join
                             let orphan_col = parent_col.clone();
@@ -1342,6 +1347,7 @@ impl Planner {
                                 parent_col,
                                 parent_scan_mapping,
                                 fetcher,
+                                sort_dir,
                             );
                             if select.exhaustive {
                                 let null_filter =
@@ -1351,7 +1357,7 @@ impl Planner {
                                     )]));
                                 let orphan_scan = ScanNode::new(orphan_col, orphan_mapping)
                                     .with_filter(null_filter)
-                                    .with_fetcher(orphan_fetcher);
+                                    .with_fetcher(orphan_fetcher.unwrap());
                                 let orphan = OrphanNode::primary_side(
                                     Box::new(orphan_scan),
                                     mapping.clone(),

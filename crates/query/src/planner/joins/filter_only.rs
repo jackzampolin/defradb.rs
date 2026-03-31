@@ -208,7 +208,7 @@ impl Planner {
                     let fk_field_index = parent_scan_mapping
                         .first_index_of_name(&parent_fk_field_name)
                         .unwrap_or(0);
-                    let fetcher = self.fetcher.clone().unwrap();
+                    let fetcher = self.fetcher.clone();
 
                     // Extract scalar filter from the parent filter so it can be applied
                     // as a residual filter on parent docs fetched via FK index lookup.
@@ -230,6 +230,7 @@ impl Planner {
                         parent_col,
                         parent_scan_mapping,
                         fetcher,
+                        crate::mapper::OrderDirection::default(),
                     );
                     if let Some(sf) = scalar_filter {
                         join = join.with_parent_residual_filter(sf);
