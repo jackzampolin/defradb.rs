@@ -102,6 +102,9 @@ pub struct TypeJoinOne {
     orphan_phase_active: bool,
     /// Whether the orphan phase has completed
     orphan_phase_done: bool,
+    /// Shared set of parent docIDs yielded during the join.
+    /// Written by TypeJoinOne, read by OrphanNode::SecondarySide.
+    shared_yielded_ids: Option<crate::plan::SharedYieldedIds>,
 }
 
 /// A filter condition on a relation field.
@@ -171,6 +174,7 @@ impl TypeJoinOne {
             orphan_config: None,
             orphan_phase_active: false,
             orphan_phase_done: false,
+            shared_yielded_ids: None,
         }
     }
 
@@ -182,12 +186,21 @@ impl TypeJoinOne {
         mut self,
         orphan_node: OrphanNode,
         direction: OrderDirection,
+        shared_ids: crate::plan::SharedYieldedIds,
     ) -> Self {
+        self.shared_yielded_ids = Some(shared_ids);
         self.orphan_config = Some(OrphanConfig {
             orphan_node,
             direction,
         });
         self
+    }
+
+    /// Record a yielded parent docID in the shared set (for orphan exclusion).
+    async fn record_yielded_id(&self, doc_id: &str) {
+        if let Some(ref ids) = self.shared_yielded_ids {
+            ids.write().await.insert(doc_id.to_string());
+        }
     }
 
     /// Set a relation filter to apply during the join.
@@ -495,6 +508,9 @@ impl TypeJoinOne {
             }
 
             if let Some(doc) = self.docs_to_yield.pop() {
+                if let Some(pid) = doc.doc_id() {
+                    self.record_yielded_id(pid).await;
+                }
                 self.current_doc = doc;
                 return Ok(true);
             }
@@ -604,6 +620,9 @@ impl TypeJoinOne {
                 }
             }
 
+            if let Some(pid) = parent_doc.doc_id() {
+                self.record_yielded_id(pid).await;
+            }
             self.merge_child(&mut parent_doc, Some(child_doc));
             self.current_doc = parent_doc;
             return Ok(true);

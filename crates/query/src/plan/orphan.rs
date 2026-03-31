@@ -1,12 +1,18 @@
 //! OrphanNode scans for documents without a matching relation (orphans)
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::sync::RwLock;
 
 use crate::document::DocumentMapping;
 use crate::error::Result;
 use crate::planner::{Doc, ExecInfo, PlanNode};
+
+/// Shared set of parent docIDs yielded by the main join.
+/// TypeJoinOne writes to this during iteration; OrphanNode reads it to skip non-orphans.
+pub type SharedYieldedIds = Arc<RwLock<HashSet<String>>>;
 
 enum Inner {
     /// Parent stores FK: wraps a scan with FK IS NULL filter, just delegates.
@@ -14,7 +20,7 @@ enum Inner {
     /// Parent doesn't store FK: wraps a parent scan, skips docs already yielded by the join.
     SecondarySide {
         parent_scan: Box<dyn PlanNode>,
-        yielded_ids: HashSet<String>,
+        yielded_ids: SharedYieldedIds,
     },
 }
 
@@ -44,7 +50,7 @@ impl OrphanNode {
     /// Iterates the parent scan, skipping any document whose docID appears in `yielded_ids`.
     pub fn secondary_side(
         parent_scan: Box<dyn PlanNode>,
-        yielded_ids: HashSet<String>,
+        yielded_ids: SharedYieldedIds,
         document_mapping: DocumentMapping,
     ) -> Self {
         Self {
@@ -105,7 +111,8 @@ impl PlanNode for OrphanNode {
                 }
                 let doc = parent_scan.value();
                 if let Some(doc_id) = doc.doc_id() {
-                    if yielded_ids.contains(doc_id) {
+                    let ids = yielded_ids.read().await;
+                    if ids.contains(doc_id) {
                         continue;
                     }
                 }
