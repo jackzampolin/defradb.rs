@@ -397,6 +397,27 @@ impl TypeJoinOne {
     /// the outer loop. For each child, we look up the parent by creating an
     /// IndexScanNode on the parent's FK field (FK == child._docID).
     async fn next_inverted_index(&mut self) -> Result<bool> {
+        // For ASC with primary-side orphans: yield orphans first since
+        // FK IS NULL scan is independent of the join.
+        if let Some(ref mut config) = self.orphan_config {
+            if config.direction == OrderDirection::Asc && !self.orphan_phase_done {
+                if !self.orphan_phase_active {
+                    self.orphan_phase_active = true;
+                    config.orphan_node.init().await?;
+                    config.orphan_node.start().await?;
+                }
+                if config.orphan_node.next().await? {
+                    let mut orphan_doc = config.orphan_node.value().deep_clone();
+                    orphan_doc.set(
+                        self.parent_side.relation_field_index(),
+                        serde_json::Value::Null,
+                    );
+                    self.current_doc = orphan_doc;
+                    return Ok(true);
+                }
+                self.orphan_phase_done = true;
+            }
+        }
 
         // If we have queued parent docs from a previous child, yield one
         if let Some(doc) = self.docs_to_yield.pop() {
@@ -501,9 +522,9 @@ impl TypeJoinOne {
             }
         }
 
-        // Yield orphans after join results (DESC only — ASC handles in wrapper)
+        // Yield orphans after join results exhausted
         if let Some(ref mut config) = self.orphan_config {
-            if config.direction == OrderDirection::Desc && !self.orphan_phase_done {
+            if !self.orphan_phase_done {
                 if !self.orphan_phase_active {
                     self.orphan_phase_active = true;
                     config.orphan_node.init().await?;
@@ -645,7 +666,7 @@ impl TypeJoinOne {
             return Ok(true);
         }
 
-        // Yield orphans after join results (DESC only — ASC handles in wrapper)
+        // Yield orphans after join results exhausted (DESC only — ASC handled in wrapper)
         if let Some(ref mut config) = self.orphan_config {
             if config.direction == OrderDirection::Desc && !self.orphan_phase_done {
                 if !self.orphan_phase_active {
