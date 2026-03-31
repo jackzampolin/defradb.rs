@@ -1105,10 +1105,26 @@ impl PlanNode for TypeJoinOne {
             }));
 
             // subType = child plan's execute explain (the driving scan)
+            // Wrap in selectTopNode > selectNode with iterations + filterMatches
             let child_execute = self.child_plan.explain_execute();
+            let mut select_node = serde_json::Map::new();
+            select_node.insert(
+                "filterMatches".to_string(),
+                serde_json::json!(self.child_exec_info.docs_fetched),
+            );
+            select_node.insert(
+                "iterations".to_string(),
+                serde_json::json!(self.child_exec_info.iterations),
+            );
+            // Merge child execute content into selectNode
+            if let Some(child_obj) = child_execute.as_object() {
+                for (k, v) in child_obj {
+                    select_node.insert(k.clone(), v.clone());
+                }
+            }
             let sub_type = serde_json::json!({
                 "selectTopNode": {
-                    "selectNode": child_execute
+                    "selectNode": serde_json::Value::Object(select_node)
                 }
             });
             inner_obj.insert("subType".to_string(), sub_type);
