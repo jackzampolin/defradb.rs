@@ -10,11 +10,11 @@ pub mod lens_node;
 mod limit;
 pub mod mutation;
 mod orderby;
+mod orphan;
 mod permission_filter;
 mod scan;
 mod se_filter;
 mod select;
-mod sequence;
 mod similarity;
 mod type_join;
 pub mod view;
@@ -36,11 +36,11 @@ pub use mutation::{
     UpsertNode,
 };
 pub use orderby::OrderByNode;
+pub use orphan::OrphanNode;
 pub use permission_filter::PermissionFilterNode;
 pub use scan::ScanNode;
 pub use se_filter::{SEFilterCondition, SEFilterNode};
 pub use select::SelectNode;
-pub use sequence::SequenceNode;
 pub use similarity::SimilarityNode;
 pub use type_join::{
     compare_json_values, resolve_nested_field, JoinDirection, JoinSide, RelationFilter,
