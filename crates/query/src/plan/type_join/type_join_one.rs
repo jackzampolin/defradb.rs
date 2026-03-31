@@ -26,6 +26,9 @@ use super::{JoinChildMetrics, JoinDirection, JoinSide};
 pub struct OrphanConfig {
     pub orphan_node: OrphanNode,
     pub direction: OrderDirection,
+    /// True when parent doesn't store FK (secondary side).
+    /// Affects explain output structure.
+    pub is_secondary_side: bool,
 }
 
 /// TypeJoinOne implements one-to-one relation joins.
@@ -187,11 +190,13 @@ impl TypeJoinOne {
         orphan_node: OrphanNode,
         direction: OrderDirection,
         shared_ids: crate::plan::SharedYieldedIds,
+        is_secondary_side: bool,
     ) -> Self {
         self.shared_yielded_ids = Some(shared_ids);
         self.orphan_config = Some(OrphanConfig {
             orphan_node,
             direction,
+            is_secondary_side,
         });
         self
     }
@@ -982,16 +987,27 @@ impl PlanNode for TypeJoinOne {
 
         if let Some(ref config) = self.orphan_config {
             let orphan_explain = config.orphan_node.explain_inner();
-            let orphan_entry = serde_json::json!({ "orphanNode": orphan_explain });
             let join_entry = serde_json::json!({ "typeJoinOne": normal_explain });
 
-            let sequence = if config.direction == OrderDirection::Asc {
-                serde_json::json!([orphan_entry, join_entry])
+            if config.is_secondary_side {
+                // Secondary side: orphanNode wraps typeJoinOne directly
+                // Go uses orphanPointLookupNode which reports as "orphanNode"
+                let mut orphan_obj = match orphan_explain {
+                    JsonValue::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+                orphan_obj.insert("typeJoinOne".to_string(), serde_json::json!(normal_explain));
+                serde_json::json!({ "orphanNode": JsonValue::Object(orphan_obj) })
             } else {
-                serde_json::json!([join_entry, orphan_entry])
-            };
-
-            serde_json::json!({ "sequenceNode": sequence })
+                // Primary side: sequenceNode wraps [orphanNode, typeJoinOne]
+                let orphan_entry = serde_json::json!({ "orphanNode": orphan_explain });
+                let sequence = if config.direction == OrderDirection::Asc {
+                    serde_json::json!([orphan_entry, join_entry])
+                } else {
+                    serde_json::json!([join_entry, orphan_entry])
+                };
+                serde_json::json!({ "sequenceNode": sequence })
+            }
         } else {
             normal_explain
         }
@@ -1123,6 +1139,36 @@ impl PlanNode for TypeJoinOne {
             serde_json::Value::Object(inner_obj),
         );
 
-        serde_json::Value::Object(obj)
+        let join_explain = serde_json::Value::Object(obj);
+
+        // Wrap with orphan structure if configured
+        if let Some(ref config) = self.orphan_config {
+            let orphan_explain = config.orphan_node.explain_execute_inner();
+
+            if config.is_secondary_side {
+                // Secondary: orphanNode wraps typeJoinOne directly
+                let mut orphan_obj = match orphan_explain {
+                    JsonValue::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+                orphan_obj.insert("typeJoinOne".to_string(), join_explain
+                    .as_object()
+                    .and_then(|o| o.get("typeJoinOne"))
+                    .cloned()
+                    .unwrap_or(JsonValue::Null));
+                serde_json::json!({ "orphanNode": JsonValue::Object(orphan_obj) })
+            } else {
+                // Primary: sequenceNode wraps [orphanNode, typeJoinOne]
+                let orphan_entry = serde_json::json!({ "orphanNode": orphan_explain });
+                let sequence = if config.direction == OrderDirection::Asc {
+                    serde_json::json!([orphan_entry, join_explain])
+                } else {
+                    serde_json::json!([join_explain, orphan_entry])
+                };
+                serde_json::json!({ "sequenceNode": sequence })
+            }
+        } else {
+            join_explain
+        }
     }
 }

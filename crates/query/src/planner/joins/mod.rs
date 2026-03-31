@@ -1295,7 +1295,7 @@ impl Planner {
                                 .map(|c| c.direction)
                                 .unwrap_or(OrderDirection::Asc);
                             let join =
-                                join.with_orphan_config(orphan, direction, shared_ids);
+                                join.with_orphan_config(orphan, direction, shared_ids, child_has_fk);
                             plan = Box::new(join);
                         } else {
                             plan = Box::new(join);
@@ -1363,7 +1363,7 @@ impl Planner {
                                         std::collections::HashSet::new(),
                                     ));
                                 let join =
-                                    join.with_orphan_config(orphan, direction, shared_ids);
+                                    join.with_orphan_config(orphan, direction, shared_ids, child_has_fk);
                                 plan = Box::new(join);
                             } else {
                                 plan = Box::new(join);
