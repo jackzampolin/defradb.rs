@@ -78,15 +78,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     Some(id) => id.to_string(),
                     None => continue,
                 };
-                match acp
-                    .check_doc_access(
-                        &identity,
-                        DocumentPermission::Read,
-                        &policy.id,
-                        &policy.resource_name,
-                        &doc_id,
-                    )
-                    .await
+                match crate::txn::check_doc_access_with_overlay(
+                    acp.as_ref(),
+                    &identity,
+                    DocumentPermission::Read,
+                    &policy.id,
+                    &policy.resource_name,
+                    &doc_id,
+                )
+                .await
                 {
                     Ok(true) => permitted.push(doc),
                     Ok(false) => {

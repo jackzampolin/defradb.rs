@@ -256,6 +256,7 @@ fn recompute_rollups(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assert_rollup_row(
     row: &Value,
     source_doc_id: &str,

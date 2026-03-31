@@ -23,6 +23,7 @@ use super::commits_numeric::{
 use super::{DocFetcher, QueryRunner};
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -747,15 +748,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     // Check against all policies -- at least one must grant access.
                     let mut any_granted = false;
                     for &(policy_id, resource_name) in &policies {
-                        match acp
-                            .check_doc_access(
-                                &identity,
-                                DocumentPermission::Read,
-                                policy_id,
-                                resource_name,
-                                &doc_id,
-                            )
-                            .await
+                        match crate::txn::check_doc_access_with_overlay(
+                            acp.as_ref(),
+                            &identity,
+                            DocumentPermission::Read,
+                            policy_id,
+                            resource_name,
+                            &doc_id,
+                        )
+                        .await
                         {
                             Ok(true) => {
                                 any_granted = true;

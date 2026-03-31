@@ -139,7 +139,7 @@ async fn rust_policy_cache_ttl_expiry() {
     for i in 0..5 {
         let result = node
             .query_with_identity("query { User { _docID name } }", &alice.private_key_hex)
-            .expect(&format!("Alice query iteration {}", i));
+            .unwrap_or_else(|_| panic!("Alice query iteration {}", i));
         assert_eq!(
             result["User"].as_array().unwrap().len(),
             1,
@@ -258,7 +258,7 @@ async fn go_policy_cache_ttl_expiry() {
     for i in 0..5 {
         let result = node
             .query_with_identity("query { User { _docID name } }", &alice.private_key_hex)
-            .expect(&format!("query iteration {}", i));
+            .unwrap_or_else(|_| panic!("query iteration {}", i));
         assert_eq!(result["User"].as_array().unwrap().len(), 1);
     }
 }

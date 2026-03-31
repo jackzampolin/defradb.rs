@@ -63,6 +63,7 @@ mod commit_priority_index;
 pub(crate) mod commits_fetcher;
 pub mod database;
 pub mod definition_validation;
+pub mod dense_search;
 pub(crate) mod doc_fetcher;
 pub(crate) mod doc_mutator;
 pub mod downsample;
@@ -122,9 +123,14 @@ pub use collection_snapshot::CollectionSnapshot;
 pub use commits_fetcher::{CommitsFetcher, CommitsQueryOptions};
 pub use database::{DbOptions, EmbeddingClientConfig, DB};
 pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
+pub use dense_search::{
+    hybrid_search_dense, require_query_success, DenseHybridSearchHit, DenseHybridSearchRequest,
+    DenseHybridSearchResponse,
+};
 pub use doc_fetcher::DbDocFetcher;
 pub use doc_mutator::DbDocMutator;
 pub use downsample::GcDownsampleHistoriesOptions;
+pub use embedding::embed_text;
 pub use error::{Error, Result};
 #[cfg(feature = "p2p")]
 pub use head_provider::DbHeadProvider;

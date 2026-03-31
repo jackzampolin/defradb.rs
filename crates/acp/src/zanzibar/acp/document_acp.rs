@@ -178,13 +178,13 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         &self,
         requestor: &Did,
         target: &Did,
-        _policy_id: &str,
+        policy_id: &str,
         collection_id: &str,
         doc_id: &str,
         relation: &str,
         _managing_relations: &[String],
     ) -> Result<bool> {
-        self.ensure_policy(collection_id, collection_id).await?;
+        self.ensure_policy(policy_id, collection_id).await?;
 
         if relation == OWNER_RELATION {
             return Err(Error::InvalidRelation(
@@ -194,7 +194,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
 
         self.check_manage_relation(
             requestor,
-            collection_id,
+            policy_id,
             collection_id,
             doc_id,
             relation,
@@ -205,7 +205,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         let has = self
             .store
             .has_relationship(
-                collection_id,
+                policy_id,
                 collection_id,
                 doc_id,
                 relation,
@@ -228,7 +228,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         }
 
         let rel = Relationship::with_entity(collection_id, doc_id, relation, target.clone());
-        self.store.store_relationship(collection_id, &rel).await?;
+        self.store.store_relationship(policy_id, &rel).await?;
 
         tracing::info!(
             target: "acp::audit",
@@ -248,13 +248,13 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         &self,
         requestor: &Did,
         target: &Did,
-        _policy_id: &str,
+        policy_id: &str,
         collection_id: &str,
         doc_id: &str,
         relation: &str,
         _managing_relations: &[String],
     ) -> Result<bool> {
-        self.ensure_policy(collection_id, collection_id).await?;
+        self.ensure_policy(policy_id, collection_id).await?;
 
         if relation == OWNER_RELATION {
             return Err(Error::InvalidRelation(
@@ -264,7 +264,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
 
         self.check_manage_relation(
             requestor,
-            collection_id,
+            policy_id,
             collection_id,
             doc_id,
             relation,
@@ -273,7 +273,7 @@ impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
         .await?;
 
         let rel = Relationship::with_entity(collection_id, doc_id, relation, target.clone());
-        let deleted = self.store.delete_relationship(collection_id, &rel).await?;
+        let deleted = self.store.delete_relationship(policy_id, &rel).await?;
 
         if deleted {
             tracing::info!(

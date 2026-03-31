@@ -119,15 +119,13 @@ impl Policy {
             RelationExpression::ComputedUserset { .. } => None,
             RelationExpression::TupleToUserset { .. } => None,
             RelationExpression::Union(exprs) => {
-                for e in exprs {
-                    if let Some(op) = Self::find_disallowed_operation(e) {
-                        return Some(op);
-                    }
-                }
-                None
+                exprs.iter().find_map(Self::find_disallowed_operation)
             }
             RelationExpression::Intersection(_) => Some("intersection (&)".to_string()),
-            RelationExpression::Difference { .. } => Some("difference (-)".to_string()),
+            RelationExpression::Difference { base, subtract } => {
+                Self::find_disallowed_operation(base)
+                    .or_else(|| Self::find_disallowed_operation(subtract))
+            }
         }
     }
 

@@ -11,10 +11,13 @@ mod benchmark_queries;
 mod benchmark_stats;
 #[doc(hidden)]
 pub mod benchmark_support;
+pub mod coding_search;
 pub mod config;
 mod db_impls;
+pub mod dense_search;
 #[cfg(feature = "p2p")]
 mod p2p_handle;
+pub mod search_chunks;
 pub mod version;
 
 use std::path::PathBuf;
@@ -23,10 +26,15 @@ use std::sync::Arc;
 #[cfg(feature = "p2p")]
 use p2p::P2PTransport;
 
+pub use coding_search::{
+    CodingHybridSearchHit, CodingHybridSearchRequest, CodingHybridSearchResponse,
+    CodingSearchTarget,
+};
 #[cfg(feature = "http")]
 pub use config::HttpConfig;
 #[cfg(feature = "p2p")]
 pub use config::P2PConfig;
+pub use dense_search::{DenseHybridSearchHit, DenseHybridSearchRequest, DenseHybridSearchResponse};
 pub use events::EventName;
 pub use query::{QueryExecutor, QueryRequest, QueryResponse};
 
@@ -182,6 +190,7 @@ pub struct EmbeddedNode {
     runner: Arc<dyn QueryExecutor>,
     event_bus: Arc<dyn events::Bus>,
     schema_ops: Arc<dyn SchemaOps>,
+    embedding_config: db::EmbeddingClientConfig,
     #[cfg(feature = "p2p")]
     p2p_ops: Option<Arc<dyn P2POps>>,
 }
@@ -226,6 +235,11 @@ impl EmbeddedNode {
         &self.event_bus
     }
 
+    /// Access the resolved node-level embedding runtime config.
+    pub fn embedding_config(&self) -> &db::EmbeddingClientConfig {
+        &self.embedding_config
+    }
+
     /// Access P2P operations (if P2P is enabled and configured).
     #[cfg(feature = "p2p")]
     pub fn p2p(&self) -> Option<&dyn P2POps> {
@@ -259,6 +273,9 @@ pub enum StorageBackend {
 pub struct NodeBuilder {
     data_path: Option<PathBuf>,
     storage_backend: StorageBackend,
+    embedding_url: Option<String>,
+    embedding_model: Option<String>,
+    embedding_api_key: Option<String>,
     #[cfg(feature = "http")]
     http_config: Option<HttpConfig>,
     #[cfg(feature = "p2p")]
@@ -282,6 +299,24 @@ impl NodeBuilder {
         self
     }
 
+    /// Set the fallback OpenAI-compatible embedding base URL.
+    pub fn with_embedding_url(mut self, url: impl Into<String>) -> Self {
+        self.embedding_url = Some(url.into());
+        self
+    }
+
+    /// Set the fallback embedding model name used when the schema leaves it empty.
+    pub fn with_embedding_model(mut self, model: impl Into<String>) -> Self {
+        self.embedding_model = Some(model.into());
+        self
+    }
+
+    /// Set the resolved embedding API key value used for Authorization headers.
+    pub fn with_embedding_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.embedding_api_key = Some(api_key.into());
+        self
+    }
+
     /// Enable the HTTP GraphQL server.
     #[cfg(feature = "http")]
     pub fn with_http(mut self, config: HttpConfig) -> Self {
@@ -300,6 +335,20 @@ impl NodeBuilder {
     pub async fn build(self) -> anyhow::Result<EmbeddedNode> {
         // 1. Event bus
         let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::default());
+
+        let db_options = {
+            let mut options = db::DbOptions::default();
+            if let Some(url) = self.embedding_url.as_ref() {
+                options = options.with_embedding_url(url.clone());
+            }
+            if let Some(model) = self.embedding_model.as_ref() {
+                options = options.with_embedding_model(model.clone());
+            }
+            if let Some(api_key) = self.embedding_api_key.as_ref() {
+                options = options.with_embedding_api_key(api_key.clone());
+            }
+            options
+        };
 
         // 2. Extract configs before moving self
         #[cfg(feature = "http")]
@@ -326,6 +375,7 @@ impl NodeBuilder {
                     Self::build_with_store(
                         store,
                         acp_store,
+                        db_options.clone(),
                         event_bus,
                         #[cfg(feature = "p2p")]
                         p2p_config,
@@ -345,6 +395,7 @@ impl NodeBuilder {
                     Self::build_with_store(
                         store,
                         acp_store,
+                        db_options.clone(),
                         event_bus,
                         #[cfg(feature = "p2p")]
                         p2p_config,
@@ -366,6 +417,7 @@ impl NodeBuilder {
             Self::build_with_store(
                 store,
                 acp_store,
+                db_options,
                 event_bus,
                 #[cfg(feature = "p2p")]
                 p2p_config,
@@ -437,11 +489,14 @@ impl NodeBuilder {
     async fn build_with_store<S: storage::corekv::Store + 'static>(
         store: Arc<S>,
         acp_store: Arc<dyn acp::AcpStore>,
+        db_options: db::DbOptions,
         event_bus: Arc<dyn events::Bus>,
         #[cfg(feature = "p2p")] p2p_config: Option<P2PConfig>,
     ) -> anyhow::Result<EmbeddedNode> {
+        let embedding_config = db_options.embedding_config();
+
         // Open database
-        let mut database = db::DB::open_from_arc(store.clone())
+        let mut database = db::DB::open_from_arc_with_options(store.clone(), db_options)
             .await
             .map_err(|e| anyhow::anyhow!("failed to open database: {}", e))?;
 
@@ -490,6 +545,7 @@ impl NodeBuilder {
             runner,
             event_bus,
             schema_ops,
+            embedding_config,
             #[cfg(feature = "p2p")]
             p2p_ops: p2p_result.map(|r| r.ops),
         })

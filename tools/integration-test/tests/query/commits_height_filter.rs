@@ -13,7 +13,7 @@ fn extract_doc_id(data: &Value, mutation_name: &str) -> String {
         .to_string()
 }
 
-fn extract_commits<'a>(data: &'a Value) -> &'a [Value] {
+fn extract_commits(data: &Value) -> &[Value] {
     data["_commits"]
         .as_array()
         .unwrap_or_else(|| {
