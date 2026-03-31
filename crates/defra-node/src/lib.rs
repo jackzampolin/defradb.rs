@@ -14,6 +14,7 @@ pub mod benchmark_support;
 pub mod coding_search;
 pub mod config;
 mod db_impls;
+pub mod dense_search;
 #[cfg(feature = "p2p")]
 mod p2p_handle;
 pub mod version;
@@ -32,6 +33,7 @@ pub use coding_search::{
 pub use config::HttpConfig;
 #[cfg(feature = "p2p")]
 pub use config::P2PConfig;
+pub use dense_search::{DenseHybridSearchHit, DenseHybridSearchRequest, DenseHybridSearchResponse};
 pub use events::EventName;
 pub use query::{QueryExecutor, QueryRequest, QueryResponse};
 

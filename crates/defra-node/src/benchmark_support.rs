@@ -1453,6 +1453,46 @@ mod tests {
         }
     }
 
+    fn dense_request_for_target(
+        target: SearchTarget,
+        query: &str,
+        session_doc_id: Option<&str>,
+    ) -> crate::DenseHybridSearchRequest {
+        let (collection_name, vector_field, fulltext_fields, return_fields, embedding_model) =
+            match target {
+                SearchTarget::Messages => (
+                    "CodingMessage",
+                    "content_v",
+                    vec!["content"],
+                    vec!["message_id", "content"],
+                    "coding-message-model",
+                ),
+                SearchTarget::Actions => (
+                    "CodingAction",
+                    "command_v",
+                    vec!["command"],
+                    vec!["action_type", "target", "command"],
+                    "coding-action-model",
+                ),
+            };
+
+        let mut request = crate::DenseHybridSearchRequest::new(
+            collection_name,
+            query,
+            vector_field,
+            fulltext_fields,
+        )
+        .with_return_fields(return_fields)
+        .with_embedding_model(embedding_model);
+        if let Some(session_doc_id) = session_doc_id {
+            request = request.with_filter(serde_json::json!({
+                "_sessionID": { "_eq": session_doc_id }
+            }));
+        }
+
+        request
+    }
+
     #[derive(Debug, Clone)]
     struct RankedHit {
         doc_id: String,
@@ -1718,6 +1758,56 @@ mod tests {
             hits.len(),
             "expected {} {} rows, got {}",
             hits.len(),
+            collection_name,
+            items.len()
+        );
+        for item in items {
+            assert_eq!(
+                item.get("_sessionID").and_then(JsonValue::as_str),
+                Some(expected_session_doc_id),
+                "hit belonged to unexpected session: {}",
+                item
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn assert_doc_ids_belong_to_session(
+        node: &crate::EmbeddedNode,
+        collection_name: &str,
+        doc_ids: &[String],
+        expected_session_doc_id: &str,
+    ) -> anyhow::Result<()> {
+        if doc_ids.is_empty() {
+            anyhow::bail!("expected at least one hit to validate session scope");
+        }
+
+        let rendered_doc_ids = doc_ids
+            .iter()
+            .map(|doc_id| format!("\"{}\"", crate::benchmark_queries::escape_graphql(doc_id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            r#"{{
+  {collection_name}(filter: {{ _docID: {{ _in: [{rendered_doc_ids}] }} }}, limit: {limit}) {{
+    _docID
+    _sessionID
+  }}
+}}"#,
+            limit = doc_ids.len(),
+        );
+        let data = ensure_success(node.execute(&query).await, "dense search session scope")?;
+        let items = data
+            .get(collection_name)
+            .and_then(JsonValue::as_array)
+            .ok_or_else(|| anyhow::anyhow!("missing {collection_name} array in {data}"))?;
+
+        assert_eq!(
+            items.len(),
+            doc_ids.len(),
+            "expected {} {} rows, got {}",
+            doc_ids.len(),
             collection_name,
             items.len()
         );
@@ -2269,6 +2359,195 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn dense_search_v1_supports_query_text_api() {
+        let server = MockEmbeddingServer::start().await;
+
+        let mut config = CodingSessionFixtureConfig::smoke_test();
+        config.hot_session_messages = 64;
+        config.hot_session_actions = 24;
+        config.medium_session_messages = 16;
+        config.medium_session_actions = 8;
+
+        let node = crate::EmbeddedNode::builder()
+            .with_embedding_url(server.base_url.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let fixture = seed_coding_session_embedding_fixture(&node, &config)
+            .await
+            .unwrap();
+        let tasks = build_context1_style_coding_tasks(&node, &fixture)
+            .await
+            .unwrap();
+
+        for task_id in ["hot_messages_pushdown", "hot_actions_rg_pushdown"] {
+            let task = tasks.iter().find(|task| task.task_id == task_id).unwrap();
+            let session_doc_id = lookup_session_doc_id(&node, &task.session_id)
+                .await
+                .unwrap();
+            let response = node
+                .hybrid_search_dense(
+                    &dense_request_for_target(
+                        task.target,
+                        task.effective_query(),
+                        Some(&session_doc_id),
+                    )
+                    .with_limit(6),
+                )
+                .await
+                .unwrap();
+            eprintln!(
+                "{} dense v1 query=\"{}\" hits={}",
+                task.task_id,
+                response.query_text,
+                response.hits.len()
+            );
+
+            assert!(response.query_vector_dimensions > 0);
+            assert_eq!(response.embedding_model, task_embedding_model(task.target));
+            assert!(!response.bm25_candidates.is_empty());
+            assert!(!response.dense_candidates.is_empty());
+            assert!(!response.hits.is_empty());
+
+            match task.target {
+                SearchTarget::Messages => {
+                    assert_eq!(response.collection_name, "CodingMessage");
+                    assert_eq!(response.vector_field, "content_v");
+                    assert!(response
+                        .hits
+                        .iter()
+                        .all(|hit| hit.fields.get("message_id").is_some()
+                            && hit.fields.get("content").is_some()));
+                }
+                SearchTarget::Actions => {
+                    assert_eq!(response.collection_name, "CodingAction");
+                    assert_eq!(response.vector_field, "command_v");
+                    assert!(response.hits.iter().all(|hit| {
+                        hit.fields.get("action_type").is_some()
+                            && hit.fields.get("target").is_some()
+                            && hit.fields.get("command").is_some()
+                    }));
+                }
+            }
+
+            assert!(
+                response
+                    .hits
+                    .iter()
+                    .any(|hit| task.support_ids().contains(&hit.doc_id)),
+                "{} dense v1 search missed all labeled supports",
+                task.task_id
+            );
+        }
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), total_embedding_documents(&fixture) + 2);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| {
+                    request.model == "coding-message-model"
+                        && request.input == "relation narrowing bm25 pushdown"
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| {
+                    request.model == "coding-action-model"
+                        && request.input == "rg pushdown planner joins"
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn dense_search_v1_honors_filter_and_exclusions() {
+        let server = MockEmbeddingServer::start().await;
+
+        let mut config = CodingSessionFixtureConfig::smoke_test();
+        config.hot_session_messages = 48;
+        config.hot_session_actions = 20;
+        config.medium_session_messages = 14;
+        config.medium_session_actions = 8;
+
+        let node = crate::EmbeddedNode::builder()
+            .with_embedding_url(server.base_url.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let fixture = seed_coding_session_embedding_fixture(&node, &config)
+            .await
+            .unwrap();
+        let session_doc_id = lookup_session_doc_id(&node, &fixture.hot_session.session_id)
+            .await
+            .unwrap();
+        let request = dense_request_for_target(
+            SearchTarget::Messages,
+            "pushdown candidate",
+            Some(&session_doc_id),
+        )
+        .with_limit(5);
+
+        let first_response = node.hybrid_search_dense(&request).await.unwrap();
+        assert!(!first_response.hits.is_empty());
+        assert_doc_ids_belong_to_session(
+            &node,
+            "CodingMessage",
+            &first_response
+                .hits
+                .iter()
+                .map(|hit| hit.doc_id.clone())
+                .collect::<Vec<_>>(),
+            &session_doc_id,
+        )
+        .await
+        .unwrap();
+
+        let excluded_doc_id = first_response.hits[0].doc_id.clone();
+        let second_response = node
+            .hybrid_search_dense(
+                &request
+                    .clone()
+                    .with_excluded_doc_ids(vec![excluded_doc_id.clone()]),
+            )
+            .await
+            .unwrap();
+
+        assert!(!second_response.hits.is_empty());
+        assert!(
+            second_response
+                .hits
+                .iter()
+                .all(|hit| hit.doc_id != excluded_doc_id),
+            "excluded doc_id {} was still returned",
+            excluded_doc_id
+        );
+        assert_doc_ids_belong_to_session(
+            &node,
+            "CodingMessage",
+            &second_response
+                .hits
+                .iter()
+                .map(|hit| hit.doc_id.clone())
+                .collect::<Vec<_>>(),
+            &session_doc_id,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            server.requests().len(),
+            total_embedding_documents(&fixture) + 2
+        );
+    }
+
     struct RealEmbeddingServer {
         base_url: String,
         child: Child,
@@ -2572,6 +2851,67 @@ mod tests {
                     .iter()
                     .any(|hit| task.support_ids().contains(&hit.doc_id)),
                 "{} real hybrid_search_coding missed all labeled supports",
+                task.task_id
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "downloads local Hugging Face embedding models and runs generic dense-search v1"]
+    async fn dense_search_v1_real_models_query_text_api() {
+        let server = RealEmbeddingServer::start().await.unwrap();
+
+        let mut config = CodingSessionFixtureConfig::smoke_test();
+        config.hot_session_messages = 48;
+        config.hot_session_actions = 24;
+        config.medium_session_messages = 16;
+        config.medium_session_actions = 8;
+
+        let node = crate::EmbeddedNode::builder()
+            .with_embedding_url(server.base_url.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let fixture = seed_coding_session_embedding_fixture(&node, &config)
+            .await
+            .unwrap();
+        let tasks = build_context1_style_coding_tasks(&node, &fixture)
+            .await
+            .unwrap();
+
+        for task_id in ["hot_messages_pushdown", "hot_actions_rg_pushdown"] {
+            let task = tasks.iter().find(|task| task.task_id == task_id).unwrap();
+            let session_doc_id = lookup_session_doc_id(&node, &task.session_id)
+                .await
+                .unwrap();
+            let response = node
+                .hybrid_search_dense(
+                    &dense_request_for_target(
+                        task.target,
+                        task.effective_query(),
+                        Some(&session_doc_id),
+                    )
+                    .with_limit(6),
+                )
+                .await
+                .unwrap();
+            eprintln!(
+                "{} real dense v1 query=\"{}\" hits={}",
+                task.task_id,
+                response.query_text,
+                response.hits.len()
+            );
+
+            assert_eq!(response.embedding_model, task_embedding_model(task.target));
+            assert!(response.query_vector_dimensions > 0);
+            assert!(!response.hits.is_empty());
+            assert!(
+                response
+                    .hits
+                    .iter()
+                    .any(|hit| task.support_ids().contains(&hit.doc_id)),
+                "{} real dense v1 search missed all labeled supports",
                 task.task_id
             );
         }
