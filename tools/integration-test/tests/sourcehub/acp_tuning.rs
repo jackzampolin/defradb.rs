@@ -288,7 +288,7 @@ async fn rust_access_cache_grant_revoke_invalidation() {
     for i in 0..5 {
         let result = node
             .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
-            .expect(&format!("Bob cached denial iteration {}", i));
+            .unwrap_or_else(|_| panic!("Bob cached denial iteration {}", i));
         assert_eq!(
             result["User"].as_array().unwrap().len(),
             0,
@@ -315,7 +315,7 @@ async fn rust_access_cache_grant_revoke_invalidation() {
     for i in 0..5 {
         let result = node
             .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
-            .expect(&format!("Bob cached grant iteration {}", i));
+            .unwrap_or_else(|_| panic!("Bob cached grant iteration {}", i));
         assert_eq!(
             result["User"].as_array().unwrap().len(),
             1,

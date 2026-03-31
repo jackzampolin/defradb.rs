@@ -12,6 +12,7 @@ use identity::Did;
 use crate::document::DocumentMapping;
 use crate::error::Result;
 use crate::planner::{Doc, PlanNode};
+use crate::txn::check_doc_access_with_overlay;
 
 /// PermissionFilterNode filters documents based on ACP permissions.
 ///
@@ -90,27 +91,26 @@ impl PermissionFilterNode {
             return Ok(true);
         }
 
-        Ok(self
-            .acp
-            .check_doc_access(
-                &self.identity,
-                DocumentPermission::Read,
-                &self.policy_id,
-                &self.resource_name,
-                doc_id,
-            )
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    doc_id = %doc_id,
-                    policy_id = %self.policy_id,
-                    resource_name = %self.resource_name,
-                    identity = %self.identity,
-                    error = %e,
-                    "Permission check failed, denying access to document"
-                );
-                false
-            }))
+        Ok(check_doc_access_with_overlay(
+            self.acp.as_ref(),
+            &self.identity,
+            DocumentPermission::Read,
+            &self.policy_id,
+            &self.resource_name,
+            doc_id,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                doc_id = %doc_id,
+                policy_id = %self.policy_id,
+                resource_name = %self.resource_name,
+                identity = %self.identity,
+                error = %e,
+                "Permission check failed, denying access to document"
+            );
+            false
+        }))
     }
 }
 

@@ -398,7 +398,7 @@ fn test_dpi_disallowed_intersection() {
 }
 
 #[test]
-fn test_dpi_disallowed_difference() {
+fn test_dpi_allows_difference() {
     let policy = Policy::new("policy1", "Test").with_resource(
         Resource::new("document")
             .with_relation(Relation::direct("owner"))
@@ -412,12 +412,7 @@ fn test_dpi_disallowed_difference() {
             )),
     );
 
-    let result = policy.validate_dpi();
-    assert!(
-        matches!(result, Err(Error::DpiDisallowedOperation { .. })),
-        "Expected DpiDisallowedOperation, got {:?}",
-        result
-    );
+    assert!(policy.validate_dpi().is_ok());
 }
 
 #[test]
@@ -437,6 +432,65 @@ fn test_dpi_owner_via_ttu() {
                 )),
         )
         .with_resource(Resource::new("folder").with_relation(Relation::direct("owner")));
+
+    assert!(policy.validate_dpi().is_ok());
+}
+
+#[test]
+fn test_dpi_allows_nested_difference() {
+    let policy = Policy::new("policy1", "Test").with_resource(
+        Resource::new("document")
+            .with_relation(Relation::direct("owner"))
+            .with_relation(Relation::direct("reader"))
+            .with_relation(Relation::direct("writer"))
+            .with_relation(Relation::direct("blocked"))
+            .with_relation(Relation::computed(
+                "viewer",
+                RelationExpression::union(vec![
+                    RelationExpression::computed_userset("owner"),
+                    RelationExpression::difference(
+                        RelationExpression::union(vec![
+                            RelationExpression::computed_userset("reader"),
+                            RelationExpression::computed_userset("writer"),
+                        ]),
+                        RelationExpression::computed_userset("blocked"),
+                    ),
+                ]),
+            )),
+    );
+
+    assert!(policy.validate_dpi().is_ok());
+}
+
+#[test]
+fn test_dpi_allows_ttu_in_union() {
+    let policy = Policy::new("policy1", "Test")
+        .with_resource(
+            Resource::new("file")
+                .with_relation(Relation::direct("owner"))
+                .with_relation(Relation::direct("parent"))
+                .with_relation(Relation::direct("reader"))
+                .with_relation(Relation::computed(
+                    "read",
+                    RelationExpression::union(vec![
+                        RelationExpression::computed_userset("owner"),
+                        RelationExpression::computed_userset("reader"),
+                        RelationExpression::tuple_to_userset("parent", "read"),
+                    ]),
+                )),
+        )
+        .with_resource(
+            Resource::new("directory")
+                .with_relation(Relation::direct("owner"))
+                .with_relation(Relation::direct("reader"))
+                .with_relation(Relation::computed(
+                    "read",
+                    RelationExpression::union(vec![
+                        RelationExpression::computed_userset("owner"),
+                        RelationExpression::computed_userset("reader"),
+                    ]),
+                )),
+        );
 
     assert!(policy.validate_dpi().is_ok());
 }

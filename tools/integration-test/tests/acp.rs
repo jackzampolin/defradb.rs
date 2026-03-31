@@ -16,5 +16,7 @@ mod node_access;
 mod p2p;
 #[path = "acp/revoke_lifecycle.rs"]
 mod revoke_lifecycle;
+#[path = "acp/transaction_rollback.rs"]
+mod transaction_rollback;
 #[path = "acp/xarchive_access_matrix.rs"]
 mod xarchive_access_matrix;

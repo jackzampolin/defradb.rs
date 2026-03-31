@@ -17,7 +17,8 @@ use async_trait::async_trait;
 use document::Document;
 use query::error::TransactionError;
 use query::txn::{
-    GetTransactionResult, TransactionContext, TransactionHandle, TransactionRegistry,
+    DeferredAcpMutations, GetTransactionResult, TransactionContext, TransactionHandle,
+    TransactionRegistry,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -377,11 +378,25 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
     ) -> std::result::Result<TransactionHandle, TransactionError> {
         let txn_id = self.id_counter.fetch_add(1, Ordering::SeqCst).to_string();
 
-        let db_txn = self
+        let mut db_txn = self
             .db
             .new_txn(readonly)
             .await
             .map_err(|e| TransactionError::execution(format!("storage error: {}", e)))?;
+        let deferred_acp_mutations = Arc::new(DeferredAcpMutations::new());
+        let deferred_acp_mutations_for_commit = deferred_acp_mutations.clone();
+        db_txn
+            .on_success_async(Box::new(move || {
+                Box::pin(async move {
+                    deferred_acp_mutations_for_commit.run_all_logged().await;
+                })
+            }))
+            .map_err(|e| {
+                TransactionError::execution(format!(
+                    "failed to register deferred ACP commit hook: {}",
+                    e
+                ))
+            })?;
 
         // Transaction-scoped collection caching: collections are loaded lazily
         // from the SystemStore on first access within the transaction. Once loaded,
@@ -394,6 +409,7 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
             txn_id.clone(),
             readonly,
             fetcher,
+            deferred_acp_mutations,
         ));
 
         self.transactions

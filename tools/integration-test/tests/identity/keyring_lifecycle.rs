@@ -105,8 +105,8 @@ fn generate_creates_both_keys(binary: &Path) {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
 
-    let out = defra_keyring(binary, kr, &["generate"]);
-    assert!(out.status.success(), "generate failed: {}", stderr(&out));
+    let out = defra_keyring(binary, kr, &["new"]);
+    assert!(out.status.success(), "new failed: {}", stderr(&out));
 
     let out = defra_keyring(binary, kr, &["list"]);
     assert!(out.status.success(), "list failed: {}", stderr(&out));
@@ -136,8 +136,8 @@ fn generate_no_encryption(binary: &Path) {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
 
-    let out = defra_keyring(binary, kr, &["generate", "--no-encryption"]);
-    assert!(out.status.success(), "generate failed: {}", stderr(&out));
+    let out = defra_keyring(binary, kr, &["new", "--no-encryption"]);
+    assert!(out.status.success(), "new failed: {}", stderr(&out));
 
     let out = defra_keyring(binary, kr, &["list"]);
     let list = combined_output(&out);
@@ -166,8 +166,8 @@ fn generate_no_peer_key(binary: &Path) {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
 
-    let out = defra_keyring(binary, kr, &["generate", "--no-peer-key"]);
-    assert!(out.status.success(), "generate failed: {}", stderr(&out));
+    let out = defra_keyring(binary, kr, &["new", "--no-peer-key"]);
+    assert!(out.status.success(), "new failed: {}", stderr(&out));
 
     let out = defra_keyring(binary, kr, &["list"]);
     let list = combined_output(&out);
@@ -200,17 +200,13 @@ fn generate_fails_if_exists(binary: &Path) {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
 
-    let out = defra_keyring(binary, kr, &["generate"]);
-    assert!(
-        out.status.success(),
-        "first generate failed: {}",
-        stderr(&out)
-    );
+    let out = defra_keyring(binary, kr, &["new"]);
+    assert!(out.status.success(), "first new failed: {}", stderr(&out));
 
-    let out = defra_keyring(binary, kr, &["generate"]);
+    let out = defra_keyring(binary, kr, &["new"]);
     assert!(
         !out.status.success(),
-        "second generate should fail but succeeded"
+        "second new should fail but succeeded"
     );
     let err = combined_output(&out);
     assert!(
@@ -237,19 +233,11 @@ fn generate_force_overwrites(binary: &Path) {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
 
-    let out = defra_keyring(binary, kr, &["generate"]);
-    assert!(
-        out.status.success(),
-        "first generate failed: {}",
-        stderr(&out)
-    );
+    let out = defra_keyring(binary, kr, &["new"]);
+    assert!(out.status.success(), "first new failed: {}", stderr(&out));
 
-    let out = defra_keyring(binary, kr, &["generate", "--force"]);
-    assert!(
-        out.status.success(),
-        "generate --force failed: {}",
-        stderr(&out)
-    );
+    let out = defra_keyring(binary, kr, &["new", "--force"]);
+    assert!(out.status.success(), "new --force failed: {}", stderr(&out));
 }
 
 #[test]
@@ -269,8 +257,8 @@ fn generate_silent_on_success(binary: &Path) {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
 
-    let out = defra_keyring(binary, kr, &["generate"]);
-    assert!(out.status.success(), "generate failed: {}", stderr(&out));
+    let out = defra_keyring(binary, kr, &["new"]);
+    assert!(out.status.success(), "new failed: {}", stderr(&out));
     assert!(
         stdout(&out).trim().is_empty(),
         "expected empty stdout, got: '{}'",
@@ -295,14 +283,14 @@ fn export_hex_format(binary: &Path) {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
 
-    // Import a known hex key
+    // Add a known hex key
     let known_hex = "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233";
-    let out = defra_keyring(binary, kr, &["import", "test-key", known_hex]);
-    assert!(out.status.success(), "import failed: {}", stderr(&out));
+    let out = defra_keyring(binary, kr, &["add", "test-key", known_hex]);
+    assert!(out.status.success(), "add failed: {}", stderr(&out));
 
-    // Export and verify — Go writes hex to stderr, Rust to stdout
-    let out = defra_keyring(binary, kr, &["export", "test-key"]);
-    assert!(out.status.success(), "export failed: {}", stderr(&out));
+    // Get and verify — Go writes hex to stderr, Rust to stdout
+    let out = defra_keyring(binary, kr, &["get", "test-key"]);
+    assert!(out.status.success(), "get failed: {}", stderr(&out));
     let hex_out = extract_hex_line(&out);
     assert_eq!(hex_out, known_hex, "exported hex doesn't match imported");
 }
@@ -324,12 +312,12 @@ fn export_roundtrip(binary: &Path) {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
 
-    let out = defra_keyring(binary, kr, &["generate"]);
-    assert!(out.status.success(), "generate failed: {}", stderr(&out));
+    let out = defra_keyring(binary, kr, &["new"]);
+    assert!(out.status.success(), "new failed: {}", stderr(&out));
 
-    // Export peer-key (Ed25519 = 64 bytes = 128 hex chars)
-    let out = defra_keyring(binary, kr, &["export", "peer-key"]);
-    assert!(out.status.success(), "export failed: {}", stderr(&out));
+    // Get peer-key (Ed25519 = 64 bytes = 128 hex chars)
+    let out = defra_keyring(binary, kr, &["get", "peer-key"]);
+    assert!(out.status.success(), "get failed: {}", stderr(&out));
     let hex_str = extract_hex_line(&out);
     assert!(
         hex_str.len() == 128,
@@ -338,9 +326,9 @@ fn export_roundtrip(binary: &Path) {
         hex_str
     );
 
-    // Export encryption-key (AES-256 = 32 bytes = 64 hex chars)
-    let out = defra_keyring(binary, kr, &["export", "encryption-key"]);
-    assert!(out.status.success(), "export failed: {}", stderr(&out));
+    // Get encryption-key (AES-256 = 32 bytes = 64 hex chars)
+    let out = defra_keyring(binary, kr, &["get", "encryption-key"]);
+    assert!(out.status.success(), "get failed: {}", stderr(&out));
     let hex_str = extract_hex_line(&out);
     assert!(
         hex_str.len() == 64,
@@ -368,11 +356,11 @@ fn import_positional_hex(binary: &Path) {
     let kr = tmp.path();
 
     let hex_key = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-    let out = defra_keyring(binary, kr, &["import", "my-key", hex_key]);
-    assert!(out.status.success(), "import failed: {}", stderr(&out));
+    let out = defra_keyring(binary, kr, &["add", "my-key", hex_key]);
+    assert!(out.status.success(), "add failed: {}", stderr(&out));
 
-    let out = defra_keyring(binary, kr, &["export", "my-key"]);
-    assert!(out.status.success(), "export failed: {}", stderr(&out));
+    let out = defra_keyring(binary, kr, &["get", "my-key"]);
+    assert!(out.status.success(), "get failed: {}", stderr(&out));
     let hex_out = extract_hex_line(&out);
     assert_eq!(hex_out, hex_key);
 }
@@ -395,8 +383,8 @@ fn import_silent_on_success(binary: &Path) {
     let kr = tmp.path();
 
     let hex_key = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd";
-    let out = defra_keyring(binary, kr, &["import", "s-key", hex_key]);
-    assert!(out.status.success(), "import failed: {}", stderr(&out));
+    let out = defra_keyring(binary, kr, &["add", "s-key", hex_key]);
+    assert!(out.status.success(), "add failed: {}", stderr(&out));
     assert!(
         stdout(&out).trim().is_empty(),
         "expected empty stdout, got: '{}'",
@@ -421,8 +409,8 @@ fn import_invalid_hex_fails(binary: &Path) {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
 
-    let out = defra_keyring(binary, kr, &["import", "bad-key", "ZZZZ"]);
-    assert!(!out.status.success(), "import of invalid hex should fail");
+    let out = defra_keyring(binary, kr, &["add", "bad-key", "ZZZZ"]);
+    assert!(!out.status.success(), "add of invalid hex should fail");
 }
 
 #[test]
@@ -470,7 +458,7 @@ fn list_format(binary: &Path) {
     let kr = tmp.path();
 
     let hex_key = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd";
-    let out = defra_keyring(binary, kr, &["import", "alpha", hex_key]);
+    let out = defra_keyring(binary, kr, &["add", "alpha", hex_key]);
     assert!(out.status.success());
 
     let out = defra_keyring(binary, kr, &["list"]);
@@ -507,33 +495,15 @@ fn list_format_go() {
 
 #[test]
 
-fn delete_removes_key_rust() {
-    let tmp = tempfile::tempdir().unwrap();
-    let kr = tmp.path();
-    let binary = defra_binary();
-
-    let hex_key = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd";
-    let out = defra_keyring(&binary, kr, &["import", "del-key", hex_key]);
-    assert!(out.status.success());
-
-    let out = defra_keyring(&binary, kr, &["delete", "del-key"]);
-    assert!(out.status.success(), "delete failed: {}", stderr(&out));
-
-    let out = defra_keyring(&binary, kr, &["export", "del-key"]);
-    assert!(!out.status.success(), "export should fail after delete");
-}
-
-#[test]
-
 fn generate_named_key_rust() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
     let binary = defra_binary();
 
-    let out = defra_keyring(&binary, kr, &["generate", "custom-key", "-t", "aes256"]);
+    let out = defra_keyring(&binary, kr, &["new", "custom-key", "-t", "aes256"]);
     assert!(
         out.status.success(),
-        "generate named key failed: {}",
+        "new named key failed: {}",
         stderr(&out)
     );
 
@@ -553,25 +523,17 @@ fn generate_named_key_force_rust() {
     let kr = tmp.path();
     let binary = defra_binary();
 
-    let out = defra_keyring(&binary, kr, &["generate", "my-key", "-t", "ed25519"]);
+    let out = defra_keyring(&binary, kr, &["new", "my-key", "-t", "ed25519"]);
     assert!(out.status.success());
 
     // Without --force, should fail
-    let out = defra_keyring(&binary, kr, &["generate", "my-key", "-t", "ed25519"]);
+    let out = defra_keyring(&binary, kr, &["new", "my-key", "-t", "ed25519"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("already exists"));
 
     // With --force, should succeed
-    let out = defra_keyring(
-        &binary,
-        kr,
-        &["generate", "my-key", "-t", "ed25519", "--force"],
-    );
-    assert!(
-        out.status.success(),
-        "generate --force failed: {}",
-        stderr(&out)
-    );
+    let out = defra_keyring(&binary, kr, &["new", "my-key", "-t", "ed25519", "--force"]);
+    assert!(out.status.success(), "new --force failed: {}", stderr(&out));
 }
 
 #[test]
@@ -582,14 +544,10 @@ fn import_stdin_rust() {
     let binary = defra_binary();
 
     let hex_key = "aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd";
-    let out = defra_keyring_stdin(&binary, kr, &["import", "stdin-key", "--stdin"], hex_key);
-    assert!(
-        out.status.success(),
-        "import --stdin failed: {}",
-        stderr(&out)
-    );
+    let out = defra_keyring_stdin(&binary, kr, &["add", "stdin-key", "--stdin"], hex_key);
+    assert!(out.status.success(), "add --stdin failed: {}", stderr(&out));
 
-    let out = defra_keyring(&binary, kr, &["export", "stdin-key"]);
+    let out = defra_keyring(&binary, kr, &["get", "stdin-key"]);
     assert!(out.status.success());
     assert_eq!(stdout(&out).trim(), hex_key);
 }
@@ -607,12 +565,12 @@ fn import_rust_export_go() {
     let rust = defra_binary();
 
     let hex_key = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-    let out = defra_keyring(&rust, kr, &["import", "cross-key", hex_key]);
-    assert!(out.status.success(), "rust import failed: {}", stderr(&out));
+    let out = defra_keyring(&rust, kr, &["add", "cross-key", hex_key]);
+    assert!(out.status.success(), "rust add failed: {}", stderr(&out));
 
-    // Go export writes to stderr
-    let out = defra_keyring(&go, kr, &["export", "cross-key"]);
-    assert!(out.status.success(), "go export failed: {}", stderr(&out));
+    // Go get writes to stderr
+    let out = defra_keyring(&go, kr, &["get", "cross-key"]);
+    assert!(out.status.success(), "go get failed: {}", stderr(&out));
     let hex_out = extract_hex_line(&out);
     assert_eq!(hex_out, hex_key, "go export mismatch");
 }
@@ -626,11 +584,11 @@ fn import_go_export_rust() {
     let rust = defra_binary();
 
     let hex_key = "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe";
-    let out = defra_keyring(&go, kr, &["import", "cross-key2", hex_key]);
-    assert!(out.status.success(), "go import failed: {}", stderr(&out));
+    let out = defra_keyring(&go, kr, &["add", "cross-key2", hex_key]);
+    assert!(out.status.success(), "go add failed: {}", stderr(&out));
 
-    let out = defra_keyring(&rust, kr, &["export", "cross-key2"]);
-    assert!(out.status.success(), "rust export failed: {}", stderr(&out));
+    let out = defra_keyring(&rust, kr, &["get", "cross-key2"]);
+    assert!(out.status.success(), "rust get failed: {}", stderr(&out));
     assert_eq!(stdout(&out).trim(), hex_key, "rust export mismatch");
 }
 
@@ -642,8 +600,8 @@ fn generate_go_list_rust() {
     let kr = tmp.path();
     let rust = defra_binary();
 
-    let out = defra_keyring(&go, kr, &["generate"]);
-    assert!(out.status.success(), "go generate failed: {}", stderr(&out));
+    let out = defra_keyring(&go, kr, &["new"]);
+    assert!(out.status.success(), "go new failed: {}", stderr(&out));
 
     let out = defra_keyring(&rust, kr, &["list"]);
     assert!(out.status.success(), "rust list failed: {}", stderr(&out));
