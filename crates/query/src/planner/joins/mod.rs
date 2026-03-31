@@ -1257,7 +1257,7 @@ impl Planner {
                         let parent_col = parent_collection.clone();
                         let fetcher = self.fetcher.clone().unwrap();
 
-                        let mut join = TypeJoinOne::new(
+                        let join = TypeJoinOne::new(
                             plan,
                             child_plan,
                             parent_side,
@@ -1270,9 +1270,7 @@ impl Planner {
                             parent_scan_mapping,
                             fetcher,
                         );
-                        if select.exhaustive {
-                            join = join.with_include_orphans();
-                        }
+                        // TODO: Wire SequenceNode(OrphanNode, TypeJoinOne) for @exhaustive
                         plan = Box::new(join);
                         join_provides_ordering = true;
                     } else {
@@ -1295,7 +1293,7 @@ impl Planner {
                                 .unwrap_or(0);
                             let fetcher = self.fetcher.clone().unwrap();
 
-                            let mut join = TypeJoinOne::new(
+                            let join = TypeJoinOne::new(
                                 plan,
                                 child_plan,
                                 parent_side,
@@ -1309,9 +1307,7 @@ impl Planner {
                                 parent_scan_mapping,
                                 fetcher,
                             );
-                            if select.exhaustive {
-                                join = join.with_include_orphans();
-                            }
+                            // TODO: Wire SequenceNode(OrphanNode, TypeJoinOne) for @exhaustive
                             plan = Box::new(join);
                             join_provides_ordering = true;
                         } else {

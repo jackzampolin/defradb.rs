@@ -85,12 +85,8 @@ pub struct TypeJoinOne {
     parent_scan_mapping: Option<DocumentMapping>,
     /// For InvertedIndex mode: queue of parent docs to yield
     docs_to_yield: Vec<Doc>,
-    /// Whether to include orphan parents (for @exhaustive directive)
-    include_orphans: bool,
-    /// Parent docIDs already yielded during child-driven scan
+    /// Tracks parent docIDs yielded during the join, for OrphanNode to exclude.
     yielded_parent_ids: HashSet<String>,
-    /// Whether the child-driven scan is exhausted and we're now yielding orphans
-    orphan_phase: bool,
 }
 
 /// A filter condition on a relation field.
@@ -157,9 +153,7 @@ impl TypeJoinOne {
             parent_collection: None,
             parent_scan_mapping: None,
             docs_to_yield: Vec::new(),
-            include_orphans: false,
             yielded_parent_ids: HashSet::new(),
-            orphan_phase: false,
         }
     }
 
@@ -214,15 +208,14 @@ impl TypeJoinOne {
         self
     }
 
-    /// Enable orphan inclusion (for @exhaustive directive).
-    pub fn with_include_orphans(mut self) -> Self {
-        self.include_orphans = true;
-        self
-    }
-
     /// Returns the direction of this join.
     pub fn direction(&self) -> &JoinDirection {
         &self.direction
+    }
+
+    /// Takes the set of parent docIDs yielded during the join.
+    pub fn take_yielded_parent_ids(&mut self) -> HashSet<String> {
+        std::mem::take(&mut self.yielded_parent_ids)
     }
 
     /// Extract the foreign key value from the parent document.
@@ -448,10 +441,10 @@ impl TypeJoinOne {
                     }
                 }
 
+                self.merge_child(&mut parent_doc, Some(child_doc.deep_clone()));
                 if let Some(pid) = parent_doc.doc_id() {
                     self.yielded_parent_ids.insert(pid.to_string());
                 }
-                self.merge_child(&mut parent_doc, Some(child_doc.deep_clone()));
                 self.docs_to_yield.push(parent_doc);
             }
 
@@ -461,9 +454,6 @@ impl TypeJoinOne {
             }
         }
 
-        if self.include_orphans {
-            return self.next_orphan().await;
-        }
         Ok(false)
     }
 
@@ -526,40 +516,10 @@ impl TypeJoinOne {
                 }
             }
 
+            self.merge_child(&mut parent_doc, Some(child_doc));
             if let Some(pid) = parent_doc.doc_id() {
                 self.yielded_parent_ids.insert(pid.to_string());
             }
-            self.merge_child(&mut parent_doc, Some(child_doc));
-            self.current_doc = parent_doc;
-            return Ok(true);
-        }
-
-        if self.include_orphans {
-            return self.next_orphan().await;
-        }
-        Ok(false)
-    }
-
-    /// Yield orphan parents after child-driven scan exhausts.
-    async fn next_orphan(&mut self) -> Result<bool> {
-        if !self.orphan_phase {
-            self.orphan_phase = true;
-            self.parent_plan.init().await?;
-            self.parent_plan.start().await?;
-        }
-
-        while self.parent_plan.next().await? {
-            let mut parent_doc = self.parent_plan.value().deep_clone();
-            let parent_id = match parent_doc.doc_id() {
-                Some(id) => id.to_string(),
-                None => continue,
-            };
-
-            if self.yielded_parent_ids.contains(&parent_id) {
-                continue;
-            }
-
-            self.merge_child(&mut parent_doc, None);
             self.current_doc = parent_doc;
             return Ok(true);
         }
@@ -677,7 +637,6 @@ impl PlanNode for TypeJoinOne {
         self.go_child_metrics.reset();
         self.docs_to_yield.clear();
         self.yielded_parent_ids.clear();
-        self.orphan_phase = false;
 
         if matches!(
             self.direction,
@@ -781,6 +740,9 @@ impl PlanNode for TypeJoinOne {
 
             // Merge child into parent
             self.merge_child(&mut parent_doc, child_doc);
+            if let Some(pid) = parent_doc.doc_id() {
+                self.yielded_parent_ids.insert(pid.to_string());
+            }
             self.current_doc = parent_doc;
 
             return Ok(true);
@@ -796,17 +758,14 @@ impl PlanNode for TypeJoinOne {
             self.direction,
             JoinDirection::InvertedIndex { .. } | JoinDirection::OrderedInvertedPrimary { .. }
         ) {
+            // Inverted/ordered modes: child_plan is still open, parent_plan was never used
             self.child_plan.close().await?;
-            if self.orphan_phase {
-                self.parent_plan.close().await?;
-            }
         } else {
             self.parent_plan.close().await?;
+            // child_plan was already closed in build_child_cache()
         }
         self.child_cache.clear();
         self.docs_to_yield.clear();
-        self.yielded_parent_ids.clear();
-        self.orphan_phase = false;
         self.initialized = false;
         Ok(())
     }
