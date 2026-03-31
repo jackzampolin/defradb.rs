@@ -160,20 +160,30 @@ impl PlanNode for OrphanNode {
     }
 
     fn explain_execute_inner(&self) -> serde_json::Value {
+        // Go's orphanNode/orphanPointLookupNode reports flat metrics:
+        // {iterations, docFetches, fieldFetches, indexFetches}
+        // NOT nested in a child scanNode.
+        let child_info = self.source_node().exec_info();
         let mut obj = serde_json::Map::new();
-
         obj.insert(
             "iterations".to_string(),
             serde_json::json!(self.exec_info.iterations),
         );
-
-        let child_explain = self.source_node().explain_execute();
-        if let Some(child_obj) = child_explain.as_object() {
-            for (key, value) in child_obj {
-                obj.insert(key.clone(), value.clone());
-            }
-        }
-
+        obj.insert(
+            "docFetches".to_string(),
+            serde_json::json!(child_info.docs_fetched),
+        );
+        obj.insert(
+            "fieldFetches".to_string(),
+            serde_json::json!(child_info.fields_fetched),
+        );
+        // Go's orphanPointLookupNode counts one indexFetch per parent checked
+        // via Has() on the child FK index. We simulate this by counting
+        // docs_fetched (number of parents scanned) as index fetches.
+        obj.insert(
+            "indexFetches".to_string(),
+            serde_json::json!(child_info.docs_fetched + child_info.indexes_fetched),
+        );
         serde_json::Value::Object(obj)
     }
 }
