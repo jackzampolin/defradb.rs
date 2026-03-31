@@ -57,7 +57,7 @@ pub unsafe extern "C" fn add_view(
             rt,
             node_ptr,
             identity_did,
-            NodePermission::CollectionPatch
+            NodePermission::ViewAdd
         ));
         let query_str = try_ffi!(require_c_str(gql_query, "gql_query"));
         let sdl_str = try_ffi!(require_c_str(sdl, "sdl"));
