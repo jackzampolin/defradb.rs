@@ -31,8 +31,8 @@ use crate::error::QueryError;
 use crate::mapper::OrderDirection;
 use crate::mapper::{Field, Filter, OrderBy, OrderCondition, Requestable, Select};
 use crate::plan::{
-    IndexScanNode, JoinSide, OrphanNode, RelationFilter, ScanNode, SelectNode,
-    TypeJoinMany, TypeJoinOne,
+    IndexScanNode, JoinSide, OrphanNode, RelationFilter, ScanNode, SelectNode, TypeJoinMany,
+    TypeJoinOne,
 };
 use crate::planner::PlanNode;
 
