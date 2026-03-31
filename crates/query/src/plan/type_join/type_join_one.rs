@@ -1077,15 +1077,17 @@ impl PlanNode for TypeJoinOne {
             JoinDirection::InvertedIndex { .. } | JoinDirection::OrderedInvertedPrimary { .. }
         ) {
             // Inverted/ordered modes: child drives the loop, parent is looked up per-child.
-            // root = child plan's execute explain (the driving scan)
-            inner_obj.insert("root".to_string(), self.child_plan.explain_execute());
+            // Go always shows parentPlan for root, childPlan for subType.
+            // root = parent lookup metrics (accumulated per-child)
+            inner_obj.insert("root".to_string(), serde_json::json!({
+                "scanNode": self.go_child_metrics.scan_node_json()
+            }));
 
-            // subType = parent lookup metrics as a synthetic scanNode
+            // subType = child plan's execute explain (the driving scan)
+            let child_execute = self.child_plan.explain_execute();
             let sub_type = serde_json::json!({
                 "selectTopNode": {
-                    "selectNode": {
-                        "scanNode": self.go_child_metrics.to_json()
-                    }
+                    "selectNode": child_execute
                 }
             });
             inner_obj.insert("subType".to_string(), sub_type);
