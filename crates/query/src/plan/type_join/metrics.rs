@@ -44,16 +44,6 @@ impl JoinChildMetrics {
         })
     }
 
-    /// Convert scanNode metrics to JSON with an overridden indexFetches value.
-    pub fn scan_node_json_with_index_fetches(&self, index_fetches: u64) -> serde_json::Value {
-        serde_json::json!({
-            "iterations": self.iterations,
-            "docFetches": self.doc_fetches,
-            "fieldFetches": self.field_fetches,
-            "indexFetches": index_fetches
-        })
-    }
-
     /// Convert to a full selectTopNode > selectNode > scanNode JSON structure.
     ///
     /// In Go, the parent side plan is a selectNode wrapping a scanNode.
