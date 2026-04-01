@@ -1173,7 +1173,10 @@ impl Planner {
                 } else if let (Some(fetcher), Some((fk_field_name, index_name))) =
                     (self.fetcher.clone(), child_fk_index_info.clone())
                 {
-                    if can_use_direct_indexed_child_cache(nested_select) && !has_filter_child_plan {
+                    if can_use_direct_indexed_child_cache(nested_select)
+                        && !has_filter_child_plan
+                        && !select.show_deleted
+                    {
                         join_many = join_many.with_indexed_child_fetch(
                             fetcher,
                             target_collection.name.clone(),

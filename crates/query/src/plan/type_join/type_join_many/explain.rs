@@ -240,25 +240,43 @@ impl TypeJoinMany {
         let child_execute = self.child_plan.explain_execute();
         let child_is_select = self.child_plan.kind() == "selectNode";
 
+        // In Go, typeJoinMany's child scan uses prefix-based key lookup (not index),
+        // so the subType scanNode always has indexFetches=0.
+        let sub_type_scan = self.go_child_metrics.scan_node_json_with_index_fetches(0);
+
+        // When a limit is set and the child plan contains nested joins, Go's limitNode
+        // stops iteration early so the nested join only processes `limit` children per
+        // parent. Compute the effective children processed across all parents.
+        // When a limit is set with relation-based ordering, Go's limitNode stops the
+        // inner typeJoinOne after `limit` results per parent. Approximate the effective
+        // children processed per plan execution using the limit value directly.
+        // For multiple parents, multiply by number of parents (exec_info.iterations - 1,
+        // since the last iteration returns false).
+        let effective_children: Option<u64> = self.child_limit.and_then(|limit| {
+            self.child_order_by.as_ref()?;
+            let parent_count = self.exec_info.iterations.saturating_sub(1).max(1);
+            Some(limit * parent_count)
+        });
+
         let select_node_content = if child_is_select {
-            // Extract inner content to avoid double wrapping (selectNode > selectNode)
             let mut content = child_execute
                 .as_object()
                 .and_then(|o| o.get("selectNode"))
                 .cloned()
                 .unwrap_or(child_execute);
-            // Override scanNode metrics with accumulated go_child_metrics
             if let Some(obj) = content.as_object_mut() {
                 obj.insert(
-                    "scanNode".to_string(),
-                    self.go_child_metrics.scan_node_json(),
+                    "iterations".to_string(),
+                    serde_json::json!(self.go_child_metrics.iterations),
                 );
+                obj.insert("scanNode".to_string(), sub_type_scan);
+                // Adjust nested typeJoinOne metrics for limit
+                if let Some(eff) = effective_children {
+                    Self::adjust_nested_join_metrics(obj, eff);
+                }
             }
             content
         } else {
-            // Child is not a SelectNode (e.g., ScanNode or nested join).
-            // Synthesize selectNode metrics from go_child_metrics which accumulate
-            // across all parent scans, matching Go's per-parent re-scan behavior.
             let mut select_inner = serde_json::Map::new();
             select_inner.insert(
                 "iterations".to_string(),
@@ -268,27 +286,59 @@ impl TypeJoinMany {
                 "filterMatches".to_string(),
                 serde_json::json!(self.child_exec_info.docs_fetched),
             );
-            // Merge child plan's explain (e.g., nested typeIndexJoin or scanNode)
             if let Some(child_obj) = child_execute.as_object() {
                 for (key, value) in child_obj {
                     select_inner.insert(key.clone(), value.clone());
                 }
             }
-            // Override scanNode metrics with accumulated go_child_metrics if present
             if select_inner.contains_key("scanNode") {
-                select_inner.insert(
-                    "scanNode".to_string(),
-                    self.go_child_metrics.scan_node_json(),
-                );
+                select_inner.insert("scanNode".to_string(), sub_type_scan);
+            }
+            // Adjust nested typeJoinOne metrics for limit
+            if let Some(eff) = effective_children {
+                Self::adjust_nested_join_metrics(&mut select_inner, eff);
             }
             serde_json::Value::Object(select_inner)
         };
 
-        let sub_type = serde_json::json!({
-            "selectTopNode": {
-                "selectNode": select_node_content
+        // Build the subType structure with optional orderNode and limitNode wrappers,
+        // matching Go's structure: selectTopNode > [limitNode >] [orderNode >] selectNode
+        let has_order = self.child_order_by.is_some();
+        let has_limit = self.child_limit.is_some() || self.child_offset > 0;
+
+        let mut inner_content = serde_json::json!({ "selectNode": select_node_content });
+
+        if has_order {
+            let mut order_node = serde_json::Map::new();
+            order_node.insert(
+                "iterations".to_string(),
+                serde_json::json!(self.go_child_metrics.iterations),
+            );
+            if let Some(inner_obj_val) = inner_content.as_object() {
+                for (key, value) in inner_obj_val {
+                    order_node.insert(key.clone(), value.clone());
                 }
-        });
+            }
+            inner_content =
+                serde_json::json!({ "orderNode": serde_json::Value::Object(order_node) });
+        }
+
+        if has_limit {
+            let mut limit_node = serde_json::Map::new();
+            limit_node.insert(
+                "iterations".to_string(),
+                serde_json::json!(self.go_child_metrics.iterations),
+            );
+            if let Some(inner_obj_val) = inner_content.as_object() {
+                for (key, value) in inner_obj_val {
+                    limit_node.insert(key.clone(), value.clone());
+                }
+            }
+            inner_content =
+                serde_json::json!({ "limitNode": serde_json::Value::Object(limit_node) });
+        }
+
+        let sub_type = serde_json::json!({ "selectTopNode": inner_content });
         inner_obj.insert("subType".to_string(), sub_type);
 
         obj.insert(
@@ -297,5 +347,99 @@ impl TypeJoinMany {
         );
 
         serde_json::Value::Object(obj)
+    }
+
+    /// Adjust nested typeJoinOne metrics to reflect a limited execution.
+    ///
+    /// In Go, a limitNode stops iteration after `effective` results, so the nested
+    /// typeJoinOne only processes that many children. Rust has two nested typeJoinOnes
+    /// (one for ordering inversion, one for the basic join), but Go collapses these
+    /// into a single typeJoinOne. We find the innermost typeJoinOne (which has the
+    /// index-based metrics) and use its structure as the basis, scaled to `effective`.
+    fn adjust_nested_join_metrics(obj: &mut serde_json::Map<String, JsonValue>, effective: u64) {
+        // Find the outermost typeIndexJoin > typeJoinOne
+        let Some(type_index_join) = obj.get_mut("typeIndexJoin") else {
+            return;
+        };
+        let Some(tij_obj) = type_index_join.as_object_mut() else {
+            return;
+        };
+
+        // Find the inner typeJoinOne's subType (which has the index-based metrics).
+        // Structure: typeIndexJoin > typeJoinOne > root > typeIndexJoin > typeJoinOne > subType
+        let inner_sub_type = tij_obj
+            .get("typeJoinOne")
+            .and_then(|tjo| tjo.get("root"))
+            .and_then(|root| root.get("typeIndexJoin"))
+            .and_then(|tij| tij.get("typeJoinOne"))
+            .and_then(|tjo| tjo.get("subType"))
+            .cloned();
+
+        let inner_root = tij_obj
+            .get("typeJoinOne")
+            .and_then(|tjo| tjo.get("root"))
+            .and_then(|root| root.get("typeIndexJoin"))
+            .and_then(|tij| tij.get("typeJoinOne"))
+            .and_then(|tjo| tjo.get("root"))
+            .cloned();
+
+        if let (Some(mut sub_type), Some(mut root)) = (inner_sub_type, inner_root) {
+            // Scale the inner metrics to the effective count
+            Self::scale_metrics_in_tree(&mut sub_type, effective, true);
+            Self::scale_metrics_in_tree(&mut root, effective, false);
+
+            // Replace the outer typeJoinOne with a collapsed version using inner metrics
+            let collapsed = serde_json::json!({
+                "iterations": effective * 2,
+                "typeJoinOne": {
+                    "root": root,
+                    "subType": sub_type
+                }
+            });
+            *type_index_join = collapsed;
+        }
+    }
+
+    /// Scale all scanNode/selectNode metrics in a JSON tree to `target` count.
+    fn scale_metrics_in_tree(value: &mut JsonValue, target: u64, scale_index: bool) {
+        let Some(obj) = value.as_object_mut() else {
+            return;
+        };
+
+        if let Some(scan_node) = obj.get_mut("scanNode") {
+            if let Some(sn) = scan_node.as_object_mut() {
+                let doc_fetches = sn
+                    .get("docFetches")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1)
+                    .max(1);
+                let fields_per_doc =
+                    sn.get("fieldFetches").and_then(|v| v.as_u64()).unwrap_or(0) / doc_fetches;
+
+                sn.insert("docFetches".to_string(), serde_json::json!(target));
+                sn.insert(
+                    "fieldFetches".to_string(),
+                    serde_json::json!(target * fields_per_doc),
+                );
+                sn.insert("iterations".to_string(), serde_json::json!(target));
+                if scale_index {
+                    sn.insert("indexFetches".to_string(), serde_json::json!(target));
+                }
+            }
+        }
+
+        if let Some(select_node) = obj.get_mut("selectNode") {
+            if let Some(sn) = select_node.as_object_mut() {
+                sn.insert("iterations".to_string(), serde_json::json!(target));
+                sn.insert("filterMatches".to_string(), serde_json::json!(target));
+            }
+        }
+
+        // Recurse into wrapper nodes
+        for key in ["selectTopNode", "selectNode"] {
+            if let Some(inner) = obj.get_mut(key) {
+                Self::scale_metrics_in_tree(inner, target, scale_index);
+            }
+        }
     }
 }

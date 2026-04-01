@@ -77,13 +77,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mapping.add_render_key(index, field.output_name());
         }
 
-        // When _version is requested, ensure _docID is always rendered
-        // (needed to look up version/commit data for each document)
-        let has_version = mutation
+        // When _version or relation sub-selects are requested, ensure _docID
+        // is always rendered (needed to look up version/commit data and to
+        // re-query relation data for each document after the mutation)
+        let has_sub_select = mutation
             .fields
             .iter()
-            .any(|r| matches!(r, Requestable::Select(s) if s.field.name == "_version"));
-        if has_version && !has_docid_render {
+            .any(|r| matches!(r, Requestable::Select(_)));
+        if has_sub_select && !has_docid_render {
             mapping.add_render_key(0, "_docID");
         }
 

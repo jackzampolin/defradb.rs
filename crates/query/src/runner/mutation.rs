@@ -794,6 +794,98 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        // Enrich results with relation sub-select data if requested.
+        //
+        // Mutation plan nodes only return flat document fields. When the
+        // mutation selection set includes relation sub-selects (e.g.,
+        // `update_Author { name published { name } }`), we re-query each
+        // result document through the query engine to resolve the joins.
+        let relation_selects: Vec<&crate::mapper::Select> = mutation
+            .fields
+            .iter()
+            .filter_map(|r| {
+                if let Requestable::Select(s) = r {
+                    if s.field.name != "_version" {
+                        return Some(s.as_ref());
+                    }
+                }
+                None
+            })
+            .collect();
+
+        if !relation_selects.is_empty() {
+            let docid_explicitly_requested = mutation
+                .requested_fields()
+                .iter()
+                .any(|f| f.name == "_docID");
+
+            for result in &mut results {
+                if let JsonValue::Object(ref mut obj) = result {
+                    if let Some(doc_id) =
+                        obj.get("_docID").and_then(|v| v.as_str()).map(String::from)
+                    {
+                        // Build a GQL query to fetch relation data for this document
+                        let mut relation_fields = String::new();
+                        for sel in &relation_selects {
+                            relation_fields.push(' ');
+                            render_select_to_gql(sel, &mut relation_fields);
+                        }
+
+                        let query = format!(
+                            "query {{ {}(docID: \"{}\") {{{} }} }}",
+                            mutation.collection_name, doc_id, relation_fields
+                        );
+
+                        if let Ok(query_result) = self
+                            .execute_query_internal(
+                                &query,
+                                fetcher.as_ref(),
+                                caller_identity.clone(),
+                            )
+                            .await
+                        {
+                            if let Some(docs) = query_result
+                                .get(&mutation.collection_name)
+                                .and_then(|v| v.as_array())
+                            {
+                                if let Some(JsonValue::Object(fetched)) = docs.first() {
+                                    for (key, value) in fetched {
+                                        obj.insert(key.clone(), value.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !docid_explicitly_requested {
+                        obj.remove("_docID");
+                    }
+                }
+            }
+        }
+
         Ok(JsonValue::Array(results))
+    }
+}
+
+/// Render a Select sub-select back to GQL selection syntax.
+fn render_select_to_gql(select: &crate::mapper::Select, out: &mut String) {
+    out.push_str(select.field.output_name());
+    if !select.fields.is_empty() {
+        out.push_str(" { ");
+        for child in &select.fields {
+            match child {
+                Requestable::Field(f) => {
+                    out.push_str(f.output_name());
+                    out.push(' ');
+                }
+                Requestable::Select(s) => {
+                    render_select_to_gql(s, out);
+                    out.push(' ');
+                }
+                _ => {}
+            }
+        }
+        out.push('}');
     }
 }
