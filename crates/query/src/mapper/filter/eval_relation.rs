@@ -124,7 +124,12 @@ impl Filter {
                         QueryError::invalid_filter(format!("unknown operator: {}", op_str))
                     })?;
                     if field_missing && !expected.is_null() {
-                        return Ok(false);
+                        // Go treats missing nested JSON fields as implicit nulls for _nin,
+                        // so values absent at the path still pass when none of the banned
+                        // values match. Other operators keep the stricter missing-field miss.
+                        if op != FilterOp::Nin {
+                            return Ok(false);
+                        }
                     }
                     if !eval_op(&field_value, op, expected)? {
                         return Ok(false);
