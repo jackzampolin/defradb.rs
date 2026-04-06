@@ -705,7 +705,8 @@ impl TypeJoinOne {
             let parent_docs = documents_to_plan_docs(result.docs(), parent_mapping)?;
 
             // Track parent lookup metrics (Go counts this as child metrics)
-            self.go_child_metrics.iterations += 1;
+            self.go_child_metrics.iterations += 2;
+            self.go_child_metrics.index_fetches += 1;
             if let Some(parent) = parent_docs.first() {
                 self.go_child_metrics.doc_fetches += 1;
                 self.go_child_metrics.field_fetches += parent.stored_field_count as u64;
@@ -1132,6 +1133,22 @@ impl PlanNode for TypeJoinOne {
 
     fn explain_execute_inner(&self) -> JsonValue {
         let mut obj = serde_json::Map::new();
+        let child_scan_metrics = match self.direction {
+            JoinDirection::OrderedInvertedPrimary { .. } => {
+                let mut info = self.child_plan.exec_info();
+                info.iterations = self.go_child_metrics.iterations;
+                info.indexes_fetched = self.go_child_metrics.index_fetches;
+                info
+            }
+            JoinDirection::InvertedIndex { .. } => self.child_plan.exec_info(),
+            _ => ExecInfo {
+                iterations: self.go_child_metrics.iterations,
+                docs_fetched: self.go_child_metrics.doc_fetches,
+                fields_fetched: self.go_child_metrics.field_fetches,
+                indexes_fetched: self.go_child_metrics.index_fetches,
+            },
+        };
+        let scan_node_iterations = child_scan_metrics.docs_fetched + child_scan_metrics.indexes_fetched;
 
         obj.insert(
             "iterations".to_string(),
@@ -1160,11 +1177,11 @@ impl PlanNode for TypeJoinOne {
             let mut select_node = serde_json::Map::new();
             select_node.insert(
                 "filterMatches".to_string(),
-                serde_json::json!(self.child_exec_info.docs_fetched),
+                serde_json::json!(child_scan_metrics.docs_fetched),
             );
             select_node.insert(
                 "iterations".to_string(),
-                serde_json::json!(self.child_exec_info.iterations),
+                serde_json::json!(child_scan_metrics.iterations),
             );
             // Merge child execute content into selectNode
             if let Some(child_obj) = child_execute.as_object() {
@@ -1189,11 +1206,33 @@ impl PlanNode for TypeJoinOne {
 
             let select_node_content = if child_is_select {
                 // Extract inner content to avoid double wrapping (selectNode > selectNode)
-                child_execute
+                let mut content = child_execute
                     .as_object()
                     .and_then(|o| o.get("selectNode"))
                     .cloned()
-                    .unwrap_or(child_execute)
+                    .unwrap_or(child_execute);
+                if let Some(obj) = content.as_object_mut() {
+                    obj.insert(
+                        "iterations".to_string(),
+                        serde_json::json!(child_scan_metrics.iterations),
+                    );
+                    obj.insert(
+                        "filterMatches".to_string(),
+                        serde_json::json!(child_scan_metrics.docs_fetched),
+                    );
+                    if obj.contains_key("scanNode") {
+                        obj.insert(
+                            "scanNode".to_string(),
+                            serde_json::json!({
+                                "iterations": scan_node_iterations,
+                                "docFetches": child_scan_metrics.docs_fetched,
+                                "fieldFetches": child_scan_metrics.fields_fetched,
+                                "indexFetches": child_scan_metrics.indexes_fetched,
+                            }),
+                        );
+                    }
+                }
+                content
             } else {
                 // Child is not a SelectNode (e.g., ScanNode or nested TypeJoinOne).
                 // Synthesize selectNode metrics from captured child exec info,
@@ -1201,15 +1240,26 @@ impl PlanNode for TypeJoinOne {
                 let mut select_inner = serde_json::Map::new();
                 select_inner.insert(
                     "iterations".to_string(),
-                    serde_json::json!(self.child_exec_info.iterations),
+                    serde_json::json!(child_scan_metrics.iterations),
                 );
                 select_inner.insert(
                     "filterMatches".to_string(),
-                    serde_json::json!(self.child_exec_info.docs_fetched),
+                    serde_json::json!(child_scan_metrics.docs_fetched),
                 );
                 if let Some(child_obj) = child_execute.as_object() {
                     for (key, value) in child_obj {
                         select_inner.insert(key.clone(), value.clone());
+                    }
+                    if child_obj.contains_key("scanNode") {
+                        select_inner.insert(
+                            "scanNode".to_string(),
+                            serde_json::json!({
+                                "iterations": scan_node_iterations,
+                                "docFetches": child_scan_metrics.docs_fetched,
+                                "fieldFetches": child_scan_metrics.fields_fetched,
+                                "indexFetches": child_scan_metrics.indexes_fetched,
+                            }),
+                        );
                     }
                 }
                 serde_json::Value::Object(select_inner)

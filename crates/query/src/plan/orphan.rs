@@ -77,6 +77,28 @@ impl OrphanNode {
             Inner::SecondarySide { parent_scan, .. } => parent_scan,
         }
     }
+
+    fn scan_metrics_from_explain(value: &serde_json::Value) -> Option<ExecInfo> {
+        let obj = value.as_object()?;
+
+        obj.values()
+            .find_map(Self::scan_metrics_from_explain)
+            .or_else(|| {
+                if obj.contains_key("docFetches")
+                    && obj.contains_key("fieldFetches")
+                    && obj.contains_key("indexFetches")
+                {
+                    Some(ExecInfo {
+                        iterations: obj.get("iterations")?.as_u64()?,
+                        docs_fetched: obj.get("docFetches")?.as_u64()?,
+                        fields_fetched: obj.get("fieldFetches")?.as_u64()?,
+                        indexes_fetched: obj.get("indexFetches")?.as_u64()?,
+                    })
+                } else {
+                    None
+                }
+            })
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -163,26 +185,25 @@ impl PlanNode for OrphanNode {
         // Go's orphanNode/orphanPointLookupNode reports flat metrics:
         // {iterations, docFetches, fieldFetches, indexFetches}
         // NOT nested in a child scanNode.
-        let child_info = self.source_node().exec_info();
+        let child_info = Self::scan_metrics_from_explain(&self.source_node().explain_execute())
+            .unwrap_or_else(|| self.source_node().exec_info());
+        let matched_docs = child_info.iterations.saturating_sub(1);
         let mut obj = serde_json::Map::new();
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations),
+            serde_json::json!(child_info.iterations),
         );
         obj.insert(
             "docFetches".to_string(),
-            serde_json::json!(child_info.docs_fetched),
+            serde_json::json!(matched_docs),
         );
         obj.insert(
             "fieldFetches".to_string(),
-            serde_json::json!(child_info.fields_fetched),
+            serde_json::json!(matched_docs),
         );
-        // Go's orphanPointLookupNode counts one indexFetch per parent checked
-        // via Has() on the child FK index. We simulate this by counting
-        // docs_fetched (number of parents scanned) as index fetches.
         obj.insert(
             "indexFetches".to_string(),
-            serde_json::json!(child_info.docs_fetched + child_info.indexes_fetched),
+            serde_json::json!(matched_docs),
         );
         serde_json::Value::Object(obj)
     }

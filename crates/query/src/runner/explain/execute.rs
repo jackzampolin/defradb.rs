@@ -88,7 +88,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Go's executeAndExplainRequest calls Next() on the top-level operationNode.
         // Each Next()=true yields one query result. After all queries, Next()=false.
         // So planExecutions = number_of_queries + 1, sizeOfResult = number_of_queries.
-        let num_queries = operation_children.len() as u64;
+        let num_queries = operation_children.len() as i64;
         let plan_executions = num_queries + 1;
         let size_of_result = num_queries;
 

@@ -87,9 +87,20 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
                 if field_exists(&field.name) {
                     continue;
                 }
+                let is_group_by_field = select
+                    .group_by
+                    .as_ref()
+                    .map(|group_by| group_by.fields.contains(&field.name))
+                    .unwrap_or(false);
                 let relation_name = &field.name[1..field.name.len() - 2];
                 if let Some(rel_field) = collection.field_by_name(relation_name) {
                     if rel_field.kind.is_relation() && rel_field.kind.is_array() {
+                        if is_group_by_field {
+                            return Err(QueryError::parse(format!(
+                                "Argument \"groupBy\" has invalid value [{}].\nIn element #1: Expected type \"{}Field\", found {}.",
+                                field.name, select.collection_name, field.name
+                            )));
+                        }
                         return Err(QueryError::unknown_field(format!(
                             "Cannot query field \"{}\" on type \"{}\". ",
                             field.name, select.collection_name
@@ -109,9 +120,9 @@ pub(crate) fn validate_select(select: &Select, collection: &CollectionVersion) -
     if let Some(ref group_by) = select.group_by {
         for field_name in &group_by.fields {
             if !field_exists(field_name) {
-                return Err(QueryError::unknown_field(format!(
-                    "GROUP BY field '{}' not found in collection '{}'",
-                    field_name, select.collection_name
+                return Err(QueryError::parse(format!(
+                    "Argument \"groupBy\" has invalid value [{}].\nIn element #1: Expected type \"{}Field\", found {}.",
+                    field_name, select.collection_name, field_name
                 )));
             }
             // Reject array relation fields (one-to-many) - can't group by a list value
