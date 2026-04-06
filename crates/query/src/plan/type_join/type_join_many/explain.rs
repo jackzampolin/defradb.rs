@@ -6,6 +6,14 @@ use crate::planner::ExecInfo;
 use super::node::TypeJoinMany;
 
 impl TypeJoinMany {
+    fn scan_index_fetches(value: &JsonValue) -> Option<u64> {
+        value.as_object()
+            .and_then(|obj| obj.get("scanNode"))
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("indexFetches"))
+            .and_then(|value| value.as_u64())
+    }
+
     fn nested_type_join_one_root_scan(value: &JsonValue) -> Option<JsonValue> {
         value.as_object()
             .and_then(|obj| obj.get("typeIndexJoin"))
@@ -288,7 +296,10 @@ impl TypeJoinMany {
         // override the child scanNode metrics, matching Go's explain output.
         let child_execute = self.child_plan.explain_execute();
         let child_is_select = self.child_plan.kind() == "selectNode";
-
+        let child_is_direct_scan = child_execute
+            .as_object()
+            .is_some_and(|obj| obj.contains_key("scanNode"));
+        let original_child_scan_index_fetches = Self::scan_index_fetches(&child_execute);
         let select_node_content = if child_is_select {
             // Extract inner content to avoid double wrapping (selectNode > selectNode)
             let mut content = child_execute
@@ -333,7 +344,25 @@ impl TypeJoinMany {
             serde_json::Value::Object(select_inner)
         };
 
-        let sub_type = if has_limit && has_order && !child_is_select {
+        let sub_type = if has_limit && !has_order && !child_is_select && child_is_direct_scan {
+            serde_json::json!({
+                "selectTopNode": {
+                    "limitNode": {
+                        "iterations": self.go_child_metrics.doc_fetches,
+                        "selectNode": {
+                            "iterations": self.exec_info.iterations,
+                            "filterMatches": self.exec_info.iterations,
+                            "scanNode": {
+                                "iterations": self.exec_info.iterations,
+                                "docFetches": self.go_child_metrics.doc_fetches,
+                                "fieldFetches": self.go_child_metrics.field_fetches,
+                                "indexFetches": original_child_scan_index_fetches.unwrap_or(0),
+                            }
+                        }
+                    }
+                }
+            })
+        } else if has_limit && has_order && !child_is_select {
             let nested_root_scan = Self::nested_type_join_one_root_scan(&child_execute);
             let nested_root_is_non_indexed = nested_root_scan
                 .as_ref()
