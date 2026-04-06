@@ -145,6 +145,51 @@ impl std::fmt::Debug for TypeJoinOne {
 }
 
 impl TypeJoinOne {
+    fn override_nested_type_index_join_metrics(
+        value: &mut serde_json::Value,
+        metrics: &ExecInfo,
+    ) -> bool {
+        let Some(obj) = value.as_object_mut() else {
+            return false;
+        };
+
+        if let Some(type_index_join) = obj.get_mut("typeIndexJoin") {
+            if let Some(type_index_join_obj) = type_index_join.as_object_mut() {
+                type_index_join_obj
+                    .insert("iterations".to_string(), serde_json::json!(metrics.iterations));
+
+                if let Some(type_join_one) = type_index_join_obj.get_mut("typeJoinOne") {
+                    if let Some(type_join_one_obj) = type_join_one.as_object_mut() {
+                        if let Some(root) = type_join_one_obj.get_mut("root") {
+                            if let Some(root_obj) = root.as_object_mut() {
+                                if root_obj.contains_key("scanNode") {
+                                    root_obj.insert(
+                                        "scanNode".to_string(),
+                                        serde_json::json!({
+                                            "iterations": metrics.iterations,
+                                            "docFetches": metrics.docs_fetched,
+                                            "fieldFetches": metrics.fields_fetched,
+                                            "indexFetches": metrics.indexes_fetched,
+                                        }),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                return true;
+            }
+        }
+
+        for child in obj.values_mut() {
+            if Self::override_nested_type_index_join_metrics(child, metrics) {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Create a new TypeJoinOne node.
     pub fn new(
         parent_plan: Box<dyn PlanNode>,
@@ -1231,6 +1276,10 @@ impl PlanNode for TypeJoinOne {
                             }),
                         );
                     }
+                    Self::override_nested_type_index_join_metrics(
+                        &mut content,
+                        &child_scan_metrics,
+                    );
                 }
                 content
             } else {
@@ -1262,7 +1311,12 @@ impl PlanNode for TypeJoinOne {
                         );
                     }
                 }
-                serde_json::Value::Object(select_inner)
+                let mut select_inner_value = serde_json::Value::Object(select_inner);
+                Self::override_nested_type_index_join_metrics(
+                    &mut select_inner_value,
+                    &child_scan_metrics,
+                );
+                select_inner_value
             };
 
             let sub_type = serde_json::json!({
@@ -1301,13 +1355,28 @@ impl PlanNode for TypeJoinOne {
                 serde_json::json!({ "orphanNode": JsonValue::Object(orphan_obj) })
             } else {
                 // Primary: sequenceNode wraps [orphanNode, typeJoinOne]
+                let join_entry = serde_json::json!({
+                    "typeJoinOne": join_explain
+                        .as_object()
+                        .and_then(|o| o.get("typeJoinOne"))
+                        .cloned()
+                        .unwrap_or(JsonValue::Null)
+                });
                 let orphan_entry = serde_json::json!({ "orphanNode": orphan_explain });
                 let sequence = if config.direction == OrderDirection::Asc {
-                    serde_json::json!([orphan_entry, join_explain])
+                    serde_json::json!([orphan_entry, join_entry])
                 } else {
-                    serde_json::json!([join_explain, orphan_entry])
+                    serde_json::json!([join_entry, orphan_entry])
                 };
-                serde_json::json!({ "sequenceNode": sequence })
+                let iterations = join_explain
+                    .as_object()
+                    .and_then(|o| o.get("iterations"))
+                    .cloned()
+                    .unwrap_or(JsonValue::Null);
+                serde_json::json!({
+                    "iterations": iterations,
+                    "sequenceNode": sequence
+                })
             }
         } else {
             join_explain
