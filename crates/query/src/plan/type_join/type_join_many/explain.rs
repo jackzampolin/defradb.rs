@@ -45,6 +45,14 @@ impl TypeJoinMany {
         Some(flattened)
     }
 
+    fn nested_type_join_one(value: &mut JsonValue) -> Option<&mut serde_json::Map<String, JsonValue>> {
+        value.as_object_mut()
+            .and_then(|obj| obj.get_mut("typeIndexJoin"))
+            .and_then(|value| value.as_object_mut())
+            .and_then(|obj| obj.get_mut("typeJoinOne"))
+            .and_then(|value| value.as_object_mut())
+    }
+
     pub(super) fn explain_inner_impl(&self) -> JsonValue {
         // Simple/Default mode: typeIndexJoin contains both attributes and tree structure
         let mut obj = serde_json::Map::new();
@@ -378,6 +386,80 @@ impl TypeJoinMany {
                                         .cloned()
                                         .unwrap_or(JsonValue::Null)
                                 }
+                            }
+                        }
+                    }
+                })
+            } else if nested_root_scan.is_some() {
+                let mut flattened_child =
+                    Self::flattened_nested_type_join(&child_execute).unwrap_or(child_execute);
+
+                if let Some(type_index_join) = flattened_child
+                    .as_object_mut()
+                    .and_then(|obj| obj.get_mut("typeIndexJoin"))
+                    .and_then(|value| value.as_object_mut())
+                {
+                    type_index_join.insert(
+                        "iterations".to_string(),
+                        serde_json::json!(self.exec_info.iterations),
+                    );
+                }
+
+                if let Some(type_join_one) = Self::nested_type_join_one(&mut flattened_child) {
+                    if let Some(root_scan) = type_join_one
+                        .get_mut("root")
+                        .and_then(|value| value.as_object_mut())
+                        .and_then(|obj| obj.get_mut("scanNode"))
+                        .and_then(|value| value.as_object_mut())
+                    {
+                        root_scan.insert(
+                            "iterations".to_string(),
+                            serde_json::json!(self.exec_info.iterations),
+                        );
+                        root_scan.insert("indexFetches".to_string(), serde_json::json!(0));
+                    }
+
+                    if let Some(select_node) = type_join_one
+                        .get_mut("subType")
+                        .and_then(|value| value.as_object_mut())
+                        .and_then(|obj| obj.get_mut("selectTopNode"))
+                        .and_then(|value| value.as_object_mut())
+                        .and_then(|obj| obj.get_mut("selectNode"))
+                        .and_then(|value| value.as_object_mut())
+                    {
+                        select_node.insert(
+                            "iterations".to_string(),
+                            serde_json::json!(self.exec_info.iterations),
+                        );
+                        select_node.insert(
+                            "filterMatches".to_string(),
+                            serde_json::json!(self.exec_info.iterations),
+                        );
+
+                        if let Some(scan_node) = select_node
+                            .get_mut("scanNode")
+                            .and_then(|value| value.as_object_mut())
+                        {
+                            scan_node.insert(
+                                "iterations".to_string(),
+                                serde_json::json!(self.exec_info.iterations),
+                            );
+                        }
+                    }
+                }
+
+                serde_json::json!({
+                    "selectTopNode": {
+                        "limitNode": {
+                            "iterations": self.go_child_metrics.iterations,
+                            "selectNode": {
+                                "iterations": self.exec_info.iterations,
+                                "filterMatches": self.exec_info.iterations,
+                                "typeIndexJoin": flattened_child
+                                    .as_object()
+                                    .and_then(|obj| obj.get("typeIndexJoin"))
+                                    .cloned()
+                                    .unwrap_or(JsonValue::Null)
                             }
                         }
                     }
