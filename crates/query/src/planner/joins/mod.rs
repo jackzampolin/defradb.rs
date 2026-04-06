@@ -1284,11 +1284,34 @@ impl Planner {
                             let shared_ids: crate::plan::SharedYieldedIds = std::sync::Arc::new(
                                 tokio::sync::RwLock::new(std::collections::HashSet::new()),
                             );
+                            let child_fk_field_name = target_relation_field
+                                .as_ref()
+                                .map(|f| schema::CollectionVersion::relation_id_field_name(&f.name))
+                                .unwrap_or_default();
+                            let child_fk_index_name = target_collection
+                                .indexes
+                                .iter()
+                                .find(|idx| {
+                                    idx.fields
+                                        .first()
+                                        .is_some_and(|f| f.name == child_fk_field_name)
+                                })
+                                .map(|idx| idx.name.clone())
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "{}__{}_ASC",
+                                        target_collection.name,
+                                        child_fk_field_name.trim_start_matches('_')
+                                    )
+                                });
                             let orphan_scan = ScanNode::new(orphan_col, orphan_mapping)
                                 .with_fetcher(orphan_fetcher.unwrap());
                             let orphan = OrphanNode::secondary_side(
                                 Box::new(orphan_scan),
                                 shared_ids.clone(),
+                                self.fetcher.clone().unwrap(),
+                                target_collection.name.clone(),
+                                child_fk_index_name,
                                 mapping.clone(),
                             );
                             let direction = parent_order_for_child

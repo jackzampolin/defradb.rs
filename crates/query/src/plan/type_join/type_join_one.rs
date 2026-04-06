@@ -662,34 +662,16 @@ impl TypeJoinOne {
     /// For each child doc, we read its FK field (which contains the parent's _docID),
     /// then fetch the parent directly by docID using the fetcher.
     async fn next_ordered_primary(&mut self) -> Result<bool> {
-        // For ASC with orphans: we need orphans first, but can't know orphans until
-        // the join runs. So on first call, pre-run the entire join to populate
-        // shared_yielded_ids, then yield orphans, then buffered join results.
-        if self.orphan_config.is_some() && !self.orphan_phase_active {
-            let is_asc = self
-                .orphan_config
-                .as_ref()
-                .map(|c| c.direction == OrderDirection::Asc)
-                .unwrap_or(false);
-            if is_asc {
-                self.orphan_phase_active = true;
-                // Pre-run the join to collect results and populate yielded IDs
-                let mut buffered = Vec::new();
-                while let Ok(true) = self.next_ordered_primary_inner().await {
-                    buffered.push(self.current_doc.deep_clone());
-                }
-                // Now init and start orphan node (shared_yielded_ids is populated)
-                let config = self.orphan_config.as_mut().unwrap();
-                config.orphan_node.init().await?;
-                config.orphan_node.start().await?;
-                // Store buffered join results
-                self.docs_to_yield = buffered;
-            }
-        }
-
-        // Yield orphans (for ASC: before buffered results; for DESC: handled at end)
+        // Yield orphans first for ASC exhaustive queries. The orphan node handles
+        // relation absence directly, so the source join can remain untouched until
+        // orphan results are exhausted.
         if let Some(ref mut config) = self.orphan_config {
             if config.direction == OrderDirection::Asc && !self.orphan_phase_done {
+                if !self.orphan_phase_active {
+                    self.orphan_phase_active = true;
+                    config.orphan_node.init().await?;
+                    config.orphan_node.start().await?;
+                }
                 if config.orphan_node.next().await? {
                     let mut orphan_doc = config.orphan_node.value().deep_clone();
                     orphan_doc.set(
@@ -703,13 +685,7 @@ impl TypeJoinOne {
             }
         }
 
-        // Yield buffered join results (ASC pre-run)
-        if !self.docs_to_yield.is_empty() {
-            self.current_doc = self.docs_to_yield.remove(0);
-            return Ok(true);
-        }
-
-        // Normal iteration (DESC or no orphans)
+        // Normal iteration (DESC or no orphans, or ASC after orphan phase)
         self.next_ordered_primary_inner().await
     }
 
@@ -1232,6 +1208,17 @@ impl PlanNode for TypeJoinOne {
             if let Some(child_obj) = child_execute.as_object() {
                 for (k, v) in child_obj {
                     select_node.insert(k.clone(), v.clone());
+                }
+                if child_obj.contains_key("scanNode") {
+                    select_node.insert(
+                        "scanNode".to_string(),
+                        serde_json::json!({
+                            "iterations": child_scan_metrics.iterations,
+                            "docFetches": child_scan_metrics.docs_fetched,
+                            "fieldFetches": child_scan_metrics.fields_fetched,
+                            "indexFetches": child_scan_metrics.indexes_fetched,
+                        }),
+                    );
                 }
             }
             let sub_type = serde_json::json!({
