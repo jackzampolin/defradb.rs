@@ -32,6 +32,29 @@ pub struct SelectNode {
 }
 
 impl SelectNode {
+    fn is_relation_id_index_explain(explain: &serde_json::Value) -> bool {
+        let Some(index_name) = explain
+            .as_object()
+            .and_then(|obj| obj.get("scanNode"))
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("indexName"))
+            .and_then(|value| value.as_str())
+        else {
+            return false;
+        };
+
+        let Some((_, field_and_dir)) = index_name.split_once("__") else {
+            return false;
+        };
+
+        let field_name = field_and_dir
+            .strip_suffix("_ASC")
+            .or_else(|| field_and_dir.strip_suffix("_DESC"))
+            .unwrap_or(field_and_dir);
+
+        field_name.ends_with("ID")
+    }
+
     /// Create a new select node wrapping a source
     pub fn new(source: Box<dyn PlanNode>, document_mapping: DocumentMapping) -> Self {
         Self {
@@ -379,8 +402,24 @@ impl PlanNode for SelectNode {
         // Execute mode uses a different flattening strategy since the explain
         // structure differs (no root/typeJoinOne wrappers).
         let child_explain = self.source.explain_execute();
+        let child_debug_explain = self.source.explain();
         let flattened = Self::flatten_execute_join_chain(&child_explain);
         let explain_to_merge = flattened.as_ref().unwrap_or(&child_explain);
+        let relation_id_wrapped = if flattened.is_none()
+            && explain_to_merge
+                .as_object()
+                .is_some_and(|obj| obj.contains_key("scanNode"))
+            && Self::is_relation_id_index_explain(&child_debug_explain)
+        {
+            Some(serde_json::json!({
+                "typeIndexJoin": {
+                    "root": explain_to_merge
+                }
+            }))
+        } else {
+            None
+        };
+        let explain_to_merge = relation_id_wrapped.as_ref().unwrap_or(explain_to_merge);
         if let Some(child_obj) = explain_to_merge.as_object() {
             for (key, value) in child_obj {
                 obj.insert(key.clone(), value.clone());
