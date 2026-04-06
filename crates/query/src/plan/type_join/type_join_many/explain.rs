@@ -6,6 +6,45 @@ use crate::planner::ExecInfo;
 use super::node::TypeJoinMany;
 
 impl TypeJoinMany {
+    fn nested_type_join_one_root_scan(value: &JsonValue) -> Option<JsonValue> {
+        value.as_object()
+            .and_then(|obj| obj.get("typeIndexJoin"))
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("typeJoinOne"))
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("root"))
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("typeIndexJoin"))
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("typeJoinOne"))
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("root"))
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("scanNode"))
+            .cloned()
+    }
+
+    fn flattened_nested_type_join(value: &JsonValue) -> Option<JsonValue> {
+        let mut flattened = value.clone();
+        let root_scan = Self::nested_type_join_one_root_scan(value)?;
+
+        let type_join_one = flattened
+            .as_object_mut()
+            .and_then(|obj| obj.get_mut("typeIndexJoin"))
+            .and_then(|value| value.as_object_mut())
+            .and_then(|obj| obj.get_mut("typeJoinOne"))
+            .and_then(|value| value.as_object_mut())?;
+
+        type_join_one.insert(
+            "root".to_string(),
+            serde_json::json!({
+                "scanNode": root_scan
+            }),
+        );
+
+        Some(flattened)
+    }
+
     pub(super) fn explain_inner_impl(&self) -> JsonValue {
         // Simple/Default mode: typeIndexJoin contains both attributes and tree structure
         let mut obj = serde_json::Map::new();
@@ -222,6 +261,8 @@ impl TypeJoinMany {
 
     pub(super) fn explain_execute_inner_impl(&self) -> JsonValue {
         let mut obj = serde_json::Map::new();
+        let has_order = self.child_order_by.is_some();
+        let has_limit = self.child_limit.is_some() || self.child_offset > 0;
 
         obj.insert(
             "iterations".to_string(),
@@ -246,7 +287,7 @@ impl TypeJoinMany {
                 .as_object()
                 .and_then(|o| o.get("selectNode"))
                 .cloned()
-                .unwrap_or(child_execute);
+                .unwrap_or_else(|| child_execute.clone());
             // Override scanNode metrics with accumulated go_child_metrics
             if let Some(obj) = content.as_object_mut() {
                 obj.insert(
@@ -284,11 +325,77 @@ impl TypeJoinMany {
             serde_json::Value::Object(select_inner)
         };
 
-        let sub_type = serde_json::json!({
-            "selectTopNode": {
-                "selectNode": select_node_content
+        let sub_type = if has_limit && has_order && !child_is_select {
+            let nested_root_scan = Self::nested_type_join_one_root_scan(&child_execute);
+            let nested_root_is_non_indexed = nested_root_scan
+                .as_ref()
+                .and_then(|value| value.as_object())
+                .and_then(|obj| obj.get("indexFetches"))
+                .and_then(|value| value.as_u64())
+                == Some(0);
+
+            if nested_root_is_non_indexed {
+                let mut flattened_child =
+                    Self::flattened_nested_type_join(&child_execute).unwrap_or(child_execute);
+
+                if let Some(type_index_join) = flattened_child
+                    .as_object_mut()
+                    .and_then(|obj| obj.get_mut("typeIndexJoin"))
+                    .and_then(|value| value.as_object_mut())
+                {
+                    type_index_join.insert(
+                        "iterations".to_string(),
+                        serde_json::json!(self.go_child_metrics.iterations),
+                    );
+
+                    if let Some(root_scan) = type_index_join
+                        .get_mut("typeJoinOne")
+                        .and_then(|value| value.as_object_mut())
+                        .and_then(|obj| obj.get_mut("root"))
+                        .and_then(|value| value.as_object_mut())
+                        .and_then(|obj| obj.get_mut("scanNode"))
+                        .and_then(|value| value.as_object_mut())
+                    {
+                        root_scan.insert(
+                            "iterations".to_string(),
+                            serde_json::json!(self.go_child_metrics.iterations),
+                        );
+                    }
                 }
-        });
+
+                serde_json::json!({
+                    "selectTopNode": {
+                        "limitNode": {
+                            "iterations": self.go_child_metrics.iterations,
+                            "orderNode": {
+                                "iterations": self.exec_info.iterations,
+                                "selectNode": {
+                                    "iterations": self.go_child_metrics.iterations,
+                                    "filterMatches": self.exec_info.iterations,
+                                    "typeIndexJoin": flattened_child
+                                        .as_object()
+                                        .and_then(|obj| obj.get("typeIndexJoin"))
+                                        .cloned()
+                                        .unwrap_or(JsonValue::Null)
+                                }
+                            }
+                        }
+                    }
+                })
+            } else {
+                serde_json::json!({
+                    "selectTopNode": {
+                        "selectNode": select_node_content
+                        }
+                })
+            }
+        } else {
+            serde_json::json!({
+                "selectTopNode": {
+                    "selectNode": select_node_content
+                    }
+            })
+        };
         inner_obj.insert("subType".to_string(), sub_type);
 
         obj.insert(
