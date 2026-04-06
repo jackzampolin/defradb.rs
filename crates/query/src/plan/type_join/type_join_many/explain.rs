@@ -2,6 +2,7 @@ use serde_json::Value as JsonValue;
 
 use crate::mapper::OrderDirection;
 use crate::planner::ExecInfo;
+use crate::planner::index_selection::can_be_ordered_by_index;
 
 use super::node::TypeJoinMany;
 
@@ -344,6 +345,14 @@ impl TypeJoinMany {
             serde_json::Value::Object(select_inner)
         };
 
+        let child_order_uses_index = self.child_order_by.as_ref().is_some_and(|order_by| {
+            self.child_side
+                .collection()
+                .indexes
+                .iter()
+                .any(|index| can_be_ordered_by_index(order_by, index).0)
+        });
+
         let sub_type = if has_limit && !has_order && !child_is_select && child_is_direct_scan {
             serde_json::json!({
                 "selectTopNode": {
@@ -354,6 +363,29 @@ impl TypeJoinMany {
                             "filterMatches": self.exec_info.iterations,
                             "scanNode": {
                                 "iterations": self.exec_info.iterations,
+                                "docFetches": self.go_child_metrics.doc_fetches,
+                                "fieldFetches": self.go_child_metrics.field_fetches,
+                                "indexFetches": original_child_scan_index_fetches.unwrap_or(0),
+                            }
+                        }
+                    }
+                }
+            })
+        } else if has_order
+            && !has_limit
+            && !child_is_select
+            && child_is_direct_scan
+            && !child_order_uses_index
+        {
+            serde_json::json!({
+                "selectTopNode": {
+                    "orderNode": {
+                        "iterations": self.go_child_metrics.iterations,
+                        "selectNode": {
+                            "iterations": self.go_child_metrics.iterations,
+                            "filterMatches": self.child_exec_info.docs_fetched,
+                            "scanNode": {
+                                "iterations": self.go_child_metrics.iterations,
                                 "docFetches": self.go_child_metrics.doc_fetches,
                                 "fieldFetches": self.go_child_metrics.field_fetches,
                                 "indexFetches": original_child_scan_index_fetches.unwrap_or(0),
