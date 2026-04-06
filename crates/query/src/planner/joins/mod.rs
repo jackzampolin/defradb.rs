@@ -1145,12 +1145,12 @@ impl Planner {
                 //   runs per parent (when filter_child_plan exists, it handles globally)
                 // - With ordering + no FK index + no parent filter: Go scans the
                 //   ordering index per parent without FK index for efficient matching
-                let use_per_parent = child_uses_index
-                    && (nested_limit.is_some()
-                        || (nested_select.filter.is_some() && filter_child_plan.is_none())
-                        || (filter_child_plan.is_none()
-                            && nested_order_by.is_some()
-                            && !has_child_fk_index));
+                let use_per_parent = nested_limit.is_some()
+                    || (child_uses_index
+                        && ((nested_select.filter.is_some() && filter_child_plan.is_none())
+                            || (filter_child_plan.is_none()
+                                && nested_order_by.is_some()
+                                && !has_child_fk_index)));
                 let has_filter_child_plan = filter_child_plan.is_some();
 
                 // Apply filter child plan for indexed relation filter evaluation
