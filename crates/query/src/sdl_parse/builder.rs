@@ -652,13 +652,13 @@ impl<'a> SdlParser<'a> {
                 .collect();
 
             index_id_counter += 1;
-                indexes.push(IndexDescription {
-                    name: idx_name,
-                    id: index_id_counter,
-                    fields: indexed_fields,
-                    unique: composite_idx.unique,
-                    auto_generated: false,
-                });
+            indexes.push(IndexDescription {
+                name: idx_name,
+                id: index_id_counter,
+                fields: indexed_fields,
+                unique: composite_idx.unique,
+                auto_generated: false,
+            });
         }
 
         // Create auto-indexes for primary FK fields that aren't covered by user indexes.
