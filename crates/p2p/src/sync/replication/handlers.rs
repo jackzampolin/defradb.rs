@@ -418,10 +418,14 @@ where
             )
             .await
         }
-        SyncEvent::BlockAlreadyMerged { cid } => ReplicationResult::Skipped {
+        SyncEvent::BlockAlreadyMerged {
             cid,
-            doc_id: String::new(),
-            collection_id: String::new(),
+            doc_id,
+            collection_id,
+        } => ReplicationResult::Skipped {
+            cid,
+            doc_id,
+            collection_id,
             reason: "already merged".to_string(),
             terminal: true,
         },

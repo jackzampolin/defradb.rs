@@ -166,7 +166,10 @@ where
                 } => {
                     if *terminal
                         && !doc_id.is_empty()
-                        && matches!(reason.as_str(), "already applied" | "nonce already applied")
+                        && matches!(
+                            reason.as_str(),
+                            "already applied" | "nonce already applied" | "already merged"
+                        )
                     {
                         event_bus.publish(events::Message::merge_complete(
                             events::MergeCompleteData {
