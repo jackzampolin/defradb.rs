@@ -355,6 +355,7 @@ impl Planner {
             &collection,
             scan_mapping,
             0,
+            select.exhaustive,
             filter_for_joins,
             &[select.field.output_name().to_string()],
         )?;

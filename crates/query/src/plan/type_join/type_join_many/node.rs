@@ -86,6 +86,10 @@ pub struct TypeJoinMany {
     /// Used when the child plan uses an index for ordering, matching Go's per-parent
     /// scan behavior for correct metrics and limit support.
     pub(super) per_parent_child_scan: bool,
+    /// When true, per-parent scans with child ordering must collect all matches before
+    /// applying the limit so exhaustive nested relation ordering can merge null/orphan
+    /// children ahead of later indexed matches.
+    pub(super) preserve_ordered_orphans: bool,
     /// Child documents in storage scan order: (fk_value, stored_field_count).
     /// Used to simulate Go's per-parent filteredFetcher behavior for explain metrics
     /// when a child limit is set.
@@ -178,6 +182,7 @@ impl TypeJoinMany {
             total_children_in_cache: 0,
             total_fields_per_scan: 0,
             per_parent_child_scan: false,
+            preserve_ordered_orphans: false,
             child_scan_order: Vec::new(),
             filter_child_plan: None,
             filter_child_cache: HashMap::new(),
@@ -246,6 +251,12 @@ impl TypeJoinMany {
     /// per-parent limit applied during the scan.
     pub fn with_per_parent_child_scan(mut self) -> Self {
         self.per_parent_child_scan = true;
+        self
+    }
+
+    /// Preserve null/orphan children when ordering exhaustive nested relation scopes.
+    pub fn with_preserve_ordered_orphans(mut self) -> Self {
+        self.preserve_ordered_orphans = true;
         self
     }
 

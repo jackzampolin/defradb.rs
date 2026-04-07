@@ -27,7 +27,9 @@ fn is_hidden_auto_relation_index(
     }
 
     let field_name = &index.fields[0].name;
-    let Some(stripped_name) = field_name.strip_prefix('_').and_then(|name| name.strip_suffix("ID"))
+    let Some(stripped_name) = field_name
+        .strip_prefix('_')
+        .and_then(|name| name.strip_suffix("ID"))
     else {
         return false;
     };

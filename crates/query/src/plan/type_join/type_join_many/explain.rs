@@ -1,14 +1,15 @@
 use serde_json::Value as JsonValue;
 
 use crate::mapper::OrderDirection;
-use crate::planner::ExecInfo;
 use crate::planner::index_selection::can_be_ordered_by_index;
+use crate::planner::ExecInfo;
 
 use super::node::TypeJoinMany;
 
 impl TypeJoinMany {
     fn scan_index_fetches(value: &JsonValue) -> Option<u64> {
-        value.as_object()
+        value
+            .as_object()
             .and_then(|obj| obj.get("scanNode"))
             .and_then(|value| value.as_object())
             .and_then(|obj| obj.get("indexFetches"))
@@ -16,7 +17,8 @@ impl TypeJoinMany {
     }
 
     fn nested_type_join_one_root_scan(value: &JsonValue) -> Option<JsonValue> {
-        value.as_object()
+        value
+            .as_object()
             .and_then(|obj| obj.get("typeIndexJoin"))
             .and_then(|value| value.as_object())
             .and_then(|obj| obj.get("typeJoinOne"))
@@ -54,8 +56,11 @@ impl TypeJoinMany {
         Some(flattened)
     }
 
-    fn nested_type_join_one(value: &mut JsonValue) -> Option<&mut serde_json::Map<String, JsonValue>> {
-        value.as_object_mut()
+    fn nested_type_join_one(
+        value: &mut JsonValue,
+    ) -> Option<&mut serde_json::Map<String, JsonValue>> {
+        value
+            .as_object_mut()
             .and_then(|obj| obj.get_mut("typeIndexJoin"))
             .and_then(|value| value.as_object_mut())
             .and_then(|obj| obj.get_mut("typeJoinOne"))

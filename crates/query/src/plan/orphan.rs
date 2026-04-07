@@ -8,10 +8,10 @@ use document::NormalValue;
 use tokio::sync::RwLock;
 
 use crate::document::DocumentMapping;
-use crate::fetcher::DocFetcher;
 use crate::error::Result;
-use crate::planner::{IndexScanParams, IndexScanType};
+use crate::fetcher::DocFetcher;
 use crate::planner::{Doc, ExecInfo, PlanNode};
+use crate::planner::{IndexScanParams, IndexScanType};
 
 /// Shared set of parent docIDs yielded by the main join.
 /// TypeJoinOne writes to this during iteration; OrphanNode reads it to skip non-orphans.
@@ -224,8 +224,10 @@ impl PlanNode for OrphanNode {
         let is_secondary_side = matches!(&self.inner, Inner::SecondarySide { .. });
         let child_info = match &self.inner {
             Inner::SecondarySide { .. } => self.exec_info.clone(),
-            Inner::PrimarySide { .. } => Self::scan_metrics_from_explain(&self.source_node().explain_execute())
-                .unwrap_or_else(|| self.source_node().exec_info()),
+            Inner::PrimarySide { .. } => {
+                Self::scan_metrics_from_explain(&self.source_node().explain_execute())
+                    .unwrap_or_else(|| self.source_node().exec_info())
+            }
         };
         let matched_docs = child_info.iterations.saturating_sub(1);
         let mut obj = serde_json::Map::new();

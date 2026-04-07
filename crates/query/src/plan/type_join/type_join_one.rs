@@ -155,8 +155,10 @@ impl TypeJoinOne {
 
         if let Some(type_index_join) = obj.get_mut("typeIndexJoin") {
             if let Some(type_index_join_obj) = type_index_join.as_object_mut() {
-                type_index_join_obj
-                    .insert("iterations".to_string(), serde_json::json!(metrics.iterations));
+                type_index_join_obj.insert(
+                    "iterations".to_string(),
+                    serde_json::json!(metrics.iterations),
+                );
 
                 if let Some(type_join_one) = type_index_join_obj.get_mut("typeJoinOne") {
                     if let Some(type_join_one_obj) = type_join_one.as_object_mut() {
@@ -999,7 +1001,6 @@ impl PlanNode for TypeJoinOne {
             }
 
             let mut parent_doc = self.parent_plan.value().deep_clone();
-
             // Extract FK and lookup child in cache (O(1) lookup)
             let fk = self.extract_fk(&parent_doc);
             let child_doc = fk.and_then(|fk| self.find_child_doc(&fk));
@@ -1169,7 +1170,8 @@ impl PlanNode for TypeJoinOne {
                 indexes_fetched: self.go_child_metrics.index_fetches,
             },
         };
-        let scan_node_iterations = child_scan_metrics.docs_fetched + child_scan_metrics.indexes_fetched;
+        let scan_node_iterations =
+            child_scan_metrics.docs_fetched + child_scan_metrics.indexes_fetched;
 
         obj.insert(
             "iterations".to_string(),
