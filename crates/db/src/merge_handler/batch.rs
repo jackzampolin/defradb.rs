@@ -315,7 +315,15 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
             }
             CrdtDelta::Lww(payload) => {
                 let mut ds = datastore.clone();
-                let result = self.process_lww_delta_in_txn(&mut ds, cid, payload).await;
+                let result = self
+                    .process_lww_delta_in_txn(
+                        &mut ds,
+                        headstore,
+                        cid,
+                        payload,
+                        metadata.collection_id,
+                    )
+                    .await;
                 match result {
                     Ok(r) if r.applied => Ok(MergeOutcome::Merged),
                     Ok(_) => Ok(MergeOutcome::terminal_skip("rejected by CRDT")),

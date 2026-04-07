@@ -214,9 +214,16 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     return Err(MergeError::Database(e));
                 }
             };
+            let headstore = match txn.headstore() {
+                Ok(headstore) => headstore,
+                Err(e) => {
+                    let _ = txn.force_discard();
+                    return Err(MergeError::Database(e));
+                }
+            };
 
             match self
-                .process_linked_field_blocks(&mut datastore, &context, &mut state)
+                .process_linked_field_blocks(&mut datastore, &headstore, &context, &mut state)
                 .await?
             {
                 Some(outcome) => Ok(Some(outcome)),
@@ -472,7 +479,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             let mut datastore = datastore.clone();
 
             match self
-                .process_linked_field_blocks(&mut datastore, &context, &mut state)
+                .process_linked_field_blocks(&mut datastore, headstore, &context, &mut state)
                 .await?
             {
                 Some(outcome) => Ok(Some(outcome)),
