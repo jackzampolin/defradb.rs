@@ -41,6 +41,25 @@ pub struct P2PAdapter<B: Blockstore + 'static> {
 }
 
 impl<B: Blockstore + 'static> P2PAdapter<B> {
+    async fn resubscribe_tracked_document_topics(&self) {
+        let doc_ids: Vec<String> = match self.tracked_documents.read() {
+            Ok(docs) => docs.iter().cloned().collect(),
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to read tracked documents");
+                return;
+            }
+        };
+        for doc_id in &doc_ids {
+            let topic = DefraTopic::document(doc_id);
+            if let Err(error) = self.handle.unsubscribe(topic.clone()).await {
+                tracing::debug!(doc_id = %doc_id, error = %error, "failed to drop tracked document topic before reconnect resubscribe");
+            }
+            if let Err(error) = self.handle.subscribe(topic).await {
+                tracing::debug!(doc_id = %doc_id, error = %error, "failed to resubscribe tracked document topic after reconnect");
+            }
+        }
+    }
+
     pub fn with_full_context(
         handle: P2PHostHandle,
         coordinator: Arc<Libp2pSyncCoordinator<B>>,
@@ -127,6 +146,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         if let Ok(mut addrs) = self.peer_addresses.write() {
             addrs.insert(parsed.peer_id.to_string(), addr.to_string());
         }
+        self.resubscribe_tracked_document_topics().await;
         Ok(())
     }
 
