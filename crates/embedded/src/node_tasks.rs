@@ -157,7 +157,26 @@ where
                 ReplicationResult::Failed { cid, error } => {
                     tracing::error!(cid = %cid, error = %error, "block merge failed");
                 }
-                ReplicationResult::Skipped { cid, reason, .. } => {
+                ReplicationResult::Skipped {
+                    cid,
+                    doc_id,
+                    collection_id,
+                    reason,
+                    terminal,
+                } => {
+                    if *terminal
+                        && !doc_id.is_empty()
+                        && matches!(reason.as_str(), "already applied" | "nonce already applied")
+                    {
+                        event_bus.publish(events::Message::merge_complete(
+                            events::MergeCompleteData {
+                                doc_id: doc_id.clone(),
+                                cid: *cid,
+                                collection_id: collection_id.clone(),
+                                by_peer: local_peer.clone(),
+                            },
+                        ));
+                    }
                     tracing::debug!(cid = %cid, reason = %reason, "replication loop skipped block");
                 }
                 _ => {}
