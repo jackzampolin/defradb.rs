@@ -67,16 +67,44 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Create the CounterDelta from payload
         let delta = self.create_counter_delta(payload, numeric_kind)?;
 
-        // Create the context
-        let ctx = Context {
-            doc_id: DocId::new(&doc_id_str),
-            schema_version: payload.schema_version_id.clone(),
-            is_create: payload.priority == 1,
-        };
-
         // Perform the merge in a scoped block
         let result = {
             let mut datastore = txn.datastore()?;
+            let mut doc_exists = false;
+
+            // Seed counter CRDT from the existing document if CRDT storage is still empty.
+            // Replicated creates can materialize the document value before any later standalone
+            // counter update arrives, so the standalone path needs the same initialization logic
+            // as the batched merge path.
+            if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
+                if let Ok(Some(existing_doc)) =
+                    collection.get_with_datastore(&mut datastore, &doc_id).await
+                {
+                    doc_exists = true;
+                    if let Some(field_value) = existing_doc.get(&payload.field_name) {
+                        match (numeric_kind, field_value) {
+                            (NumericKind::Int64, NormalValue::Int(v)) => {
+                                let _ = counter
+                                    .seed_if_uninitialized_int64(&mut datastore, *v)
+                                    .await;
+                            }
+                            (NumericKind::Float64, NormalValue::Float64(v)) => {
+                                let _ = counter
+                                    .seed_if_uninitialized_float64(&mut datastore, *v)
+                                    .await;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            let ctx = Context {
+                doc_id: DocId::new(&doc_id_str),
+                schema_version: payload.schema_version_id.clone(),
+                is_create: payload.priority == 1 && !doc_exists,
+            };
+
             counter.merge(&mut datastore, &ctx, &delta).await
         };
 
@@ -182,9 +210,11 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Local document creation stores counter values in the document layer but not
         // in CRDT accumulation storage, so we must seed before merging remote deltas.
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
+        let mut doc_exists = false;
         if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
             if let Ok(Some(existing_doc)) = collection.get_with_datastore(datastore, &doc_id).await
             {
+                doc_exists = true;
                 if let Some(field_value) = existing_doc.get(&payload.field_name) {
                     match (numeric_kind, field_value) {
                         (NumericKind::Int64, NormalValue::Int(v)) => {
@@ -204,7 +234,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let ctx = Context {
             doc_id: DocId::new(&doc_id_str),
             schema_version: payload.schema_version_id.clone(),
-            is_create: payload.priority == 1,
+            is_create: payload.priority == 1 && !doc_exists,
         };
 
         // Perform the merge
@@ -212,52 +242,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             .merge(datastore, &ctx, &delta)
             .await
             .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
-
         // Read the accumulated value (counters always accumulate, so we always read current)
-        let value = match ValueReader::value(&counter, datastore).await {
-            Ok(bytes) => {
-                if bytes.is_empty() {
-                    None
-                } else {
-                    // Convert raw bytes to NormalValue based on kind
-                    match numeric_kind {
-                        NumericKind::Int64 => {
-                            if bytes.len() == 8 {
-                                let arr: [u8; 8] = bytes[..8].try_into().unwrap();
-                                Some(NormalValue::Int(i64::from_be_bytes(arr)))
-                            } else {
-                                tracing::warn!(
-                                    field_name = %payload.field_name,
-                                    "Invalid counter value length for Int64"
-                                );
-                                None
-                            }
-                        }
-                        NumericKind::Float64 => {
-                            if bytes.len() == 8 {
-                                let arr: [u8; 8] = bytes[..8].try_into().unwrap();
-                                Some(NormalValue::Float64(f64::from_be_bytes(arr)))
-                            } else {
-                                tracing::warn!(
-                                    field_name = %payload.field_name,
-                                    "Invalid counter value length for Float64"
-                                );
-                                None
-                            }
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::debug!(
-                    field_name = %payload.field_name,
-                    error = %e,
-                    "Could not read counter value"
-                );
-                None
-            }
-        };
+        let value = self
+            .read_counter_value(&counter, datastore, numeric_kind, &payload.field_name)
+            .await;
 
         Ok(CounterMergeResult {
             applied: merge_result.was_applied(),
@@ -333,6 +321,65 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     increment,
                 )
                 .map_err(|e| MergeError::MergeFailed(e.to_string()))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    async fn read_counter_value(
+        &self,
+        counter: &Counter,
+        datastore: &mut NamespaceView,
+        numeric_kind: NumericKind,
+        field_name: &str,
+    ) -> Option<NormalValue> {
+        match ValueReader::value(counter, datastore).await {
+            Ok(bytes) => self.decode_counter_value(bytes, numeric_kind, field_name),
+            Err(e) => {
+                tracing::debug!(
+                    field_name,
+                    error = %e,
+                    "Could not read counter value"
+                );
+                None
+            }
+        }
+    }
+
+    fn decode_counter_value(
+        &self,
+        bytes: Vec<u8>,
+        numeric_kind: NumericKind,
+        field_name: &str,
+    ) -> Option<NormalValue> {
+        if bytes.is_empty() {
+            return None;
+        }
+
+        match numeric_kind {
+            NumericKind::Int64 => {
+                if bytes.len() == 8 {
+                    let arr: [u8; 8] = bytes[..8].try_into().unwrap();
+                    Some(NormalValue::Int(i64::from_be_bytes(arr)))
+                } else {
+                    tracing::warn!(
+                        field_name = %field_name,
+                        "Invalid counter value length for Int64"
+                    );
+                    None
+                }
+            }
+            NumericKind::Float64 => {
+                if bytes.len() == 8 {
+                    let arr: [u8; 8] = bytes[..8].try_into().unwrap();
+                    Some(NormalValue::Float64(f64::from_be_bytes(arr)))
+                } else {
+                    tracing::warn!(
+                        field_name = %field_name,
+                        "Invalid counter value length for Float64"
+                    );
+                    None
+                }
             }
             _ => unreachable!(),
         }
