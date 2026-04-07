@@ -231,6 +231,20 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         match process_result {
             Ok(Some(outcome)) => {
                 txn.force_discard()?;
+                if outcome.is_terminal_skip() && !from_collection {
+                    if let Some(bus) = self.db.event_bus() {
+                        let merge_complete = MergeCompleteData {
+                            doc_id: doc_id_str.clone(),
+                            cid: *cid,
+                            collection_id: metadata
+                                .collection_id
+                                .unwrap_or(&payload.schema_version_id)
+                                .to_string(),
+                            by_peer: metadata.sender_peer.unwrap_or("").to_string(),
+                        };
+                        bus.publish(Message::merge_complete(merge_complete));
+                    }
+                }
                 Ok(outcome)
             }
             Ok(None) => {
@@ -471,7 +485,29 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         };
 
         match process_result {
-            Ok(Some(outcome)) => Ok(outcome),
+            Ok(Some(outcome)) => {
+                if outcome.is_terminal_skip() && !from_collection {
+                    let merge_complete = MergeCompleteData {
+                        doc_id: doc_id_str.clone(),
+                        cid: *cid,
+                        collection_id: metadata
+                            .collection_id
+                            .unwrap_or(&payload.schema_version_id)
+                            .to_string(),
+                        by_peer: metadata.sender_peer.unwrap_or("").to_string(),
+                    };
+                    pending_events
+                        .lock()
+                        .unwrap_or_else(|e| {
+                            tracing::warn!("pending_events lock poisoned, recovering");
+                            e.into_inner()
+                        })
+                        .push(PendingMergeEvent {
+                            message: Message::merge_complete(merge_complete),
+                        });
+                }
+                Ok(outcome)
+            }
             Ok(None) => {
                 self.update_heads(headstore, &context, &state).await;
 

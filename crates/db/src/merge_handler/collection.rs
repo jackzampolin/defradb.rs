@@ -186,6 +186,18 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                     outcome = ?outcome,
                                     "Composite skipped"
                                 );
+                                if let Some(bus) = self.db.event_bus() {
+                                    let col_id = metadata
+                                        .collection_id
+                                        .unwrap_or(&payload.schema_version_id)
+                                        .to_string();
+                                    bus.publish(Message::merge_complete(MergeCompleteData {
+                                        doc_id: doc_id_str,
+                                        cid: *link_cid,
+                                        collection_id: col_id,
+                                        by_peer: metadata.sender_peer.unwrap_or("").to_string(),
+                                    }));
+                                }
                             }
                             Ok(outcome) => {
                                 tracing::debug!(
@@ -402,6 +414,22 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         }
                         Ok(outcome) if outcome.is_terminal_skip() => {
                             tracing::debug!(link_cid = %link_cid, outcome = ?outcome, "Composite skipped in batch");
+                            let col_id = metadata
+                                .collection_id
+                                .unwrap_or(&payload.schema_version_id)
+                                .to_string();
+                            let mut pe = pending_events.lock().unwrap_or_else(|e| {
+                                tracing::warn!("pending_events lock poisoned, recovering");
+                                e.into_inner()
+                            });
+                            pe.push(PendingMergeEvent {
+                                message: Message::merge_complete(MergeCompleteData {
+                                    doc_id: doc_id_str,
+                                    cid: *link_cid,
+                                    collection_id: col_id,
+                                    by_peer: metadata.sender_peer.unwrap_or("").to_string(),
+                                }),
+                            });
                         }
                         Ok(outcome) => {
                             tracing::debug!(link_cid = %link_cid, outcome = ?outcome, "Composite skipped in batch and will be retried");
