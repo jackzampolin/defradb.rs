@@ -234,7 +234,7 @@ impl PlanNode for OrphanNode {
         obj.insert(
             "iterations".to_string(),
             serde_json::json!(if is_secondary_side {
-                child_info.docs_fetched
+                child_info.docs_fetched + 1
             } else {
                 child_info.iterations
             }),

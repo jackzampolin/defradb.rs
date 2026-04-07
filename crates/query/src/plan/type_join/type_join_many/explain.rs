@@ -7,6 +7,102 @@ use crate::planner::ExecInfo;
 use super::node::TypeJoinMany;
 
 impl TypeJoinMany {
+    fn nested_default_type_join(value: &JsonValue) -> Option<JsonValue> {
+        value
+            .as_object()
+            .and_then(|obj| obj.get("typeIndexJoin"))
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("root"))
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("typeIndexJoin"))
+            .cloned()
+    }
+
+    fn nested_default_type_join_root(value: &JsonValue) -> Option<JsonValue> {
+        Self::nested_default_type_join(value)
+            .as_ref()
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("root"))
+            .cloned()
+    }
+
+    fn flatten_default_nested_type_join(value: &JsonValue) -> Option<JsonValue> {
+        let nested_root = Self::nested_default_type_join_root(value)?;
+        let mut flattened = value.clone();
+
+        let type_index_join = flattened
+            .as_object_mut()
+            .and_then(|obj| obj.get_mut("typeIndexJoin"))
+            .and_then(|value| value.as_object_mut())?;
+
+        type_index_join.insert("root".to_string(), nested_root);
+        Some(flattened)
+    }
+
+    fn nested_debug_type_join(value: &JsonValue) -> Option<JsonValue> {
+        value
+            .as_object()
+            .and_then(|obj| obj.get("typeIndexJoin"))
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("typeJoinOne"))
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("root"))
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("typeIndexJoin"))
+            .cloned()
+    }
+
+    fn nested_debug_type_join_root(value: &JsonValue) -> Option<JsonValue> {
+        let nested = Self::nested_debug_type_join(value)?;
+        let nested_obj = nested.as_object()?;
+
+        nested_obj
+            .get("typeJoinOne")
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("root"))
+            .cloned()
+            .or_else(|| {
+                nested_obj
+                    .get("orphanNode")
+                    .and_then(|value| value.as_object())
+                    .and_then(|obj| obj.get("typeJoinOne"))
+                    .and_then(|value| value.as_object())
+                    .and_then(|obj| obj.get("root"))
+                    .cloned()
+            })
+    }
+
+    fn flatten_debug_nested_type_join(value: &JsonValue) -> Option<JsonValue> {
+        let nested_root = Self::nested_debug_type_join_root(value)?;
+        let mut flattened = value.clone();
+
+        let type_join_one = flattened
+            .as_object_mut()
+            .and_then(|obj| obj.get_mut("typeIndexJoin"))
+            .and_then(|value| value.as_object_mut())
+            .and_then(|obj| obj.get_mut("typeJoinOne"))
+            .and_then(|value| value.as_object_mut())?;
+
+        type_join_one.insert("root".to_string(), nested_root);
+        Some(flattened)
+    }
+
+    fn default_nested_root_has_orphan(value: &JsonValue) -> bool {
+        Self::nested_default_type_join(value)
+            .as_ref()
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get("root"))
+            .and_then(|value| value.as_object())
+            .is_some_and(|obj| obj.contains_key("orphanNode"))
+    }
+
+    fn debug_nested_root_has_orphan(value: &JsonValue) -> bool {
+        Self::nested_debug_type_join(value)
+            .as_ref()
+            .and_then(|value| value.as_object())
+            .is_some_and(|obj| obj.contains_key("orphanNode"))
+    }
+
     fn scan_index_fetches(value: &JsonValue) -> Option<u64> {
         value
             .as_object()
@@ -121,6 +217,9 @@ impl TypeJoinMany {
             serde_json::Value::Object(select_node_inner)
         };
 
+        let has_nested_type_join = Self::nested_default_type_join_root(&child_explain).is_some();
+        let nested_uses_orphan = Self::default_nested_root_has_orphan(&child_explain);
+
         // Build the subType structure based on order/limit presence
         // Structure: selectTopNode > [limitNode >] [orderNode >] selectNode > scanNode
         // Go wraps order around selectNode first, then limit around order.
@@ -128,9 +227,27 @@ impl TypeJoinMany {
         let has_limit = self.child_limit.is_some() || self.child_offset > 0;
 
         // Start with selectNode content, then wrap with orderNode, then limitNode
-        let mut inner_content = select_node_content;
+        let mut inner_content = if has_nested_type_join {
+            Self::flatten_default_nested_type_join(&child_explain)
+                .and_then(|flattened| {
+                    flattened
+                        .as_object()
+                        .and_then(|obj| obj.get("typeIndexJoin"))
+                        .cloned()
+                })
+                .map(|flattened| {
+                    serde_json::json!({
+                        "docID": serde_json::Value::Null,
+                        "filter": serde_json::Value::Null,
+                        "typeIndexJoin": flattened
+                    })
+                })
+                .unwrap_or(select_node_content)
+        } else {
+            select_node_content
+        };
 
-        if has_order {
+        if has_order && !(has_limit && (nested_uses_orphan || has_nested_type_join)) {
             // Wrap selectNode in orderNode first (innermost wrapper)
             let mut order_node = serde_json::Map::new();
             if let Some(ref order_by) = self.child_order_by {
@@ -152,7 +269,10 @@ impl TypeJoinMany {
             order_node.insert("selectNode".to_string(), inner_content);
             inner_content =
                 serde_json::json!({ "orderNode": serde_json::Value::Object(order_node) });
-        } else {
+        } else if !inner_content
+            .as_object()
+            .is_some_and(|obj| obj.contains_key("selectNode"))
+        {
             // No order, wrap selectNode directly
             inner_content = serde_json::json!({ "selectNode": inner_content });
         }
@@ -218,6 +338,9 @@ impl TypeJoinMany {
             serde_json::Value::Object(select_node_inner)
         };
 
+        let has_nested_type_join = Self::nested_debug_type_join_root(&child_explain).is_some();
+        let nested_uses_orphan = Self::debug_nested_root_has_orphan(&child_explain);
+
         // Build the subType structure based on order/limit presence
         // Structure: selectTopNode > [limitNode >] [orderNode >] selectNode > scanNode
         // Go wraps order around selectNode first, then limit around order.
@@ -225,9 +348,21 @@ impl TypeJoinMany {
         let has_limit = self.child_limit.is_some() || self.child_offset > 0;
 
         // Start with selectNode content, then wrap with orderNode, then limitNode
-        let mut inner_content = select_node_content;
+        let mut inner_content = if has_nested_type_join {
+            Self::flatten_debug_nested_type_join(&child_explain)
+                .and_then(|flattened| {
+                    flattened
+                        .as_object()
+                        .and_then(|obj| obj.get("typeIndexJoin"))
+                        .cloned()
+                })
+                .map(|flattened| serde_json::json!({ "typeIndexJoin": flattened }))
+                .unwrap_or(select_node_content)
+        } else {
+            select_node_content
+        };
 
-        if has_order {
+        if has_order && !(has_limit && nested_uses_orphan) {
             // Wrap selectNode in orderNode first (debug mode: no attributes, just structure)
             let mut order_node_content = serde_json::Map::new();
             order_node_content.insert(
@@ -245,7 +380,10 @@ impl TypeJoinMany {
             inner_content = serde_json::json!({
                 "orderNode": serde_json::Value::Object(order_node_content)
             });
-        } else {
+        } else if !inner_content
+            .as_object()
+            .is_some_and(|obj| obj.contains_key("selectNode"))
+        {
             // No order, wrap selectNode directly
             inner_content = serde_json::json!({ "selectNode": inner_content });
         }
