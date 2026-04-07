@@ -1157,7 +1157,10 @@ impl Planner {
                     let index = target_collection
                         .indexes
                         .iter()
-                        .find(|idx| idx.fields.first().is_some_and(|f| f.name == fk_field.name))?;
+                        .find(|idx| {
+                            !idx.auto_generated
+                                && idx.fields.first().is_some_and(|f| f.name == fk_field.name)
+                        })?;
                     Some((fk_field.name.clone(), index.name.clone()))
                 });
                 let has_child_fk_index = child_fk_index_info.is_some();

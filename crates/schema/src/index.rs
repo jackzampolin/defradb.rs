@@ -36,6 +36,10 @@ pub struct IndexDescription {
     /// Whether the index enforces uniqueness.
     #[serde(rename = "Unique", default)]
     pub unique: bool,
+
+    /// Internal-only marker for auto-generated schema indexes.
+    #[serde(skip)]
+    pub auto_generated: bool,
 }
 
 impl IndexDescription {
@@ -46,6 +50,7 @@ impl IndexDescription {
             id: 0,
             fields: Vec::new(),
             unique: false,
+            auto_generated: false,
         }
     }
 
@@ -61,6 +66,12 @@ impl IndexDescription {
     /// Set the index as unique.
     pub fn as_unique(mut self) -> Self {
         self.unique = true;
+        self
+    }
+
+    /// Mark the index as auto-generated.
+    pub fn as_auto_generated(mut self) -> Self {
+        self.auto_generated = true;
         self
     }
 }

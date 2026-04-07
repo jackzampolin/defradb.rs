@@ -43,6 +43,7 @@ fn make_test_collection_with_index() -> CollectionVersion {
             name: "name".to_string(),
             descending: false,
         }],
+        auto_generated: false,
     })
     .with_index(IndexDescription {
         id: 2,
@@ -52,6 +53,7 @@ fn make_test_collection_with_index() -> CollectionVersion {
             name: "age".to_string(),
             descending: false,
         }],
+        auto_generated: false,
     })
 }
 

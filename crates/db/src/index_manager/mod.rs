@@ -124,6 +124,7 @@ impl IndexManager {
                     descending: false,
                 }],
                 unique: false,
+                auto_generated: false,
             };
             let ft_index = FullTextIndex::new(collection_short_id, desc, ft_desc.clone());
             manager
@@ -214,6 +215,7 @@ impl IndexManager {
             id: index_id,
             fields,
             unique,
+            auto_generated: false,
         };
 
         let index = IndexType::new(self.collection_short_id, desc.clone());
