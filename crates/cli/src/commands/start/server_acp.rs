@@ -18,7 +18,7 @@ impl Node {
     pub(super) async fn setup_document_acp(
         config: &Config,
         identity_key_bytes: Option<&[u8]>,
-        acp_store: Arc<dyn acp::AcpStore>,
+        _acp_store: Arc<dyn acp::AcpStore>,
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
         event_bus: Arc<dyn events::Bus>,
     ) -> Result<DocumentAcpSetup> {
@@ -136,9 +136,10 @@ impl Node {
             })
         } else {
             info!("Document ACP configured (local)");
+            let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
             Ok(DocumentAcpSetup {
-                document_acp: Arc::new(acp::LocalDocumentACP::new(acp_store)),
-                http_adapter: None,
+                document_acp,
+                http_adapter: Some(crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store)),
             })
         }
     }

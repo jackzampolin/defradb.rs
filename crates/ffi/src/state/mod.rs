@@ -103,6 +103,8 @@ pub struct NodeState {
     pub event_bus: Arc<dyn events::Bus>,
     /// The policy store for DAC policies.
     pub policy_store: Arc<PolicyStore>,
+    /// Local Zanzibar policy store when document ACP is configured in local mode.
+    pub local_zanzibar_store: Option<Arc<dyn acp::ZanzibarStore>>,
     /// P2P state (optional - not all nodes have P2P enabled).
     pub p2p: Option<Arc<P2PState>>,
     /// Node identity DID (set when signing is enabled).

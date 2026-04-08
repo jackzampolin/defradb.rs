@@ -44,6 +44,11 @@ impl LocalDocumentACP {
         Self { store }
     }
 
+    /// Namespace a collection_id by policy_id to isolate policies in storage.
+    fn namespaced_collection(policy_id: &str, collection_id: &str) -> String {
+        format!("{policy_id}:{collection_id}")
+    }
+
     /// Check if the subject is the owner of the document.
     async fn is_owner(&self, subject: &Did, collection_id: &str, doc_id: &str) -> Result<bool> {
         let tuple = RelationTuple::owner(subject.clone(), collection_id, doc_id);
@@ -77,15 +82,16 @@ impl DocumentACP for LocalDocumentACP {
     async fn register_doc_object(
         &self,
         identity: &Did,
-        _policy_id: &str,
+        policy_id: &str,
         resource_name: &str,
         doc_id: &str,
     ) -> Result<()> {
+        let ns_collection = Self::namespaced_collection(policy_id, resource_name);
         // Use atomic registration to prevent TOCTOU race conditions
         // where concurrent registrations could overwrite each other
         match self
             .store
-            .register_doc_atomic(identity, resource_name, doc_id)
+            .register_doc_atomic(identity, &ns_collection, doc_id)
             .await?
         {
             true => {
@@ -119,22 +125,24 @@ impl DocumentACP for LocalDocumentACP {
 
     async fn is_doc_registered(
         &self,
-        _policy_id: &str,
+        policy_id: &str,
         resource_name: &str,
         doc_id: &str,
     ) -> Result<bool> {
-        self.store.is_doc_registered(resource_name, doc_id).await
+        let ns_collection = Self::namespaced_collection(policy_id, resource_name);
+        self.store.is_doc_registered(&ns_collection, doc_id).await
     }
 
     async fn get_doc_owner(
         &self,
-        _policy_id: &str,
+        policy_id: &str,
         resource_name: &str,
         doc_id: &str,
     ) -> Result<Option<Did>> {
+        let ns_collection = Self::namespaced_collection(policy_id, resource_name);
         Ok(self
             .store
-            .get_relation_subjects(resource_name, doc_id, OWNER_RELATION)
+            .get_relation_subjects(&ns_collection, doc_id, OWNER_RELATION)
             .await?
             .into_iter()
             .next())
@@ -144,12 +152,13 @@ impl DocumentACP for LocalDocumentACP {
         &self,
         identity: &Identity,
         permission: DocumentPermission,
-        _policy_id: &str,
+        policy_id: &str,
         resource_name: &str,
         doc_id: &str,
     ) -> Result<bool> {
+        let ns_collection = Self::namespaced_collection(policy_id, resource_name);
         // Check if document is registered
-        if !self.store.is_doc_registered(resource_name, doc_id).await? {
+        if !self.store.is_doc_registered(&ns_collection, doc_id).await? {
             // Document is NOT registered — it was created without an identity
             // on an ACP-protected collection, making it a public document.
             // Anyone can read/update/delete it.
@@ -165,27 +174,27 @@ impl DocumentACP for LocalDocumentACP {
                 let wildcard = Did::wildcard();
                 let granted = match permission {
                     DocumentPermission::Read => {
-                        self.has_relation(&wildcard, resource_name, doc_id, READER_RELATION)
+                        self.has_relation(&wildcard, &ns_collection, doc_id, READER_RELATION)
                             .await?
                             || self
-                                .has_relation(&wildcard, resource_name, doc_id, "writer")
+                                .has_relation(&wildcard, &ns_collection, doc_id, "writer")
                                 .await?
                             || self
-                                .has_relation(&wildcard, resource_name, doc_id, UPDATER_RELATION)
+                                .has_relation(&wildcard, &ns_collection, doc_id, UPDATER_RELATION)
                                 .await?
                             || self
-                                .has_relation(&wildcard, resource_name, doc_id, DELETER_RELATION)
+                                .has_relation(&wildcard, &ns_collection, doc_id, DELETER_RELATION)
                                 .await?
                     }
                     DocumentPermission::Update => {
-                        self.has_relation(&wildcard, resource_name, doc_id, UPDATER_RELATION)
+                        self.has_relation(&wildcard, &ns_collection, doc_id, UPDATER_RELATION)
                             .await?
                             || self
-                                .has_relation(&wildcard, resource_name, doc_id, "writer")
+                                .has_relation(&wildcard, &ns_collection, doc_id, "writer")
                                 .await?
                     }
                     DocumentPermission::Delete => {
-                        self.has_relation(&wildcard, resource_name, doc_id, DELETER_RELATION)
+                        self.has_relation(&wildcard, &ns_collection, doc_id, DELETER_RELATION)
                             .await?
                     }
                 };
@@ -194,7 +203,7 @@ impl DocumentACP for LocalDocumentACP {
         };
 
         // Owner always has all permissions (DPI rule: every permission starts with owner)
-        if self.is_owner(did, resource_name, doc_id).await? {
+        if self.is_owner(did, &ns_collection, doc_id).await? {
             return Ok(true);
         }
 
@@ -204,27 +213,27 @@ impl DocumentACP for LocalDocumentACP {
         let granted = match permission {
             DocumentPermission::Read => {
                 // Any relation that could imply read access (matches Go behavior)
-                self.has_relation(did, resource_name, doc_id, READER_RELATION)
+                self.has_relation(did, &ns_collection, doc_id, READER_RELATION)
                     .await?
                     || self
-                        .has_relation(did, resource_name, doc_id, "writer")
+                        .has_relation(did, &ns_collection, doc_id, "writer")
                         .await?
                     || self
-                        .has_relation(did, resource_name, doc_id, UPDATER_RELATION)
+                        .has_relation(did, &ns_collection, doc_id, UPDATER_RELATION)
                         .await?
                     || self
-                        .has_relation(did, resource_name, doc_id, DELETER_RELATION)
+                        .has_relation(did, &ns_collection, doc_id, DELETER_RELATION)
                         .await?
             }
             DocumentPermission::Update => {
-                self.has_relation(did, resource_name, doc_id, UPDATER_RELATION)
+                self.has_relation(did, &ns_collection, doc_id, UPDATER_RELATION)
                     .await?
                     || self
-                        .has_relation(did, resource_name, doc_id, "writer")
+                        .has_relation(did, &ns_collection, doc_id, "writer")
                         .await?
             }
             DocumentPermission::Delete => {
-                self.has_relation(did, resource_name, doc_id, DELETER_RELATION)
+                self.has_relation(did, &ns_collection, doc_id, DELETER_RELATION)
                     .await?
             }
         };
@@ -258,18 +267,19 @@ impl DocumentACP for LocalDocumentACP {
         &self,
         requestor: &Did,
         target: &Did,
-        _policy_id: &str,
+        policy_id: &str,
         collection_id: &str,
         doc_id: &str,
         relation: &str,
         managing_relations: &[String],
     ) -> Result<bool> {
+        let ns_collection = Self::namespaced_collection(policy_id, collection_id);
         // Owner or manager with a managing relation can add relationships
-        if !self.is_owner(requestor, collection_id, doc_id).await? {
+        if !self.is_owner(requestor, &ns_collection, doc_id).await? {
             let mut is_manager = false;
             for mgr_relation in managing_relations {
                 if self
-                    .has_relation(requestor, collection_id, doc_id, mgr_relation)
+                    .has_relation(requestor, &ns_collection, doc_id, mgr_relation)
                     .await?
                 {
                     is_manager = true;
@@ -295,7 +305,7 @@ impl DocumentACP for LocalDocumentACP {
             ));
         }
 
-        let tuple = RelationTuple::new(target.clone(), relation, collection_id, doc_id);
+        let tuple = RelationTuple::new(target.clone(), relation, &ns_collection, doc_id);
 
         // Check if already exists
         if self.store.has_tuple(&tuple).await? {
@@ -305,7 +315,7 @@ impl DocumentACP for LocalDocumentACP {
                 requestor = %requestor,
                 target = %target,
                 relation = %relation,
-                collection = %collection_id,
+                collection = %ns_collection,
                 doc_id = %doc_id,
                 "Relationship already exists"
             );
@@ -319,7 +329,7 @@ impl DocumentACP for LocalDocumentACP {
             requestor = %requestor,
             target = %target,
             relation = %relation,
-            collection = %collection_id,
+            collection = %ns_collection,
             doc_id = %doc_id,
             "Actor relationship added"
         );
@@ -330,18 +340,19 @@ impl DocumentACP for LocalDocumentACP {
         &self,
         requestor: &Did,
         target: &Did,
-        _policy_id: &str,
+        policy_id: &str,
         collection_id: &str,
         doc_id: &str,
         relation: &str,
         managing_relations: &[String],
     ) -> Result<bool> {
+        let ns_collection = Self::namespaced_collection(policy_id, collection_id);
         // Owner or manager with a managing relation can delete relationships
-        if !self.is_owner(requestor, collection_id, doc_id).await? {
+        if !self.is_owner(requestor, &ns_collection, doc_id).await? {
             let mut is_manager = false;
             for mgr_relation in managing_relations {
                 if self
-                    .has_relation(requestor, collection_id, doc_id, mgr_relation)
+                    .has_relation(requestor, &ns_collection, doc_id, mgr_relation)
                     .await?
                 {
                     is_manager = true;
@@ -367,7 +378,7 @@ impl DocumentACP for LocalDocumentACP {
             ));
         }
 
-        let tuple = RelationTuple::new(target.clone(), relation, collection_id, doc_id);
+        let tuple = RelationTuple::new(target.clone(), relation, &ns_collection, doc_id);
 
         // Check if exists
         if !self.store.has_tuple(&tuple).await? {
@@ -377,7 +388,7 @@ impl DocumentACP for LocalDocumentACP {
                 requestor = %requestor,
                 target = %target,
                 relation = %relation,
-                collection = %collection_id,
+                collection = %ns_collection,
                 doc_id = %doc_id,
                 "Relationship does not exist"
             );
@@ -391,7 +402,7 @@ impl DocumentACP for LocalDocumentACP {
             requestor = %requestor,
             target = %target,
             relation = %relation,
-            collection = %collection_id,
+            collection = %ns_collection,
             doc_id = %doc_id,
             "Actor relationship deleted"
         );
@@ -400,12 +411,13 @@ impl DocumentACP for LocalDocumentACP {
 
     async fn unregister_doc_object(
         &self,
-        _policy_id: &str,
+        policy_id: &str,
         resource_name: &str,
         doc_id: &str,
     ) -> Result<()> {
+        let ns_collection = Self::namespaced_collection(policy_id, resource_name);
         // Delete all tuples for this document (owner, reader, updater, deleter, etc.)
-        self.store.delete_doc_tuples(resource_name, doc_id).await?;
+        self.store.delete_doc_tuples(&ns_collection, doc_id).await?;
         tracing::info!(
             target: "acp::audit",
             event = "document_unregistered",

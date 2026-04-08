@@ -3,6 +3,7 @@
 //! Provides the EncryptionConfig type and thread-local storage for passing
 //! encryption config from the query layer to the block builder layer.
 
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -77,23 +78,23 @@ impl EncryptionConfig {
 
     /// Derive the encryption key for a specific field and document.
     ///
-    /// Key derivation: `(fieldName + docID + masterKey)[:32]`
+    /// Key derivation: `SHA-256(fieldName + docID + masterKey)`
     /// - Doc-level: fieldName = "" (empty string)
     /// - Field-level: fieldName = specific field name
+    ///
+    /// Uses SHA-256 to ensure all input material (including the master key)
+    /// contributes to the derived key regardless of field name or doc ID length.
     pub fn derive_key(&self, field_name: &str, doc_id: &str) -> [u8; 32] {
         let field = if self.encrypt_fields.iter().any(|f| f == field_name) {
             field_name
         } else {
             "" // doc-level
         };
-        let mut key_material = Vec::new();
-        key_material.extend_from_slice(field.as_bytes());
-        key_material.extend_from_slice(doc_id.as_bytes());
-        key_material.extend_from_slice(&self.encryption_key);
-        let mut key = [0u8; 32];
-        let len = key_material.len().min(32);
-        key[..len].copy_from_slice(&key_material[..len]);
-        key
+        let mut hasher = Sha256::new();
+        hasher.update(field.as_bytes());
+        hasher.update(doc_id.as_bytes());
+        hasher.update(&self.encryption_key);
+        hasher.finalize().into()
     }
 }
 
@@ -147,5 +148,30 @@ pub fn get_doc_encryption(doc_id: &str) -> Option<EncryptionConfig> {
 pub fn clear_doc_encryption_store() {
     if let Ok(mut store) = doc_encryption_store().lock() {
         store.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EncryptionConfig;
+
+    #[test]
+    fn derive_key_mixes_in_master_key_for_long_doc_ids() {
+        let doc_id = "bae-c94acbfa-1234-5678-90ab-cdef12345678";
+        let config_a = EncryptionConfig {
+            encrypt_doc: true,
+            encrypt_fields: vec![],
+            encryption_key: b"first-master-key-material-123456".to_vec(),
+        };
+        let config_b = EncryptionConfig {
+            encrypt_doc: true,
+            encrypt_fields: vec![],
+            encryption_key: b"second-master-key-material654321".to_vec(),
+        };
+
+        assert_ne!(
+            config_a.derive_key("", doc_id),
+            config_b.derive_key("", doc_id)
+        );
     }
 }

@@ -2,6 +2,8 @@
 mod audit;
 #[path = "acp/basic.rs"]
 mod basic;
+#[path = "acp/custom_policy.rs"]
+mod custom_policy;
 #[path = "acp/multi_identity.rs"]
 mod multi_identity;
 #[path = "acp/multi_role.rs"]
