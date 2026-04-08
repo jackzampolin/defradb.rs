@@ -505,8 +505,8 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
 mod tests {
     use super::*;
     use crate::node::{new_node, node_close};
-    use crate::{add_schema, exec_request};
     use crate::types::NodeInitOptions;
+    use crate::{add_schema, exec_request};
     use std::ffi::{CStr, CString};
 
     fn ffi_value(result: &crate::types::FfiResult) -> String {
@@ -606,10 +606,11 @@ resources:
         )
         .unwrap();
 
-        let add_policy_result = unsafe { add_dac_policy(node, owner_did.as_ptr(), policy_yaml.as_ptr()) };
+        let add_policy_result =
+            unsafe { add_dac_policy(node, owner_did.as_ptr(), policy_yaml.as_ptr()) };
         let add_policy_json = ffi_value(&add_policy_result);
-        let policy_id = serde_json::from_str::<serde_json::Value>(&add_policy_json)
-            .unwrap()["PolicyID"]
+        let policy_id = serde_json::from_str::<serde_json::Value>(&add_policy_json).unwrap()
+            ["PolicyID"]
             .as_str()
             .unwrap()
             .to_string();
@@ -636,10 +637,9 @@ resources:
             unsafe { crate::types::defra_free_string(schema_result.value) };
         }
 
-        let add_doc = CString::new(
-            r#"mutation { add_User(input: {name: "Alice"}) { _docID name } }"#,
-        )
-        .unwrap();
+        let add_doc =
+            CString::new(r#"mutation { add_User(input: {name: "Alice"}) { _docID name } }"#)
+                .unwrap();
         let add_doc_result = unsafe {
             exec_request(
                 node,

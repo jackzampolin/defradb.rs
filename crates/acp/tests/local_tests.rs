@@ -203,7 +203,15 @@ async fn test_add_reader_grants_read_only() {
         .unwrap();
 
     let added = acp
-        .add_actor_relationship(&owner, &reader, "policy1", "users", "doc1", READER_RELATION, &[])
+        .add_actor_relationship(
+            &owner,
+            &reader,
+            "policy1",
+            "users",
+            "doc1",
+            READER_RELATION,
+            &[],
+        )
         .await
         .unwrap();
     assert!(added, "relationship should be added");
@@ -255,9 +263,17 @@ async fn test_add_updater_grants_read_and_update() {
         .await
         .unwrap();
 
-    acp.add_actor_relationship(&owner, &updater, "policy1", "users", "doc1", UPDATER_RELATION, &[])
-        .await
-        .unwrap();
+    acp.add_actor_relationship(
+        &owner,
+        &updater,
+        "policy1",
+        "users",
+        "doc1",
+        UPDATER_RELATION,
+        &[],
+    )
+    .await
+    .unwrap();
 
     // Updater can read (implied)
     assert!(acp
@@ -307,7 +323,15 @@ async fn test_non_owner_cannot_add_relationship() {
         .unwrap();
 
     let result = acp
-        .add_actor_relationship(&other, &owner, "policy1", "users", "doc1", READER_RELATION, &[])
+        .add_actor_relationship(
+            &other,
+            &owner,
+            "policy1",
+            "users",
+            "doc1",
+            READER_RELATION,
+            &[],
+        )
         .await;
     assert!(matches!(result, Err(Error::NotOwner { .. })));
 }
@@ -323,7 +347,15 @@ async fn test_cannot_add_owner_relation() {
         .unwrap();
 
     let result = acp
-        .add_actor_relationship(&owner, &other, "policy1", "users", "doc1", OWNER_RELATION, &[])
+        .add_actor_relationship(
+            &owner,
+            &other,
+            "policy1",
+            "users",
+            "doc1",
+            OWNER_RELATION,
+            &[],
+        )
         .await;
     assert!(matches!(result, Err(Error::InvalidRelation(_))));
 }
@@ -369,13 +401,29 @@ async fn test_add_duplicate_relationship_returns_false() {
         .unwrap();
 
     let added1 = acp
-        .add_actor_relationship(&owner, &reader, "policy1", "users", "doc1", READER_RELATION, &[])
+        .add_actor_relationship(
+            &owner,
+            &reader,
+            "policy1",
+            "users",
+            "doc1",
+            READER_RELATION,
+            &[],
+        )
         .await
         .unwrap();
     assert!(added1);
 
     let added2 = acp
-        .add_actor_relationship(&owner, &reader, "policy1", "users", "doc1", READER_RELATION, &[])
+        .add_actor_relationship(
+            &owner,
+            &reader,
+            "policy1",
+            "users",
+            "doc1",
+            READER_RELATION,
+            &[],
+        )
         .await
         .unwrap();
     assert!(!added2, "duplicate add should return false");
@@ -393,9 +441,17 @@ async fn test_delete_relationship() {
         .await
         .unwrap();
 
-    acp.add_actor_relationship(&owner, &reader, "policy1", "users", "doc1", READER_RELATION, &[])
-        .await
-        .unwrap();
+    acp.add_actor_relationship(
+        &owner,
+        &reader,
+        "policy1",
+        "users",
+        "doc1",
+        READER_RELATION,
+        &[],
+    )
+    .await
+    .unwrap();
 
     // Verify reader has access
     assert!(acp
@@ -411,7 +467,15 @@ async fn test_delete_relationship() {
 
     // Delete relationship
     let deleted = acp
-        .delete_actor_relationship(&owner, &reader, "policy1", "users", "doc1", READER_RELATION, &[])
+        .delete_actor_relationship(
+            &owner,
+            &reader,
+            "policy1",
+            "users",
+            "doc1",
+            READER_RELATION,
+            &[],
+        )
         .await
         .unwrap();
     assert!(deleted);
@@ -440,7 +504,15 @@ async fn test_delete_nonexistent_relationship_returns_false() {
         .unwrap();
 
     let deleted = acp
-        .delete_actor_relationship(&owner, &other, "policy1", "users", "doc1", READER_RELATION, &[])
+        .delete_actor_relationship(
+            &owner,
+            &other,
+            "policy1",
+            "users",
+            "doc1",
+            READER_RELATION,
+            &[],
+        )
         .await
         .unwrap();
     assert!(!deleted);
@@ -458,9 +530,17 @@ async fn test_add_deleter_grants_read_and_delete() {
         .await
         .unwrap();
 
-    acp.add_actor_relationship(&owner, &deleter, "policy1", "users", "doc1", DELETER_RELATION, &[])
-        .await
-        .unwrap();
+    acp.add_actor_relationship(
+        &owner,
+        &deleter,
+        "policy1",
+        "users",
+        "doc1",
+        DELETER_RELATION,
+        &[],
+    )
+    .await
+    .unwrap();
 
     // Deleter can read (implied by deleter relation)
     assert!(
@@ -515,9 +595,17 @@ async fn test_delete_deleter_relationship_revokes_access() {
         .await
         .unwrap();
 
-    acp.add_actor_relationship(&owner, &deleter, "policy1", "users", "doc1", DELETER_RELATION, &[])
-        .await
-        .unwrap();
+    acp.add_actor_relationship(
+        &owner,
+        &deleter,
+        "policy1",
+        "users",
+        "doc1",
+        DELETER_RELATION,
+        &[],
+    )
+    .await
+    .unwrap();
 
     // Verify deleter has access
     assert!(acp
@@ -532,9 +620,17 @@ async fn test_delete_deleter_relationship_revokes_access() {
         .unwrap());
 
     // Delete relationship
-    acp.delete_actor_relationship(&owner, &deleter, "policy1", "users", "doc1", DELETER_RELATION, &[])
-        .await
-        .unwrap();
+    acp.delete_actor_relationship(
+        &owner,
+        &deleter,
+        "policy1",
+        "users",
+        "doc1",
+        DELETER_RELATION,
+        &[],
+    )
+    .await
+    .unwrap();
 
     // Verify deleter no longer has delete access
     assert!(!acp
@@ -574,9 +670,17 @@ async fn test_non_owner_cannot_delete_relationship() {
         .await
         .unwrap();
 
-    acp.add_actor_relationship(&owner, &reader, "policy1", "users", "doc1", READER_RELATION, &[])
-        .await
-        .unwrap();
+    acp.add_actor_relationship(
+        &owner,
+        &reader,
+        "policy1",
+        "users",
+        "doc1",
+        READER_RELATION,
+        &[],
+    )
+    .await
+    .unwrap();
 
     // Attacker (non-owner) tries to delete reader relationship
     let result = acp
@@ -607,7 +711,15 @@ async fn test_cannot_delete_owner_relation() {
 
     // Owner tries to delete their own owner relation
     let result = acp
-        .delete_actor_relationship(&owner, &owner, "policy1", "users", "doc1", OWNER_RELATION, &[])
+        .delete_actor_relationship(
+            &owner,
+            &owner,
+            "policy1",
+            "users",
+            "doc1",
+            OWNER_RELATION,
+            &[],
+        )
         .await;
     assert!(
         matches!(result, Err(Error::InvalidRelation(_))),
@@ -632,9 +744,17 @@ async fn test_cross_collection_isolation() {
         .unwrap();
 
     // Grant reader access to doc1 in "users" collection ONLY
-    acp.add_actor_relationship(&owner, &reader, "policy1", "users", "doc1", READER_RELATION, &[])
-        .await
-        .unwrap();
+    acp.add_actor_relationship(
+        &owner,
+        &reader,
+        "policy1",
+        "users",
+        "doc1",
+        READER_RELATION,
+        &[],
+    )
+    .await
+    .unwrap();
 
     // Reader CAN access users/doc1
     assert!(

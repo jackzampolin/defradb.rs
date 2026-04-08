@@ -61,7 +61,10 @@ async fn custom_relation_policy_test(cluster: TestCluster) {
         .to_string();
 
     let before = node
-        .query_with_identity("query { Report { _docID title body } }", &viewer.private_key_hex)
+        .query_with_identity(
+            "query { Report { _docID title body } }",
+            &viewer.private_key_hex,
+        )
         .expect("query before viewer grant");
     assert_eq!(
         before["Report"].as_array().map(|a| a.len()).unwrap_or(0),
@@ -79,7 +82,10 @@ async fn custom_relation_policy_test(cluster: TestCluster) {
     .expect("grant viewer relation");
 
     let after = node
-        .query_with_identity("query { Report { _docID title body } }", &viewer.private_key_hex)
+        .query_with_identity(
+            "query { Report { _docID title body } }",
+            &viewer.private_key_hex,
+        )
         .expect("query after viewer grant");
     let reports = after["Report"].as_array().expect("Report array");
     assert_eq!(reports.len(), 1, "viewer should see exactly one report");
@@ -95,7 +101,10 @@ async fn custom_relation_policy_test(cluster: TestCluster) {
     match update_attempt {
         Err(_) => {}
         Ok(val) => {
-            let updated = val["update_Report"].as_array().map(|a| a.len()).unwrap_or(0);
+            let updated = val["update_Report"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0);
             assert_eq!(
                 updated, 0,
                 "viewer relation must not grant update access: {:?}",
@@ -105,7 +114,10 @@ async fn custom_relation_policy_test(cluster: TestCluster) {
     }
 
     let owner_read = node
-        .query_with_identity("query { Report { _docID title body } }", &owner.private_key_hex)
+        .query_with_identity(
+            "query { Report { _docID title body } }",
+            &owner.private_key_hex,
+        )
         .expect("owner read after viewer update attempt");
     let owner_reports = owner_read["Report"].as_array().expect("owner report array");
     assert_eq!(owner_reports.len(), 1);

@@ -169,6 +169,9 @@ mod tests {
             encryption_key: b"second-master-key-material654321".to_vec(),
         };
 
-        assert_ne!(config_a.derive_key("", doc_id), config_b.derive_key("", doc_id));
+        assert_ne!(
+            config_a.derive_key("", doc_id),
+            config_b.derive_key("", doc_id)
+        );
     }
 }

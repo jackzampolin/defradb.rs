@@ -138,29 +138,25 @@ resources:
             .await
             .unwrap();
 
-        assert!(
-            document_acp
-                .check_doc_access(
-                    &Identity::Authenticated(viewer.clone()),
-                    DocumentPermission::Read,
-                    &policy.id,
-                    "users",
-                    "doc1",
-                )
-                .await
-                .unwrap()
-        );
-        assert!(
-            !document_acp
-                .check_doc_access(
-                    &Identity::Authenticated(viewer),
-                    DocumentPermission::Update,
-                    &policy.id,
-                    "users",
-                    "doc1",
-                )
-                .await
-                .unwrap()
-        );
+        assert!(document_acp
+            .check_doc_access(
+                &Identity::Authenticated(viewer.clone()),
+                DocumentPermission::Read,
+                &policy.id,
+                "users",
+                "doc1",
+            )
+            .await
+            .unwrap());
+        assert!(!document_acp
+            .check_doc_access(
+                &Identity::Authenticated(viewer),
+                DocumentPermission::Update,
+                &policy.id,
+                "users",
+                "doc1",
+            )
+            .await
+            .unwrap());
     }
 }
