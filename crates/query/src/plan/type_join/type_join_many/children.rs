@@ -641,20 +641,10 @@ impl TypeJoinMany {
                 });
             }
 
-            // Apply offset and limit.
-            let offset = self.child_offset as usize;
-            let children: Vec<Doc> = if offset > 0 || self.child_limit.is_some() {
-                let after_offset: Vec<Doc> = all_children.into_iter().skip(offset).collect();
-                if let Some(limit) = self.child_limit {
-                    after_offset.into_iter().take(limit as usize).collect()
-                } else {
-                    after_offset
-                }
-            } else {
-                all_children
-            };
-
-            self.merge_children(&mut parent_doc, children);
+            // Defer limit/offset to QueryRunner::apply_relation_limits so relation
+            // aggregates (_count/_sum/etc.) and parent ordering can observe the full
+            // ordered child scope, matching the cached TypeJoinMany path.
+            self.merge_children(&mut parent_doc, all_children);
             self.current_doc = parent_doc;
             return Ok(true);
         }
