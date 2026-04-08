@@ -555,6 +555,7 @@ impl TypeJoinMany {
                     // Early termination is only safe when child ordering does not need
                     // exhaustive orphan/null merging before the per-parent limit.
                     if self.relation_filter.is_none()
+                        && self.child_order_by.is_none()
                         && !(self.preserve_ordered_orphans && self.child_order_by.is_some())
                     {
                         if let Some(limit) = self.child_limit {
