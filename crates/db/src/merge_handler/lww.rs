@@ -9,12 +9,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         field_name: &str,
     ) -> std::result::Result<u64, MergeError> {
         let mut iter = headstore
-            .iterator(
-                storage::corekv::IterOptions::new()
-                    .with_prefix(storage::keys::headstore::HeadstoreDocKey::field_prefix(
-                        doc_id, field_name,
-                    )),
-            )
+            .iterator(storage::corekv::IterOptions::new().with_prefix(
+                storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, field_name),
+            ))
             .await
             .map_err(|e| MergeError::Storage(e.to_string()))?;
 
