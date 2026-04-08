@@ -78,6 +78,17 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             return Err(MergeError::depth_exceeded(cid, depth));
         }
 
+        {
+            let merged = self.merged_composites.lock().unwrap_or_else(|e| {
+                tracing::warn!("merged_composites lock poisoned, recovering");
+                e.into_inner()
+            });
+            if merged.contains(cid) {
+                tracing::debug!(cid = %cid, "Composite already merged, skipping");
+                return Ok(MergeOutcome::terminal_skip("already merged"));
+            }
+        }
+
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
 
         tracing::info!(
@@ -372,6 +383,27 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     ) -> std::result::Result<MergeOutcome, MergeError> {
         if depth >= super::MAX_MERGE_DEPTH {
             return Err(MergeError::depth_exceeded(cid, depth));
+        }
+
+        {
+            let merged = self.merged_composites.lock().unwrap_or_else(|e| {
+                tracing::warn!("merged_composites lock poisoned, recovering");
+                e.into_inner()
+            });
+            if merged.contains(cid) {
+                tracing::debug!(cid = %cid, "Composite already merged in permanent dedup set, skipping");
+                return Ok(MergeOutcome::terminal_skip("already merged"));
+            }
+        }
+        {
+            let batch_merged_guard = batch_merged.lock().unwrap_or_else(|e| {
+                tracing::warn!("batch_merged lock poisoned, recovering");
+                e.into_inner()
+            });
+            if batch_merged_guard.contains(cid) {
+                tracing::debug!(cid = %cid, "Composite already merged in batch dedup set, skipping");
+                return Ok(MergeOutcome::terminal_skip("already merged"));
+            }
         }
 
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
