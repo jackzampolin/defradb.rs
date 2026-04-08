@@ -305,6 +305,22 @@ impl<S: Store> CommitsFetcher<S> {
         let headstore = txn.headstore()?;
         let mut cids = Vec::new();
 
+        if options.doc_id.is_none() {
+            let col_opts = IterOptions::new().with_prefix(b"/c/".to_vec());
+            let mut col_iter = headstore.iterator(col_opts).await.map_err(Error::Storage)?;
+
+            while let Some(pair) = col_iter.next().await.map_err(Error::Storage)? {
+                let key_str = String::from_utf8_lossy(&pair.key);
+                let parts: Vec<&str> = key_str.split('/').collect();
+                if parts.len() >= 4 {
+                    if let Ok(cid) = Cid::from_str(parts[3]) {
+                        cids.push(cid);
+                    }
+                }
+            }
+            col_iter.close().await.map_err(Error::Storage)?;
+        }
+
         let doc_prefix = if let Some(ref doc_id) = options.doc_id {
             format!("/d/{}/", doc_id).into_bytes()
         } else {
@@ -324,22 +340,6 @@ impl<S: Store> CommitsFetcher<S> {
             }
         }
         iter.close().await.map_err(Error::Storage)?;
-
-        if options.doc_id.is_none() {
-            let col_opts = IterOptions::new().with_prefix(b"/c/".to_vec());
-            let mut col_iter = headstore.iterator(col_opts).await.map_err(Error::Storage)?;
-
-            while let Some(pair) = col_iter.next().await.map_err(Error::Storage)? {
-                let key_str = String::from_utf8_lossy(&pair.key);
-                let parts: Vec<&str> = key_str.split('/').collect();
-                if parts.len() >= 4 {
-                    if let Ok(cid) = Cid::from_str(parts[3]) {
-                        cids.push(cid);
-                    }
-                }
-            }
-            col_iter.close().await.map_err(Error::Storage)?;
-        }
 
         Ok(cids)
     }

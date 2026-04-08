@@ -22,6 +22,17 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             return Err(MergeError::depth_exceeded(cid, depth));
         }
 
+        {
+            let merged = self.merged_collections.lock().unwrap_or_else(|e| {
+                tracing::warn!("merged_collections lock poisoned, recovering");
+                e.into_inner()
+            });
+            if merged.contains(cid) {
+                tracing::debug!(cid = %cid, "Collection block already merged, skipping replay");
+                return Ok(MergeOutcome::terminal_skip("collection already merged"));
+            }
+        }
+
         tracing::debug!(
             cid = %cid,
             schema_version = %payload.schema_version_id,
@@ -280,6 +291,14 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             "Collection delta processed"
         );
 
+        {
+            let mut merged = self.merged_collections.lock().unwrap_or_else(|e| {
+                tracing::warn!("merged_collections lock poisoned, recovering");
+                e.into_inner()
+            });
+            merged.insert(*cid);
+        }
+
         if any_merged {
             Ok(MergeOutcome::Merged)
         } else {
@@ -303,12 +322,32 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         payload: &defra_core::block::CollectionDeltaPayload,
         metadata: &BlockMetadata<'_>,
         batch_merged: &std::sync::Mutex<HashSet<Cid>>,
+        batch_merged_collections: &std::sync::Mutex<HashSet<Cid>>,
         pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
         pending_post_commit_actions: &std::sync::Mutex<Vec<PendingPostCommitAction>>,
         depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
         if depth >= super::MAX_MERGE_DEPTH {
             return Err(MergeError::depth_exceeded(cid, depth));
+        }
+
+        {
+            let merged = self.merged_collections.lock().unwrap_or_else(|e| {
+                tracing::warn!("merged_collections lock poisoned, recovering");
+                e.into_inner()
+            });
+            if merged.contains(cid) {
+                return Ok(MergeOutcome::terminal_skip("collection already merged"));
+            }
+        }
+        {
+            let batch_merged_guard = batch_merged_collections.lock().unwrap_or_else(|e| {
+                tracing::warn!("batch_merged_collections lock poisoned, recovering");
+                e.into_inner()
+            });
+            if batch_merged_guard.contains(cid) {
+                return Ok(MergeOutcome::terminal_skip("collection already merged in batch"));
+            }
         }
 
         tracing::debug!(
@@ -339,6 +378,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         head_payload,
                         metadata,
                         batch_merged,
+                        batch_merged_collections,
                         pending_events,
                         pending_post_commit_actions,
                         depth + 1,
@@ -389,6 +429,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             metadata,
                             true,
                             batch_merged,
+                            batch_merged_collections,
                             pending_events,
                             pending_post_commit_actions,
                             depth + 1,
@@ -450,6 +491,14 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Update collection headstore using the shared headstore view
         let collection_id = metadata.collection_id.unwrap_or(&payload.schema_version_id);
         let short_id = collection_short_id(collection_id);
+
+        {
+            let mut batch_merged_guard = batch_merged_collections.lock().unwrap_or_else(|e| {
+                tracing::warn!("batch_merged_collections lock poisoned, recovering");
+                e.into_inner()
+            });
+            batch_merged_guard.insert(*cid);
+        }
 
         {
             if let Some(heads) = &block.heads {

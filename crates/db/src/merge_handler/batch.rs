@@ -119,6 +119,8 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
     ) -> Result<Vec<Result<MergeOutcome, MergeError>>, MergeError> {
         let txn = self.db.new_txn(false).await?;
         let batch_merged: std::sync::Mutex<HashSet<Cid>> = std::sync::Mutex::new(HashSet::new());
+        let batch_merged_collections: std::sync::Mutex<HashSet<Cid>> =
+            std::sync::Mutex::new(HashSet::new());
         let pending_events: std::sync::Mutex<Vec<PendingMergeEvent>> =
             std::sync::Mutex::new(Vec::new());
         let pending_post_commit_actions: std::sync::Mutex<Vec<PendingPostCommitAction>> =
@@ -152,6 +154,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                         &block.block_data,
                         &metadata,
                         &batch_merged,
+                        &batch_merged_collections,
                         &pending_events,
                         &pending_post_commit_actions,
                     )
@@ -179,6 +182,11 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         {
             let batch = batch_merged.lock().unwrap();
             let mut merged = self.merged_composites.lock().unwrap();
+            merged.extend(batch.iter());
+        }
+        {
+            let batch = batch_merged_collections.lock().unwrap();
+            let mut merged = self.merged_collections.lock().unwrap();
             merged.extend(batch.iter());
         }
 
@@ -215,6 +223,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         block_data: &[u8],
         metadata: &BlockMetadata<'_>,
         batch_merged: &std::sync::Mutex<HashSet<Cid>>,
+        batch_merged_collections: &std::sync::Mutex<HashSet<Cid>>,
         pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
         pending_post_commit_actions: &std::sync::Mutex<Vec<PendingPostCommitAction>>,
     ) -> Result<MergeOutcome, MergeError> {
@@ -292,6 +301,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     &metadata,
                     false,
                     batch_merged,
+                    batch_merged_collections,
                     pending_events,
                     pending_post_commit_actions,
                     0,
@@ -307,6 +317,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     payload,
                     &metadata,
                     batch_merged,
+                    batch_merged_collections,
                     pending_events,
                     pending_post_commit_actions,
                     0,
