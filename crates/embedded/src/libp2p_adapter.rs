@@ -135,6 +135,18 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
     async fn connect_peer(&self, addr: &str) -> Result<(), String> {
         let parsed = p2p::parse_multiaddr_with_peer_id(addr).map_err(|e| e.to_string())?;
+        let already_connected = self
+            .handle
+            .connected_peers()
+            .await
+            .map(|peers| peers.contains(&parsed.peer_id))
+            .unwrap_or(false);
+        if already_connected {
+            if let Ok(mut addrs) = self.peer_addresses.write() {
+                addrs.insert(parsed.peer_id.to_string(), addr.to_string());
+            }
+            return Ok(());
+        }
         self.handle
             .dial(parsed.peer_id, vec![parsed.transport_addr])
             .await
