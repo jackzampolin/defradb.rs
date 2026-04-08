@@ -160,7 +160,7 @@ pub use encrypted_index::{
     add_encrypted_index, delete_encrypted_index, list_all_encrypted_indexes, list_encrypted_indexes,
 };
 pub use index::{create_index, delete_index, get_indexes, list_all_indexes};
-pub use lens::{lens_add, lens_list};
+pub use lens::{lens_add, lens_add_in_txn, lens_list, lens_list_in_txn};
 pub use mobile::{
     defra_mobile_close_node, defra_mobile_connect, defra_mobile_ensure_schema,
     defra_mobile_execute, defra_mobile_init, defra_mobile_notify_network_change,

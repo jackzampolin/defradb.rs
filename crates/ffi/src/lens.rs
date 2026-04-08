@@ -127,6 +127,76 @@ pub unsafe extern "C" fn lens_add(
     }
 }
 
+/// Add a lens transform within a transaction.
+///
+/// The lens is only visible within the transaction until commit.
+///
+/// # Safety
+///
+/// Both string pointers must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn lens_add_in_txn(
+    node_ptr: usize,
+    txn_id: *const c_char,
+    identity_did: *const c_char,
+    lens_json: *const c_char,
+) -> FfiResult {
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::LensCreate
+        ));
+        let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
+        let lens_str = try_ffi!(require_c_str(lens_json, "lens_json"));
+
+        let registry = match NODES.get(node_ptr, |state| state.txn_registry.clone()) {
+            Some(r) => r,
+            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
+
+        let result = rt.block_on(async {
+            let modules: Vec<LensModule> =
+                if let Ok(lens_obj) = serde_json::from_str::<serde_json::Value>(&lens_str) {
+                    if let Some(lenses_arr) = lens_obj.get("Lenses").and_then(|v| v.as_array()) {
+                        lenses_arr
+                            .iter()
+                            .map(|v| {
+                                serde_json::from_value::<LensModule>(v.clone())
+                                    .map_err(|e| format!("failed to parse lens module: {}", e))
+                            })
+                            .collect::<std::result::Result<Vec<_>, _>>()?
+                    } else {
+                        vec![serde_json::from_str::<LensModule>(&lens_str)
+                            .map_err(|e| format!("failed to parse lens config: {}", e))?]
+                    }
+                } else {
+                    vec![serde_json::from_str::<LensModule>(&lens_str)
+                        .map_err(|e| format!("failed to parse lens config: {}", e))?]
+                };
+
+            let mut all_ids = Vec::new();
+            for lens_module in &modules {
+                let config = LensConfig::new("", "", lens_module.clone());
+                let transform_id = registry
+                    .add_lens_in_txn(&txn_str, config)
+                    .await
+                    .map_err(|e| format!("failed to add lens in txn: {}", e))?;
+                all_ids.push(transform_id.to_string());
+            }
+
+            Ok::<String, String>(all_ids.join(","))
+        });
+
+        match result {
+            Ok(lens_id) => FfiResult::success(&lens_id),
+            Err(e) => FfiResult::error(&e),
+        }
+    }
+}
+
 /// List all lens transforms.
 ///
 /// Returns a JSON object mapping lens IDs to their configurations.
@@ -155,6 +225,46 @@ pub unsafe extern "C" fn lens_list(node_ptr: usize, identity_did: *const c_char)
                 .list()
                 .await
                 .map_err(|e| format!("failed to list lenses: {}", e))?;
+
+            let json = serde_json::to_string(&lenses)
+                .map_err(|e| format!("failed to serialize lenses: {}", e))?;
+
+            Ok(json)
+        })
+    }
+}
+
+/// List all lens transforms visible within a transaction.
+///
+/// # Safety
+///
+/// `txn_id` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn lens_list_in_txn(
+    node_ptr: usize,
+    txn_id: *const c_char,
+    identity_did: *const c_char,
+) -> FfiResult {
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::LensList
+        ));
+        let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
+
+        let registry = match NODES.get(node_ptr, |state| state.txn_registry.clone()) {
+            Some(r) => r,
+            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
+
+        ffi_async!(rt, {
+            let lenses = registry
+                .list_lenses_in_txn(&txn_str)
+                .await
+                .map_err(|e| format!("failed to list lenses in txn: {}", e))?;
 
             let json = serde_json::to_string(&lenses)
                 .map_err(|e| format!("failed to serialize lenses: {}", e))?;
