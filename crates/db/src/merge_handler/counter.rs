@@ -78,7 +78,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             // as the batched merge path.
             if let Ok(doc_id) = DocID::from_string(&doc_id_str) {
                 if let Ok(Some(existing_doc)) =
-                    collection.get_with_datastore(&mut datastore, &doc_id).await
+                    collection.get_with_datastore(&datastore, &doc_id).await
                 {
                     doc_exists = true;
                     if let Some(field_value) = existing_doc.get(&payload.field_name) {

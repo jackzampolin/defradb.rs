@@ -10,6 +10,7 @@ fn test_index_description(unique: bool) -> schema::IndexDescription {
         id: 1,
         name: "test_index".to_string(),
         unique,
+        auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: "name".to_string(),
             descending: false,
@@ -22,6 +23,7 @@ fn composite_index_description(unique: bool) -> schema::IndexDescription {
         id: 2,
         name: "composite_index".to_string(),
         unique,
+        auto_generated: false,
         fields: vec![
             IndexedFieldDescription {
                 name: "category".to_string(),

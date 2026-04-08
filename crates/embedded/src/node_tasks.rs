@@ -123,8 +123,10 @@ where
 {
     tokio::spawn(async move {
         let local_peer = coordinator.local_peer_id().to_string();
-        let mut config = ReplicationConfig::default();
-        config.max_workers = 1;
+        let config = ReplicationConfig {
+            max_workers: 1,
+            ..ReplicationConfig::default()
+        };
         ReplicationLoop::run_parallel(
             coordinator,
             sync_events_rx,

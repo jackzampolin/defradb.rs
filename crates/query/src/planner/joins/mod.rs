@@ -1192,13 +1192,12 @@ impl Planner {
                 if let Some(order_by) = nested_order_by.clone() {
                     join_many = join_many.with_order_by(order_by);
                 }
-                if select.exhaustive || ancestor_exhaustive {
-                    if nested_order_by
+                if (select.exhaustive || ancestor_exhaustive)
+                    && nested_order_by
                         .as_ref()
                         .is_some_and(|order| order.has_relation_order())
-                    {
-                        join_many = join_many.with_preserve_ordered_orphans();
-                    }
+                {
+                    join_many = join_many.with_preserve_ordered_orphans();
                 }
                 if use_per_parent {
                     join_many = join_many.with_per_parent_child_scan();
