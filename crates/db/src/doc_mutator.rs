@@ -3,13 +3,18 @@
 use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use document::{DocID, Document};
+use tracing::warn;
 use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
 use std::sync::Arc;
 use storage::corekv::Store;
 
+use crate::block_builder::{write_collection_block, write_document_blocks};
+use crate::collection::collection_short_id;
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
 use crate::txn::DbTxn;
+use defra_core::encryption::{get_encryption_config, store_doc_encryption};
+use defra_core::signing::get_signing_config;
 
 /// Document mutator that uses a database transaction.
 ///
@@ -124,6 +129,69 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                     query::error::QueryError::execution(format!("create error: {}", e))
                 }
             })?;
+
+        {
+            let txn_guard = self.txn.lock().await;
+            let txn = txn_guard.as_ref().ok_or_else(|| {
+                query::error::QueryError::execution("transaction is no longer active")
+            })?;
+
+            let blockstore = txn.blockstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
+            })?;
+            let headstore = txn.headstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get headstore: {}", e))
+            })?;
+
+            let schema_version_id = collection.version_id();
+            let enc_config = get_encryption_config();
+            let sign_config = get_signing_config();
+
+            match write_document_blocks(
+                &blockstore,
+                &headstore,
+                &doc,
+                schema_version_id,
+                None,
+                enc_config.as_ref(),
+                sign_config.as_ref(),
+            )
+            .await
+            {
+                Ok(block_result) => {
+                    if let Some(ref config) = enc_config {
+                        store_doc_encryption(&doc_id.to_string(), config.clone());
+                    }
+
+                    if collection.schema().is_branchable {
+                        let short_id = collection_short_id(collection.collection_id());
+                        if let Err(error) = write_collection_block(
+                            &blockstore,
+                            &headstore,
+                            short_id,
+                            schema_version_id,
+                            block_result.cid,
+                            sign_config.as_ref(),
+                        )
+                        .await
+                        {
+                            warn!(
+                                collection = %collection_name,
+                                error = %error,
+                                "Failed to write collection block for transaction create"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        collection = %collection_name,
+                        error = %error,
+                        "Failed to write document blocks for transaction create"
+                    );
+                }
+            }
+        }
 
         Ok(CreateResult::new(doc_id, doc))
     }

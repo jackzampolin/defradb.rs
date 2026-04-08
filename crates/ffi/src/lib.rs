@@ -148,7 +148,7 @@ pub use acp::{
 };
 pub use backup::{basic_export, basic_import};
 pub use batch::{batch_sign, batch_start};
-pub use block::block_verify_signature;
+pub use block::{block_verify_signature, block_verify_signature_in_txn};
 pub use collection::{
     add_view, delete_collection, delete_collection_versions, delete_documents,
     find_collection_by_id, gc_downsample_histories, get_collection_by_name,
