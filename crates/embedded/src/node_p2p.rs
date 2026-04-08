@@ -154,6 +154,8 @@ where
         version_syncer,
     );
     adapter.set_initial_tracked_documents(restored_doc_ids);
+    let broadcast_mutator = Arc::new(db::BroadcastMutator::new(database.clone(), coordinator));
+    let broadcast_mutator_for_acp = broadcast_mutator.clone();
     let system = Arc::new(ManagedP2PSystem::new(
         TransportKind::Libp2p,
         Arc::new(adapter) as Arc<dyn P2POperations>,
@@ -170,10 +172,11 @@ where
 
     Ok(P2PSetup {
         system,
-        mutator: Arc::new(db::BroadcastMutator::new(database, coordinator)),
+        mutator: broadcast_mutator,
         merge_handler,
         wire_document_acp: Some(Box::new(move |acp| {
-            doc_pusher_for_acp.set_document_acp(acp);
+            doc_pusher_for_acp.set_document_acp(acp.clone());
+            broadcast_mutator_for_acp.set_document_acp(acp);
         })),
     })
 }
@@ -280,6 +283,8 @@ where
         version_syncer,
     );
     adapter.set_initial_tracked_documents(restored_doc_ids);
+    let broadcast_mutator = Arc::new(db::BroadcastMutator::new(database.clone(), coordinator));
+    let broadcast_mutator_for_acp = broadcast_mutator.clone();
     let system = Arc::new(ManagedP2PSystem::new(
         TransportKind::Iroh,
         Arc::new(adapter) as Arc<dyn P2POperations>,
@@ -297,10 +302,11 @@ where
 
     Ok(P2PSetup {
         system,
-        mutator: Arc::new(db::BroadcastMutator::new(database, coordinator)),
+        mutator: broadcast_mutator,
         merge_handler,
         wire_document_acp: Some(Box::new(move |acp| {
-            doc_pusher_for_acp.set_document_acp(acp);
+            doc_pusher_for_acp.set_document_acp(acp.clone());
+            broadcast_mutator_for_acp.set_document_acp(acp);
         })),
     })
 }
