@@ -14,7 +14,7 @@ use crate::permission::DocumentPermission;
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S: ZanzibarStore + 'static> DocumentACP for ZanzibarDocumentACP<S> {
+impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S> {
     async fn register_doc_object(
         &self,
         identity: &Did,

@@ -10,7 +10,7 @@ use crate::expression::RelationExpression;
 use crate::store::ZanzibarStore;
 use crate::types::Subject;
 
-impl<S: ZanzibarStore> PermissionEngine<S> {
+impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn evaluate_expr_with_trace<'a>(
         &'a self,

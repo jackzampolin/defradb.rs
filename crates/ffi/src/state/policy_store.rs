@@ -31,9 +31,7 @@ impl PolicyStore {
 
     /// Add a policy and return its Go-compatible ID.
     pub fn add_policy(&self, policy: &str, parsed: &ParsedPolicy) -> String {
-        let counter_val = self.counter.fetch_add(1, Ordering::SeqCst);
-        let policy_id = acp::policy_yaml::generate_policy_id(parsed, counter_val);
-
+        let policy_id = self.next_policy_id(parsed);
         self.policies
             .write()
             .insert(policy_id.clone(), policy.to_string());
@@ -41,11 +39,22 @@ impl PolicyStore {
         policy_id
     }
 
+    /// Generate the next Go-compatible policy ID without storing the policy body.
+    pub fn next_policy_id(&self, parsed: &ParsedPolicy) -> String {
+        let counter_val = self.counter.fetch_add(1, Ordering::SeqCst);
+        acp::policy_yaml::generate_policy_id(parsed, counter_val)
+    }
+
     /// Store a policy with a known ID (used for SourceHub-created policies).
     pub fn store_policy(&self, id: &str, policy: &str) {
         self.policies
             .write()
             .insert(id.to_string(), policy.to_string());
+    }
+
+    /// Remove a policy from the cache.
+    pub fn remove_policy(&self, id: &str) {
+        self.policies.write().remove(id);
     }
 
     /// Get a policy by ID.
