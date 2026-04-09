@@ -250,6 +250,10 @@ impl SourceHubClient {
         }
     }
 
+    pub(crate) fn sequence_cache_key(&self, address: &str) -> String {
+        format!("{}::{}", self.comet_rpc_address, address)
+    }
+
     /// Derive REST base URL from gRPC address.
     /// SourceHub exposes REST on port 1317 by default, but in tests it uses
     /// the gRPC port. We use the gRPC address directly since the LCD gateway
