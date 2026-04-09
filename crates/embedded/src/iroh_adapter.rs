@@ -571,6 +571,31 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         Ok(())
     }
 
+    async fn republish_document(&self, collection_name: &str, doc_id: &str) -> Result<(), String> {
+        let pusher = self
+            .doc_pusher
+            .as_ref()
+            .ok_or_else(|| "no database context for republish".to_string())?;
+        let coordinator = self
+            .sync_coordinator
+            .as_ref()
+            .ok_or_else(|| "no sync coordinator for republish".to_string())?;
+        pusher.validate_collection_exists(collection_name)?;
+        let collection_id = pusher
+            .get_collection_id(collection_name)
+            .ok_or_else(|| format!("collection '{collection_name}' not found"))?;
+        let head_blocks = pusher.load_document_head_blocks(doc_id).await?;
+
+        for (cid, block) in head_blocks {
+            coordinator
+                .broadcast_local_update(&cid, &block, doc_id, &collection_id)
+                .await
+                .map_err(|error| format!("failed to republish document head {cid}: {error}"))?;
+        }
+
+        Ok(())
+    }
+
     async fn sync_documents(
         &self,
         collection_name: &str,

@@ -288,6 +288,9 @@ where
 
     if let Some(ref mut setup) = p2p_setup {
         setup.merge_handler.set_document_acp(document_acp.clone());
+        setup
+            .merge_handler
+            .set_strict_replicated_doc_access(sourcehub_acp.is_some());
         if let Some(wire_document_acp) = setup.wire_document_acp.take() {
             wire_document_acp(document_acp.clone());
         }

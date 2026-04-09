@@ -1,6 +1,8 @@
 use std::ffi::c_char;
+use std::time::{Duration, Instant};
 
 use acp::nac::NodePermission;
+use acp::DocumentPermission;
 
 use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
@@ -258,12 +260,13 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
             );
         }
 
-        // Validate node handle and get database, document_acp, and policy_store
-        let (database, document_acp, policy_store) = match NODES.get(node_ptr, |state| {
+        // Validate node handle and get database, document_acp, policy_store, and optional p2p
+        let (database, document_acp, policy_store, p2p_system) = match NODES.get(node_ptr, |state| {
             (
                 state.database.clone(),
                 state.document_acp.clone(),
                 state.policy_store.clone(),
+                state.p2p.as_ref().map(|p2p| p2p.system.clone()),
             )
         }) {
             Some(tuple) => tuple,
@@ -326,6 +329,43 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
                 )
                 .await
                 .map_err(|e| e.to_string())?;
+
+            if added {
+                let target_identity = acp::Identity::from(target.clone());
+                let wait_deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let readable = document_acp
+                        .check_doc_access(
+                            &target_identity,
+                            DocumentPermission::Read,
+                            &policy_id,
+                            &resource_name,
+                            &doc_id_str,
+                        )
+                        .await
+                        .map_err(|e| format!("failed to verify DAC relationship propagation: {e}"))?;
+
+                    if readable {
+                        break;
+                    }
+
+                    if Instant::now() >= wait_deadline {
+                        return Err(
+                            "timed out waiting for DAC relationship to become readable".to_string(),
+                        );
+                    }
+
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+
+                if let Some(system) = p2p_system {
+                    system
+                        .ops()
+                        .republish_document(&collection_id_str, &doc_id_str)
+                        .await
+                        .map_err(|e| format!("failed to republish document after DAC relationship add: {e}"))?;
+                }
+            }
 
             let json = serde_json::json!({ "added": added }).to_string();
             Ok::<String, String>(json)

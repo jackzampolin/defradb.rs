@@ -125,6 +125,15 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 );
                 return Ok(MergeOutcome::terminal_skip(reason));
             }
+
+            if let Some(hook) = self.composite_merge_hook() {
+                if let Some(outcome) = hook
+                    .on_protected_composite(&doc_id_str, collection.schema(), metadata)
+                    .await?
+                {
+                    return Ok(outcome);
+                }
+            }
         }
 
         // Recursively merge parent composites referenced in `heads` before
@@ -438,6 +447,15 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     "Skipping replicated write into local-only downsample source"
                 );
                 return Ok(MergeOutcome::terminal_skip(reason));
+            }
+
+            if let Some(hook) = self.composite_merge_hook() {
+                if let Some(outcome) = hook
+                    .on_protected_composite(&doc_id_str, collection.schema(), metadata)
+                    .await?
+                {
+                    return Ok(outcome);
+                }
             }
         }
 

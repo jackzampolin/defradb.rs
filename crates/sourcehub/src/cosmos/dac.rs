@@ -182,15 +182,17 @@ impl DocumentACP for SourceHubDocumentACP {
             .await
             .map_err(provider_err)?;
 
-        if let Some(cache) = &self.access_cache {
-            cache.set(
-                &actor_did,
-                policy_id,
-                resource_name,
-                doc_id,
-                permission.as_str(),
-                result,
-            );
+        if result {
+            if let Some(cache) = &self.access_cache {
+                cache.set(
+                    &actor_did,
+                    policy_id,
+                    resource_name,
+                    doc_id,
+                    permission.as_str(),
+                    result,
+                );
+            }
         }
 
         Ok(result)
@@ -498,7 +500,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_doc_access_caches_when_enabled() {
+    async fn check_doc_access_does_not_cache_denials_when_enabled() {
         let provider = Arc::new(MockProvider::new(vec![false, true]));
         let acp = SourceHubDocumentACP::new(provider.clone(), Duration::from_secs(300));
         let did = Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
@@ -516,7 +518,7 @@ mod tests {
             .expect("initial denial");
         assert!(!denied);
 
-        let still_denied = acp
+        let allowed = acp
             .check_doc_access(
                 &identity,
                 DocumentPermission::Read,
@@ -525,9 +527,9 @@ mod tests {
                 "doc-1",
             )
             .await
-            .expect("cached denial");
-        assert!(!still_denied);
-        assert_eq!(provider.verify_calls(), 1);
+            .expect("fresh remote decision");
+        assert!(allowed);
+        assert_eq!(provider.verify_calls(), 2);
     }
 
     #[tokio::test]
