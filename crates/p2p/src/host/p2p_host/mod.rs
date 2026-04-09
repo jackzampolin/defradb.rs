@@ -95,6 +95,10 @@ pub struct P2PHost<S: Store> {
     /// Per-peer addresses learned from connections and identify protocol.
     /// Used by ActivePeers to return full multiaddrs (Go-compatible).
     pub(super) peer_addrs: HashMap<PeerId, Multiaddr>,
+    /// Optional local DEFRA identity used for Go-compatible identity exchange.
+    pub(super) node_identity: Option<Arc<identity::RawIdentity>>,
+    /// Verified peer DEFRA DIDs keyed by peer ID.
+    pub(super) peer_identities: HashMap<PeerId, identity::Did>,
 }
 
 impl<S: Store> P2PHost<S> {
@@ -161,7 +165,13 @@ impl<S: Store> P2PHost<S> {
         mpsc::Receiver<HostEvent>,
         Arc<ReplicatorRegistry>,
     )> {
-        Self::with_keypair_and_config(keypair, bitswap_store, P2PHostConfig::default()).await
+        Self::with_keypair_and_config_and_identity(
+            keypair,
+            bitswap_store,
+            P2PHostConfig::default(),
+            None,
+        )
+        .await
     }
 
     /// Create a new P2P host with the given keypair, blockstore, and config options.
@@ -175,6 +185,21 @@ impl<S: Store> P2PHost<S> {
         keypair: Keypair,
         bitswap_store: S,
         config: P2PHostConfig,
+    ) -> Result<(
+        Self,
+        P2PHostHandle,
+        mpsc::Receiver<HostEvent>,
+        Arc<ReplicatorRegistry>,
+    )> {
+        Self::with_keypair_and_config_and_identity(keypair, bitswap_store, config, None).await
+    }
+
+    /// Create a new P2P host with the given keypair, blockstore, config, and optional DEFRA identity.
+    pub async fn with_keypair_and_config_and_identity(
+        keypair: Keypair,
+        bitswap_store: S,
+        config: P2PHostConfig,
+        node_identity: Option<Arc<identity::RawIdentity>>,
     ) -> Result<(
         Self,
         P2PHostHandle,
@@ -268,6 +293,14 @@ impl<S: Store> P2PHost<S> {
         let car_response_streams = control
             .accept(TwoStreamHandler::car_response_protocol())
             .map_err(|_| Error::Behaviour("Failed to register CAR response protocol".into()))?;
+        let identity_request_streams = control
+            .accept(TwoStreamHandler::identity_request_protocol())
+            .map_err(|_| Error::Behaviour("Failed to register identity request protocol".into()))?;
+        let identity_response_streams = control
+            .accept(TwoStreamHandler::identity_response_protocol())
+            .map_err(|_| {
+                Error::Behaviour("Failed to register identity response protocol".into())
+            })?;
 
         let handler = TwoStreamHandler::new(control);
         let pending = handler.pending_responses();
@@ -283,6 +316,8 @@ impl<S: Store> P2PHost<S> {
             se_response_streams,
             car_request_streams,
             car_response_streams,
+            identity_request_streams,
+            identity_response_streams,
             two_stream_event_tx,
             config.max_msg_size,
             config.max_car_size,
@@ -303,6 +338,8 @@ impl<S: Store> P2PHost<S> {
             spawned_tasks: tokio::task::JoinSet::new(),
             bitswap_queries: HashMap::new(),
             peer_addrs: HashMap::new(),
+            node_identity,
+            peer_identities: HashMap::new(),
         };
 
         Ok((host, handle, event_rx, replicators))

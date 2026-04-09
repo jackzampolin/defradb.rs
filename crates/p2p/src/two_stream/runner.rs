@@ -34,6 +34,10 @@ pub struct TwoStreamRunner {
     car_request_streams: stream::IncomingStreams,
     /// Incoming CAR response streams.
     car_response_streams: stream::IncomingStreams,
+    /// Incoming identity request streams.
+    identity_request_streams: stream::IncomingStreams,
+    /// Incoming identity response streams.
+    identity_response_streams: stream::IncomingStreams,
     /// Channel to send events.
     event_tx: mpsc::Sender<TwoStreamEvent>,
     /// Bounds the number of concurrently active stream handler tasks.
@@ -57,6 +61,8 @@ impl TwoStreamRunner {
         se_response_streams: stream::IncomingStreams,
         car_request_streams: stream::IncomingStreams,
         car_response_streams: stream::IncomingStreams,
+        identity_request_streams: stream::IncomingStreams,
+        identity_response_streams: stream::IncomingStreams,
         event_tx: mpsc::Sender<TwoStreamEvent>,
         max_msg_size: u64,
         max_car_size: u64,
@@ -71,6 +77,8 @@ impl TwoStreamRunner {
             se_response_streams,
             car_request_streams,
             car_response_streams,
+            identity_request_streams,
+            identity_response_streams,
             event_tx,
             semaphore: Arc::new(Semaphore::new(max_concurrent_tasks)),
             max_msg_size,
@@ -238,6 +246,49 @@ impl TwoStreamRunner {
                                     buf_len = buf.len(),
                                     "Received SE response (acknowledgement)"
                                 );
+                            }
+                        }
+                    });
+                }
+                Some((peer_id, stream)) = self.identity_request_streams.next() => {
+                    let event_tx = self.event_tx.clone();
+                    let sem = self.semaphore.clone();
+                    let max_msg_size = self.max_msg_size;
+                    let stream_read_timeout = self.stream_read_timeout;
+                    tokio::spawn(async move {
+                        let Ok(_permit) = sem.acquire().await else { return };
+                        match TwoStreamHandler::handle_request_stream(peer_id, stream, max_msg_size, stream_read_timeout).await {
+                            Ok(event) => {
+                                if event_tx.send(event).await.is_err() {
+                                    tracing::warn!(peer_id = %peer_id, "Failed to send identity request event");
+                                }
+                            }
+                            Err(e) => {
+                                let _ = event_tx.send(TwoStreamEvent::DecodeError {
+                                    peer_id,
+                                    error: e.to_string(),
+                                }).await;
+                            }
+                        }
+                    });
+                }
+                Some((peer_id, stream)) = self.identity_response_streams.next() => {
+                    let pending = self.pending.clone();
+                    let event_tx = self.event_tx.clone();
+                    let sem = self.semaphore.clone();
+                    let max_msg_size = self.max_msg_size;
+                    let stream_read_timeout = self.stream_read_timeout;
+                    tokio::spawn(async move {
+                        let Ok(_permit) = sem.acquire().await else { return };
+                        match TwoStreamHandler::handle_response_stream(&pending, peer_id, stream, max_msg_size, stream_read_timeout).await {
+                            Ok(Some(event)) => {
+                                if event_tx.send(event).await.is_err() {
+                                    tracing::warn!(peer_id = %peer_id, "Failed to send identity response event");
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::warn!(peer_id = %peer_id, error = %e, "Failed to handle identity response stream");
                             }
                         }
                     });

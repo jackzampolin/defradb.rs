@@ -151,6 +151,65 @@ impl<S: Store> P2PHost<S> {
                     );
                 }
             }
+            TwoStreamEvent::IdentityRequest { peer_id, request } => {
+                let mut reply = match self.node_identity.as_ref() {
+                    Some(node_identity) => match identity::new_token(
+                        node_identity.as_ref(),
+                        std::time::Duration::from_secs(60 * 60 * 24),
+                        Some(request.peer_id.clone()),
+                        None,
+                    ) {
+                        Ok(token) => crate::message::IdentityResponse::success(
+                            &request.metadata.message_id,
+                            token,
+                        ),
+                        Err(error) => crate::message::IdentityResponse::error(
+                            &request.metadata.message_id,
+                            &format!("failed to generate identity token: {error}"),
+                        ),
+                    },
+                    None => crate::message::IdentityResponse::error(
+                        &request.metadata.message_id,
+                        "node identity is not configured",
+                    ),
+                };
+
+                match crate::signing::sign_message(self.keypair(), &mut reply) {
+                    Ok(()) => {
+                        let handler = self.two_stream_handler.clone();
+                        self.spawned_tasks.spawn(async move {
+                            let mut h = handler.lock().await;
+                            if let Err(error) = h.send_identity_response(peer_id, reply).await {
+                                warn!(peer_id = %peer_id, error = %error, "Failed to send identity response");
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        warn!(peer_id = %peer_id, error = %error, "Failed to sign identity response");
+                    }
+                }
+            }
+            TwoStreamEvent::IdentityReply { peer_id, reply } => {
+                if let Some(error_message) = reply.err_message.as_deref() {
+                    warn!(peer_id = %peer_id, error = %error_message, "Peer identity request returned error");
+                    return;
+                }
+
+                match identity::from_token(&reply.identity_token).and_then(|identity| {
+                    identity::verify_auth_token(
+                        &identity,
+                        &self.swarm.local_peer_id().to_string(),
+                    )?;
+                    identity::Identity::did(&identity)
+                }) {
+                    Ok(did) => {
+                        self.peer_identities.insert(peer_id, did);
+                    }
+                    Err(error) => {
+                        warn!(peer_id = %peer_id, error = %error, "Failed to verify peer identity token");
+                    }
+                }
+            }
             TwoStreamEvent::CarFetchRequest { peer_id, root_cid } => {
                 debug!(
                     peer_id = %peer_id,

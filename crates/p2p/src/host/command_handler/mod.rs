@@ -184,6 +184,9 @@ impl<S: Store> P2PHost<S> {
             HostCommand::BitswapCancel { query_id, response } => {
                 self.handle_bitswap_cancel(query_id, response);
             }
+            HostCommand::GetPeerIdentity { peer_id, response } => {
+                self.handle_get_peer_identity(peer_id, response);
+            }
             HostCommand::TopicPeers { topic: _, response } => {
                 // Return all connected peers as a best-effort approximation.
                 // GossipSub's all_peers() is behind a Toggle wrapper and not easily

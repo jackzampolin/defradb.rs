@@ -213,6 +213,19 @@ impl P2PHostHandle {
         response_rx.await.map_err(|_| Error::ChannelReceive)
     }
 
+    /// Resolve and cache a peer's DEFRA identity through the Go-compatible identity protocol.
+    pub async fn get_peer_identity(&self, peer_id: PeerId) -> Result<Option<identity::Did>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::GetPeerIdentity {
+                peer_id,
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| Error::ChannelSend)?;
+        response_rx.await.map_err(|_| Error::ChannelReceive)?
+    }
+
     /// Get all peers known to GossipSub for a topic (mesh + non-mesh).
     pub async fn topic_peers(&self, topic: DefraTopic) -> Result<Vec<PeerId>> {
         let (response_tx, response_rx) = oneshot::channel();

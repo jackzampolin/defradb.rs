@@ -64,9 +64,14 @@ where
     };
 
     let (host, handle, event_rx, _replicator_registry) =
-        p2p::P2PHost::with_keypair(p2p_keypair, bitswap_store)
-            .await
-            .map_err(|error| anyhow!("failed to create P2P host: {error}"))?;
+        p2p::P2PHost::with_keypair_and_config_and_identity(
+            p2p_keypair,
+            bitswap_store,
+            p2p::P2PHostConfig::default(),
+            database.node_identity(),
+        )
+        .await
+        .map_err(|error| anyhow!("failed to create P2P host: {error}"))?;
     tokio::spawn(async move {
         host.run().await;
     });
