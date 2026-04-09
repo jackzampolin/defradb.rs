@@ -897,7 +897,7 @@ mod tests {
     use async_trait::async_trait;
     use document::{DocID, Document};
     use schema::{CollectionVersion, FieldDescription, FieldKind};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use std::sync::Mutex;
 
     use crate::mutator::{CreateResult, DeleteResult, UpdateResult};

@@ -212,28 +212,25 @@ impl TwoStreamHandler {
             }
         }
 
-        match serde_cbor::from_slice::<IdentityResponse>(&buf) {
-            Ok(reply) => {
-                crate::verify_message(&reply)?;
-                let message_id = reply.message_id.clone();
+        if let Ok(reply) = serde_cbor::from_slice::<IdentityResponse>(&buf) {
+            crate::verify_message(&reply)?;
+            let message_id = reply.message_id.clone();
 
-                let sender = {
-                    let mut pending = pending.lock();
-                    pending.identity_channels.remove(&message_id)
-                };
+            let sender = {
+                let mut pending = pending.lock();
+                pending.identity_channels.remove(&message_id)
+            };
 
-                if let Some(sender) = sender {
-                    let _ = sender.send(reply.clone());
-                }
-
-                tracing::debug!(
-                    peer_id = %peer_id,
-                    message_id = %message_id,
-                    "Received Identity response on two-stream protocol"
-                );
-                return Ok(Some(TwoStreamEvent::IdentityReply { peer_id, reply }));
+            if let Some(sender) = sender {
+                let _ = sender.send(reply.clone());
             }
-            Err(_) => {}
+
+            tracing::debug!(
+                peer_id = %peer_id,
+                message_id = %message_id,
+                "Received Identity response on two-stream protocol"
+            );
+            return Ok(Some(TwoStreamEvent::IdentityReply { peer_id, reply }));
         }
 
         // Deserialize as DocSyncReply once we've ruled out a pending PushLogReply
