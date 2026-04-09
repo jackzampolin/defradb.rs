@@ -194,14 +194,15 @@ impl TxSigner {
                         error = %e,
                         "retrying SourceHub tx after account sequence mismatch"
                     );
-                    let (account_number, sequence) = client
+                    let (account_number, queried_sequence) = client
                         .query_account(&self.address())
                         .await
                         .map_err(|query_error| {
                             TxSignerError::Broadcast(format!("account query: {}", query_error))
                         })?;
+                    let next_sequence = std::cmp::max(sequence + 1, queried_sequence);
                     state.account_number = Some(account_number);
-                    state.next_sequence = Some(sequence);
+                    state.next_sequence = Some(next_sequence);
                     last_error = Some(e);
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 }
