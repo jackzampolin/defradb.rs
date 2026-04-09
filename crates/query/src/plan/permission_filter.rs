@@ -134,13 +134,17 @@ impl PlanNode for PermissionFilterNode {
 
             let doc = self.source.value();
 
-            // Get doc ID for permission check
-            let doc_id = match doc.doc_id() {
+            // Child join scan mappings may place `_docID` at a non-zero index to keep
+            // schema fields aligned for FK lookups, so resolve it from the mapping
+            // instead of assuming Doc field index 0.
+            let doc_id = match self
+                .document_mapping
+                .first_index_of_name("_docID")
+                .and_then(|index| doc.get(index))
+                .and_then(|value| value.as_str())
+            {
                 Some(id) => id.to_string(),
-                None => {
-                    // No doc ID, skip this document
-                    continue;
-                }
+                None => continue,
             };
 
             // Check read permission

@@ -37,6 +37,7 @@ fn make_test_collection_with_index() -> CollectionVersion {
         id: 1,
         name: "name_idx".to_string(),
         unique: false,
+        auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: "name".to_string(),
             descending: false,
@@ -46,6 +47,7 @@ fn make_test_collection_with_index() -> CollectionVersion {
         id: 2,
         name: "age_idx".to_string(),
         unique: false,
+        auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: "age".to_string(),
             descending: false,
@@ -684,6 +686,7 @@ fn make_user_with_name_index() -> CollectionVersion {
         id: 1,
         name: "User_name_ASC".to_string(),
         unique: false,
+        auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: "name".to_string(),
             descending: false,
@@ -716,6 +719,7 @@ fn make_device_with_owner_index() -> CollectionVersion {
         id: 1,
         name: "Device__ownerID_ASC".to_string(),
         unique: false,
+        auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: "_ownerID".to_string(),
             descending: false,
@@ -827,6 +831,7 @@ async fn test_plan_mixed_scalar_and_relation_filter_uses_index() {
         id: 2,
         name: "Device_model_ASC".to_string(),
         unique: false,
+        auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: "model".to_string(),
             descending: false,

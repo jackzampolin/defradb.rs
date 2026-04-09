@@ -11,6 +11,15 @@ pub(crate) trait CompositePostCommitAction: Send {
 
 #[async_trait]
 pub(crate) trait CompositeMergeHook: Send + Sync {
+    async fn on_protected_composite(
+        &self,
+        _doc_id: &str,
+        _collection: &CollectionVersion,
+        _metadata: &BlockMetadata<'_>,
+    ) -> Result<Option<MergeOutcome>, MergeError> {
+        Ok(None)
+    }
+
     async fn on_encrypted_link(
         &self,
         _doc_id: &str,

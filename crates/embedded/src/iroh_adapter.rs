@@ -28,6 +28,25 @@ pub struct IrohP2PAdapter<B: Blockstore + 'static> {
 }
 
 impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
+    async fn resubscribe_tracked_document_topics(&self) {
+        let doc_ids: Vec<String> = match self.tracked_documents.read() {
+            Ok(docs) => docs.iter().cloned().collect(),
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to read tracked documents");
+                return;
+            }
+        };
+        for doc_id in &doc_ids {
+            let topic = DefraTopic::document(doc_id);
+            if let Err(error) = self.transport.unsubscribe(topic.clone()).await {
+                tracing::debug!(doc_id = %doc_id, error = %error, "failed to drop tracked document topic before reconnect resubscribe");
+            }
+            if let Err(error) = self.transport.subscribe(topic).await {
+                tracing::debug!(doc_id = %doc_id, error = %error, "failed to resubscribe tracked document topic after reconnect");
+            }
+        }
+    }
+
     pub fn with_full_context(
         transport: IrohTransport,
         coordinator: Arc<IrohSyncCoordinator<B>>,
@@ -125,6 +144,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         if let Ok(mut addrs) = self.peer_addresses.write() {
             addrs.insert(peer_id.to_string(), addr.to_string());
         }
+        self.resubscribe_tracked_document_topics().await;
 
         Ok(())
     }
@@ -452,17 +472,20 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
 
     async fn remove_collections(&self, collections: Vec<String>) -> Result<(), String> {
         if let Some(ref coordinator) = self.sync_coordinator {
-            for collection_name in collections {
-                let topic_id = if let Some(ref pusher) = self.doc_pusher {
-                    if let Some(collection_id) = pusher.get_collection_id(&collection_name) {
-                        collection_id
+            let topic_ids = collections
+                .into_iter()
+                .map(|collection_name| {
+                    if let Some(ref pusher) = self.doc_pusher {
+                        pusher
+                            .get_collection_id(&collection_name)
+                            .ok_or_else(|| format!("collection '{}' not found", collection_name))
                     } else {
-                        return Err(format!("collection '{}' not found", collection_name));
+                        Ok(collection_name)
                     }
-                } else {
-                    collection_name
-                };
+                })
+                .collect::<Result<Vec<_>, _>>()?;
 
+            for topic_id in topic_ids {
                 coordinator
                     .unsubscribe_collection(&topic_id)
                     .await
@@ -543,6 +566,31 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             if let Ok(mut tracked) = self.tracked_documents.write() {
                 tracked.remove(doc_id);
             }
+        }
+
+        Ok(())
+    }
+
+    async fn republish_document(&self, collection_name: &str, doc_id: &str) -> Result<(), String> {
+        let pusher = self
+            .doc_pusher
+            .as_ref()
+            .ok_or_else(|| "no database context for republish".to_string())?;
+        let coordinator = self
+            .sync_coordinator
+            .as_ref()
+            .ok_or_else(|| "no sync coordinator for republish".to_string())?;
+        pusher.validate_collection_exists(collection_name)?;
+        let collection_id = pusher
+            .get_collection_id(collection_name)
+            .ok_or_else(|| format!("collection '{collection_name}' not found"))?;
+        let head_blocks = pusher.load_document_head_blocks(doc_id).await?;
+
+        for (cid, block) in head_blocks {
+            coordinator
+                .broadcast_local_update(&cid, &block, doc_id, &collection_id)
+                .await
+                .map_err(|error| format!("failed to republish document head {cid}: {error}"))?;
         }
 
         Ok(())

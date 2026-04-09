@@ -15,6 +15,7 @@
 
 use async_trait::async_trait;
 use document::Document;
+use lens::{LensConfig, LensModule, TransformId};
 use query::error::TransactionError;
 use query::txn::{
     DeferredAcpMutations, GetTransactionResult, TransactionContext, TransactionHandle,
@@ -78,6 +79,7 @@ impl CleanupResult {
 pub struct DbTransactionRegistry<S: Store> {
     db: Arc<DB<S>>,
     transactions: RwLock<HashMap<String, Arc<DbTransactionContext<S>>>>,
+    pending_lenses: RwLock<HashMap<String, HashMap<String, LensConfig>>>,
     id_counter: AtomicU64,
 }
 
@@ -89,8 +91,43 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         Self {
             db,
             transactions: RwLock::new(HashMap::new()),
+            pending_lenses: RwLock::new(HashMap::new()),
             id_counter: AtomicU64::new(0),
         }
+    }
+
+    async fn compute_lens_transform_id(config: &LensConfig) -> Result<TransformId> {
+        let first_lens = config
+            .lens()
+            .ok_or_else(|| Error::Lens("lens config has no modules".into()))?;
+
+        let wasm_bytes = if let Some(ref bytes) = first_lens.module {
+            bytes.clone()
+        } else if let Some(ref path) = first_lens.path {
+            let clean_path = path.strip_prefix("file://").unwrap_or(path);
+            tokio::fs::read(clean_path)
+                .await
+                .map_err(|e| Error::Lens(format!("failed to read WASM from {}: {}", path, e)))?
+        } else {
+            return Err(Error::Lens("lens module has neither path nor bytes".into()));
+        };
+
+        let arguments: Vec<(String, String)> = first_lens
+            .arguments
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let (config_cid, _) =
+            defra_core::build_lens_ipld_blocks(&wasm_bytes, first_lens.inverse, &arguments)
+                .map_err(|e| Error::Lens(format!("failed to build lens IPLD blocks: {}", e)))?;
+
+        Ok(TransformId::new(config_cid.to_string()))
     }
 
     /// Get the database instance.
@@ -329,6 +366,124 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         Ok(finalized)
     }
 
+    /// Add a standalone lens within a transaction.
+    ///
+    /// The lens is visible only within this transaction until commit. On commit it is
+    /// persisted through the regular DB lens path so restart behavior stays consistent.
+    pub async fn add_lens_in_txn(&self, txn_id: &str, config: LensConfig) -> Result<TransformId> {
+        let ctx = self
+            .get_ctx(txn_id)?
+            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+
+        let shared_txn = ctx.fetcher_shared_txn();
+        let mut txn_guard = shared_txn.lock().await;
+        let txn = txn_guard.as_mut().ok_or(Error::TxnNotActive)?;
+
+        let transform_id = Self::compute_lens_transform_id(&config).await?;
+        let transform_id_str = transform_id.to_string();
+
+        {
+            let pending = self.pending_lenses.read().map_err(|_| {
+                Error::LockPoisoned("failed to acquire pending lens read lock".into())
+            })?;
+            if pending
+                .get(txn_id)
+                .and_then(|m| m.get(&transform_id_str))
+                .is_some()
+            {
+                return Ok(transform_id);
+            }
+        }
+
+        let db = self.db.clone();
+        let config_for_commit = config.clone();
+        let transform_id_for_log = transform_id_str.clone();
+        txn.on_success_async(Box::new(move || {
+            let db = db.clone();
+            Box::pin(async move {
+                if let Err(error) = db.add_lens(config_for_commit).await {
+                    tracing::warn!(
+                        transform_id = %transform_id_for_log,
+                        error = %error,
+                        "failed to persist committed transaction lens"
+                    );
+                }
+            })
+        }))?;
+
+        let mut pending = self
+            .pending_lenses
+            .write()
+            .map_err(|_| Error::LockPoisoned("failed to acquire pending lens write lock".into()))?;
+        pending
+            .entry(txn_id.to_string())
+            .or_default()
+            .insert(transform_id_str, config);
+
+        Ok(transform_id)
+    }
+
+    /// Verify a block signature using the existing transaction's blockstore view.
+    pub async fn verify_block_signature_in_txn(
+        &self,
+        txn_id: &str,
+        document_acp: &dyn acp::DocumentACP,
+        cid_str: &str,
+        public_key_hex: &str,
+        key_type: crypto::KeyType,
+        caller_identity: &acp::Identity,
+    ) -> Result<()> {
+        let ctx = self
+            .get_ctx(txn_id)?
+            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+
+        let shared_txn = ctx.fetcher_shared_txn();
+        let txn_guard = shared_txn.lock().await;
+        let txn = txn_guard.as_ref().ok_or(Error::TxnNotActive)?;
+
+        crate::block_verify::verify_block_signature_in_txn(
+            &self.db,
+            document_acp,
+            txn,
+            cid_str,
+            public_key_hex,
+            key_type,
+            caller_identity,
+        )
+        .await
+        .map_err(Error::Other)
+    }
+
+    /// List all lenses visible within a transaction.
+    pub async fn list_lenses_in_txn(
+        &self,
+        txn_id: &str,
+    ) -> Result<std::collections::HashMap<String, LensModule>> {
+        self.get_ctx(txn_id)?
+            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+
+        let mut lenses = self
+            .db
+            .lens_store()
+            .list()
+            .await
+            .map_err(|e| Error::Lens(e.to_string()))?;
+
+        let pending = self
+            .pending_lenses
+            .read()
+            .map_err(|_| Error::LockPoisoned("failed to acquire pending lens read lock".into()))?;
+        if let Some(txn_lenses) = pending.get(txn_id) {
+            for (id, config) in txn_lenses {
+                if let Some(module) = config.lens().cloned() {
+                    lenses.insert(id.clone(), module);
+                }
+            }
+        }
+
+        Ok(lenses)
+    }
+
     /// Get all collection versions visible within a transaction.
     ///
     /// This reads from the transaction's systemstore, which includes both
@@ -455,6 +610,11 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
                 TransactionError::not_found(format!("transaction '{}' not found", handle))
             })?;
 
+        let _ = self
+            .pending_lenses
+            .write()
+            .map(|mut guard| guard.remove(handle.as_str()));
+
         let txn = ctx.take_txn().await.ok_or_else(|| {
             TransactionError::already_finalized(format!(
                 "transaction '{}' was already consumed (double commit/rollback?)",
@@ -484,6 +644,11 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
             .ok_or_else(|| {
                 TransactionError::not_found(format!("transaction '{}' not found", handle))
             })?;
+
+        let _ = self
+            .pending_lenses
+            .write()
+            .map(|mut guard| guard.remove(handle.as_str()));
 
         let txn = ctx.take_txn().await.ok_or_else(|| {
             TransactionError::already_finalized(format!(

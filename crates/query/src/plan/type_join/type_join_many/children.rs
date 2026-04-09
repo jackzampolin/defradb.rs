@@ -552,8 +552,12 @@ impl TypeJoinMany {
                     matching_count += 1;
                     all_children.push(child_doc.deep_clone());
 
-                    // Early termination: if no relation filter and limit reached
-                    if self.relation_filter.is_none() {
+                    // Early termination is only safe when child ordering does not need
+                    // exhaustive orphan/null merging before the per-parent limit.
+                    if self.relation_filter.is_none()
+                        && self.child_order_by.is_none()
+                        && !(self.preserve_ordered_orphans && self.child_order_by.is_some())
+                    {
                         if let Some(limit) = self.child_limit {
                             let effective_needed = self.child_offset + limit;
                             if matching_count >= effective_needed {
@@ -638,20 +642,10 @@ impl TypeJoinMany {
                 });
             }
 
-            // Apply offset and limit.
-            let offset = self.child_offset as usize;
-            let children: Vec<Doc> = if offset > 0 || self.child_limit.is_some() {
-                let after_offset: Vec<Doc> = all_children.into_iter().skip(offset).collect();
-                if let Some(limit) = self.child_limit {
-                    after_offset.into_iter().take(limit as usize).collect()
-                } else {
-                    after_offset
-                }
-            } else {
-                all_children
-            };
-
-            self.merge_children(&mut parent_doc, children);
+            // Defer limit/offset to QueryRunner::apply_relation_limits so relation
+            // aggregates (_count/_sum/etc.) and parent ordering can observe the full
+            // ordered child scope, matching the cached TypeJoinMany path.
+            self.merge_children(&mut parent_doc, all_children);
             self.current_doc = parent_doc;
             return Ok(true);
         }

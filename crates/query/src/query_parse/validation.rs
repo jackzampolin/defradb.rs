@@ -21,7 +21,7 @@ pub async fn validate_parsed_operation(
     match op {
         ParsedOperation::Query { selects, .. } => {
             for select in selects {
-                validate_select_collection(select, provider).await?;
+                validate_select_collection(select, provider, "Query").await?;
             }
         }
         ParsedOperation::Mutation { mutations, .. } => {
@@ -30,7 +30,7 @@ pub async fn validate_parsed_operation(
             }
         }
         ParsedOperation::Subscription { select, .. } => {
-            validate_select_collection(select, provider).await?;
+            validate_select_collection(select, provider, "Subscription").await?;
         }
         ParsedOperation::Introspection { .. } => {}
     }
@@ -44,6 +44,7 @@ pub async fn validate_parsed_operation(
 async fn validate_select_collection(
     select: &Select,
     provider: &dyn CollectionProvider,
+    root_type: &str,
 ) -> Result<()> {
     let name = &select.collection_name;
 
@@ -53,11 +54,11 @@ async fn validate_select_collection(
 
     if provider.get_collection(name).await?.is_none() {
         let suggestion = suggest_collection(name, provider).await;
-        let mut msg = format!("Cannot query collection '{}': collection not found", name);
+        let mut msg = format!("Cannot query field \"{}\" on type \"{}\".", name, root_type);
         if let Some(suggested) = suggestion {
-            msg.push_str(&format!(". Did you mean '{}'?", suggested));
+            msg.push_str(&format!(" Did you mean \"{}\"?", suggested));
         }
-        return Err(QueryError::collection_not_found(msg));
+        return Err(QueryError::parse(msg));
     }
 
     Ok(())
@@ -72,17 +73,20 @@ async fn validate_mutation_collection(
 
     if provider.get_collection(name).await?.is_none() {
         let suggestion = suggest_collection(name, provider).await;
-        let op = match mutation.mutation_type {
-            crate::mapper::MutationType::Create => "create documents in",
-            crate::mapper::MutationType::Update => "update documents in",
-            crate::mapper::MutationType::Delete => "delete documents from",
-            crate::mapper::MutationType::Upsert => "upsert documents in",
+        let field_name = match mutation.mutation_type {
+            crate::mapper::MutationType::Create => format!("add_{}", name),
+            crate::mapper::MutationType::Update => format!("update_{}", name),
+            crate::mapper::MutationType::Delete => format!("delete_{}", name),
+            crate::mapper::MutationType::Upsert => format!("upsert_{}", name),
         };
-        let mut msg = format!("Cannot {} collection '{}': collection not found", op, name);
+        let mut msg = format!(
+            "Cannot query field \"{}\" on type \"Mutation\".",
+            field_name
+        );
         if let Some(suggested) = suggestion {
-            msg.push_str(&format!(". Did you mean '{}'?", suggested));
+            msg.push_str(&format!(" Did you mean \"{}\"?", suggested));
         }
-        return Err(QueryError::collection_not_found(msg));
+        return Err(QueryError::parse(msg));
     }
 
     Ok(())
@@ -175,12 +179,9 @@ mod tests {
         let err = validate_parsed_operation(&op, &provider).await.unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Uzr"), "error should contain collection name");
+        assert!(msg.contains("Cannot query field \"Uzr\" on type \"Query\"."));
         assert!(
-            msg.contains("collection not found"),
-            "error should mention not found"
-        );
-        assert!(
-            msg.contains("Did you mean 'User'"),
+            msg.contains("Did you mean \"User\""),
             "error should suggest User, got: {}",
             msg
         );
@@ -219,9 +220,8 @@ mod tests {
         };
         let err = validate_parsed_operation(&op, &provider).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("create documents in"));
-        assert!(msg.contains("Usr"));
-        assert!(msg.contains("Did you mean 'User'"));
+        assert!(msg.contains("Cannot query field \"add_Usr\" on type \"Mutation\"."));
+        assert!(msg.contains("Did you mean \"User\""));
     }
 
     #[tokio::test]

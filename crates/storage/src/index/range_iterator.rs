@@ -430,6 +430,7 @@ mod tests {
             id: 1,
             name: "test_index".to_string(),
             unique: false,
+            auto_generated: false,
             fields: vec![IndexedFieldDescription {
                 name: "age".to_string(),
                 descending: false,
@@ -442,6 +443,7 @@ mod tests {
             id: 2,
             name: "composite_index".to_string(),
             unique: false,
+            auto_generated: false,
             fields: vec![
                 IndexedFieldDescription {
                     name: "category".to_string(),

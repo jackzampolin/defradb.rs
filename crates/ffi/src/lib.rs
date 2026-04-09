@@ -148,7 +148,7 @@ pub use acp::{
 };
 pub use backup::{basic_export, basic_import};
 pub use batch::{batch_sign, batch_start};
-pub use block::block_verify_signature;
+pub use block::{block_verify_signature, block_verify_signature_in_txn};
 pub use collection::{
     add_view, delete_collection, delete_collection_versions, delete_documents,
     find_collection_by_id, gc_downsample_histories, get_collection_by_name,
@@ -160,7 +160,7 @@ pub use encrypted_index::{
     add_encrypted_index, delete_encrypted_index, list_all_encrypted_indexes, list_encrypted_indexes,
 };
 pub use index::{create_index, delete_index, get_indexes, list_all_indexes};
-pub use lens::{lens_add, lens_list};
+pub use lens::{lens_add, lens_add_in_txn, lens_list, lens_list_in_txn};
 pub use mobile::{
     defra_mobile_close_node, defra_mobile_connect, defra_mobile_ensure_schema,
     defra_mobile_execute, defra_mobile_init, defra_mobile_notify_network_change,
@@ -175,7 +175,7 @@ pub use p2p::{
     p2p_sync_collection_versions, p2p_sync_documents,
 };
 pub use query::exec_request;
-pub use schema::{add_schema, get_collections, get_collections_in_txn};
+pub use schema::{add_schema, add_schema_in_txn, get_collections, get_collections_in_txn};
 pub use se_key::set_se_encryption_key;
 pub use subscription::{
     close_graphql_subscription, close_subscription, create_merge_complete_subscription,

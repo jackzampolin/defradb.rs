@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use datastore::NamespaceView;
 use storage::corekv::Store;
 
 use crate::database::DB;
+use crate::txn::DbTxn;
 
 /// Verify the signature of a block.
 ///
@@ -23,18 +25,65 @@ pub async fn verify_block_signature<S: Store>(
     let pub_key = crypto::public_key_from_string(key_type, public_key_hex)
         .map_err(|e| format!("invalid public key: {}", e))?;
 
-    let parsed_cid: cid::Cid = cid_str.parse().map_err(|e| format!("invalid CID: {}", e))?;
-
     let txn = database
         .new_txn(true)
         .await
         .map_err(|e| format!("failed to create transaction: {}", e))?;
+    let blockstore = txn
+        .blockstore()
+        .map_err(|e| format!("failed to get blockstore: {}", e))?;
 
+    verify_block_signature_with_blockstore(
+        database,
+        document_acp,
+        blockstore,
+        cid_str,
+        pub_key.as_ref(),
+        public_key_hex,
+        caller_identity,
+    )
+    .await
+}
+
+pub async fn verify_block_signature_in_txn<S: Store>(
+    database: &Arc<DB<S>>,
+    document_acp: &dyn acp::DocumentACP,
+    txn: &DbTxn<S>,
+    cid_str: &str,
+    public_key_hex: &str,
+    key_type: crypto::KeyType,
+    caller_identity: &acp::Identity,
+) -> Result<(), String> {
+    let pub_key = crypto::public_key_from_string(key_type, public_key_hex)
+        .map_err(|e| format!("invalid public key: {}", e))?;
+
+    let blockstore = txn
+        .blockstore()
+        .map_err(|e| format!("failed to get blockstore: {}", e))?;
+
+    verify_block_signature_with_blockstore(
+        database,
+        document_acp,
+        blockstore,
+        cid_str,
+        pub_key.as_ref(),
+        public_key_hex,
+        caller_identity,
+    )
+    .await
+}
+
+async fn verify_block_signature_with_blockstore<S: Store>(
+    database: &Arc<DB<S>>,
+    document_acp: &dyn acp::DocumentACP,
+    blockstore: NamespaceView,
+    cid_str: &str,
+    pub_key: &dyn crypto::PublicKey,
+    public_key_hex: &str,
+    caller_identity: &acp::Identity,
+) -> Result<(), String> {
+    let parsed_cid: cid::Cid = cid_str.parse().map_err(|e| format!("invalid CID: {}", e))?;
     let (block, signature) = {
-        let blockstore = txn
-            .blockstore()
-            .map_err(|e| format!("failed to get blockstore: {}", e))?;
-
         let block_bytes = blockstore
             .get(&parsed_cid.to_bytes())
             .await
@@ -79,7 +128,6 @@ pub async fn verify_block_signature<S: Store>(
             .map_err(|e| format!("ACP check failed: {}", e))?;
 
             if !has_permission {
-                let _ = txn.discard();
                 return Err("missing permission".to_string());
             }
         }
@@ -88,7 +136,6 @@ pub async fn verify_block_signature<S: Store>(
     // Verify that the identity matches the signature's identity
     let sig_identity = String::from_utf8_lossy(&signature.header.identity);
     if sig_identity.as_ref() != public_key_hex {
-        let _ = txn.discard();
         return Err("signature was created by a different key".to_string());
     }
 
@@ -104,7 +151,6 @@ pub async fn verify_block_signature<S: Store>(
         .map_err(|e| format!("signature verification error: {}", e))?;
 
     if !valid {
-        let _ = txn.discard();
         return Err("signature verification failed".to_string());
     }
 

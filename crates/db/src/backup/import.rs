@@ -1,12 +1,15 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use document::Document;
 use serde_json::Value as JsonValue;
 
 use storage::corekv::Store;
 
-use super::{classify_schema_fields, json_to_graphql_input};
+use super::classify_schema_fields;
 use crate::database::DB;
+use crate::AutoCommitMutator;
+use query::mutator::DocMutator;
 
 /// Statistics from a backup import operation.
 #[derive(Debug, Clone, Default)]
@@ -27,9 +30,9 @@ pub struct ImportStats {
 ///
 /// Self-referencing FK fields are stripped before creation and applied
 /// via update afterward, matching Go DefraDB behavior.
-pub async fn import_database<S: Store>(
+pub async fn import_database<S: Store + 'static>(
     database: &Arc<DB<S>>,
-    runner: &Arc<dyn query::QueryExecutor>,
+    _runner: &Arc<dyn query::QueryExecutor>,
     data: &str,
 ) -> Result<ImportStats, String> {
     let parsed: JsonValue =
@@ -46,6 +49,7 @@ pub async fn import_database<S: Store>(
 
     let mut documents_imported: u64 = 0;
     let mut collections_affected: HashSet<String> = HashSet::new();
+    let mutator = AutoCommitMutator::new(database.clone());
 
     for (collection_name, docs_value) in root {
         let collection = database
@@ -127,71 +131,55 @@ pub async fn import_database<S: Store>(
                 }
             }
 
-            let input = json_to_graphql_input(&JsonValue::Object(doc_map));
-            let mutation = format!(
-                "mutation {{ add_{}(input: {}) {{ _docID }} }}",
-                collection_name, input
-            );
+            let mut doc =
+                Document::from_map(doc_map.clone().into_iter().collect()).map_err(|e| {
+                    format!("failed to create document in '{}': {}", collection_name, e)
+                })?;
+            doc.set_collection(schema.clone());
+            doc.generate_and_set_doc_id().map_err(|e| {
+                format!("failed to create document in '{}': {}", collection_name, e)
+            })?;
 
-            let request = query::QueryRequest::new(mutation);
-            let response = runner.execute(request).await;
-
-            if !response.errors.is_empty() {
-                let errs: Vec<String> = response.errors.iter().map(|e| e.message.clone()).collect();
-                let err_msg = errs.join("; ");
-                if err_msg.contains("already exists") {
-                    return Err("a document with the given ID already exists".to_string());
+            let create_result = mutator.create(collection_name, doc).await;
+            let mut created_doc = match create_result {
+                Ok(result) => result.document,
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if err_msg.contains("already exists") {
+                        return Err("a document with the given ID already exists".to_string());
+                    }
+                    return Err(format!(
+                        "failed to create document in '{}': {}",
+                        collection_name, err_msg
+                    ));
                 }
-                return Err(format!(
-                    "failed to create document in '{}': {}",
-                    collection_name, err_msg
-                ));
-            }
+            };
 
             documents_imported += 1;
             collections_affected.insert(collection_name.clone());
 
             if !self_ref_values.is_empty() {
-                let response_json = serde_json::to_value(&response.data)
-                    .map_err(|e| format!("failed to serialize response: {}", e))?;
-
-                let create_key = format!("add_{}", collection_name);
-                let new_doc_id = response_json
-                    .get(&create_key)
-                    .and_then(|v| v.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|v| v.get("_docID"))
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| "failed to get _docID from create response".to_string())?;
-
-                let mut update_parts = Vec::new();
+                let mut modified_fields = std::collections::HashSet::new();
                 for (fk_name, value) in &self_ref_values {
-                    let val_str = match value.as_str() {
-                        Some(s) => format!("{}: \"{}\"", fk_name, s),
-                        None => format!("{}: {}", fk_name, value),
-                    };
-                    update_parts.push(val_str);
+                    let doc_id = value.as_str().ok_or_else(|| {
+                        format!(
+                            "failed to update self-ref fields in '{}': expected string doc id",
+                            collection_name
+                        )
+                    })?;
+                    created_doc.set(fk_name.clone(), doc_id.to_string());
+                    modified_fields.insert(fk_name.clone());
                 }
 
-                let update_mutation = format!(
-                    "mutation {{ update_{}(docID: \"{}\", input: {{{}}}) {{ _docID }} }}",
-                    collection_name,
-                    new_doc_id,
-                    update_parts.join(", ")
-                );
-
-                let request = query::QueryRequest::new(update_mutation);
-                let response = runner.execute(request).await;
-
-                if !response.errors.is_empty() {
-                    let errs: Vec<String> =
-                        response.errors.iter().map(|e| e.message.clone()).collect();
-                    return Err(format!(
-                        "failed to update self-ref fields in '{}': {}",
-                        collection_name,
-                        errs.join("; ")
-                    ));
-                }
+                mutator
+                    .update(collection_name, created_doc, modified_fields)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "failed to update self-ref fields in '{}': {}",
+                            collection_name, e
+                        )
+                    })?;
             }
         }
     }

@@ -30,6 +30,7 @@ mod branchable;
 mod car;
 mod cbor;
 mod docsync;
+mod identity;
 mod metadata;
 mod pushlog;
 mod se;
@@ -39,6 +40,7 @@ mod traits;
 pub use branchable::{BranchableSyncReply, BranchableSyncRequest};
 pub use car::CarFetchRequest;
 pub use docsync::{DocSyncItem, DocSyncReply, DocSyncRequest, MAX_DOC_IDS};
+pub use identity::{IdentityRequest, IdentityResponse};
 pub use metadata::MetaData;
 pub use pushlog::{PushLogBroadcast, PushLogReply, PushLogRequest};
 pub use se::{

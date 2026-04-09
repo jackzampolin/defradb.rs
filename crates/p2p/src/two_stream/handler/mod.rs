@@ -10,6 +10,7 @@
 mod branchable_se;
 mod car;
 mod doc_sync;
+mod identity;
 mod inbound;
 mod pushlog;
 
@@ -22,10 +23,11 @@ use libp2p_stream as stream;
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
-use crate::message::{PushLogReply, PushLogRequest};
+use crate::message::{IdentityResponse, PushLogReply, PushLogRequest};
 use crate::protocol::{
-    CAR_REQUEST_PROTOCOL, CAR_RESPONSE_PROTOCOL, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL,
-    SE_REQUEST_PROTOCOL, SE_RESPONSE_PROTOCOL,
+    CAR_REQUEST_PROTOCOL, CAR_RESPONSE_PROTOCOL, IDENTITY_REQUEST_PROTOCOL,
+    IDENTITY_RESPONSE_PROTOCOL, REP_REQUEST_PROTOCOL, REP_RESPONSE_PROTOCOL, SE_REQUEST_PROTOCOL,
+    SE_RESPONSE_PROTOCOL,
 };
 
 /// Timeout for waiting for a response.
@@ -36,6 +38,8 @@ pub(super) const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) struct PendingResponses {
     /// Map of MessageID to response channel.
     pub(crate) channels: HashMap<String, oneshot::Sender<PushLogReply>>,
+    /// Map of MessageID to identity response channel.
+    pub(crate) identity_channels: HashMap<String, oneshot::Sender<IdentityResponse>>,
 }
 
 /// Two-stream protocol handler.
@@ -95,10 +99,26 @@ impl TwoStreamHandler {
         StreamProtocol::new(CAR_RESPONSE_PROTOCOL)
     }
 
+    /// Get the identity request protocol.
+    pub fn identity_request_protocol() -> StreamProtocol {
+        StreamProtocol::new(IDENTITY_REQUEST_PROTOCOL)
+    }
+
+    /// Get the identity response protocol.
+    pub fn identity_response_protocol() -> StreamProtocol {
+        StreamProtocol::new(IDENTITY_RESPONSE_PROTOCOL)
+    }
+
     /// Clean up a pending response channel (used on timeout or cancellation).
     pub fn cleanup_pending(&self, message_id: &str) {
         let mut pending = self.pending.lock();
         pending.channels.remove(message_id);
+    }
+
+    /// Clean up a pending identity response channel (used on timeout or cancellation).
+    pub fn cleanup_pending_identity(&self, message_id: &str) {
+        let mut pending = self.pending.lock();
+        pending.identity_channels.remove(message_id);
     }
 
     /// Create a success reply for a request.

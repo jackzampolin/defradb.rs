@@ -155,6 +155,58 @@ async fn test_two_stream_non_replicator_is_not_marked_explicit() {
 }
 
 #[tokio::test]
+async fn test_identity_protocol_roundtrip_returns_defra_identity() {
+    let store0 = MockBitswapStore::new();
+    let store1 = MockBitswapStore::new();
+    let node_identity0 = std::sync::Arc::new(authorizer_identity());
+    let node_identity1 = std::sync::Arc::new(authorizer_identity());
+    let (host0, handle0, _events0, _replicators0) = P2PHost::with_keypair_and_config_and_identity(
+        libp2p::identity::Keypair::generate_ed25519(),
+        store0,
+        p2p::P2PHostConfig::default(),
+        Some(node_identity0),
+    )
+    .await
+    .unwrap();
+    let (host1, handle1, _events1, _replicators1) = P2PHost::with_keypair_and_config_and_identity(
+        libp2p::identity::Keypair::generate_ed25519(),
+        store1,
+        p2p::P2PHostConfig::default(),
+        Some(node_identity1.clone()),
+    )
+    .await
+    .unwrap();
+
+    tokio::spawn(host0.run());
+    tokio::spawn(host1.run());
+
+    handle1
+        .listen("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr1 = handle1.listen_addresses().await.unwrap().remove(0);
+    let peer1 = handle1.local_peer_id_cached();
+    let peer0 = handle0.local_peer_id_cached();
+
+    handle0.dial(peer1, vec![addr1]).await.unwrap();
+    wait_until_connected(&handle0, peer1).await;
+    wait_until_connected(&handle1, peer0).await;
+
+    let peer_identity = timeout(Duration::from_secs(5), handle0.get_peer_identity(peer1))
+        .await
+        .expect("timed out waiting for identity reply")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        peer_identity.to_string(),
+        node_identity1.did().unwrap().to_string()
+    );
+
+    handle0.shutdown().await.unwrap();
+    handle1.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_two_stream_registered_replicator_without_capability_is_not_marked_explicit() {
     let store0 = MockBitswapStore::new();
     let store1 = MockBitswapStore::new();

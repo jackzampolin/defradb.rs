@@ -20,6 +20,7 @@ fn simple_index_description() -> IndexDescription {
         id: 1,
         name: "test_simple_index".to_string(),
         unique: false,
+        auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: "name".to_string(),
             descending: false,
@@ -32,6 +33,7 @@ fn unique_index_description() -> IndexDescription {
         id: 1,
         name: "test_unique_index".to_string(),
         unique: true,
+        auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: "email".to_string(),
             descending: false,
@@ -44,6 +46,7 @@ fn composite_index_description(unique: bool) -> IndexDescription {
         id: 2,
         name: "test_composite_index".to_string(),
         unique,
+        auto_generated: false,
         fields: vec![
             IndexedFieldDescription {
                 name: "category".to_string(),

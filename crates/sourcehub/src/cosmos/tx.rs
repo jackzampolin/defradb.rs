@@ -1,8 +1,18 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
 use cosmrs::crypto::secp256k1::SigningKey;
 use cosmrs::tx::{Body, Fee, SignDoc, SignerInfo};
 use cosmrs::{AccountId, Any, Coin};
+use tokio::sync::Mutex as AsyncMutex;
 
 use super::client::SourceHubClient;
+
+#[derive(Default)]
+struct SequenceState {
+    account_number: Option<u64>,
+    next_sequence: Option<u64>,
+}
 
 /// Transaction signer for SourceHub (Cosmos SDK).
 ///
@@ -16,6 +26,8 @@ pub(crate) struct TxSigner {
 }
 
 impl TxSigner {
+    const MAX_SEQUENCE_RETRIES: usize = 3;
+
     /// Create a signer from raw secp256k1 private key bytes.
     pub(crate) fn from_secp256k1_bytes(
         key_bytes: &[u8],
@@ -116,17 +128,8 @@ impl TxSigner {
         client: &SourceHubClient,
         messages: Vec<Any>,
     ) -> Result<String, TxSignerError> {
-        let (account_number, sequence) = client
-            .query_account(&self.address())
-            .await
-            .map_err(|e| TxSignerError::Broadcast(format!("account query: {}", e)))?;
-
-        tracing::debug!(
-            msg_count = messages.len(),
-            account_number,
-            sequence,
-            "sign_and_broadcast"
-        );
+        let sequence_state = sequence_state(client, &self.address());
+        let mut state = sequence_state.lock().await;
 
         let body = Body::new(messages, "", 0u32);
 
@@ -138,27 +141,125 @@ impl TxSigner {
             400_000u64,
         );
 
-        let auth_info =
-            SignerInfo::single_direct(Some(self.signing_key.public_key()), sequence).auth_info(fee);
+        let mut last_error = None;
 
-        let sign_doc = SignDoc::new(&body, &auth_info, &self.chain_id, account_number)
-            .map_err(|e| TxSignerError::Sign(format!("SignDoc creation: {}", e)))?;
+        for attempt in 0..Self::MAX_SEQUENCE_RETRIES {
+            let (account_number, sequence) = if let (Some(account_number), Some(sequence)) =
+                (state.account_number, state.next_sequence)
+            {
+                (account_number, sequence)
+            } else {
+                let (account_number, sequence) = client
+                    .query_account(&self.address())
+                    .await
+                    .map_err(|e| TxSignerError::Broadcast(format!("account query: {}", e)))?;
+                state.account_number = Some(account_number);
+                state.next_sequence = Some(sequence);
+                (account_number, sequence)
+            };
 
-        let tx_raw = sign_doc
-            .sign(&self.signing_key)
-            .map_err(|e| TxSignerError::Sign(format!("signing: {}", e)))?;
+            tracing::debug!(
+                msg_count = body.messages.len(),
+                account_number,
+                sequence,
+                attempt,
+                "sign_and_broadcast"
+            );
 
-        let tx_bytes = tx_raw
-            .to_bytes()
-            .map_err(|e| TxSignerError::Sign(format!("tx serialization: {}", e)))?;
+            let auth_info =
+                SignerInfo::single_direct(Some(self.signing_key.public_key()), sequence)
+                    .auth_info(fee.clone());
 
-        tracing::debug!(tx_bytes_len = tx_bytes.len(), "transaction serialized");
+            let sign_doc = SignDoc::new(&body, &auth_info, &self.chain_id, account_number)
+                .map_err(|e| TxSignerError::Sign(format!("SignDoc creation: {}", e)))?;
 
-        client
-            .broadcast_tx_sync(&tx_bytes)
-            .await
-            .map_err(|e| TxSignerError::Broadcast(e.to_string()))
+            let tx_raw = sign_doc
+                .sign(&self.signing_key)
+                .map_err(|e| TxSignerError::Sign(format!("signing: {}", e)))?;
+
+            let tx_bytes = tx_raw
+                .to_bytes()
+                .map_err(|e| TxSignerError::Sign(format!("tx serialization: {}", e)))?;
+
+            tracing::debug!(
+                tx_bytes_len = tx_bytes.len(),
+                attempt,
+                "transaction serialized"
+            );
+
+            match client.broadcast_tx_sync(&tx_bytes).await {
+                Ok(hash) => {
+                    state.account_number = Some(account_number);
+                    state.next_sequence = Some(sequence + 1);
+                    return Ok(hash);
+                }
+                Err(e) if is_sequence_mismatch(&e) && attempt + 1 < Self::MAX_SEQUENCE_RETRIES => {
+                    tracing::warn!(
+                        attempt,
+                        error = %e,
+                        "retrying SourceHub tx after account sequence mismatch"
+                    );
+                    let (account_number, queried_sequence) = client
+                        .query_account(&self.address())
+                        .await
+                        .map_err(|query_error| {
+                            TxSignerError::Broadcast(format!("account query: {}", query_error))
+                        })?;
+                    let next_sequence = expected_sequence_from_error(&e)
+                        .unwrap_or_else(|| std::cmp::max(sequence + 1, queried_sequence));
+                    state.account_number = Some(account_number);
+                    state.next_sequence = Some(next_sequence);
+                    last_error = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                Err(e) => return Err(TxSignerError::Broadcast(e.to_string())),
+            }
+        }
+
+        Err(TxSignerError::Broadcast(
+            last_error
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "transaction broadcast failed".to_string()),
+        ))
     }
+}
+
+fn is_sequence_mismatch(error: &super::client::ClientError) -> bool {
+    match error {
+        super::client::ClientError::TxFailed(message) => {
+            message.contains("incorrect account sequence")
+                || message.contains("account sequence mismatch")
+                || message.contains("code=32")
+        }
+        _ => false,
+    }
+}
+
+fn expected_sequence_from_error(error: &super::client::ClientError) -> Option<u64> {
+    let super::client::ClientError::TxFailed(message) = error else {
+        return None;
+    };
+
+    let expected_idx = message.find("expected ")?;
+    let rest = &message[expected_idx + "expected ".len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
+}
+
+fn sequence_state(client: &SourceHubClient, address: &str) -> Arc<AsyncMutex<SequenceState>> {
+    static STATES: OnceLock<Mutex<HashMap<String, Arc<AsyncMutex<SequenceState>>>>> =
+        OnceLock::new();
+
+    let states = STATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = states.lock().expect("sequence state map poisoned");
+    guard
+        .entry(client.sequence_cache_key(address))
+        .or_insert_with(|| Arc::new(AsyncMutex::new(SequenceState::default())))
+        .clone()
 }
 
 // === SourceHub-specific message builders ===

@@ -1,8 +1,10 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use acp::DocumentACP;
+use acp::{DocumentACP, DocumentPermission, Identity};
 use async_trait::async_trait;
 use cid::Cid;
+use identity::Identity as _;
 use p2p::sync::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
 use schema::CollectionVersion;
 use storage::corekv::Store;
@@ -37,17 +39,26 @@ impl CompositePostCommitAction for RegisterReplicatedDocAction {
 
 struct AcpCompositeMergeHook {
     document_acp: std::sync::OnceLock<Arc<dyn DocumentACP>>,
+    local_identity: Option<Identity>,
+    strict_replicated_doc_access: AtomicBool,
 }
 
 impl AcpCompositeMergeHook {
-    fn new() -> Self {
+    fn new(local_identity: Option<Identity>) -> Self {
         Self {
             document_acp: std::sync::OnceLock::new(),
+            local_identity,
+            strict_replicated_doc_access: AtomicBool::new(false),
         }
     }
 
     fn set_document_acp(&self, acp: Arc<dyn DocumentACP>) {
         let _ = self.document_acp.set(acp);
+    }
+
+    fn set_strict_replicated_doc_access(&self, strict: bool) {
+        self.strict_replicated_doc_access
+            .store(strict, Ordering::Relaxed);
     }
 
     fn document_acp(&self) -> Option<&Arc<dyn DocumentACP>> {
@@ -57,6 +68,60 @@ impl AcpCompositeMergeHook {
 
 #[async_trait]
 impl CompositeMergeHook for AcpCompositeMergeHook {
+    async fn on_protected_composite(
+        &self,
+        doc_id: &str,
+        collection: &CollectionVersion,
+        metadata: &BlockMetadata<'_>,
+    ) -> Result<Option<MergeOutcome>, MergeError> {
+        let Some(acp) = self.document_acp() else {
+            return Ok(None);
+        };
+        let Some(policy) = &collection.policy else {
+            return Ok(None);
+        };
+        if !self.strict_replicated_doc_access.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        if metadata.allows_explicit_replay_for(&collection.collection_id) {
+            return Ok(None);
+        }
+        let Some(identity) = self.local_identity.as_ref() else {
+            return Ok(None);
+        };
+
+        let is_registered = acp
+            .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
+            .await
+            .map_err(|e| {
+                MergeError::MergeFailed(format!("ACP registration lookup failed: {}", e))
+            })?;
+        if !is_registered {
+            return Ok(Some(MergeOutcome::retryable_skip(
+                "replicated protected document is not yet registered in local ACP",
+            )));
+        }
+
+        let has_access = acp
+            .check_doc_access(
+                identity,
+                DocumentPermission::Read,
+                &policy.id,
+                &policy.resource_name,
+                doc_id,
+            )
+            .await
+            .map_err(|e| MergeError::MergeFailed(format!("ACP access check failed: {}", e)))?;
+
+        if has_access {
+            return Ok(None);
+        }
+
+        Ok(Some(MergeOutcome::retryable_skip(
+            "replicated protected document is not yet readable by local node",
+        )))
+    }
+
     async fn on_encrypted_link(
         &self,
         doc_id: &str,
@@ -131,7 +196,11 @@ pub struct AcpMergeHandler<S: Store, B: blockstore::Blockstore> {
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> AcpMergeHandler<S, B> {
     pub fn new(inner: Arc<DbMergeHandler<S, B>>) -> Self {
-        let hook = Arc::new(AcpCompositeMergeHook::new());
+        let local_identity = inner
+            .db
+            .node_identity()
+            .and_then(|identity| identity.did().ok().map(Identity::from));
+        let hook = Arc::new(AcpCompositeMergeHook::new(local_identity));
         inner.set_composite_merge_hook(hook.clone());
         Self { inner, hook }
     }
@@ -143,6 +212,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> AcpMergeHandler<S, B> {
 
     pub fn set_document_acp(&self, acp: Arc<dyn DocumentACP>) {
         self.hook.set_document_acp(acp);
+    }
+
+    pub fn set_strict_replicated_doc_access(&self, strict: bool) {
+        self.hook.set_strict_replicated_doc_access(strict);
     }
 
     pub fn inner(&self) -> &Arc<DbMergeHandler<S, B>> {

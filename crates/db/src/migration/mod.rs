@@ -11,7 +11,7 @@ mod set_migration;
 use std::sync::Arc;
 
 use lens::{LensConfig, TransformId, TransformStore};
-use storage::corekv::{IterOptions, Store};
+use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::LensConfigKey;
 
 use crate::error::{Error, Result};
@@ -38,6 +38,7 @@ impl<S: Store> DB<S> {
     /// and stored in the blockstore. The root CID of this DAG becomes the transform ID,
     /// which is a valid IPLD CID that peers can fetch during version sync.
     pub async fn add_lens(&self, config: LensConfig) -> Result<TransformId> {
+        let config_for_persistence = config.clone();
         let first_lens = config
             .lens()
             .ok_or_else(|| Error::Lens("lens config has no modules".into()))?;
@@ -45,7 +46,8 @@ impl<S: Store> DB<S> {
         let wasm_bytes = if let Some(ref bytes) = first_lens.module {
             bytes.clone()
         } else if let Some(ref path) = first_lens.path {
-            tokio::fs::read(path)
+            let clean_path = path.strip_prefix("file://").unwrap_or(path);
+            tokio::fs::read(clean_path)
                 .await
                 .map_err(|e| Error::Lens(format!("failed to read WASM from {}: {}", path, e)))?
         } else {
@@ -76,6 +78,16 @@ impl<S: Store> DB<S> {
                     .await
                     .map_err(Error::Storage)?;
             }
+
+            let systemstore = txn.systemstore()?;
+            let lens_key = LensConfigKey::new(config_cid.to_string());
+            let lens_data = serde_json::to_vec(&config_for_persistence).map_err(|e| {
+                Error::Serialization(format!("failed to serialize lens config: {}", e))
+            })?;
+            systemstore
+                .set(&lens_key.bytes(), &lens_data)
+                .await
+                .map_err(Error::Storage)?;
         }
         txn.commit().await?;
 

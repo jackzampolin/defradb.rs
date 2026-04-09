@@ -8,8 +8,8 @@ use tracing::debug;
 use crate::error::{Error, Result};
 use crate::host::ResponseChannel;
 use crate::message::{
-    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogReply,
-    PushLogRequest, PushSEArtifactsRequest,
+    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, IdentityRequest,
+    PushLogReply, PushLogRequest, PushSEArtifactsRequest,
 };
 
 use super::super::p2p_host::P2PHost;
@@ -221,6 +221,58 @@ impl<S: Store> P2PHost<S> {
             let result = h.send_car_response(peer_id, car_data).await;
             if response.send(result).is_err() {
                 debug!(peer_id = %peer_id, "SendCarResponse command response dropped");
+            }
+        });
+    }
+
+    pub(super) fn handle_get_peer_identity(
+        &mut self,
+        peer_id: PeerId,
+        response: tokio::sync::oneshot::Sender<Result<Option<identity::Did>>>,
+    ) {
+        if let Some(identity) = self.peer_identities.get(&peer_id).cloned() {
+            let _ = response.send(Ok(Some(identity)));
+            return;
+        }
+
+        let local_peer_id = self.swarm.local_peer_id().to_string();
+        let keypair = self.keypair.clone();
+        let handler = self.two_stream_handler.clone();
+        self.spawned_tasks.spawn(async move {
+            let mut request = IdentityRequest::new(local_peer_id.clone());
+            let result = match crate::signing::sign_message(&keypair, &mut request) {
+                Ok(()) => {
+                    let mut h = handler.lock().await;
+                    h.send_identity_request(peer_id, request).await
+                }
+                Err(error) => Err(crate::error::Error::Transport(format!(
+                    "failed to sign identity request: {error}"
+                ))),
+            };
+
+            let result = result.and_then(|reply| {
+                if let Some(error) = reply.err_message.clone() {
+                    return Err(crate::error::Error::Transport(error));
+                }
+                let token_identity = identity::from_token(&reply.identity_token)
+                    .map_err(|e| {
+                        crate::error::Error::Transport(format!(
+                            "invalid peer identity token: {e}"
+                        ))
+                    })?;
+                identity::verify_auth_token(&token_identity, &local_peer_id).map_err(|e| {
+                    crate::error::Error::Transport(format!(
+                        "peer identity token verification failed: {e}"
+                    ))
+                })?;
+                let did = identity::Identity::did(&token_identity).map_err(|e| {
+                    crate::error::Error::Transport(format!("failed to extract peer DID: {e}"))
+                })?;
+                Ok(Some(did))
+            });
+
+            if response.send(result).is_err() {
+                debug!(peer_id = %peer_id, "GetPeerIdentity command response dropped - caller cancelled");
             }
         });
     }

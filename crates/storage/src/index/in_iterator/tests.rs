@@ -9,6 +9,7 @@ fn test_index_description(unique: bool) -> IndexDescription {
         id: 1,
         name: "test_index".to_string(),
         unique,
+        auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: "name".to_string(),
             descending: false,
@@ -297,6 +298,7 @@ async fn test_in_iterator_integer_values() {
         id: 1,
         name: "age_index".to_string(),
         unique: false,
+        auto_generated: false,
         fields: vec![IndexedFieldDescription {
             name: "age".to_string(),
             descending: false,

@@ -165,6 +165,26 @@ pub(super) fn parse_order_condition(
                 ));
             }
             let (nested_field, nested_direction) = nested_obj.iter().next().unwrap();
+            if field_name == "_alias" {
+                match nested_direction {
+                    Value::Enum(s) | Value::String(s) if OrderDirection::parse(s).is_none() => {
+                        return Err(QueryError::parse(format!("invalid order direction: {}", s)));
+                    }
+                    Value::Variable(name) => {
+                        if let Some(vars) = variables {
+                            if let Some(s) = vars.get(name).and_then(|v| v.as_str()) {
+                                if OrderDirection::parse(s).is_none() {
+                                    return Err(QueryError::parse(format!(
+                                        "invalid order direction: {}",
+                                        s
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             let nested_condition =
                 parse_order_condition(nested_field.clone(), nested_direction, variables)?;
             // If nested condition is None (null value), propagate the None

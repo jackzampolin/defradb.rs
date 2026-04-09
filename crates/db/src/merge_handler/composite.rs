@@ -78,6 +78,17 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             return Err(MergeError::depth_exceeded(cid, depth));
         }
 
+        {
+            let merged = self.merged_composites.lock().unwrap_or_else(|e| {
+                tracing::warn!("merged_composites lock poisoned, recovering");
+                e.into_inner()
+            });
+            if merged.contains(cid) {
+                tracing::debug!(cid = %cid, "Composite already merged, skipping");
+                return Ok(MergeOutcome::terminal_skip("already merged"));
+            }
+        }
+
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
 
         tracing::info!(
@@ -113,6 +124,15 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     "Skipping replicated write into local-only downsample source"
                 );
                 return Ok(MergeOutcome::terminal_skip(reason));
+            }
+
+            if let Some(hook) = self.composite_merge_hook() {
+                if let Some(outcome) = hook
+                    .on_protected_composite(&doc_id_str, collection.schema(), metadata)
+                    .await?
+                {
+                    return Ok(outcome);
+                }
             }
         }
 
@@ -214,9 +234,16 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     return Err(MergeError::Database(e));
                 }
             };
+            let headstore = match txn.headstore() {
+                Ok(headstore) => headstore,
+                Err(e) => {
+                    let _ = txn.force_discard();
+                    return Err(MergeError::Database(e));
+                }
+            };
 
             match self
-                .process_linked_field_blocks(&mut datastore, &context, &mut state)
+                .process_linked_field_blocks(&mut datastore, &headstore, &context, &mut state)
                 .await?
             {
                 Some(outcome) => Ok(Some(outcome)),
@@ -231,6 +258,20 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         match process_result {
             Ok(Some(outcome)) => {
                 txn.force_discard()?;
+                if outcome.is_terminal_skip() && !from_collection {
+                    if let Some(bus) = self.db.event_bus() {
+                        let merge_complete = MergeCompleteData {
+                            doc_id: doc_id_str.clone(),
+                            cid: *cid,
+                            collection_id: metadata
+                                .collection_id
+                                .unwrap_or(&payload.schema_version_id)
+                                .to_string(),
+                            by_peer: metadata.sender_peer.unwrap_or("").to_string(),
+                        };
+                        bus.publish(Message::merge_complete(merge_complete));
+                    }
+                }
                 Ok(outcome)
             }
             Ok(None) => {
@@ -344,12 +385,34 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         metadata: &BlockMetadata<'_>,
         from_collection: bool,
         batch_merged: &std::sync::Mutex<HashSet<Cid>>,
+        _batch_merged_collections: &std::sync::Mutex<HashSet<Cid>>,
         pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
         pending_post_commit_actions: &std::sync::Mutex<Vec<PendingPostCommitAction>>,
         depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
         if depth >= super::MAX_MERGE_DEPTH {
             return Err(MergeError::depth_exceeded(cid, depth));
+        }
+
+        {
+            let merged = self.merged_composites.lock().unwrap_or_else(|e| {
+                tracing::warn!("merged_composites lock poisoned, recovering");
+                e.into_inner()
+            });
+            if merged.contains(cid) {
+                tracing::debug!(cid = %cid, "Composite already merged in permanent dedup set, skipping");
+                return Ok(MergeOutcome::terminal_skip("already merged"));
+            }
+        }
+        {
+            let batch_merged_guard = batch_merged.lock().unwrap_or_else(|e| {
+                tracing::warn!("batch_merged lock poisoned, recovering");
+                e.into_inner()
+            });
+            if batch_merged_guard.contains(cid) {
+                tracing::debug!(cid = %cid, "Composite already merged in batch dedup set, skipping");
+                return Ok(MergeOutcome::terminal_skip("already merged"));
+            }
         }
 
         let doc_id_str = String::from_utf8_lossy(&payload.doc_id).to_string();
@@ -384,6 +447,15 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     "Skipping replicated write into local-only downsample source"
                 );
                 return Ok(MergeOutcome::terminal_skip(reason));
+            }
+
+            if let Some(hook) = self.composite_merge_hook() {
+                if let Some(outcome) = hook
+                    .on_protected_composite(&doc_id_str, collection.schema(), metadata)
+                    .await?
+                {
+                    return Ok(outcome);
+                }
             }
         }
 
@@ -428,6 +500,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         metadata,
                         from_collection,
                         batch_merged,
+                        _batch_merged_collections,
                         pending_events,
                         pending_post_commit_actions,
                         depth + 1,
@@ -458,7 +531,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             let mut datastore = datastore.clone();
 
             match self
-                .process_linked_field_blocks(&mut datastore, &context, &mut state)
+                .process_linked_field_blocks(&mut datastore, headstore, &context, &mut state)
                 .await?
             {
                 Some(outcome) => Ok(Some(outcome)),
@@ -471,7 +544,29 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         };
 
         match process_result {
-            Ok(Some(outcome)) => Ok(outcome),
+            Ok(Some(outcome)) => {
+                if outcome.is_terminal_skip() && !from_collection {
+                    let merge_complete = MergeCompleteData {
+                        doc_id: doc_id_str.clone(),
+                        cid: *cid,
+                        collection_id: metadata
+                            .collection_id
+                            .unwrap_or(&payload.schema_version_id)
+                            .to_string(),
+                        by_peer: metadata.sender_peer.unwrap_or("").to_string(),
+                    };
+                    pending_events
+                        .lock()
+                        .unwrap_or_else(|e| {
+                            tracing::warn!("pending_events lock poisoned, recovering");
+                            e.into_inner()
+                        })
+                        .push(PendingMergeEvent {
+                            message: Message::merge_complete(merge_complete),
+                        });
+                }
+                Ok(outcome)
+            }
             Ok(None) => {
                 self.update_heads(headstore, &context, &state).await;
 

@@ -32,7 +32,11 @@ pub enum SyncEvent {
     },
 
     /// A block was already merged (received duplicate).
-    BlockAlreadyMerged { cid: Cid },
+    BlockAlreadyMerged {
+        cid: Cid,
+        doc_id: String,
+        collection_id: String,
+    },
 
     /// Failed to process a sync request.
     SyncError { cid: Cid, error: String },

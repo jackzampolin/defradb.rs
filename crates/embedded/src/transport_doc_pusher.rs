@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use cid::Cid;
 use p2p::transport::PeerId;
 use p2p::P2PTransport;
 
@@ -20,6 +21,8 @@ pub trait TransportDocPusher: Send + Sync {
         doc_id: &str,
         collection_id: &str,
     ) -> Result<(), String>;
+
+    async fn load_document_head_blocks(&self, doc_id: &str) -> Result<Vec<(Cid, Vec<u8>)>, String>;
 
     fn get_collection_id(&self, name: &str) -> Option<String>;
 
@@ -102,6 +105,35 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             collection_id,
         )
         .await
+    }
+
+    async fn load_document_head_blocks(&self, doc_id: &str) -> Result<Vec<(Cid, Vec<u8>)>, String> {
+        let provider = db::DbHeadProvider::new(self.db.clone());
+        let heads = <db::DbHeadProvider<S> as p2p::sync::DocumentHeadProvider>::get_document_heads(
+            &provider, doc_id,
+        )
+        .await
+        .map_err(|error| format!("failed to load document heads: {error}"))?;
+
+        let txn = self
+            .db
+            .new_txn(true)
+            .await
+            .map_err(|error| format!("failed to create read transaction: {error}"))?;
+        let blockstore = txn
+            .blockstore()
+            .map_err(|error| format!("failed to get blockstore: {error}"))?;
+
+        let mut blocks = Vec::with_capacity(heads.len());
+        for cid in heads {
+            let bytes = blockstore
+                .get(&cid.to_bytes())
+                .await
+                .map_err(|error| format!("failed to read head block {cid}: {error}"))?
+                .ok_or_else(|| format!("head block {cid} not found"))?;
+            blocks.push((cid, bytes));
+        }
+        Ok(blocks)
     }
 
     fn get_collection_id(&self, name: &str) -> Option<String> {

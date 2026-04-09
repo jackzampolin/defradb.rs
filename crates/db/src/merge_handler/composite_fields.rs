@@ -11,6 +11,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     pub(crate) async fn process_linked_field_blocks(
         &self,
         datastore: &mut NamespaceView,
+        headstore: &NamespaceView,
         context: &CompositeMergeContext<'_, '_>,
         state: &mut CompositeMergeState,
     ) -> std::result::Result<Option<MergeOutcome>, MergeError> {
@@ -25,7 +26,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
             for dag_link in links {
                 if let Some(outcome) = self
-                    .process_field_block(datastore, context, dag_link, state)
+                    .process_field_block(datastore, headstore, context, dag_link, state)
                     .await?
                 {
                     return Ok(Some(outcome));
@@ -39,6 +40,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     async fn process_field_block(
         &self,
         datastore: &mut NamespaceView,
+        headstore: &NamespaceView,
         context: &CompositeMergeContext<'_, '_>,
         dag_link: &defra_core::block::DAGLink,
         state: &mut CompositeMergeState,
@@ -104,7 +106,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         match &effective_linked_delta {
             CrdtDelta::Lww(lww_payload) => {
                 let result = self
-                    .process_lww_delta_in_txn(datastore, link_cid, lww_payload)
+                    .process_lww_delta_in_txn(
+                        datastore,
+                        headstore,
+                        link_cid,
+                        lww_payload,
+                        context.metadata.collection_id,
+                    )
                     .await?;
                 if result.applied {
                     state.any_field_applied = true;

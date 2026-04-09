@@ -75,6 +75,17 @@ impl NodeRegistry {
         nodes.len()
     }
 
+    /// Apply a mutable operation to every node state in the registry.
+    pub fn for_each_mut<F>(&self, mut f: F)
+    where
+        F: FnMut(&mut NodeState),
+    {
+        let mut nodes = self.nodes.write();
+        for state in nodes.values_mut() {
+            f(state);
+        }
+    }
+
     /// Check if the registry is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -258,6 +269,13 @@ impl NodesAccess {
         F: FnOnce(&mut NodeState) -> R,
     {
         nodes().get_mut(handle, f)
+    }
+
+    pub fn for_each_mut<F>(&self, f: F)
+    where
+        F: FnMut(&mut NodeState),
+    {
+        nodes().for_each_mut(f)
     }
 
     pub fn remove(&self, handle: NodeHandle) -> Option<NodeState> {

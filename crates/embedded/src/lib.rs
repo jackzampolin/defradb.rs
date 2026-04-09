@@ -55,6 +55,7 @@ pub trait P2POperations: Send + Sync {
     async fn get_documents(&self) -> Result<Vec<P2pDocumentInfo>, String>;
     async fn add_documents(&self, docs: Vec<P2pDocumentRequest>) -> Result<(), String>;
     async fn remove_documents(&self, docs: Vec<P2pDocumentRequest>) -> Result<(), String>;
+    async fn republish_document(&self, collection_name: &str, doc_id: &str) -> Result<(), String>;
     async fn sync_documents(
         &self,
         collection_name: &str,

@@ -184,6 +184,8 @@ where
 
             ReplicationResult::Skipped {
                 cid,
+                doc_id: doc_id_for_result,
+                collection_id: collection_id_for_result,
                 reason,
                 terminal,
             }
@@ -338,6 +340,8 @@ where
                 }
                 results.push(ReplicationResult::Skipped {
                     cid: block.cid,
+                    doc_id: block.doc_id.clone(),
+                    collection_id: block.collection_id.clone(),
                     reason,
                     terminal,
                 });
@@ -414,8 +418,14 @@ where
             )
             .await
         }
-        SyncEvent::BlockAlreadyMerged { cid } => ReplicationResult::Skipped {
+        SyncEvent::BlockAlreadyMerged {
             cid,
+            doc_id,
+            collection_id,
+        } => ReplicationResult::Skipped {
+            cid,
+            doc_id,
+            collection_id,
             reason: "already merged".to_string(),
             terminal: true,
         },

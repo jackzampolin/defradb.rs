@@ -202,6 +202,7 @@ mod tests {
             id: 1,
             name: "test_index".to_string(),
             unique,
+            auto_generated: false,
             fields: vec![IndexedFieldDescription {
                 name: "name".to_string(),
                 descending: false,

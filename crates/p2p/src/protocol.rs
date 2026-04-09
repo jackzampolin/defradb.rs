@@ -55,6 +55,12 @@ pub const CAR_REQUEST_PROTOCOL: &str = "/defradb/car_req/0.0.1";
 /// CAR (Content ARchive) response protocol ID.
 pub const CAR_RESPONSE_PROTOCOL: &str = "/defradb/car_resp/0.0.1";
 
+/// Identity request protocol ID.
+pub const IDENTITY_REQUEST_PROTOCOL: &str = "/defradb/ident_req/0.0.1";
+
+/// Identity response protocol ID.
+pub const IDENTITY_RESPONSE_PROTOCOL: &str = "/defradb/ident_resp/0.0.1";
+
 /// StreamProtocol for the SE request protocol.
 pub fn se_request_protocol() -> StreamProtocol {
     StreamProtocol::new(SE_REQUEST_PROTOCOL)
@@ -73,6 +79,16 @@ pub fn car_request_protocol() -> StreamProtocol {
 /// StreamProtocol for the CAR response protocol.
 pub fn car_response_protocol() -> StreamProtocol {
     StreamProtocol::new(CAR_RESPONSE_PROTOCOL)
+}
+
+/// StreamProtocol for the identity request protocol.
+pub fn identity_request_protocol() -> StreamProtocol {
+    StreamProtocol::new(IDENTITY_REQUEST_PROTOCOL)
+}
+
+/// StreamProtocol for the identity response protocol.
+pub fn identity_response_protocol() -> StreamProtocol {
+    StreamProtocol::new(IDENTITY_RESPONSE_PROTOCOL)
 }
 
 // Legacy aliases for backwards compatibility with existing code

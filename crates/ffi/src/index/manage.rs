@@ -9,6 +9,47 @@ use crate::nac_check::check_nac_for_node;
 use crate::types::FfiResult;
 use crate::{ffi_async, ffi_entry, try_ffi};
 
+fn visible_indexes(collection: &db::Collection) -> Vec<schema::IndexDescription> {
+    collection
+        .get_indexes()
+        .iter()
+        .filter(|index| !is_hidden_auto_relation_index(collection, index))
+        .cloned()
+        .collect()
+}
+
+fn is_hidden_auto_relation_index(
+    collection: &db::Collection,
+    index: &schema::IndexDescription,
+) -> bool {
+    if index.unique || index.fields.len() != 1 {
+        return false;
+    }
+
+    let field_name = &index.fields[0].name;
+    let Some(stripped_name) = field_name
+        .strip_prefix('_')
+        .and_then(|name| name.strip_suffix("ID"))
+    else {
+        return false;
+    };
+
+    let expected_name = format!("{}__{}ID_ASC", collection.name(), stripped_name);
+    if index.name != expected_name {
+        return false;
+    }
+
+    collection.schema().fields.iter().any(|field| {
+        field.name == *field_name
+            && field.relation_name.is_some()
+            && field.is_primary
+            && matches!(
+                field.kind,
+                schema::FieldKind::Scalar(schema::ScalarKind::DocID)
+            )
+    })
+}
+
 /// Delete an index from a collection.
 ///
 /// # Arguments
@@ -166,7 +207,7 @@ pub unsafe extern "C" fn get_indexes(
                 .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
 
             // Get indexes from the collection schema
-            let indexes = collection.get_indexes();
+            let indexes = visible_indexes(&collection);
 
             // Return JSON array
             let json = serde_json::to_string(&indexes)
@@ -218,9 +259,9 @@ pub unsafe extern "C" fn list_all_indexes(
             for name in names {
                 match database.get_collection(&name) {
                     Ok(Some(collection)) => {
-                        let indexes = collection.get_indexes();
+                        let indexes = visible_indexes(&collection);
                         if !indexes.is_empty() {
-                            all_indexes.insert(name, indexes.to_vec());
+                            all_indexes.insert(name, indexes);
                         }
                     }
                     Ok(None) => continue,

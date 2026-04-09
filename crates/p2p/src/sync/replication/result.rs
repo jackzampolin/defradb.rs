@@ -24,6 +24,8 @@ pub enum ReplicationResult {
     /// Block was skipped (already applied or rejected)
     Skipped {
         cid: Cid,
+        doc_id: String,
+        collection_id: String,
         reason: String,
         terminal: bool,
     },

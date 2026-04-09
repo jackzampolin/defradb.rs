@@ -199,6 +199,12 @@ pub enum HostCommand {
         response: oneshot::Sender<Result<()>>,
     },
 
+    /// Resolve a peer's DEFRA identity through the Go-compatible identity protocol.
+    GetPeerIdentity {
+        peer_id: PeerId,
+        response: oneshot::Sender<Result<Option<identity::Did>>>,
+    },
+
     /// Get connected peers with their full multiaddrs (Go-compatible ActivePeers).
     PeerAddresses {
         response: oneshot::Sender<Vec<String>>,

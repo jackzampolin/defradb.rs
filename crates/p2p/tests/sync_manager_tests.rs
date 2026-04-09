@@ -134,7 +134,7 @@ async fn test_process_pushlog_already_merged() {
     // Should receive BlockAlreadyMerged event
     let event = events.try_recv().unwrap();
     match event {
-        SyncEvent::BlockAlreadyMerged { cid: event_cid } => {
+        SyncEvent::BlockAlreadyMerged { cid: event_cid, .. } => {
             assert_eq!(event_cid, cid);
         }
         _ => panic!("Expected BlockAlreadyMerged event"),

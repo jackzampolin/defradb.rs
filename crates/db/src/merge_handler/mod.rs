@@ -84,6 +84,9 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// duplicate processing from concurrent dual-broadcast paths (doc topic
     /// + collection topic). Matches Go's `loadComposites` dedup guard.
     pub(crate) merged_composites: std::sync::Mutex<HashSet<Cid>>,
+    /// Tracks collection CIDs that have already been merged, preventing
+    /// replayed collection blocks from re-adding obsolete collection heads.
+    pub(crate) merged_collections: std::sync::Mutex<HashSet<Cid>>,
     /// Optional SE encryption key for generating search artifacts on replicated documents.
     /// When set, the merge handler generates SE artifacts after merging documents
     /// that belong to collections with encrypted indexes.
@@ -103,6 +106,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             blockstore,
             composite_merge_hook: std::sync::OnceLock::new(),
             merged_composites: std::sync::Mutex::new(HashSet::new()),
+            merged_collections: std::sync::Mutex::new(HashSet::new()),
             se_enc_key: std::sync::OnceLock::new(),
             merge_queue: Arc::new(MergeQueue::new()),
         }

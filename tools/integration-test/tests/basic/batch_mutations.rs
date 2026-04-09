@@ -84,8 +84,10 @@ async fn batched_mutation_rollback_test(cluster: TestCluster) {
         Err(err) => {
             let err_msg = err.to_string();
             assert!(
-                err_msg.contains("collection") || err_msg.contains("not found"),
-                "expected collection-not-found error, got: {}",
+                err_msg.contains("collection")
+                    || err_msg.contains("not found")
+                    || err_msg.contains("Cannot query field \"add_Missing\" on type \"Mutation\"."),
+                "expected missing-collection mutation error, got: {}",
                 err_msg
             );
         }

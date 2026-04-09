@@ -79,7 +79,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         // Already merged by the other task
                         if self
                             .event_tx
-                            .send(SyncEvent::BlockAlreadyMerged { cid })
+                            .send(SyncEvent::BlockAlreadyMerged {
+                                cid,
+                                doc_id: msg.doc_id.clone(),
+                                collection_id: msg.collection_id.clone(),
+                            })
                             .await
                             .is_err()
                         {
@@ -142,7 +146,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 tracing::debug!(cid = %cid, doc_id = %msg.doc_id, "Block already merged, skipping");
                 if self
                     .event_tx
-                    .send(SyncEvent::BlockAlreadyMerged { cid: *cid })
+                    .send(SyncEvent::BlockAlreadyMerged {
+                        cid: *cid,
+                        doc_id: msg.doc_id.clone(),
+                        collection_id: msg.collection_id.clone(),
+                    })
                     .await
                     .is_err()
                 {

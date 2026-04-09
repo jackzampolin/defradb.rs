@@ -15,6 +15,7 @@ pub(crate) mod broadcast;
 use async_trait::async_trait;
 use blockstore::Blockstore;
 use document::{DocID, Document};
+use identity::Did;
 use p2p::sync::SyncCoordinator;
 use p2p::transport::P2PTransport;
 use query::mutator::{
@@ -51,6 +52,7 @@ pub struct BroadcastMutator<S: Store, B: Blockstore, T: P2PTransport = p2p::Libp
     inner: AutoCommitMutator<S>,
     sync: Arc<SyncCoordinator<B, T>>,
     db: Arc<DB<S>>,
+    document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
 }
 
 impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, T> {
@@ -60,7 +62,55 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, 
             inner: AutoCommitMutator::new(db.clone()),
             sync,
             db,
+            document_acp: std::sync::OnceLock::new(),
         }
+    }
+
+    pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
+        let _ = self.document_acp.set(acp);
+    }
+
+    async fn register_created_doc_with_acp_if_needed(
+        &self,
+        collection: &crate::Collection,
+        doc_id: &str,
+        creator_did: Option<&str>,
+    ) -> query::error::Result<()> {
+        let Some(policy) = collection.schema().policy.as_ref() else {
+            return Ok(());
+        };
+        let Some(creator_did) = creator_did else {
+            return Ok(());
+        };
+        let Some(acp) = self.document_acp.get() else {
+            return Ok(());
+        };
+        let acp: &dyn acp::DocumentACP = acp.as_ref();
+
+        let creator = Did::new(creator_did).map_err(|error| {
+            query::error::QueryError::execution(format!("invalid broadcast creator DID: {error}"))
+        })?;
+
+        let is_registered = acp
+            .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
+            .await
+            .map_err(|error| {
+                query::error::QueryError::execution(format!(
+                    "failed to check ACP registration before broadcast: {error}"
+                ))
+            })?;
+
+        if !is_registered {
+            acp.register_doc_object(&creator, &policy.id, &policy.resource_name, doc_id)
+                .await
+                .map_err(|error| {
+                    query::error::QueryError::execution(format!(
+                        "failed to register document with ACP before broadcast: {error}"
+                    ))
+                })?;
+        }
+
+        Ok(())
     }
 }
 
@@ -136,6 +186,15 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
         // Read broadcast creator DID before spawning (reads thread-local state).
         let creator_did = defra_core::signing::get_broadcast_creator_did();
+
+        // For ACP-protected collections, ensure newly created docs are registered
+        // before any detached P2P broadcast can expose them to other peers.
+        self.register_created_doc_with_acp_if_needed(
+            &collection,
+            &block_result.doc_id,
+            creator_did.as_deref(),
+        )
+        .await?;
 
         // Capture branchable collection broadcast data before spawning.
         let branchable_data = if let (Some(col_cid), Some(col_block)) =
@@ -291,6 +350,13 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             } else {
                 None
             };
+
+            self.register_created_doc_with_acp_if_needed(
+                &collection,
+                &block_result.doc_id,
+                creator_did.as_deref(),
+            )
+            .await?;
 
             broadcast_results.push(CreateResult::with_commit_and_broadcast(
                 result.doc_id,

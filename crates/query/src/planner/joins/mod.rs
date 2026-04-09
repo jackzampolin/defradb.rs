@@ -55,6 +55,7 @@ impl Planner {
         parent_collection: &CollectionVersion,
         mut mapping: DocumentMapping,
         depth: usize,
+        ancestor_exhaustive: bool,
         parent_filter: Option<&crate::mapper::Filter>,
         scope_path: &[String],
     ) -> JoinResult {
@@ -125,6 +126,10 @@ impl Planner {
                 }
             }
         }
+        let synthetic_order_relations: std::collections::HashSet<&str> = synthetic_order_selects
+            .iter()
+            .map(|s| s.field.name.as_str())
+            .collect();
         for syn_select in &synthetic_order_selects {
             selects_to_process.push((syn_select, None));
         }
@@ -153,6 +158,8 @@ impl Planner {
         for (nested_select, group_index) in selects_to_process {
             let relation_field_name = &nested_select.field.name;
             let output_name = nested_select.field.output_name();
+            let is_synthetic_order_relation =
+                synthetic_order_relations.contains(relation_field_name.as_str());
 
             // Ensure the relation field is in the parent mapping.
             // This is especially important for relation fields inside _group
@@ -532,11 +539,20 @@ impl Planner {
                 (None, None) => None,
             };
 
-            let child_index_result = self.try_select_child_index(
-                child_filter_for_index.as_ref(),
-                combined_child_order.as_ref(),
-                &target_collection,
-            );
+            let force_child_full_scan_for_relation_order = relation_field.kind.is_array()
+                && combined_child_order
+                    .as_ref()
+                    .is_some_and(|order| order.has_relation_order());
+
+            let child_index_result = if force_child_full_scan_for_relation_order {
+                None
+            } else {
+                self.try_select_child_index(
+                    child_filter_for_index.as_ref(),
+                    combined_child_order.as_ref(),
+                    &target_collection,
+                )
+            };
             let child_uses_index = child_index_result.is_some();
 
             // Create the child scan plan with scan_mapping (includes FK fields for joins)
@@ -759,6 +775,7 @@ impl Planner {
                 &target_collection,
                 child_scan_mapping.clone(),
                 depth + 1,
+                ancestor_exhaustive || select.exhaustive,
                 None, // Nested relation filters handled differently
                 &{
                     let mut child_scope_path = scope_path.to_vec();
@@ -793,6 +810,13 @@ impl Planner {
                         let order_relation_name = &condition.fields[0];
                         if already_joined.contains(&order_relation_name.as_str()) {
                             continue; // Already joined from selection
+                        }
+                        if let Some(rel_idx) =
+                            child_scan_mapping.first_index_of_name(order_relation_name)
+                        {
+                            if child_scan_mapping.child_at(rel_idx).is_some() {
+                                continue;
+                            }
                         }
                         // Check if this is a relation field on the target collection
                         if let Some(order_rel_field) =
@@ -1130,10 +1154,10 @@ impl Planner {
                             )
                     })?;
                     // Check if any index covers this FK field
-                    let index = target_collection
-                        .indexes
-                        .iter()
-                        .find(|idx| idx.fields.first().is_some_and(|f| f.name == fk_field.name))?;
+                    let index = target_collection.indexes.iter().find(|idx| {
+                        !idx.auto_generated
+                            && idx.fields.first().is_some_and(|f| f.name == fk_field.name)
+                    })?;
                     Some((fk_field.name.clone(), index.name.clone()))
                 });
                 let has_child_fk_index = child_fk_index_info.is_some();
@@ -1145,12 +1169,12 @@ impl Planner {
                 //   runs per parent (when filter_child_plan exists, it handles globally)
                 // - With ordering + no FK index + no parent filter: Go scans the
                 //   ordering index per parent without FK index for efficient matching
-                let use_per_parent = child_uses_index
-                    && (nested_limit.is_some()
-                        || (nested_select.filter.is_some() && filter_child_plan.is_none())
-                        || (filter_child_plan.is_none()
-                            && nested_order_by.is_some()
-                            && !has_child_fk_index));
+                let use_per_parent = nested_limit.is_some()
+                    || (child_uses_index
+                        && ((nested_select.filter.is_some() && filter_child_plan.is_none())
+                            || (filter_child_plan.is_none()
+                                && nested_order_by.is_some()
+                                && !has_child_fk_index)));
                 let has_filter_child_plan = filter_child_plan.is_some();
 
                 // Apply filter child plan for indexed relation filter evaluation
@@ -1168,12 +1192,22 @@ impl Planner {
                 if let Some(order_by) = nested_order_by.clone() {
                     join_many = join_many.with_order_by(order_by);
                 }
+                if (select.exhaustive || ancestor_exhaustive)
+                    && nested_order_by
+                        .as_ref()
+                        .is_some_and(|order| order.has_relation_order())
+                {
+                    join_many = join_many.with_preserve_ordered_orphans();
+                }
                 if use_per_parent {
                     join_many = join_many.with_per_parent_child_scan();
                 } else if let (Some(fetcher), Some((fk_field_name, index_name))) =
                     (self.fetcher.clone(), child_fk_index_info.clone())
                 {
-                    if can_use_direct_indexed_child_cache(nested_select) && !has_filter_child_plan {
+                    if can_use_direct_indexed_child_cache(nested_select)
+                        && !has_filter_child_plan
+                        && !select.show_deleted
+                    {
                         join_many = join_many.with_indexed_child_fetch(
                             fetcher,
                             target_collection.name.clone(),
@@ -1223,7 +1257,10 @@ impl Planner {
                 // invert the join so the child's sorted index scan drives iteration.
                 let should_invert_for_ordering = parent_order_for_child.is_some()
                     && child_uses_index
-                    && relation_filter.is_none(); // Don't invert if there's also a relation filter
+                    && relation_filter.is_none()
+                    && !((select.exhaustive || ancestor_exhaustive)
+                        && depth > 0
+                        && is_synthetic_order_relation); // Exhaustive nested order dependencies must preserve the full parent set so orphan merging can happen in the parent relation scope.
 
                 tracing::debug!(
                     parent_order_for_child_is_some = parent_order_for_child.is_some(),
@@ -1281,11 +1318,34 @@ impl Planner {
                             let shared_ids: crate::plan::SharedYieldedIds = std::sync::Arc::new(
                                 tokio::sync::RwLock::new(std::collections::HashSet::new()),
                             );
+                            let child_fk_field_name = target_relation_field
+                                .as_ref()
+                                .map(|f| schema::CollectionVersion::relation_id_field_name(&f.name))
+                                .unwrap_or_default();
+                            let child_fk_index_name = target_collection
+                                .indexes
+                                .iter()
+                                .find(|idx| {
+                                    idx.fields
+                                        .first()
+                                        .is_some_and(|f| f.name == child_fk_field_name)
+                                })
+                                .map(|idx| idx.name.clone())
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "{}__{}_ASC",
+                                        target_collection.name,
+                                        child_fk_field_name.trim_start_matches('_')
+                                    )
+                                });
                             let orphan_scan = ScanNode::new(orphan_col, orphan_mapping)
                                 .with_fetcher(orphan_fetcher.unwrap());
                             let orphan = OrphanNode::secondary_side(
                                 Box::new(orphan_scan),
                                 shared_ids.clone(),
+                                self.fetcher.clone().unwrap(),
+                                target_collection.name.clone(),
+                                child_fk_index_name,
                                 mapping.clone(),
                             );
                             let direction = parent_order_for_child

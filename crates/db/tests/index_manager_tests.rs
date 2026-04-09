@@ -258,6 +258,7 @@ async fn test_from_collection_with_indexes() {
                 descending: false,
             }],
             unique: false,
+            auto_generated: false,
         },
         IndexDescription {
             name: "idx_email".to_string(),
@@ -267,6 +268,7 @@ async fn test_from_collection_with_indexes() {
                 descending: false,
             }],
             unique: true,
+            auto_generated: false,
         },
     ];
 
@@ -850,6 +852,7 @@ async fn test_from_collection_with_empty_fields_fails() {
         id: 1,
         fields: vec![], // Empty fields - invalid
         unique: false,
+        auto_generated: false,
     }];
 
     let result = IndexManager::from_collection(1, &schema);
@@ -1258,6 +1261,7 @@ async fn test_unique_constraint_violation_returns_error() {
                 descending: false,
             }],
             unique: true,
+            auto_generated: false,
         };
 
         let index = UniqueIndex::new(1, desc);

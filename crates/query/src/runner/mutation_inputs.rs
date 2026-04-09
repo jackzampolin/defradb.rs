@@ -1,6 +1,7 @@
 //! Input construction helpers for mutation operations.
 
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 
 use crate::document::{document_to_plan_doc, DocumentMapping};
 use crate::error::Result;
@@ -11,6 +12,32 @@ use crate::txn::TransactionRegistry;
 use super::{DocFetcher, QueryRunner};
 
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
+    fn normalize_mutation_input_fields(
+        &self,
+        collection: &schema::CollectionVersion,
+        input: &HashMap<String, JsonValue>,
+    ) -> HashMap<String, JsonValue> {
+        let mut normalized = HashMap::with_capacity(input.len());
+
+        for (field_name, value) in input {
+            let mapped_name = collection
+                .field_by_name(field_name)
+                .filter(|field| field.kind.is_object() && !field.kind.is_array())
+                .and_then(|field| {
+                    let fk_field_name =
+                        schema::CollectionVersion::relation_id_field_name(&field.name);
+                    collection
+                        .field_by_name(&fk_field_name)
+                        .map(|_| fk_field_name)
+                })
+                .unwrap_or_else(|| field_name.clone());
+
+            normalized.insert(mapped_name, value.clone());
+        }
+
+        normalized
+    }
+
     /// Resolve a filter to document IDs by querying the collection.
     ///
     /// This is used for filter-based mutations where we need to first
@@ -77,13 +104,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mapping.add_render_key(index, field.output_name());
         }
 
-        // When _version is requested, ensure _docID is always rendered
-        // (needed to look up version/commit data for each document)
-        let has_version = mutation
+        // When _version or relation sub-selects are requested, ensure _docID
+        // is always rendered (needed to look up version/commit data and to
+        // re-query relation data for each document after the mutation)
+        let has_sub_select = mutation
             .fields
             .iter()
-            .any(|r| matches!(r, Requestable::Select(s) if s.field.name == "_version"));
-        if has_version && !has_docid_render {
+            .any(|r| matches!(r, Requestable::Select(_)));
+        if has_sub_select && !has_docid_render {
             mapping.add_render_key(0, "_docID");
         }
 
@@ -96,12 +124,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Build CreateInput objects from mutation input.
-    pub(crate) fn build_create_inputs(&self, mutation: &Mutation) -> Result<Vec<CreateInput>> {
+    pub(crate) fn build_create_inputs(
+        &self,
+        mutation: &Mutation,
+        collection: &schema::CollectionVersion,
+    ) -> Result<Vec<CreateInput>> {
         let mut inputs = Vec::new();
 
         for doc_input in &mutation.create_input {
             let mut create_input = CreateInput::new();
-            for (field_name, value) in doc_input {
+            let normalized = self.normalize_mutation_input_fields(collection, doc_input);
+            for (field_name, value) in normalized {
                 create_input = create_input.with_field(field_name.clone(), value.clone());
             }
             inputs.push(create_input);
@@ -111,10 +144,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// Build UpdateInput from mutation input.
-    pub(crate) fn build_update_input(&self, mutation: &Mutation) -> Result<UpdateInput> {
+    pub(crate) fn build_update_input(
+        &self,
+        mutation: &Mutation,
+        collection: &schema::CollectionVersion,
+    ) -> Result<UpdateInput> {
         let mut update_input = UpdateInput::new();
 
-        for (field_name, value) in &mutation.update_input {
+        let normalized = self.normalize_mutation_input_fields(collection, &mutation.update_input);
+        for (field_name, value) in &normalized {
             update_input = update_input.with_field(field_name.clone(), value.clone());
         }
 
@@ -124,11 +162,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Build UpsertInput from a field-value map.
     pub(crate) fn build_upsert_input_from_map(
         &self,
+        collection: &schema::CollectionVersion,
         input: &std::collections::HashMap<String, JsonValue>,
     ) -> Result<UpsertInput> {
         let mut upsert_input = UpsertInput::new();
 
-        for (field_name, value) in input {
+        let normalized = self.normalize_mutation_input_fields(collection, input);
+        for (field_name, value) in &normalized {
             upsert_input = upsert_input.with_field(field_name.clone(), value.clone());
         }
 

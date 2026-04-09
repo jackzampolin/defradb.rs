@@ -4,8 +4,8 @@ use cid::Cid;
 use libp2p::PeerId;
 
 use crate::message::{
-    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, PushLogRequest,
-    PushSEArtifactsRequest,
+    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, IdentityRequest,
+    IdentityResponse, PushLogRequest, PushSEArtifactsRequest,
 };
 
 /// Event emitted by the two-stream handler.
@@ -36,6 +36,16 @@ pub enum TwoStreamEvent {
     BranchableSyncReply {
         peer_id: PeerId,
         reply: BranchableSyncReply,
+    },
+    /// Received an identity request from a peer.
+    IdentityRequest {
+        peer_id: PeerId,
+        request: IdentityRequest,
+    },
+    /// Received an identity reply from a peer.
+    IdentityReply {
+        peer_id: PeerId,
+        reply: IdentityResponse,
     },
     /// Received a CAR fetch request (peer wants a DAG packaged as CARv1).
     CarFetchRequest { peer_id: PeerId, root_cid: Cid },

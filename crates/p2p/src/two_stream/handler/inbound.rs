@@ -8,8 +8,8 @@ use parking_lot::Mutex;
 use super::PendingResponses;
 use crate::error::{Error, Result};
 use crate::message::{
-    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, Message,
-    PushLogReply, PushLogRequest,
+    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, IdentityRequest,
+    IdentityResponse, Message, PushLogReply, PushLogRequest,
 };
 use crate::two_stream::event::TwoStreamEvent;
 
@@ -96,9 +96,23 @@ impl TwoStreamHandler {
             return Ok(TwoStreamEvent::BranchableSyncRequest { peer_id, request });
         }
 
+        // Try to deserialize as IdentityRequest
+        if let Ok(request) = serde_cbor::from_slice::<IdentityRequest>(&buf) {
+            crate::verify_message(&request)?;
+            ensure_transport_sender(&peer_id, &request)?;
+            tracing::info!(
+                peer_id = %peer_id,
+                message_id = %request.metadata.message_id,
+                requester = %request.peer_id,
+                "Successfully read Identity request on two-stream protocol"
+            );
+            return Ok(TwoStreamEvent::IdentityRequest { peer_id, request });
+        }
+
         // None worked - return error
         Err(Error::CborDeserialization(
-            "failed to deserialize as PushLog, DocSync, or BranchableSync request".to_string(),
+            "failed to deserialize as PushLog, DocSync, BranchableSync, or Identity request"
+                .to_string(),
         ))
     }
 
@@ -198,7 +212,30 @@ impl TwoStreamHandler {
             }
         }
 
-        // Deserialize as DocSyncReply once we've ruled out a pending PushLogReply.
+        if let Ok(reply) = serde_cbor::from_slice::<IdentityResponse>(&buf) {
+            crate::verify_message(&reply)?;
+            let message_id = reply.message_id.clone();
+
+            let sender = {
+                let mut pending = pending.lock();
+                pending.identity_channels.remove(&message_id)
+            };
+
+            if let Some(sender) = sender {
+                let _ = sender.send(reply.clone());
+            }
+
+            tracing::debug!(
+                peer_id = %peer_id,
+                message_id = %message_id,
+                "Received Identity response on two-stream protocol"
+            );
+            return Ok(Some(TwoStreamEvent::IdentityReply { peer_id, reply }));
+        }
+
+        // Deserialize as DocSyncReply once we've ruled out a pending PushLogReply
+        // and an IdentityResponse. IdentityResponse shares the same metadata
+        // shape and DocSyncReply defaults Results to empty, so DocSync must come later.
         if let Ok(reply) = serde_cbor::from_slice::<DocSyncReply>(&buf) {
             crate::verify_message(&reply)?;
             let message_id = reply.message_id.clone();
@@ -244,7 +281,8 @@ impl TwoStreamHandler {
 
         // None worked - log and return error
         Err(Error::CborDeserialization(
-            "failed to deserialize as BranchableSync, DocSync, or PushLog response".to_string(),
+            "failed to deserialize as BranchableSync, DocSync, Identity, or PushLog response"
+                .to_string(),
         ))
     }
 }

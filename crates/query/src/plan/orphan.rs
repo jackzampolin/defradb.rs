@@ -4,11 +4,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use document::NormalValue;
 use tokio::sync::RwLock;
 
 use crate::document::DocumentMapping;
 use crate::error::Result;
+use crate::fetcher::DocFetcher;
 use crate::planner::{Doc, ExecInfo, PlanNode};
+use crate::planner::{IndexScanParams, IndexScanType};
 
 /// Shared set of parent docIDs yielded by the main join.
 /// TypeJoinOne writes to this during iteration; OrphanNode reads it to skip non-orphans.
@@ -21,6 +24,9 @@ enum Inner {
     SecondarySide {
         parent_scan: Box<dyn PlanNode>,
         yielded_ids: SharedYieldedIds,
+        fetcher: Arc<dyn DocFetcher>,
+        child_collection_name: String,
+        child_fk_index_name: String,
     },
 }
 
@@ -51,12 +57,18 @@ impl OrphanNode {
     pub fn secondary_side(
         parent_scan: Box<dyn PlanNode>,
         yielded_ids: SharedYieldedIds,
+        fetcher: Arc<dyn DocFetcher>,
+        child_collection_name: String,
+        child_fk_index_name: String,
         document_mapping: DocumentMapping,
     ) -> Self {
         Self {
             inner: Inner::SecondarySide {
                 parent_scan,
                 yielded_ids,
+                fetcher,
+                child_collection_name,
+                child_fk_index_name,
             },
             document_mapping,
             current_doc: Doc::default(),
@@ -76,6 +88,28 @@ impl OrphanNode {
             Inner::PrimarySide { scan } => scan,
             Inner::SecondarySide { parent_scan, .. } => parent_scan,
         }
+    }
+
+    fn scan_metrics_from_explain(value: &serde_json::Value) -> Option<ExecInfo> {
+        let obj = value.as_object()?;
+
+        obj.values()
+            .find_map(Self::scan_metrics_from_explain)
+            .or_else(|| {
+                if obj.contains_key("docFetches")
+                    && obj.contains_key("fieldFetches")
+                    && obj.contains_key("indexFetches")
+                {
+                    Some(ExecInfo {
+                        iterations: obj.get("iterations")?.as_u64()?,
+                        docs_fetched: obj.get("docFetches")?.as_u64()?,
+                        fields_fetched: obj.get("fieldFetches")?.as_u64()?,
+                        indexes_fetched: obj.get("indexFetches")?.as_u64()?,
+                    })
+                } else {
+                    None
+                }
+            })
     }
 }
 
@@ -105,14 +139,38 @@ impl PlanNode for OrphanNode {
             Inner::SecondarySide {
                 parent_scan,
                 yielded_ids,
+                fetcher,
+                child_collection_name,
+                child_fk_index_name,
             } => loop {
                 if !parent_scan.next().await? {
                     return Ok(false);
                 }
                 let doc = parent_scan.value();
+                self.exec_info.docs_fetched += 1;
+                self.exec_info.fields_fetched += 1;
                 if let Some(doc_id) = doc.doc_id() {
                     let ids = yielded_ids.read().await;
                     if ids.contains(doc_id) {
+                        continue;
+                    }
+
+                    let scan_result = fetcher
+                        .get_by_index_scan(
+                            child_collection_name,
+                            &IndexScanParams {
+                                index_name: child_fk_index_name.clone(),
+                                scan_type: IndexScanType::ExactMatch {
+                                    values: vec![NormalValue::String(doc_id.to_string())],
+                                },
+                                limit: Some(1),
+                                offset: 0,
+                                value_filter: None,
+                            },
+                        )
+                        .await?;
+                    self.exec_info.indexes_fetched += 1;
+                    if !scan_result.doc_ids().is_empty() {
                         continue;
                     }
                 }
@@ -163,26 +221,47 @@ impl PlanNode for OrphanNode {
         // Go's orphanNode/orphanPointLookupNode reports flat metrics:
         // {iterations, docFetches, fieldFetches, indexFetches}
         // NOT nested in a child scanNode.
-        let child_info = self.source_node().exec_info();
+        let is_secondary_side = matches!(&self.inner, Inner::SecondarySide { .. });
+        let child_info = match &self.inner {
+            Inner::SecondarySide { .. } => self.exec_info.clone(),
+            Inner::PrimarySide { .. } => {
+                Self::scan_metrics_from_explain(&self.source_node().explain_execute())
+                    .unwrap_or_else(|| self.source_node().exec_info())
+            }
+        };
+        let matched_docs = child_info.iterations.saturating_sub(1);
         let mut obj = serde_json::Map::new();
         obj.insert(
             "iterations".to_string(),
-            serde_json::json!(self.exec_info.iterations),
+            serde_json::json!(if is_secondary_side {
+                child_info.docs_fetched + 1
+            } else {
+                child_info.iterations
+            }),
         );
         obj.insert(
             "docFetches".to_string(),
-            serde_json::json!(child_info.docs_fetched),
+            serde_json::json!(if is_secondary_side {
+                child_info.docs_fetched
+            } else {
+                matched_docs
+            }),
         );
         obj.insert(
             "fieldFetches".to_string(),
-            serde_json::json!(child_info.fields_fetched),
+            serde_json::json!(if is_secondary_side {
+                child_info.fields_fetched
+            } else {
+                matched_docs
+            }),
         );
-        // Go's orphanPointLookupNode counts one indexFetch per parent checked
-        // via Has() on the child FK index. We simulate this by counting
-        // docs_fetched (number of parents scanned) as index fetches.
         obj.insert(
             "indexFetches".to_string(),
-            serde_json::json!(child_info.docs_fetched + child_info.indexes_fetched),
+            serde_json::json!(if is_secondary_side {
+                child_info.indexes_fetched
+            } else {
+                matched_docs
+            }),
         );
         serde_json::Value::Object(obj)
     }

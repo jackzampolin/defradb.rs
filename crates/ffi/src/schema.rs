@@ -102,6 +102,72 @@ pub unsafe extern "C" fn add_schema(
     }
 }
 
+/// Add a schema within a specific transaction.
+///
+/// The schema is only visible within the transaction until it is committed.
+///
+/// # Safety
+///
+/// Caller must ensure all pointer arguments are valid, non-null, and point to valid C strings.
+#[no_mangle]
+pub unsafe extern "C" fn add_schema_in_txn(
+    node_ptr: usize,
+    txn_id: *const c_char,
+    identity_did: *const c_char,
+    schema_sdl: *const c_char,
+) -> FfiResult {
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::CollectionPatch
+        ));
+        let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
+        let schema_str = try_ffi!(require_c_str(schema_sdl, "schema_sdl"));
+
+        let (registry, policy_store) = match NODES.get(node_ptr, |state| {
+            (state.txn_registry.clone(), state.policy_store.clone())
+        }) {
+            Some(pair) => pair,
+            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
+
+        ffi_async!(rt, {
+            let known_types: std::collections::HashSet<String> = registry
+                .get_collections_in_txn(&txn_str)
+                .await
+                .map_err(|e| format!("failed to get collections in txn: {}", e))?
+                .into_iter()
+                .map(|col| col.name)
+                .collect();
+
+            let collections = query::parse_sdl_with_known_types(&schema_str, known_types)
+                .map_err(|e| format!("failed to parse schema: {}", e))?;
+
+            db::definition_validation::validate_new_collections(&collections)
+                .map_err(|e| format!("failed to validate schema: {}", e))?;
+
+            for collection in &collections {
+                if let Some(ref policy) = collection.policy {
+                    validate_collection_policy(policy, &policy_store)?;
+                }
+            }
+
+            let created_versions = registry
+                .add_schema_in_txn(&txn_str, &schema_str)
+                .await
+                .map_err(|e| format!("failed to create collection in txn: {}", e))?;
+
+            let json = serde_json::to_string(&created_versions)
+                .map_err(|e| format!("failed to serialize result: {}", e))?;
+
+            Ok(json)
+        })
+    }
+}
+
 /// Get all collections from the database.
 ///
 /// Returns a JSON array of collection descriptions.

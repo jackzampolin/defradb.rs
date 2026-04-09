@@ -4,12 +4,8 @@
 //! - Adding lens transforms
 //! - Listing lens transforms
 
-use std::ffi::c_char;
-use std::sync::Arc;
-
-use blockstore::{Blockstore, DefraBlockstore};
-
 use acp::nac::NodePermission;
+use std::ffi::c_char;
 
 use crate::ffi_entry;
 use crate::helpers::{get_rt, require_c_str};
@@ -18,38 +14,7 @@ use crate::state::NODES;
 use crate::types::FfiResult;
 use crate::{ffi_async, try_ffi, ERR_INVALID_NODE_HANDLE};
 
-use lens::{LensConfig, LensModule, TransformId};
-
-/// Read WASM bytes from a LensModule (from path or embedded bytes).
-fn read_wasm_bytes(module: &LensModule) -> Result<Vec<u8>, String> {
-    if let Some(ref bytes) = module.module {
-        return Ok(bytes.clone());
-    }
-    if let Some(ref path_str) = module.path {
-        let clean_path = path_str.strip_prefix("file://").unwrap_or(path_str);
-        std::fs::read(clean_path)
-            .map_err(|e| format!("failed to read WASM file {}: {}", clean_path, e))
-    } else {
-        Err("lens module has neither path nor module bytes".to_string())
-    }
-}
-
-/// Extract arguments from a LensModule as key-value pairs for IPLD blocks.
-fn extract_arguments(module: &LensModule) -> Vec<(String, String)> {
-    match &module.arguments {
-        Some(serde_json::Value::Object(map)) => map
-            .iter()
-            .map(|(k, v)| {
-                let val = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                (k.clone(), val)
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
-}
+use lens::{LensConfig, LensModule};
 
 /// Add a lens transform to the database.
 ///
@@ -113,14 +78,8 @@ pub unsafe extern "C" fn lens_add(
         }
 
         // No version IDs — register as standalone lens module(s).
-        // Get both the lens store and the database store for blockstore access.
-        let (lens_store, db_store) = match NODES.get(node_ptr, |state| {
-            (
-                state.database.lens_store().clone(),
-                state.database.store().clone(),
-            )
-        }) {
-            Some(pair) => pair,
+        let database = match NODES.get(node_ptr, |state| state.database.clone()) {
+            Some(db) => db,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
@@ -146,46 +105,88 @@ pub unsafe extern "C" fn lens_add(
                         .map_err(|e| format!("failed to parse lens config: {}", e))?]
                 };
 
-            // Create a blockstore for storing IPLD blocks (non-P2P mode, no merge tracking)
-            let blockstore = Arc::new(DefraBlockstore::new(db_store, false));
-
             let mut all_ids = Vec::new();
             for lens_module in &modules {
-                // Read WASM bytes from file or embedded bytes
-                let wasm_bytes = read_wasm_bytes(lens_module)?;
-                let arguments = extract_arguments(lens_module);
-
-                // Build the 3-level IPLD block hierarchy matching Go's format
-                let (config_cid, blocks) =
-                    defra_core::build_lens_ipld_blocks(&wasm_bytes, lens_module.inverse, &arguments)?;
-
-                // Store all blocks in the blockstore for Bitswap availability
-                for (cid, data) in &blocks {
-                    tracing::debug!(cid = %cid, bytes = data.len(), "storing lens block");
-                    blockstore
-                        .put(cid, data)
-                        .await
-                        .map_err(|e| format!("failed to store lens block: {}", e))?;
-                    // Verify the block was stored
-                    let has = blockstore
-                        .has(cid)
-                        .await
-                        .map_err(|e| format!("failed to check block: {}", e))?;
-                    tracing::debug!(cid = %cid, stored = has, "lens block storage verified");
-                }
-
-                // Register the transform under the real IPLD CID
                 let config = LensConfig::new("", "", lens_module.clone());
-                let transform_id = TransformId::new(config_cid.to_string());
-                lens_store
-                    .add_with_id(transform_id, config)
+                let transform_id = database
+                    .add_lens(config)
                     .await
                     .map_err(|e| format!("failed to add lens: {}", e))?;
 
-                all_ids.push(config_cid.to_string());
+                all_ids.push(transform_id.to_string());
             }
 
             // Return comma-joined IDs so chained transforms are preserved
+            Ok::<String, String>(all_ids.join(","))
+        });
+
+        match result {
+            Ok(lens_id) => FfiResult::success(&lens_id),
+            Err(e) => FfiResult::error(&e),
+        }
+    }
+}
+
+/// Add a lens transform within a transaction.
+///
+/// The lens is only visible within the transaction until commit.
+///
+/// # Safety
+///
+/// Both string pointers must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn lens_add_in_txn(
+    node_ptr: usize,
+    txn_id: *const c_char,
+    identity_did: *const c_char,
+    lens_json: *const c_char,
+) -> FfiResult {
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::LensCreate
+        ));
+        let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
+        let lens_str = try_ffi!(require_c_str(lens_json, "lens_json"));
+
+        let registry = match NODES.get(node_ptr, |state| state.txn_registry.clone()) {
+            Some(r) => r,
+            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
+
+        let result = rt.block_on(async {
+            let modules: Vec<LensModule> =
+                if let Ok(lens_obj) = serde_json::from_str::<serde_json::Value>(&lens_str) {
+                    if let Some(lenses_arr) = lens_obj.get("Lenses").and_then(|v| v.as_array()) {
+                        lenses_arr
+                            .iter()
+                            .map(|v| {
+                                serde_json::from_value::<LensModule>(v.clone())
+                                    .map_err(|e| format!("failed to parse lens module: {}", e))
+                            })
+                            .collect::<std::result::Result<Vec<_>, _>>()?
+                    } else {
+                        vec![serde_json::from_str::<LensModule>(&lens_str)
+                            .map_err(|e| format!("failed to parse lens config: {}", e))?]
+                    }
+                } else {
+                    vec![serde_json::from_str::<LensModule>(&lens_str)
+                        .map_err(|e| format!("failed to parse lens config: {}", e))?]
+                };
+
+            let mut all_ids = Vec::new();
+            for lens_module in &modules {
+                let config = LensConfig::new("", "", lens_module.clone());
+                let transform_id = registry
+                    .add_lens_in_txn(&txn_str, config)
+                    .await
+                    .map_err(|e| format!("failed to add lens in txn: {}", e))?;
+                all_ids.push(transform_id.to_string());
+            }
+
             Ok::<String, String>(all_ids.join(","))
         });
 
@@ -224,6 +225,46 @@ pub unsafe extern "C" fn lens_list(node_ptr: usize, identity_did: *const c_char)
                 .list()
                 .await
                 .map_err(|e| format!("failed to list lenses: {}", e))?;
+
+            let json = serde_json::to_string(&lenses)
+                .map_err(|e| format!("failed to serialize lenses: {}", e))?;
+
+            Ok(json)
+        })
+    }
+}
+
+/// List all lens transforms visible within a transaction.
+///
+/// # Safety
+///
+/// `txn_id` must be a valid null-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn lens_list_in_txn(
+    node_ptr: usize,
+    txn_id: *const c_char,
+    identity_did: *const c_char,
+) -> FfiResult {
+    ffi_entry! {
+        let rt = try_ffi!(get_rt());
+        try_ffi!(check_nac_for_node(
+            rt,
+            node_ptr,
+            identity_did,
+            NodePermission::LensList
+        ));
+        let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
+
+        let registry = match NODES.get(node_ptr, |state| state.txn_registry.clone()) {
+            Some(r) => r,
+            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+        };
+
+        ffi_async!(rt, {
+            let lenses = registry
+                .list_lenses_in_txn(&txn_str)
+                .await
+                .map_err(|e| format!("failed to list lenses in txn: {}", e))?;
 
             let json = serde_json::to_string(&lenses)
                 .map_err(|e| format!("failed to serialize lenses: {}", e))?;
