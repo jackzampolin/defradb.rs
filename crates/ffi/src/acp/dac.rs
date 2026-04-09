@@ -331,34 +331,34 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
                 .map_err(|e| e.to_string())?;
 
             if added {
-                let target_identity = acp::Identity::from(target.clone());
-                let wait_deadline = Instant::now() + Duration::from_secs(5);
-                loop {
-                    let readable = document_acp
-                        .check_doc_access(
-                            &target_identity,
-                            DocumentPermission::Read,
-                            &policy_id,
-                            &resource_name,
-                            &doc_id_str,
-                        )
-                        .await
-                        .map_err(|e| format!("failed to verify DAC relationship propagation: {e}"))?;
-
-                    if readable {
-                        break;
-                    }
-
-                    if Instant::now() >= wait_deadline {
-                        return Err(
-                            "timed out waiting for DAC relationship to become readable".to_string(),
-                        );
-                    }
-
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-
                 if let Some(system) = p2p_system {
+                    let target_identity = acp::Identity::from(target.clone());
+                    let wait_deadline = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        let readable = document_acp
+                            .check_doc_access(
+                                &target_identity,
+                                DocumentPermission::Read,
+                                &policy_id,
+                                &resource_name,
+                                &doc_id_str,
+                            )
+                            .await
+                            .map_err(|e| format!("failed to verify DAC relationship propagation: {e}"))?;
+
+                        if readable {
+                            break;
+                        }
+
+                        if Instant::now() >= wait_deadline {
+                            return Err(
+                                "timed out waiting for DAC relationship to become readable".to_string(),
+                            );
+                        }
+
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+
                     if let Err(error) = system
                         .ops()
                         .republish_document(&collection_id_str, &doc_id_str)
