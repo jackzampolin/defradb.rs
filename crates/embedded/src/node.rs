@@ -26,6 +26,7 @@ pub struct EmbeddedNode<S: storage::corekv::Store> {
     pub query_runner: Arc<dyn query::QueryExecutor>,
     pub nac_manager: Arc<dyn db::NacManagerApi>,
     pub document_acp: Arc<dyn acp::DocumentACP>,
+    pub local_zanzibar_store: Option<Arc<dyn acp::ZanzibarStore>>,
     pub event_bus: Arc<dyn events::Bus>,
     pub node_identity_did: Option<String>,
     pub sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
@@ -282,7 +283,7 @@ where
         ),
     };
 
-    let (document_acp, sourcehub_acp) =
+    let (document_acp, local_zanzibar_store, sourcehub_acp) =
         create_document_acp(store.clone(), config.persistence, &config.document_acp).await?;
     let nac_manager = create_nac_manager(store.clone(), config.persistence).await?;
 
@@ -328,6 +329,7 @@ where
         query_runner,
         nac_manager,
         document_acp,
+        local_zanzibar_store,
         event_bus,
         node_identity_did,
         sourcehub_acp,

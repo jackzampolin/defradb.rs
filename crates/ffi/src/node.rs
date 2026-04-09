@@ -52,6 +52,7 @@ pub(crate) async fn build_node_state(
         document_acp: node.document_acp.clone(),
         event_bus: node.event_bus.clone(),
         policy_store: Arc::new(PolicyStore::new()),
+        local_zanzibar_store: node.local_zanzibar_store.clone(),
         p2p: node
             .p2p
             .clone()

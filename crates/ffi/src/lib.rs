@@ -193,9 +193,6 @@ pub extern "C" fn defra_init() {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Ignore return value - errors will surface when operations are attempted
         let _ = runtime::init_runtime();
-        // Enable deterministic nonce for testing (matches Go's init() detection)
-        crypto::encryption::nonce::USE_DETERMINISTIC_NONCE
-            .store(true, std::sync::atomic::Ordering::Relaxed);
     }));
 }
 
@@ -222,14 +219,20 @@ mod negative_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crypto::encryption::nonce::USE_DETERMINISTIC_NONCE;
     use std::ffi::CStr;
     use std::ptr;
 
     #[test]
     fn test_defra_init() {
+        USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);
         defra_init();
         // Should be idempotent
         defra_init();
+        assert!(
+            !USE_DETERMINISTIC_NONCE.load(std::sync::atomic::Ordering::Relaxed),
+            "defra_init must not enable deterministic nonces"
+        );
     }
 
     #[test]

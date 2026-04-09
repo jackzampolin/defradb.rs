@@ -95,12 +95,12 @@ impl std::fmt::Display for StepResult {
     }
 }
 
-pub struct PermissionEngine<S: ZanzibarStore> {
+pub struct PermissionEngine<S: ZanzibarStore + ?Sized> {
     store: Arc<S>,
     pub lookup: PolicyLookupTable,
 }
 
-impl<S: ZanzibarStore> PermissionEngine<S> {
+impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
     pub fn new(store: Arc<S>) -> Self {
         Self {
             store,

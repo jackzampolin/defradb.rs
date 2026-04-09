@@ -20,12 +20,12 @@ pub const UPDATER_RELATION: &str = "updater";
 pub const DELETER_RELATION: &str = "deleter";
 pub const ADMIN_RELATION: &str = "admin";
 
-pub struct ZanzibarDocumentACP<S: ZanzibarStore> {
+pub struct ZanzibarDocumentACP<S: ZanzibarStore + ?Sized> {
     store: Arc<S>,
     engine: RwLock<PermissionEngine<S>>,
 }
 
-impl<S: ZanzibarStore> ZanzibarDocumentACP<S> {
+impl<S: ZanzibarStore + ?Sized> ZanzibarDocumentACP<S> {
     pub fn new(store: Arc<S>) -> Self {
         Self {
             store: store.clone(),
