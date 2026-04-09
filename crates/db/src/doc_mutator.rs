@@ -3,10 +3,10 @@
 use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use document::{DocID, Document};
-use tracing::warn;
 use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
 use std::sync::Arc;
 use storage::corekv::Store;
+use tracing::warn;
 
 use crate::block_builder::{write_collection_block, write_document_blocks};
 use crate::collection::collection_short_id;

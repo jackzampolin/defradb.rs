@@ -346,7 +346,9 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 e.into_inner()
             });
             if batch_merged_guard.contains(cid) {
-                return Ok(MergeOutcome::terminal_skip("collection already merged in batch"));
+                return Ok(MergeOutcome::terminal_skip(
+                    "collection already merged in batch",
+                ));
             }
         }
 

@@ -783,11 +783,15 @@ mod tests {
 
         fetcher.add_doc(
             "Company",
-            doc(&format!(r#"{{"_docID":"{company_public}","name":"Public Company"}}"#)),
+            doc(&format!(
+                r#"{{"_docID":"{company_public}","name":"Public Company"}}"#
+            )),
         );
         fetcher.add_doc(
             "Company",
-            doc(&format!(r#"{{"_docID":"{company_private}","name":"Private Company"}}"#)),
+            doc(&format!(
+                r#"{{"_docID":"{company_private}","name":"Private Company"}}"#
+            )),
         );
         fetcher.add_doc(
             "Employee",
@@ -822,7 +826,8 @@ mod tests {
             ]),
         });
 
-        let runner = QueryRunner::new(fetcher, vec![company_collection, employee_collection]).with_acp(acp);
+        let runner =
+            QueryRunner::new(fetcher, vec![company_collection, employee_collection]).with_acp(acp);
 
         let result = runner
             .execute_query(

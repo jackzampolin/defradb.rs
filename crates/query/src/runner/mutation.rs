@@ -1036,14 +1036,18 @@ mod tests {
         assert_eq!(created.len(), 2);
         let created_doc = &created[0];
         assert_eq!(
-            created_doc.get("_companyID").and_then(|value| value.as_str()),
+            created_doc
+                .get("_companyID")
+                .and_then(|value| value.as_str()),
             Some("bae-7b649bba-3168-5c05-827c-514c0f8d56fd")
         );
         assert!(created_doc.get("company").is_none());
 
         let created_doc = &created[1];
         assert_eq!(
-            created_doc.get("_companyID").and_then(|value| value.as_str()),
+            created_doc
+                .get("_companyID")
+                .and_then(|value| value.as_str()),
             Some("bae-7b649bba-3168-5c05-827c-514c0f8d56fd")
         );
         assert!(created_doc.get("company").is_none());

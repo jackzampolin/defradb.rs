@@ -79,7 +79,10 @@ async fn validate_mutation_collection(
             crate::mapper::MutationType::Delete => format!("delete_{}", name),
             crate::mapper::MutationType::Upsert => format!("upsert_{}", name),
         };
-        let mut msg = format!("Cannot query field \"{}\" on type \"Mutation\".", field_name);
+        let mut msg = format!(
+            "Cannot query field \"{}\" on type \"Mutation\".",
+            field_name
+        );
         if let Some(suggested) = suggestion {
             msg.push_str(&format!(" Did you mean \"{}\"?", suggested));
         }

@@ -144,18 +144,19 @@ impl TxSigner {
         let mut last_error = None;
 
         for attempt in 0..Self::MAX_SEQUENCE_RETRIES {
-            let (account_number, sequence) =
-                if let (Some(account_number), Some(sequence)) = (state.account_number, state.next_sequence) {
-                    (account_number, sequence)
-                } else {
-                    let (account_number, sequence) = client
-                        .query_account(&self.address())
-                        .await
-                        .map_err(|e| TxSignerError::Broadcast(format!("account query: {}", e)))?;
-                    state.account_number = Some(account_number);
-                    state.next_sequence = Some(sequence);
-                    (account_number, sequence)
-                };
+            let (account_number, sequence) = if let (Some(account_number), Some(sequence)) =
+                (state.account_number, state.next_sequence)
+            {
+                (account_number, sequence)
+            } else {
+                let (account_number, sequence) = client
+                    .query_account(&self.address())
+                    .await
+                    .map_err(|e| TxSignerError::Broadcast(format!("account query: {}", e)))?;
+                state.account_number = Some(account_number);
+                state.next_sequence = Some(sequence);
+                (account_number, sequence)
+            };
 
             tracing::debug!(
                 msg_count = body.messages.len(),
@@ -180,7 +181,11 @@ impl TxSigner {
                 .to_bytes()
                 .map_err(|e| TxSignerError::Sign(format!("tx serialization: {}", e)))?;
 
-            tracing::debug!(tx_bytes_len = tx_bytes.len(), attempt, "transaction serialized");
+            tracing::debug!(
+                tx_bytes_len = tx_bytes.len(),
+                attempt,
+                "transaction serialized"
+            );
 
             match client.broadcast_tx_sync(&tx_bytes).await {
                 Ok(hash) => {

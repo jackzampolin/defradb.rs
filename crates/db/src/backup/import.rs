@@ -7,8 +7,8 @@ use serde_json::Value as JsonValue;
 use storage::corekv::Store;
 
 use super::classify_schema_fields;
-use crate::AutoCommitMutator;
 use crate::database::DB;
+use crate::AutoCommitMutator;
 use query::mutator::DocMutator;
 
 /// Statistics from a backup import operation.
@@ -131,9 +131,10 @@ pub async fn import_database<S: Store + 'static>(
                 }
             }
 
-            let mut doc = Document::from_map(doc_map.clone().into_iter().collect()).map_err(|e| {
-                format!("failed to create document in '{}': {}", collection_name, e)
-            })?;
+            let mut doc =
+                Document::from_map(doc_map.clone().into_iter().collect()).map_err(|e| {
+                    format!("failed to create document in '{}': {}", collection_name, e)
+                })?;
             doc.set_collection(schema.clone());
             doc.generate_and_set_doc_id().map_err(|e| {
                 format!("failed to create document in '{}': {}", collection_name, e)

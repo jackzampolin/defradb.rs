@@ -203,8 +203,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     .with_request_time(request_time);
 
                     if !mutation.create_input.is_empty() {
-                        let create_input =
-                            self.build_upsert_input_from_map(&collection, &mutation.create_input[0])?;
+                        let create_input = self
+                            .build_upsert_input_from_map(&collection, &mutation.create_input[0])?;
                         node = node.with_create_input(create_input);
                     }
                     if !mutation.update_input.is_empty() {

@@ -23,6 +23,16 @@ pub(crate) fn broadcast_retry_delay_ms(
     Some(100 * (1u64 << attempt.min(5)))
 }
 
+async fn connected_peer_count<B: Blockstore + 'static, T: P2PTransport>(
+    sync: &SyncCoordinator<B, T>,
+) -> usize {
+    sync.transport()
+        .connected_peers()
+        .await
+        .map(|peers| peers.len())
+        .unwrap_or_else(|_| sync.peer_state().stats().connected_peers())
+}
+
 /// Log broadcast failures at error level for observability in fire-and-forget paths.
 pub(crate) fn log_broadcast_failure(status: &BroadcastStatus) {
     if let BroadcastStatus::Failed(err) = status {
@@ -66,6 +76,20 @@ pub(crate) async fn broadcast_with_retry_with_creator<B: Blockstore + 'static, T
                 return BroadcastStatus::Success;
             }
             Ok(BroadcastResult::PartialDocumentOnly { collection_error }) => {
+                let connected_peers = connected_peer_count(sync).await;
+                if let Some(delay_ms) =
+                    broadcast_retry_delay_ms(&collection_error, connected_peers, attempt)
+                {
+                    tracing::trace!(
+                        doc_id = %block_result.doc_id,
+                        attempt = attempt,
+                        connected_peers = connected_peers,
+                        delay_ms = delay_ms,
+                        "Retrying broadcast after collection-topic InsufficientPeers"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
                 tracing::warn!(
                     doc_id = %block_result.doc_id,
                     collection = %collection_name,
@@ -78,6 +102,20 @@ pub(crate) async fn broadcast_with_retry_with_creator<B: Blockstore + 'static, T
                 ));
             }
             Ok(BroadcastResult::PartialCollectionOnly { document_error }) => {
+                let connected_peers = connected_peer_count(sync).await;
+                if let Some(delay_ms) =
+                    broadcast_retry_delay_ms(&document_error, connected_peers, attempt)
+                {
+                    tracing::trace!(
+                        doc_id = %block_result.doc_id,
+                        attempt = attempt,
+                        connected_peers = connected_peers,
+                        delay_ms = delay_ms,
+                        "Retrying broadcast after document-topic InsufficientPeers"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
                 tracing::warn!(
                     doc_id = %block_result.doc_id,
                     collection = %collection_name,
@@ -103,7 +141,7 @@ pub(crate) async fn broadcast_with_retry_with_creator<B: Blockstore + 'static, T
             }
             Err(e) => {
                 let err_str = e.to_string();
-                let connected_peers = sync.peer_state().stats().connected_peers();
+                let connected_peers = connected_peer_count(sync).await;
                 if let Some(delay_ms) = broadcast_retry_delay_ms(&err_str, connected_peers, attempt)
                 {
                     tracing::trace!(
