@@ -359,11 +359,18 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
                 }
 
                 if let Some(system) = p2p_system {
-                    system
+                    if let Err(error) = system
                         .ops()
                         .republish_document(&collection_id_str, &doc_id_str)
                         .await
-                        .map_err(|e| format!("failed to republish document after DAC relationship add: {e}"))?;
+                    {
+                        tracing::debug!(
+                            error = %error,
+                            collection_id = %collection_id_str,
+                            doc_id = %doc_id_str,
+                            "best-effort DAC republish failed"
+                        );
+                    }
                 }
             }
 
