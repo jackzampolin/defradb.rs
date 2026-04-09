@@ -200,7 +200,8 @@ impl TxSigner {
                         .map_err(|query_error| {
                             TxSignerError::Broadcast(format!("account query: {}", query_error))
                         })?;
-                    let next_sequence = std::cmp::max(sequence + 1, queried_sequence);
+                    let next_sequence = expected_sequence_from_error(&e)
+                        .unwrap_or_else(|| std::cmp::max(sequence + 1, queried_sequence));
                     state.account_number = Some(account_number);
                     state.next_sequence = Some(next_sequence);
                     last_error = Some(e);
@@ -226,6 +227,21 @@ fn is_sequence_mismatch(error: &super::client::ClientError) -> bool {
                 || message.contains("code=32")
         }
         _ => false,
+    }
+}
+
+fn expected_sequence_from_error(error: &super::client::ClientError) -> Option<u64> {
+    let super::client::ClientError::TxFailed(message) = error else {
+        return None;
+    };
+
+    let expected_idx = message.find("expected ")?;
+    let rest = &message[expected_idx + "expected ".len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
     }
 }
 
