@@ -331,9 +331,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acp::{DocumentACP, DocumentPermission, Identity};
     use async_trait::async_trait;
     use bm25::{Document as Bm25Document, Language, SearchEngineBuilder};
     use document::Document;
+    use identity::Did;
     use schema::{CollectionVersion, FieldDescription, FieldKind};
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -341,6 +343,7 @@ mod tests {
     use super::super::nested_profile::ScopedFulltextProfile;
     use crate::fetcher::FetchByIdsResult;
     use crate::planner::Planner;
+    use schema::PolicyDescription;
 
     type ScoreMap = HashMap<(String, String, String), HashMap<String, f64>>;
 
@@ -594,6 +597,91 @@ mod tests {
         Document::from_json_str(json).unwrap()
     }
 
+    struct MockDocumentAcp {
+        private_docs: HashMap<String, Did>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl DocumentACP for MockDocumentAcp {
+        async fn register_doc_object(
+            &self,
+            _identity: &Did,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<()> {
+            Ok(())
+        }
+
+        async fn is_doc_registered(
+            &self,
+            _policy_id: &str,
+            _resource_name: &str,
+            doc_id: &str,
+        ) -> acp::Result<bool> {
+            Ok(self.private_docs.contains_key(doc_id))
+        }
+
+        async fn get_doc_owner(
+            &self,
+            _policy_id: &str,
+            _resource_name: &str,
+            doc_id: &str,
+        ) -> acp::Result<Option<Did>> {
+            Ok(self.private_docs.get(doc_id).cloned())
+        }
+
+        async fn check_doc_access(
+            &self,
+            identity: &Identity,
+            _permission: DocumentPermission,
+            _policy_id: &str,
+            _resource_name: &str,
+            doc_id: &str,
+        ) -> acp::Result<bool> {
+            Ok(match self.private_docs.get(doc_id) {
+                None => true,
+                Some(owner) => identity.did().map(|did| did == owner).unwrap_or(false),
+            })
+        }
+
+        async fn add_actor_relationship(
+            &self,
+            _requestor: &Did,
+            _target: &Did,
+            _policy_id: &str,
+            _collection_id: &str,
+            _doc_id: &str,
+            _relation: &str,
+            _managing_relations: &[String],
+        ) -> acp::Result<bool> {
+            Ok(false)
+        }
+
+        async fn delete_actor_relationship(
+            &self,
+            _requestor: &Did,
+            _target: &Did,
+            _policy_id: &str,
+            _collection_id: &str,
+            _doc_id: &str,
+            _relation: &str,
+            _managing_relations: &[String],
+        ) -> acp::Result<bool> {
+            Ok(false)
+        }
+
+        async fn unregister_doc_object(
+            &self,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<()> {
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn compute_fulltext_path_scores_lifts_parent_relation_scores() {
         let (file_collection, function_collection, collections_map) = relation_collections();
@@ -648,6 +736,131 @@ mod tests {
 
         assert_eq!(scores.get(fn_1), Some(&1.5));
         assert!(!scores.contains_key(fn_2));
+    }
+
+    #[tokio::test]
+    async fn nested_acp_relations_keep_public_join_targets() {
+        let employee_owner =
+            Did::new("did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw").unwrap();
+
+        let mut company_collection = CollectionVersion::new(
+            "Company",
+            "v1",
+            "coll-company",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                FieldDescription::new("3", "employees", FieldKind::relation("Employee", true))
+                    .with_relation_name("employee_company"),
+            ],
+        );
+        company_collection.policy = Some(PolicyDescription::new("policy", "companies"));
+
+        let mut employee_collection = CollectionVersion::new(
+            "Employee",
+            "v1",
+            "coll-employee",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                FieldDescription::new("3", "company", FieldKind::relation("Company", false))
+                    .with_relation_name("employee_company")
+                    .as_primary(),
+                FieldDescription::new("4", "_companyID", FieldKind::doc_id())
+                    .with_relation_name("employee_company")
+                    .as_primary(),
+            ],
+        );
+        employee_collection.policy = Some(PolicyDescription::new("policy", "employees"));
+
+        let fetcher = crate::test_utils::MockFetcher::new();
+        let company_public = "bae-7b649bba-3168-5c05-827c-514c0f8d56fd";
+        let company_private = "bae-47bd7c29-69cc-5b8a-856f-caaa93d9ace0";
+        let emp_public_public = "bae-bdeed30f-a5e4-5952-93df-27eccec5a5b9";
+        let emp_public_private = "bae-daad4cec-56aa-5b13-9502-657f29321b5d";
+        let emp_private_public = "bae-0c6127be-2c8f-5984-b5ca-a7f4343a5123";
+        let emp_private_private = "bae-7aa1c1b0-7546-5b1d-81f8-6f9d972b8e38";
+
+        fetcher.add_doc(
+            "Company",
+            doc(&format!(r#"{{"_docID":"{company_public}","name":"Public Company"}}"#)),
+        );
+        fetcher.add_doc(
+            "Company",
+            doc(&format!(r#"{{"_docID":"{company_private}","name":"Private Company"}}"#)),
+        );
+        fetcher.add_doc(
+            "Employee",
+            doc(&format!(
+                r#"{{"_docID":"{emp_public_public}","name":"PubEmp in PubCompany","_companyID":"{company_public}"}}"#,
+            )),
+        );
+        fetcher.add_doc(
+            "Employee",
+            doc(&format!(
+                r#"{{"_docID":"{emp_public_private}","name":"PubEmp in PrivateCompany","_companyID":"{company_private}"}}"#,
+            )),
+        );
+        fetcher.add_doc(
+            "Employee",
+            doc(&format!(
+                r#"{{"_docID":"{emp_private_public}","name":"PrivateEmp in PubCompany","_companyID":"{company_public}"}}"#,
+            )),
+        );
+        fetcher.add_doc(
+            "Employee",
+            doc(&format!(
+                r#"{{"_docID":"{emp_private_private}","name":"PrivateEmp in PrivateCompany","_companyID":"{company_private}"}}"#,
+            )),
+        );
+
+        let acp = Arc::new(MockDocumentAcp {
+            private_docs: HashMap::from([
+                (company_private.to_string(), employee_owner.clone()),
+                (emp_private_public.to_string(), employee_owner.clone()),
+                (emp_private_private.to_string(), employee_owner),
+            ]),
+        });
+
+        let runner = QueryRunner::new(fetcher, vec![company_collection, employee_collection]).with_acp(acp);
+
+        let result = runner
+            .execute_query(
+                r#"
+                query {
+                    Employee {
+                        name
+                        company {
+                            name
+                        }
+                    }
+                }
+                "#,
+            )
+            .await
+            .unwrap();
+
+        let JsonValue::Object(obj) = result else {
+            panic!("expected object result");
+        };
+        let JsonValue::Array(employees) = obj.get("Employee").cloned().unwrap() else {
+            panic!("expected employee array");
+        };
+
+        assert_eq!(employees.len(), 2);
+
+        let by_name: HashMap<_, _> = employees
+            .iter()
+            .map(|employee| {
+                (
+                    employee["name"].as_str().unwrap().to_string(),
+                    employee["company"].clone(),
+                )
+            })
+            .collect();
+
+        assert!(by_name["PubEmp in PrivateCompany"].is_null());
+        assert_eq!(by_name["PubEmp in PubCompany"]["name"], "Public Company");
     }
 
     #[tokio::test]

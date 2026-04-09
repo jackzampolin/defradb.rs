@@ -136,7 +136,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
             let mut plan: Box<dyn crate::planner::PlanNode> = match mutation.mutation_type {
                 MutationType::Create => {
-                    let inputs = self.build_create_inputs(mutation)?;
+                    let inputs = self.build_create_inputs(mutation, &collection)?;
                     Box::new(
                         crate::plan::CreateNode::new(
                             &mutation.collection_name,
@@ -149,7 +149,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     )
                 }
                 MutationType::Update => {
-                    let input = self.build_update_input(mutation)?;
+                    let input = self.build_update_input(mutation, &collection)?;
                     let fetcher: Arc<dyn crate::fetcher::DocFetcher> = self.fetcher.clone();
                     let mut node = crate::plan::UpdateNode::new(
                         &mutation.collection_name,
@@ -204,12 +204,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
                     if !mutation.create_input.is_empty() {
                         let create_input =
-                            self.build_upsert_input_from_map(&mutation.create_input[0])?;
+                            self.build_upsert_input_from_map(&collection, &mutation.create_input[0])?;
                         node = node.with_create_input(create_input);
                     }
                     if !mutation.update_input.is_empty() {
                         let update_input =
-                            self.build_upsert_input_from_map(&mutation.update_input)?;
+                            self.build_upsert_input_from_map(&collection, &mutation.update_input)?;
                         node = node.with_update_input(update_input);
                     }
                     if let Some(ref doc_ids) = resolved_doc_ids {

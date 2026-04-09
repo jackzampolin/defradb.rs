@@ -470,7 +470,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Build and execute the appropriate mutation plan
         let mut plan: Box<dyn PlanNode> = match mutation.mutation_type {
             MutationType::Create => {
-                let inputs = self.build_create_inputs(mutation)?;
+                let inputs = self.build_create_inputs(mutation, &collection)?;
                 Box::new(
                     CreateNode::new(&mutation.collection_name, mutator, mapping.clone())
                         .with_collection(collection.clone())
@@ -479,7 +479,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 )
             }
             MutationType::Update => {
-                let input = self.build_update_input(mutation)?;
+                let input = self.build_update_input(mutation, &collection)?;
                 let mut node = UpdateNode::new(
                     &mutation.collection_name,
                     mutator,
@@ -542,13 +542,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 // Set create_input (from Go's 'add' argument)
                 if !mutation.create_input.is_empty() {
                     let create_input =
-                        self.build_upsert_input_from_map(&mutation.create_input[0])?;
+                        self.build_upsert_input_from_map(&collection, &mutation.create_input[0])?;
                     node = node.with_create_input(create_input);
                 }
 
                 // Set update_input (from Go's 'update' argument)
                 if !mutation.update_input.is_empty() {
-                    let update_input = self.build_upsert_input_from_map(&mutation.update_input)?;
+                    let update_input =
+                        self.build_upsert_input_from_map(&collection, &mutation.update_input)?;
                     node = node.with_update_input(update_input);
                 }
 
@@ -604,10 +605,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             results.push(json);
         }
 
+        plan.close().await.map_err(&map_doc_not_found)?;
+
         // Clear encryption config after plan execution
         defra_core::encryption::set_encryption_config(None);
-
-        plan.close().await.map_err(&map_doc_not_found)?;
 
         let plan_execution_elapsed = plan_execution_start.elapsed();
         for doc_id in &result_doc_ids {
@@ -887,5 +888,164 @@ fn render_select_to_gql(select: &crate::mapper::Select, out: &mut String) {
             }
         }
         out.push('}');
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use document::{DocID, Document};
+    use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Mutex;
+
+    use crate::mutator::{CreateResult, DeleteResult, UpdateResult};
+    use crate::test_utils::MockFetcher;
+    use crate::{QueryExecutor, QueryRequest};
+
+    struct CapturingMutator {
+        created_docs: Mutex<Vec<Document>>,
+    }
+
+    impl CapturingMutator {
+        fn new() -> Self {
+            Self {
+                created_docs: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn created_docs(&self) -> Vec<Document> {
+            self.created_docs.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl crate::mutator::DocMutator for CapturingMutator {
+        async fn create(&self, _collection_name: &str, mut doc: Document) -> Result<CreateResult> {
+            if doc.id().is_none() {
+                doc.generate_and_set_doc_id().map_err(|error| {
+                    QueryError::execution(format!("failed to generate test doc id: {error}"))
+                })?;
+            }
+            self.created_docs.lock().unwrap().push(doc.clone());
+            Ok(CreateResult::new(doc.id().unwrap().clone(), doc))
+        }
+
+        async fn update(
+            &self,
+            _collection_name: &str,
+            doc: Document,
+            modified_fields: HashSet<String>,
+        ) -> Result<UpdateResult> {
+            Ok(UpdateResult::new(doc, modified_fields.len()))
+        }
+
+        async fn delete(&self, _collection_name: &str, doc_id: &DocID) -> Result<DeleteResult> {
+            Ok(DeleteResult::new(doc_id.clone(), true))
+        }
+
+        async fn exists(&self, _collection_name: &str, _doc_id: &DocID) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn get_for_update(
+            &self,
+            _collection_name: &str,
+            _doc_id: &DocID,
+        ) -> Result<Option<Document>> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn create_mutation_maps_relation_doc_ids_to_fk_fields() {
+        let company_collection = CollectionVersion::new(
+            "Company",
+            "v1",
+            "coll-company",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                FieldDescription::new("3", "employees", FieldKind::relation("Employee", true))
+                    .with_relation_name("employee_company"),
+            ],
+        );
+
+        let employee_collection = CollectionVersion::new(
+            "Employee",
+            "v1",
+            "coll-employee",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+                FieldDescription::new("3", "company", FieldKind::relation("Company", false))
+                    .with_relation_name("employee_company")
+                    .as_primary(),
+                FieldDescription::new("4", "_companyID", FieldKind::doc_id())
+                    .with_relation_name("employee_company")
+                    .as_primary(),
+            ],
+        );
+
+        let fetcher = MockFetcher::new();
+        let mutator = Arc::new(CapturingMutator::new());
+        let runner = QueryRunner::new(fetcher, vec![company_collection, employee_collection])
+            .with_mutator(mutator.clone());
+
+        let request = QueryRequest::new(
+            r#"
+            mutation {
+                add_Employee(input: [{
+                    name: "PubEmp in PubCompany"
+                    company: "bae-7b649bba-3168-5c05-827c-514c0f8d56fd"
+                }]) {
+                    _docID
+                }
+            }
+            "#,
+        );
+
+        let response = runner.execute(request).await;
+        assert!(
+            response.errors.is_empty(),
+            "unexpected executor errors: {:?}",
+            response.errors
+        );
+        assert!(response.data.is_some());
+
+        // Also exercise the direct mutation path used by internal callers.
+        runner
+            .execute_mutation(
+                r#"
+                mutation {
+                    add_Employee(input: [{
+                        name: "PubEmp in PubCompany 2"
+                        company: "bae-7b649bba-3168-5c05-827c-514c0f8d56fd"
+                    }]) {
+                        _docID
+                    }
+                }
+                "#,
+            )
+            .await
+            .unwrap();
+
+        let created = mutator.created_docs();
+        assert_eq!(created.len(), 2);
+        let created_doc = &created[0];
+        assert_eq!(
+            created_doc.get("_companyID").and_then(|value| value.as_str()),
+            Some("bae-7b649bba-3168-5c05-827c-514c0f8d56fd")
+        );
+        assert!(created_doc.get("company").is_none());
+
+        let created_doc = &created[1];
+        assert_eq!(
+            created_doc.get("_companyID").and_then(|value| value.as_str()),
+            Some("bae-7b649bba-3168-5c05-827c-514c0f8d56fd")
+        );
+        assert!(created_doc.get("company").is_none());
     }
 }
