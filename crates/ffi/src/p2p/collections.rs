@@ -45,7 +45,13 @@ pub unsafe extern "C" fn p2p_add_collections(
                     None => return Err("no p2p system configured".to_string()),
                 };
 
-                rt.block_on(async { p2p.system.ops().add_collections(collections).await })
+                rt.block_on(async {
+                    p2p.system
+                        .ops()
+                        .add_collections(collections)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
             .and_then(|result| result);
@@ -91,7 +97,13 @@ pub unsafe extern "C" fn p2p_delete_collections(
                     None => return Err("no p2p system configured".to_string()),
                 };
 
-                rt.block_on(async { p2p.system.ops().remove_collections(collections).await })
+                rt.block_on(async {
+                    p2p.system
+                        .ops()
+                        .remove_collections(collections)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
             .and_then(|result| result);
@@ -131,7 +143,8 @@ pub unsafe extern "C" fn p2p_list_collections(
                 };
 
                 rt.block_on(async {
-                    let collections = p2p.system.ops().get_collections().await?;
+                    let collections = p2p.system.ops().get_collections().await
+                        .map_err(|error| error.to_string())?;
                     serde_json::to_string(&collections)
                         .map_err(|error| format!("failed to serialize collections: {}", error))
                 })

@@ -396,6 +396,7 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
                         .ops()
                         .republish_document(&collection_id_str, &doc_id_str)
                         .await
+                        .map_err(|error| error.to_string())
                     {
                         tracing::debug!(
                             error = %error,

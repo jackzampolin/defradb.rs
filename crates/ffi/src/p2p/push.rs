@@ -28,7 +28,13 @@ pub unsafe extern "C" fn p2p_retry_replicators(node_ptr: usize) -> FfiResult {
                         .map(|identity| identity.as_bytes().to_vec()),
                 };
 
-                rt.block_on(async { p2p.system.ops().retry_replicators(push_options).await })
+                rt.block_on(async {
+                    p2p.system
+                        .ops()
+                        .retry_replicators(push_options)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
             .and_then(|result| result);

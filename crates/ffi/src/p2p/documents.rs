@@ -53,7 +53,13 @@ pub unsafe extern "C" fn p2p_add_documents(
                     None => return Err("no p2p system configured".to_string()),
                 };
 
-                rt.block_on(async { p2p.system.ops().add_documents(docs).await })
+                rt.block_on(async {
+                    p2p.system
+                        .ops()
+                        .add_documents(docs)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
             .and_then(|result| result);
@@ -107,7 +113,13 @@ pub unsafe extern "C" fn p2p_delete_documents(
                     None => return Err("no p2p system configured".to_string()),
                 };
 
-                rt.block_on(async { p2p.system.ops().remove_documents(docs).await })
+                rt.block_on(async {
+                    p2p.system
+                        .ops()
+                        .remove_documents(docs)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
             .and_then(|result| result);
@@ -147,7 +159,8 @@ pub unsafe extern "C" fn p2p_list_documents(
                 };
 
                 rt.block_on(async {
-                    let documents = p2p.system.ops().get_documents().await?;
+                    let documents = p2p.system.ops().get_documents().await
+                        .map_err(|error| error.to_string())?;
                     let mut doc_ids: Vec<String> =
                         documents.into_iter().map(|doc| doc.doc_id).collect();
                     doc_ids.sort();

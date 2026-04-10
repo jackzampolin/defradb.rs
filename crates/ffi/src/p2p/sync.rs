@@ -53,6 +53,7 @@ pub unsafe extern "C" fn p2p_sync_documents(
                         .ops()
                         .sync_documents(&collection_name, doc_ids)
                         .await
+                        .map_err(|error| error.to_string())
                 })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
@@ -100,6 +101,7 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
                         .ops()
                         .sync_branchable_collection(&collection_id)
                         .await
+                        .map_err(|error| error.to_string())
                 })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())

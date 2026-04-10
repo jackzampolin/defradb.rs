@@ -64,6 +64,7 @@ pub unsafe extern "C" fn p2p_add_replicator(
                         .ops()
                         .add_replicator(collections, Some(&addr), push_options)
                         .await
+                        .map_err(|error| error.to_string())
                 })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
@@ -124,6 +125,7 @@ pub unsafe extern "C" fn p2p_delete_replicator(
                         .ops()
                         .remove_replicator(collections, Some(&peer))
                         .await
+                        .map_err(|error| error.to_string())
                 })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
@@ -165,7 +167,8 @@ pub unsafe extern "C" fn p2p_list_replicators(
                 };
 
                 rt.block_on(async {
-                    let replicators = p2p.system.ops().get_replicators().await?;
+                    let replicators = p2p.system.ops().get_replicators().await
+                        .map_err(|error| error.to_string())?;
                     serde_json::to_string(&replicators)
                         .map_err(|error| format!("failed to serialize replicators: {}", error))
                 })

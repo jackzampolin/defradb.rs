@@ -33,38 +33,34 @@ pub use iroh_adapter::IrohP2PAdapter;
 /// Transport-agnostic P2P operations exposed by embedded nodes.
 #[async_trait]
 pub trait P2POperations: Send + Sync {
-    async fn local_peer_id(&self) -> Result<String, String>;
-    async fn listen_addresses(&self) -> Result<Vec<String>, String>;
-    async fn connected_peers(&self) -> Result<Vec<String>, String>;
-    async fn connect_peer(&self, addr: &str) -> Result<(), String>;
-    async fn notify_network_change(&self) -> Result<(), String>;
-    async fn get_replicators(&self) -> Result<Vec<ReplicatorInfo>, String>;
+    async fn local_peer_id(&self) -> P2PResult<String>;
+    async fn listen_addresses(&self) -> P2PResult<Vec<String>>;
+    async fn connected_peers(&self) -> P2PResult<Vec<String>>;
+    async fn connect_peer(&self, addr: &str) -> P2PResult<()>;
+    async fn notify_network_change(&self) -> P2PResult<()>;
+    async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>>;
     async fn add_replicator(
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
         push_options: ReplicatorPushOptions,
-    ) -> Result<(), String>;
+    ) -> P2PResult<()>;
     async fn remove_replicator(
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
-    ) -> Result<(), String>;
-    async fn retry_replicators(&self, push_options: ReplicatorPushOptions) -> Result<(), String>;
-    async fn get_collections(&self) -> Result<Vec<String>, String>;
-    async fn add_collections(&self, collections: Vec<String>) -> Result<(), String>;
-    async fn remove_collections(&self, collections: Vec<String>) -> Result<(), String>;
-    async fn get_documents(&self) -> Result<Vec<P2pDocumentInfo>, String>;
-    async fn add_documents(&self, docs: Vec<P2pDocumentRequest>) -> Result<(), String>;
-    async fn remove_documents(&self, docs: Vec<P2pDocumentRequest>) -> Result<(), String>;
-    async fn republish_document(&self, collection_name: &str, doc_id: &str) -> Result<(), String>;
-    async fn sync_documents(
-        &self,
-        collection_name: &str,
-        doc_ids: Vec<String>,
-    ) -> Result<(), String>;
-    async fn sync_branchable_collection(&self, collection_id: &str) -> Result<(), String>;
-    async fn sync_collection_versions(&self, version_ids: Vec<String>) -> Result<(), String>;
+    ) -> P2PResult<()>;
+    async fn retry_replicators(&self, push_options: ReplicatorPushOptions) -> P2PResult<()>;
+    async fn get_collections(&self) -> P2PResult<Vec<String>>;
+    async fn add_collections(&self, collections: Vec<String>) -> P2PResult<()>;
+    async fn remove_collections(&self, collections: Vec<String>) -> P2PResult<()>;
+    async fn get_documents(&self) -> P2PResult<Vec<P2pDocumentInfo>>;
+    async fn add_documents(&self, docs: Vec<P2pDocumentRequest>) -> P2PResult<()>;
+    async fn remove_documents(&self, docs: Vec<P2pDocumentRequest>) -> P2PResult<()>;
+    async fn republish_document(&self, collection_name: &str, doc_id: &str) -> P2PResult<()>;
+    async fn sync_documents(&self, collection_name: &str, doc_ids: Vec<String>) -> P2PResult<()>;
+    async fn sync_branchable_collection(&self, collection_id: &str) -> P2PResult<()>;
+    async fn sync_collection_versions(&self, version_ids: Vec<String>) -> P2PResult<()>;
 }
 
 /// Optional inputs used when pushing existing documents to replicators.

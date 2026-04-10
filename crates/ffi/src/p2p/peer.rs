@@ -38,12 +38,14 @@ pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_c
                         .system
                         .ops()
                         .local_peer_id()
-                        .await?;
+                        .await
+                        .map_err(|error| error.to_string())?;
                     let addresses = p2p
                         .system
                         .ops()
                         .listen_addresses()
-                        .await?;
+                        .await
+                        .map_err(|error| error.to_string())?;
 
                     let full_addrs = match p2p.system.kind() {
                         embedded::TransportKind::Libp2p => addresses
@@ -96,7 +98,13 @@ pub unsafe extern "C" fn p2p_notify_network_change(
                     None => return Err("no p2p system configured".to_string()),
                 };
 
-                rt.block_on(async { p2p.system.ops().notify_network_change().await })
+                rt.block_on(async {
+                    p2p.system
+                        .ops()
+                        .notify_network_change()
+                        .await
+                        .map_err(|error| error.to_string())
+                })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
             .and_then(|result| result);
@@ -136,7 +144,8 @@ pub unsafe extern "C" fn p2p_active_peers(
                 };
 
                 rt.block_on(async {
-                    let peers = p2p.system.ops().connected_peers().await?;
+                    let peers = p2p.system.ops().connected_peers().await
+                        .map_err(|error| error.to_string())?;
                     serde_json::to_string(&peers)
                         .map_err(|error| format!("failed to serialize peer list: {}", error))
                 })
@@ -181,7 +190,13 @@ pub unsafe extern "C" fn p2p_connect(
                     None => return Err("no p2p system configured".to_string()),
                 };
 
-                rt.block_on(async { p2p.system.ops().connect_peer(&addr_str).await })
+                rt.block_on(async {
+                    p2p.system
+                        .ops()
+                        .connect_peer(&addr_str)
+                        .await
+                        .map_err(|error| error.to_string())
+                })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
             .and_then(|result| result);

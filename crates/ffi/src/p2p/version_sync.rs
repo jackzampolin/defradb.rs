@@ -57,6 +57,7 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                         .ops()
                         .sync_collection_versions(version_ids)
                         .await
+                        .map_err(|error| error.to_string())
                 })
             })
             .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
