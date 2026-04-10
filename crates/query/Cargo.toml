@@ -19,6 +19,7 @@ identity = { path = "../identity" }
 acp = { path = "../acp" }
 lens = { path = "../lens", default-features = false }
 query-model = { path = "../query-model" }
+query-parse = { path = "../query-parse" }
 
 # Async runtime
 async-trait.workspace = true

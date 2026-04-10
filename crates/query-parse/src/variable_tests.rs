@@ -293,7 +293,7 @@ fn test_variable_in_order_direction() {
             let order = selects[0].order_by.as_ref().unwrap();
             assert_eq!(
                 order.conditions[0].direction,
-                crate::mapper::OrderDirection::Desc
+                query_model::mapper::OrderDirection::Desc
             );
         }
         _ => panic!("Expected query"),

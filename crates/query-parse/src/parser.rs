@@ -10,9 +10,9 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 use tracing::instrument;
 
-use crate::document::DocumentMapping;
-use crate::error::{QueryError, Result};
-use crate::mapper::{AggregateType, Field as SelectField, Limit, Mutation, Requestable, Select};
+use query_model::document::DocumentMapping;
+use query_model::error::{QueryError, Result};
+use query_model::mapper::{AggregateType, Field as SelectField, Limit, Mutation, Requestable, Select};
 
 use super::aggregates::{parse_aggregate_field, parse_group_by_value, parse_top_level_aggregate};
 use super::explain::{
@@ -29,7 +29,6 @@ use super::variables::{extract_variable_defaults, merge_variables, validate_requ
 
 /// Type of explain output requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
 pub enum ExplainType {
     /// Simple explanation showing query plan structure without execution.
     #[default]
@@ -54,7 +53,6 @@ impl ExplainType {
 
 /// Result of parsing a GraphQL request.
 #[derive(Debug)]
-#[non_exhaustive]
 pub enum ParsedOperation {
     /// Query operations (SELECT)
     Query {

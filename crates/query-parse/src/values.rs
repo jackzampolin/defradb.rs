@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use graphql_parser::query::Value;
 use serde_json::Value as JsonValue;
 
-use crate::error::{QueryError, Result};
+use query_model::error::{QueryError, Result};
 
 /// Convert GraphQL Value to JSON Value without variable resolution.
 ///

@@ -13,8 +13,8 @@ use graphql_parser::query::{Field, Value};
 use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 
-use crate::error::{QueryError, Result};
-use crate::mapper::{parse_mutation_name, FullTextSearch, Mutation, MutationType, Similarity};
+use query_model::error::{QueryError, Result};
+use query_model::mapper::{parse_mutation_name, FullTextSearch, Mutation, MutationType, Similarity};
 
 use super::filters::parse_filter_value;
 use super::parser::{parse_selection_set, FragmentMap};

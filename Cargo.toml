@@ -5,6 +5,7 @@ members = [
     "crates/crdt",
     "crates/storage",
     "crates/query-model",
+    "crates/query-parse",
     "crates/blockstore",
     "crates/embedded",
     "crates/schema",

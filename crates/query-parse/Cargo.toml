@@ -1,0 +1,18 @@
+[package]
+name = "query-parse"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+query-model = { path = "../query-model" }
+
+serde_json.workspace = true
+tracing.workspace = true
+graphql-parser.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -2,7 +2,7 @@
 
 use graphql_parser::query::{Directive, Value};
 
-use crate::error::{QueryError, Result};
+use query_model::error::{QueryError, Result};
 
 use super::ExplainType;
 

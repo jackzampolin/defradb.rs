@@ -9786,6 +9786,7 @@ dependencies = [
  "lens",
  "proptest",
  "query-model",
+ "query-parse",
  "regex",
  "schema",
  "serde",
@@ -9807,6 +9808,17 @@ dependencies = [
  "serde_json",
  "storage",
  "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "query-parse"
+version = "0.5.0"
+dependencies = [
+ "graphql-parser",
+ "query-model",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 
