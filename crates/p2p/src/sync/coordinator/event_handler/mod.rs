@@ -13,11 +13,136 @@ use super::SyncCoordinator;
 use crate::error::{Error, Result};
 use crate::message::{BranchableSyncReply, DocSyncReply, PushLogReply};
 use crate::signing::sign_with_transport;
-use crate::transport::{P2PTransport, TransportEvent};
+use crate::transport::{P2PTransport, PeerId, ResponseToken, TransportEvent};
 
 const RATE_LIMITED_MSG: &str = "rate limited: too many requests, retry later";
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
+    fn rate_limited_error(peer_id: &PeerId) -> Error {
+        Error::AccessDenied {
+            peer_id: peer_id.to_string(),
+            collection_id: "rate-limited".into(),
+        }
+    }
+
+    async fn reject_rate_limited_pushlog(
+        &self,
+        peer_id: &PeerId,
+        message_id: &str,
+        token: ResponseToken,
+    ) -> Error {
+        tracing::debug!(
+            peer_id = %peer_id,
+            "Rate limit exceeded for PushLogRequest, sending backpressure reply"
+        );
+        let reply = PushLogReply::error(message_id, RATE_LIMITED_MSG);
+        let _ = self
+            .runtime
+            .transport
+            .send_pushlog_response(token, reply)
+            .await;
+        Self::rate_limited_error(peer_id)
+    }
+
+    async fn reject_rate_limited_two_stream(
+        &self,
+        peer_id: &PeerId,
+        message_id: &str,
+        token: Option<ResponseToken>,
+    ) -> Error {
+        tracing::debug!(
+            peer_id = %peer_id,
+            "Rate limit exceeded for TwoStreamRequest, sending backpressure reply"
+        );
+        let mut reply = PushLogReply::error(message_id, RATE_LIMITED_MSG);
+        let _ = sign_with_transport(&self.runtime.transport, &mut reply);
+        self.send_two_stream_reply(peer_id, reply, token).await;
+        Self::rate_limited_error(peer_id)
+    }
+
+    async fn reject_rate_limited_doc_sync(
+        &self,
+        peer_id: &PeerId,
+        message_id: &str,
+        token: Option<ResponseToken>,
+    ) -> Error {
+        tracing::debug!(
+            peer_id = %peer_id,
+            "Rate limit exceeded for DocSyncRequest, sending backpressure reply"
+        );
+        let reply = DocSyncReply::error(message_id, RATE_LIMITED_MSG);
+        if let Some(token) = token {
+            let _ = self
+                .runtime
+                .transport
+                .send_doc_sync_response_token(token, reply)
+                .await;
+        } else {
+            let _ = self
+                .runtime
+                .transport
+                .send_doc_sync_response(peer_id, reply)
+                .await;
+        }
+        Self::rate_limited_error(peer_id)
+    }
+
+    async fn reject_rate_limited_branchable_sync(
+        &self,
+        peer_id: &PeerId,
+        message_id: &str,
+        collection_id: &str,
+        token: Option<ResponseToken>,
+    ) -> Error {
+        tracing::debug!(
+            peer_id = %peer_id,
+            "Rate limit exceeded for BranchableSyncRequest, sending backpressure reply"
+        );
+        let reply = BranchableSyncReply::error(message_id, collection_id, RATE_LIMITED_MSG);
+        if let Some(token) = token {
+            let _ = self
+                .runtime
+                .transport
+                .send_branchable_sync_response_token(token, reply)
+                .await;
+        } else {
+            let _ = self
+                .runtime
+                .transport
+                .send_branchable_sync_response(peer_id, reply)
+                .await;
+        }
+        Self::rate_limited_error(peer_id)
+    }
+
+    async fn reject_rate_limited_car_fetch(
+        &self,
+        peer_id: &PeerId,
+        token: Option<ResponseToken>,
+    ) -> Error {
+        tracing::debug!(
+            peer_id = %peer_id,
+            "Rate limit exceeded for CarFetchRequest, sending empty backpressure reply"
+        );
+        // CAR has no error reply type — send empty response so the
+        // sender sees an explicit (parseable) rejection rather than
+        // a hung stream / timeout.
+        if let Some(token) = token {
+            let _ = self
+                .runtime
+                .transport
+                .send_car_response_token(token, Vec::new())
+                .await;
+        } else {
+            let _ = self
+                .runtime
+                .transport
+                .send_car_response(peer_id, Vec::new())
+                .await;
+        }
+        Self::rate_limited_error(peer_id)
+    }
+
     /// Handle an event from the transport layer.
     ///
     /// This should be called from the event loop that processes TransportEvents.
@@ -55,10 +180,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         peer_id = %propagation_source,
                         "Rate limit exceeded for GossipMessage, dropping"
                     );
-                    return Err(Error::AccessDenied {
-                        peer_id: propagation_source.to_string(),
-                        collection_id: "rate-limited".into(),
-                    });
+                    return Err(Self::rate_limited_error(&propagation_source));
                 }
                 self.handle_gossip_message(propagation_source, message, topic)
                     .await?;
@@ -69,20 +191,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 token,
             } => {
                 if !self.runtime.rate_limiter.check(&peer_id) {
-                    tracing::debug!(
-                        peer_id = %peer_id,
-                        "Rate limit exceeded for PushLogRequest, sending backpressure reply"
-                    );
-                    let reply = PushLogReply::error(&request.metadata.message_id, RATE_LIMITED_MSG);
-                    let _ = self
-                        .runtime
-                        .transport
-                        .send_pushlog_response(token, reply)
-                        .await;
-                    return Err(Error::AccessDenied {
-                        peer_id: peer_id.to_string(),
-                        collection_id: "rate-limited".into(),
-                    });
+                    return Err(self
+                        .reject_rate_limited_pushlog(&peer_id, &request.metadata.message_id, token)
+                        .await);
                 }
                 self.handle_pushlog_request(peer_id, request, token).await?;
             }
@@ -94,18 +205,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 explicit_replay_authorization,
             } => {
                 if !self.runtime.rate_limiter.check(&peer_id) {
-                    tracing::debug!(
-                        peer_id = %peer_id,
-                        "Rate limit exceeded for TwoStreamRequest, sending backpressure reply"
-                    );
-                    let mut reply =
-                        PushLogReply::error(&request.metadata.message_id, RATE_LIMITED_MSG);
-                    let _ = sign_with_transport(&self.runtime.transport, &mut reply);
-                    self.send_two_stream_reply(&peer_id, reply, token).await;
-                    return Err(Error::AccessDenied {
-                        peer_id: peer_id.to_string(),
-                        collection_id: "rate-limited".into(),
-                    });
+                    return Err(self
+                        .reject_rate_limited_two_stream(
+                            &peer_id,
+                            &request.metadata.message_id,
+                            token,
+                        )
+                        .await);
                 }
                 self.handle_two_stream_request(
                     peer_id,
@@ -138,28 +244,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 token,
             } => {
                 if !self.runtime.rate_limiter.check(&peer_id) {
-                    tracing::debug!(
-                        peer_id = %peer_id,
-                        "Rate limit exceeded for DocSyncRequest, sending backpressure reply"
-                    );
-                    let reply = DocSyncReply::error(&request.metadata.message_id, RATE_LIMITED_MSG);
-                    if let Some(token) = token {
-                        let _ = self
-                            .runtime
-                            .transport
-                            .send_doc_sync_response_token(token, reply)
-                            .await;
-                    } else {
-                        let _ = self
-                            .runtime
-                            .transport
-                            .send_doc_sync_response(&peer_id, reply)
-                            .await;
-                    }
-                    return Err(Error::AccessDenied {
-                        peer_id: peer_id.to_string(),
-                        collection_id: "rate-limited".into(),
-                    });
+                    return Err(self
+                        .reject_rate_limited_doc_sync(&peer_id, &request.metadata.message_id, token)
+                        .await);
                 }
                 self.handle_doc_sync_request(peer_id, request, token)
                     .await?;
@@ -173,32 +260,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 token,
             } => {
                 if !self.runtime.rate_limiter.check(&peer_id) {
-                    tracing::debug!(
-                        peer_id = %peer_id,
-                        "Rate limit exceeded for BranchableSyncRequest, sending backpressure reply"
-                    );
-                    let reply = BranchableSyncReply::error(
-                        &request.metadata.message_id,
-                        &request.collection_id,
-                        RATE_LIMITED_MSG,
-                    );
-                    if let Some(token) = token {
-                        let _ = self
-                            .runtime
-                            .transport
-                            .send_branchable_sync_response_token(token, reply)
-                            .await;
-                    } else {
-                        let _ = self
-                            .runtime
-                            .transport
-                            .send_branchable_sync_response(&peer_id, reply)
-                            .await;
-                    }
-                    return Err(Error::AccessDenied {
-                        peer_id: peer_id.to_string(),
-                        collection_id: "rate-limited".into(),
-                    });
+                    return Err(self
+                        .reject_rate_limited_branchable_sync(
+                            &peer_id,
+                            &request.metadata.message_id,
+                            &request.collection_id,
+                            token,
+                        )
+                        .await);
                 }
                 self.handle_branchable_sync_request(peer_id, request, token)
                     .await?;
@@ -212,30 +281,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 token,
             } => {
                 if !self.runtime.rate_limiter.check(&peer_id) {
-                    tracing::debug!(
-                        peer_id = %peer_id,
-                        "Rate limit exceeded for CarFetchRequest, sending empty backpressure reply"
-                    );
-                    // CAR has no error reply type — send empty response so the
-                    // sender sees an explicit (parseable) rejection rather than
-                    // a hung stream / timeout.
-                    if let Some(token) = token {
-                        let _ = self
-                            .runtime
-                            .transport
-                            .send_car_response_token(token, Vec::new())
-                            .await;
-                    } else {
-                        let _ = self
-                            .runtime
-                            .transport
-                            .send_car_response(&peer_id, Vec::new())
-                            .await;
-                    }
-                    return Err(Error::AccessDenied {
-                        peer_id: peer_id.to_string(),
-                        collection_id: "rate-limited".into(),
-                    });
+                    return Err(self.reject_rate_limited_car_fetch(&peer_id, token).await);
                 }
                 self.handle_car_fetch_request(peer_id, request, token)
                     .await?;
