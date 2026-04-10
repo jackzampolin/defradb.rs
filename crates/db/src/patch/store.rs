@@ -204,10 +204,10 @@ impl<S: Store> crate::database::DB<S> {
                 Some(data) => {
                     let placeholder: CollectionVersion =
                         serde_json::from_slice(&data).map_err(|e| {
-                            Error::Serialization(format!(
-                                "failed to deserialize placeholder version: {}",
-                                e
-                            ))
+                            Error::collection_schema_json(
+                                "failed to deserialize placeholder version",
+                                e,
+                            )
                         })?;
                     tracing::debug!(
                         new_version_id = %new_version_id,
@@ -292,17 +292,23 @@ impl<S: Store> crate::database::DB<S> {
         // Prepare serialized data before getting systemstore reference
         let old_version_key = CollectionKey::new(old_version_id);
         let old_version_data = serde_json::to_vec(&old_schema_inactive).map_err(|e| {
-            Error::Serialization(format!(
-                "failed to serialize old schema version '{}': {}",
-                old_version_id, e
-            ))
+            Error::collection_schema_json(
+                format!(
+                    "failed to serialize old schema version '{}'",
+                    old_version_id
+                ),
+                e,
+            )
         })?;
         let new_version_key = CollectionKey::new(&new_version_id);
         let new_version_data = serde_json::to_vec(&new_schema).map_err(|e| {
-            Error::Serialization(format!(
-                "failed to serialize new schema version '{}': {}",
-                new_version_id, e
-            ))
+            Error::collection_schema_json(
+                format!(
+                    "failed to serialize new schema version '{}'",
+                    new_version_id
+                ),
+                e,
+            )
         })?;
         let name_key = CollectionNameKey::new(actual_name);
         let version_index_key = CollectionVersionKey::new(collection_id, &new_version_id);
@@ -564,10 +570,13 @@ impl<S: Store> crate::database::DB<S> {
                 let txn = self.new_txn(false).await?;
                 let key = CollectionKey::new(&updated_schema.version_id);
                 let data = serde_json::to_vec(&updated_schema).map_err(|e| {
-                    Error::Serialization(format!(
-                        "failed to serialize updated schema '{}': {}",
-                        updated_schema.version_id, e
-                    ))
+                    Error::collection_schema_json(
+                        format!(
+                            "failed to serialize updated schema '{}'",
+                            updated_schema.version_id
+                        ),
+                        e,
+                    )
                 })?;
                 {
                     let systemstore = txn.systemstore()?;
