@@ -272,9 +272,8 @@ async fn test_counter_schema_version_mismatch() {
         .contains("schema version mismatch"));
 }
 
-#[tokio::test]
-async fn test_counter_float64_nan_rejected_by_constructor() {
-    // NaN is rejected during delta construction (new_float64 validates)
+#[test]
+fn test_counter_float64_constructor_accepts_nan() {
     let result = CounterDelta::new_float64(
         b"doc1".to_vec(),
         "count".to_string(),
@@ -283,13 +282,11 @@ async fn test_counter_float64_nan_rejected_by_constructor() {
         "v1".to_string(),
         f64::NAN,
     );
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("must be finite"));
+    assert!(result.is_ok());
 }
 
 #[test]
-fn test_counter_float64_positive_infinity() {
-    // new_float64 validates, so we test via the constructor validation
+fn test_counter_float64_constructor_accepts_positive_infinity() {
     let result = CounterDelta::new_float64(
         b"doc1".to_vec(),
         "count".to_string(),
@@ -298,13 +295,11 @@ fn test_counter_float64_positive_infinity() {
         "v1".to_string(),
         f64::INFINITY,
     );
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("must be finite"));
+    assert!(result.is_ok());
 }
 
 #[test]
-fn test_counter_float64_negative_infinity() {
-    // new_float64 validates, so we test via the constructor validation
+fn test_counter_float64_constructor_accepts_negative_infinity() {
     let result = CounterDelta::new_float64(
         b"doc1".to_vec(),
         "count".to_string(),
@@ -313,12 +308,11 @@ fn test_counter_float64_negative_infinity() {
         "v1".to_string(),
         f64::NEG_INFINITY,
     );
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("must be finite"));
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
-async fn test_counter_float64_overflow() {
+async fn test_counter_float64_overflow_becomes_positive_infinity() {
     let store = MemoryStore::new();
     let counter = Counter::new(
         "v1".to_string(),
@@ -360,9 +354,86 @@ async fn test_counter_float64_overflow() {
     )
     .unwrap();
 
-    let result = counter.merge(&mut *txn, &ctx, &delta2).await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("float64 overflow"));
+    counter.merge(&mut *txn, &ctx, &delta2).await.unwrap();
+
+    let value_bytes = counter.value(&*txn).await.unwrap();
+    let value = f64::from_be_bytes(value_bytes.try_into().unwrap());
+    assert!(value.is_infinite());
+    assert!(value.is_sign_positive());
+}
+
+#[tokio::test]
+async fn test_counter_float64_nan_increment_propagates_nan() {
+    let store = MemoryStore::new();
+    let counter = Counter::new(
+        "v1".to_string(),
+        b"doc1",
+        "count".to_string(),
+        true,
+        NumericKind::Float64,
+    )
+    .unwrap();
+
+    let ctx = Context {
+        doc_id: DocId::new("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    let delta = CounterDelta::new_float64(
+        b"doc1".to_vec(),
+        "count".to_string(),
+        10,
+        1,
+        "v1".to_string(),
+        f64::NAN,
+    )
+    .unwrap();
+
+    counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+
+    let value_bytes = counter.value(&*txn).await.unwrap();
+    let value = f64::from_be_bytes(value_bytes.try_into().unwrap());
+    assert!(value.is_nan());
+}
+
+#[tokio::test]
+async fn test_counter_float64_negative_zero_normalizes_to_positive_zero() {
+    let store = MemoryStore::new();
+    let counter = Counter::new(
+        "v1".to_string(),
+        b"doc1",
+        "count".to_string(),
+        true,
+        NumericKind::Float64,
+    )
+    .unwrap();
+
+    let ctx = Context {
+        doc_id: DocId::new("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    let delta = CounterDelta::new_float64(
+        b"doc1".to_vec(),
+        "count".to_string(),
+        10,
+        1,
+        "v1".to_string(),
+        -0.0,
+    )
+    .unwrap();
+
+    counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+
+    let value_bytes = counter.value(&*txn).await.unwrap();
+    let value = f64::from_be_bytes(value_bytes.try_into().unwrap());
+    assert_eq!(value.to_bits(), 0.0f64.to_bits());
 }
 
 #[tokio::test]

@@ -11,6 +11,7 @@ use crdt::counter::NumericKind;
 use crdt::traits::{Context, ReplicatedData};
 use defra_core::types::DocId;
 use std::collections::HashMap;
+use std::f64;
 use storage::{MemoryStore, Store};
 
 #[tokio::test]
@@ -255,6 +256,125 @@ async fn test_composite_doc_id_mismatch() {
         .unwrap_err()
         .to_string()
         .contains("document ID mismatch"));
+}
+
+#[tokio::test]
+async fn test_composite_float64_counter_overflow_becomes_positive_infinity() {
+    let store = MemoryStore::new();
+    let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+    composite.register_counter_field("count".to_string(), true, NumericKind::Float64);
+
+    let ctx = Context {
+        doc_id: DocId::new("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let mut delta1 = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), 10).unwrap();
+    delta1
+        .add_field_delta(
+            "count".to_string(),
+            FieldDelta::Counter {
+                priority: 10,
+                nonce: 1,
+                data: f64::MAX.to_be_bytes().to_vec(),
+            },
+        )
+        .unwrap();
+
+    let mut delta2 = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), 20).unwrap();
+    delta2
+        .add_field_delta(
+            "count".to_string(),
+            FieldDelta::Counter {
+                priority: 20,
+                nonce: 2,
+                data: f64::MAX.to_be_bytes().to_vec(),
+            },
+        )
+        .unwrap();
+
+    let mut txn = store.new_txn(false).await.unwrap();
+    composite.merge(&mut *txn, &ctx, &delta1).await.unwrap();
+    composite.merge(&mut *txn, &ctx, &delta2).await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let count_key = b"/data/v1/doc1/count".to_vec();
+    let count_bytes = txn.get(&count_key).await.unwrap().unwrap();
+    let count = f64::from_be_bytes(count_bytes.try_into().unwrap());
+    assert!(count.is_infinite());
+    assert!(count.is_sign_positive());
+}
+
+#[tokio::test]
+async fn test_composite_float64_counter_nan_increment_propagates_nan() {
+    let store = MemoryStore::new();
+    let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+    composite.register_counter_field("count".to_string(), true, NumericKind::Float64);
+
+    let ctx = Context {
+        doc_id: DocId::new("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let mut delta = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), 10).unwrap();
+    delta
+        .add_field_delta(
+            "count".to_string(),
+            FieldDelta::Counter {
+                priority: 10,
+                nonce: 1,
+                data: f64::NAN.to_be_bytes().to_vec(),
+            },
+        )
+        .unwrap();
+
+    let mut txn = store.new_txn(false).await.unwrap();
+    composite.merge(&mut *txn, &ctx, &delta).await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let count_key = b"/data/v1/doc1/count".to_vec();
+    let count_bytes = txn.get(&count_key).await.unwrap().unwrap();
+    let count = f64::from_be_bytes(count_bytes.try_into().unwrap());
+    assert!(count.is_nan());
+}
+
+#[tokio::test]
+async fn test_composite_float64_counter_negative_zero_normalizes_to_positive_zero() {
+    let store = MemoryStore::new();
+    let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+    composite.register_counter_field("count".to_string(), true, NumericKind::Float64);
+
+    let ctx = Context {
+        doc_id: DocId::new("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let mut delta = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), 10).unwrap();
+    delta
+        .add_field_delta(
+            "count".to_string(),
+            FieldDelta::Counter {
+                priority: 10,
+                nonce: 1,
+                data: (-0.0f64).to_be_bytes().to_vec(),
+            },
+        )
+        .unwrap();
+
+    let mut txn = store.new_txn(false).await.unwrap();
+    composite.merge(&mut *txn, &ctx, &delta).await.unwrap();
+    txn.commit().await.unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    let count_key = b"/data/v1/doc1/count".to_vec();
+    let count_bytes = txn.get(&count_key).await.unwrap().unwrap();
+    let count = f64::from_be_bytes(count_bytes.try_into().unwrap());
+    assert_eq!(count.to_bits(), 0.0f64.to_bits());
 }
 
 #[tokio::test]

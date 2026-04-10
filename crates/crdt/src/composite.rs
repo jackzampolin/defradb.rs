@@ -364,12 +364,6 @@ impl CompositeDAG {
                                 field_name, data.len()
                             ))
                         })?);
-                        if !increment.is_finite() {
-                            return Err(Error::MergeError(format!(
-                                "invalid float64 increment for field '{}': {}",
-                                field_name, increment
-                            )));
-                        }
                         if !allow_decrement && increment < 0.0 {
                             return Err(Error::MergeError("decrement not allowed".into()));
                         }
@@ -398,20 +392,7 @@ impl CompositeDAG {
                                 None => 0.0,
                             }
                         };
-                        if !current.is_finite() {
-                            return Err(Error::MergeError(format!(
-                                "invalid float64 current value for field '{}': {}",
-                                field_name, current
-                            )));
-                        }
-                        let result = current + increment;
-                        if !result.is_finite() {
-                            return Err(Error::MergeError(format!(
-                                "float64 overflow for field '{}': {} + {} = {}",
-                                field_name, current, increment, result
-                            )));
-                        }
-                        result.to_be_bytes()
+                        (current + increment).to_be_bytes()
                     }
                 };
 
