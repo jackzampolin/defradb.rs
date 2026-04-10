@@ -15,6 +15,31 @@ use crate::sync::BroadcastResult;
 use crate::transport::{P2PTransport, PeerId};
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
+    async fn list_replicators_for_push(&self) -> Option<Vec<crate::replicator::ReplicatorInfo>> {
+        match self.runtime.transport.list_replicators().await {
+            Ok(replicators) => Some(replicators),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to get replicators for push");
+                None
+            }
+        }
+    }
+
+    fn report_push_failure(
+        failure_tx: &Option<tokio::sync::mpsc::Sender<super::PushFailure>>,
+        peer_id: &PeerId,
+        doc_id: String,
+        collection_id: String,
+    ) {
+        if let Some(tx) = failure_tx {
+            let _ = tx.try_send(super::PushFailure {
+                peer_id: peer_id.to_string(),
+                doc_id,
+                collection_id,
+            });
+        }
+    }
+
     /// Broadcast a local update to the network.
     pub async fn broadcast_local_update(
         &self,
@@ -68,12 +93,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         creator_override: Option<&str>,
     ) {
         let creator = creator_override.unwrap_or(&self.access.local_peer_id);
-        let replicators = match self.runtime.transport.list_replicators().await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to get replicators for push");
-                return;
-            }
+        let Some(replicators) = self.list_replicators_for_push().await else {
+            return;
         };
 
         if replicators.is_empty() {
@@ -132,13 +153,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 let any_failed =
                     Self::send_ordered_pushlogs_via_transport(&transport, &peer_id, requests).await;
                 if any_failed {
-                    if let Some(tx) = failure_tx {
-                        let _ = tx.try_send(super::PushFailure {
-                            peer_id: peer_id.to_string(),
-                            doc_id: doc_id_owned,
-                            collection_id: collection_id_owned,
-                        });
-                    }
+                    Self::report_push_failure(
+                        &failure_tx,
+                        &peer_id,
+                        doc_id_owned,
+                        collection_id_owned,
+                    );
                 }
             });
         }
@@ -166,12 +186,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         creator_override: Option<&str>,
     ) {
         let creator = creator_override.unwrap_or(&self.access.local_peer_id);
-        let replicators = match self.runtime.transport.list_replicators().await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to get replicators for push");
-                return;
-            }
+        let Some(replicators) = self.list_replicators_for_push().await else {
+            return;
         };
 
         for rep in &replicators {
@@ -218,13 +234,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         error = %e,
                         "PushLog to replicator failed"
                     );
-                    if let Some(tx) = failure_tx {
-                        let _ = tx.try_send(super::PushFailure {
-                            peer_id: peer_id_clone.to_string(),
-                            doc_id: doc_id_owned,
-                            collection_id: collection_id_owned,
-                        });
-                    }
+                    Self::report_push_failure(
+                        &failure_tx,
+                        &peer_id_clone,
+                        doc_id_owned,
+                        collection_id_owned,
+                    );
                 }
             });
         }
