@@ -9785,6 +9785,7 @@ dependencies = [
  "identity",
  "lens",
  "proptest",
+ "query-model",
  "regex",
  "schema",
  "serde",
@@ -9793,6 +9794,19 @@ dependencies = [
  "storage",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "query-model"
+version = "0.5.0"
+dependencies = [
+ "chrono",
+ "schema",
+ "serde",
+ "serde_json",
+ "storage",
+ "thiserror 1.0.69",
  "tracing",
 ]
 

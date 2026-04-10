@@ -317,7 +317,7 @@ impl TypeJoinMany {
 
         children
             .iter()
-            .map(|doc| child_mapping.render_doc_to_json(doc))
+            .map(|doc| crate::document::render_doc_to_json(child_mapping, doc))
             .collect()
     }
 
@@ -376,7 +376,7 @@ impl TypeJoinMany {
                 // Use explicit group mapping for rendering _group contents
                 group_docs
                     .iter()
-                    .map(|doc| group_mapping.render_doc_to_json(doc))
+                    .map(|doc| crate::document::render_doc_to_json(group_mapping, doc))
                     .collect()
             } else {
                 // Fall back to render mapping, excluding groupBy fields

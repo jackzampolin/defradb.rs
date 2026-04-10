@@ -18,6 +18,7 @@ blockstore = { path = "../blockstore" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
 lens = { path = "../lens", default-features = false }
+query-model = { path = "../query-model" }
 
 # Async runtime
 async-trait.workspace = true

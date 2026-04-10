@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 
 use crate::error::{QueryError, Result};
-use crate::mapper::filter::FilterOp;
+use crate::mapper::FilterOp;
 
 /// Check if two JSON values are equal.
 /// Handles type coercion for numbers and datetime strings.

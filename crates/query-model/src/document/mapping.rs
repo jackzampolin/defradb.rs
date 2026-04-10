@@ -2,10 +2,6 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value as JsonValue;
-
-use crate::planner::Doc;
-
 /// Index of the DocID field in a document (always first)
 pub const DOC_ID_FIELD_INDEX: usize = 0;
 
@@ -172,52 +168,6 @@ impl DocumentMapping {
         self.child_mappings
             .get_mut(index)
             .and_then(|opt| opt.as_mut().map(|b| b.as_mut()))
-    }
-
-    /// Render a document to a JSON object using this mapping's render keys.
-    ///
-    /// Iterates over render_keys and extracts the corresponding values from the document
-    /// to build a JSON object suitable for output.
-    ///
-    /// Missing fields are rendered as `null` to match GraphQL conventions and provide
-    /// consistent output structure regardless of data presence.
-    ///
-    /// Special handling for `__typename`: if the type_info is set and the render_key
-    /// matches the __typename index, the stored type name is used instead of looking
-    /// up the value in the document.
-    ///
-    /// Special handling for `_deleted`: the deleted status is stored as a flag on the
-    /// Doc struct, not in the fields array, so we use `doc.is_deleted()` to get the value.
-    pub fn render_doc_to_json(&self, doc: &Doc) -> JsonValue {
-        let mut obj = serde_json::Map::new();
-
-        // Get the _deleted index if present in mapping
-        let deleted_index = self.first_index_of_name("_deleted");
-
-        for render_key in &self.render_keys {
-            // Check for _deleted special handling - the deleted status is stored
-            // as a flag on the Doc, not in the fields array
-            let value = if Some(render_key.index) == deleted_index && render_key.key == "_deleted" {
-                JsonValue::Bool(doc.is_deleted())
-            } else if let Some(ref type_info) = self.type_info {
-                // Check for __typename special handling
-                if render_key.index == type_info.index {
-                    // Return the stored type name for __typename
-                    JsonValue::String(type_info.name.clone())
-                } else {
-                    doc.get(render_key.index)
-                        .cloned()
-                        .unwrap_or(JsonValue::Null)
-                }
-            } else {
-                // Use null for missing fields to match GraphQL conventions
-                doc.get(render_key.index)
-                    .cloned()
-                    .unwrap_or(JsonValue::Null)
-            };
-            obj.insert(render_key.key.clone(), value);
-        }
-        JsonValue::Object(obj)
     }
 
     /// Clone without render keys (for subqueries)

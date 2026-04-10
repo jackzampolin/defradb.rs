@@ -13,7 +13,7 @@ use serde_json::Value as JsonValue;
 /// The format is a JSON array of field values in mapping order.
 /// This matches Go's ViewCacheItem serialization format.
 pub fn marshal_view_item(doc: &Doc, mapping: &DocumentMapping) -> Result<Vec<u8>> {
-    let rendered = mapping.render_doc_to_json(doc);
+    let rendered = crate::document::render_doc_to_json(mapping, doc);
     serde_json::to_vec(&rendered)
         .map_err(|e| QueryError::internal(format!("failed to serialize view cache item: {}", e)))
 }

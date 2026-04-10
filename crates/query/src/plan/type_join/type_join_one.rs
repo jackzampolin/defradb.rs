@@ -793,7 +793,7 @@ impl TypeJoinOne {
                     .document_mapping
                     .child_at(self.parent_side.relation_field_index())
                     .unwrap_or(self.child_plan.document_map());
-                let rendered = child_mapping.render_doc_to_json(doc);
+                let rendered = crate::document::render_doc_to_json(child_mapping, doc);
                 let doc_id = doc.doc_id().map(String::from);
                 (rendered, doc_id)
             }

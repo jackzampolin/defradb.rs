@@ -4,6 +4,7 @@ members = [
     "crates/defra-core",
     "crates/crdt",
     "crates/storage",
+    "crates/query-model",
     "crates/blockstore",
     "crates/embedded",
     "crates/schema",
