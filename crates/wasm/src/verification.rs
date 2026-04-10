@@ -37,8 +37,7 @@ pub fn verify_merkle_proof(proof_json: &str) -> std::result::Result<bool, JsValu
 
 fn verify_merkle_proof_impl(proof_json: &str) -> Result<bool> {
     // Parse the proof from JSON
-    let proof: MerkleProof =
-        serde_json::from_str(proof_json).map_err(|e| WasmError::Serialization(e.to_string()))?;
+    let proof: MerkleProof = serde_json::from_str(proof_json)?;
 
     proof.verify().map_err(WasmError::from)
 }
@@ -94,14 +93,14 @@ pub fn verify_ed25519_signature(
 
 fn verify_ed25519_impl(public_key_hex: &str, message: &[u8], signature_hex: &str) -> Result<bool> {
     let public_key = public_key_from_string(crypto::KeyType::Ed25519, public_key_hex)
-        .map_err(|e| WasmError::Verification(e.to_string()))?;
+        .map_err(WasmError::from)?;
 
     let signature = hex::decode(signature_hex)
         .map_err(|e: hex::FromHexError| WasmError::InvalidArgument(e.to_string()))?;
 
     public_key
         .verify(message, &signature)
-        .map_err(|e| WasmError::Verification(e.to_string()))
+        .map_err(WasmError::from)
 }
 
 /// Verify a secp256k1 signature.
@@ -125,14 +124,14 @@ fn verify_secp256k1_impl(
     signature_hex: &str,
 ) -> Result<bool> {
     let public_key = public_key_from_string(crypto::KeyType::Secp256k1, public_key_hex)
-        .map_err(|e| WasmError::Verification(e.to_string()))?;
+        .map_err(WasmError::from)?;
 
     let signature = hex::decode(signature_hex)
         .map_err(|e: hex::FromHexError| WasmError::InvalidArgument(e.to_string()))?;
 
     public_key
         .verify(message, &signature)
-        .map_err(|e| WasmError::Verification(e.to_string()))
+        .map_err(WasmError::from)
 }
 
 /// Compute SHA-256 hash of data.
@@ -177,7 +176,7 @@ pub fn generate_ed25519_keypair() -> std::result::Result<JsValue, JsValue> {
 }
 
 fn generate_ed25519_impl() -> Result<JsValue> {
-    let private_key = generate_ed25519().map_err(|e| WasmError::Verification(e.to_string()))?;
+    let private_key = generate_ed25519().map_err(WasmError::from)?;
     let public_key = private_key.public_key();
 
     let result = serde_json::json!({
@@ -199,7 +198,7 @@ pub fn generate_secp256k1_keypair() -> std::result::Result<JsValue, JsValue> {
 }
 
 fn generate_secp256k1_impl() -> Result<JsValue> {
-    let private_key = generate_secp256k1().map_err(|e| WasmError::Verification(e.to_string()))?;
+    let private_key = generate_secp256k1().map_err(WasmError::from)?;
     let public_key = private_key.public_key();
 
     let result = serde_json::json!({
