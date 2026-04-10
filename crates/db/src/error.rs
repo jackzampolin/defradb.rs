@@ -67,6 +67,12 @@ pub enum Error {
         source: serde_json::Error,
     },
 
+    #[error("{context}: {source}")]
+    TextDecode {
+        context: String,
+        source: std::string::FromUtf8Error,
+    },
+
     #[error("query error: {0}")]
     Query(#[from] query::error::QueryError),
 
@@ -119,6 +125,13 @@ impl Error {
 
     pub fn collection_schema_json(context: impl Into<String>, source: serde_json::Error) -> Self {
         Self::CollectionSchemaJson {
+            context: context.into(),
+            source,
+        }
+    }
+
+    pub fn text_decode(context: impl Into<String>, source: std::string::FromUtf8Error) -> Self {
+        Self::TextDecode {
             context: context.into(),
             source,
         }

@@ -80,7 +80,7 @@ impl<S: Store> crate::database::DB<S> {
                         key_bytes = ?&pair.key[..pair.key.len().min(50)],
                         "Collection key contains invalid UTF-8"
                     );
-                    Error::Serialization(format!("collection key contains invalid UTF-8: {}", e))
+                    Error::text_decode("collection key contains invalid UTF-8", e)
                 })?;
 
                 let prefix_str = String::from_utf8(prefix.clone()).map_err(|e| {
@@ -114,10 +114,13 @@ impl<S: Store> crate::database::DB<S> {
                         collection_name = %name,
                         "Collection version ID contains invalid UTF-8"
                     );
-                    Error::Serialization(format!(
-                        "collection version ID for '{}' contains invalid UTF-8: {}",
-                        name, e
-                    ))
+                    Error::text_decode(
+                        format!(
+                            "collection version ID for '{}' contains invalid UTF-8",
+                            name
+                        ),
+                        e,
+                    )
                 })?;
 
                 // Look up the full collection definition from /collection/id/{version_id}

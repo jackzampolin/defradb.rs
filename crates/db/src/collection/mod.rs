@@ -254,9 +254,8 @@ impl Collection {
 
         match datastore.get(&key).await.map_err(Error::Storage)? {
             Some(bytes) => {
-                let version = String::from_utf8(bytes).map_err(|e| {
-                    Error::Serialization(format!("Invalid version encoding: {}", e))
-                })?;
+                let version = String::from_utf8(bytes)
+                    .map_err(|e| Error::text_decode("invalid version encoding", e))?;
                 Ok(Some(version))
             }
             None => Ok(None),
