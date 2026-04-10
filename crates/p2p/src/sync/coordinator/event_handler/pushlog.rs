@@ -7,7 +7,7 @@ use super::super::SyncCoordinator;
 use crate::error::Result;
 use crate::message::{PushLogBroadcast, PushLogReply};
 use crate::signing::sign_with_transport;
-use crate::transport::{P2PTransport, PeerId, ResponseToken};
+use crate::transport::{P2PTransport, PeerId};
 use crate::ExplicitReplayAuthorization;
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
@@ -15,7 +15,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         &self,
         peer_id: PeerId,
         request: crate::message::PushLogRequest,
-        token: ResponseToken,
+        token: T::ResponseToken,
     ) -> Result<()> {
         tracing::debug!(
             peer_id = %peer_id,
@@ -132,7 +132,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         &self,
         peer_id: PeerId,
         request: crate::message::PushLogRequest,
-        token: Option<ResponseToken>,
+        token: Option<T::ResponseToken>,
         is_explicit_replicator: bool,
         explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
     ) -> Result<()> {
@@ -230,7 +230,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         &self,
         peer_id: &PeerId,
         reply: PushLogReply,
-        token: Option<ResponseToken>,
+        token: Option<T::ResponseToken>,
     ) {
         if let Some(token) = token {
             if let Err(e) = self.transport.send_pushlog_response(token, reply).await {

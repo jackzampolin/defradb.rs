@@ -100,7 +100,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
 
             let ctx = Context {
-                doc_id: DocId::new(&doc_id_str),
+                doc_id: DocId::new(&doc_id_str)
+                    .map_err(|e| MergeError::MergeFailed(e.to_string()))?,
                 schema_version: payload.schema_version_id.clone(),
                 is_create: payload.priority == 1 && !doc_exists,
             };
@@ -232,7 +233,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         // Create the CounterDelta from payload
         let delta = self.create_counter_delta(payload, numeric_kind)?;
         let ctx = Context {
-            doc_id: DocId::new(&doc_id_str),
+            doc_id: DocId::new(&doc_id_str).map_err(|e| MergeError::MergeFailed(e.to_string()))?,
             schema_version: payload.schema_version_id.clone(),
             is_create: payload.priority == 1 && !doc_exists,
         };

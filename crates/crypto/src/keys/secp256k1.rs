@@ -195,12 +195,8 @@ impl PublicKey for Secp256k1PublicKey {
             Err(_) => return Ok(false),
         };
 
-        // Normalize S to low-S form if needed for Go compatibility
-        // ECDSA signatures have the property that both (r, s) and (r, n-s) are valid.
-        // Some implementations (like Go's dcrd) may produce high-S signatures,
-        // while k256 verification expects low-S. Normalizing ensures compatibility.
-        let sig = sig.normalize_s().unwrap_or(sig);
-
+        // Preserve the caller-provided DER signature as-is so secp256k1
+        // verification enforces canonical low-S semantics and matches Go.
         // Hash the message with SHA-256 using DigestVerifier trait
         // This matches Go behavior which signs/verifies against SHA256(message)
         let mut hasher = Sha256::new();

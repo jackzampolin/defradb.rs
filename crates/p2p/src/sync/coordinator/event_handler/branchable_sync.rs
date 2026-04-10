@@ -8,14 +8,14 @@ use super::super::SyncCoordinator;
 use crate::error::Result;
 use crate::message::BranchableSyncReply;
 use crate::signing::sign_with_transport;
-use crate::transport::{P2PTransport, PeerId, ResponseToken};
+use crate::transport::{P2PTransport, PeerId};
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub(super) async fn handle_branchable_sync_request(
         &self,
         peer_id: PeerId,
         request: crate::message::BranchableSyncRequest,
-        token: Option<ResponseToken>,
+        token: Option<T::ResponseToken>,
     ) -> Result<()> {
         self.check_access_str(peer_id.as_str(), &request.collection_id)
             .await?;

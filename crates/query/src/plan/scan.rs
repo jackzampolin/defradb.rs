@@ -1,9 +1,9 @@
 //! ScanNode for scanning collection documents
 
 use async_trait::async_trait;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use defra_core::collection_short_id;
 use schema::CollectionVersion;
 
 use tracing::debug;
@@ -13,14 +13,6 @@ use crate::error::Result;
 use crate::fetcher::DocFetcher;
 use crate::mapper::Filter;
 use crate::planner::{Doc, ExecInfo, PlanNode};
-
-/// Derive a short u32 ID from a collection_id string.
-/// Uses the same hash as db::collection_short_id for consistency.
-fn collection_short_id(collection_id: &str) -> u32 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    collection_id.hash(&mut hasher);
-    hasher.finish() as u32
-}
 
 /// ScanNode scans documents from a collection.
 ///

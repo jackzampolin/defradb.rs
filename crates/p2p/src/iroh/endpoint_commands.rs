@@ -37,7 +37,7 @@ pub(super) async fn handle_command(
     replicators: &mut HashMap<String, ReplicatorInfo>,
     active_syncs: &mut HashMap<u64, ActiveSync>,
     next_query_id: &mut u64,
-    event_tx: &mpsc::Sender<TransportEvent>,
+    event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) -> bool {
     match cmd {
         IrohCommand::Dial {
@@ -402,7 +402,7 @@ async fn handle_dial(
     subscriptions: &HashMap<String, TopicSubscription>,
     peer_id: &PeerId,
     addrs: Vec<PeerAddr>,
-    event_tx: &mpsc::Sender<TransportEvent>,
+    event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) -> crate::error::Result<()> {
     let endpoint_id = parse_endpoint_id(peer_id)?;
     let endpoint_addr = endpoint_addr_from_parts(peer_id, &addrs)?;
@@ -463,7 +463,7 @@ pub(super) async fn handle_subscribe(
     subscriptions: &mut HashMap<String, TopicSubscription>,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
     topic: crate::topics::DefraTopic,
-    event_tx: &mpsc::Sender<TransportEvent>,
+    event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) -> crate::error::Result<bool> {
     use futures::StreamExt;
 
@@ -572,7 +572,7 @@ async fn handle_publish(
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
     topic: crate::topics::DefraTopic,
     msg: &crate::message::PushLogBroadcast,
-    event_tx: &mpsc::Sender<TransportEvent>,
+    event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) -> crate::error::Result<MessageId> {
     let topic_str = topic.to_string();
 

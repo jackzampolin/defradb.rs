@@ -52,6 +52,18 @@ impl FileKeyring {
             fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
         }
 
+        #[cfg(windows)]
+        {
+            restrict_owner_access(&dir, WindowsObjectKind::Directory)?;
+
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    restrict_owner_access(&entry.path(), WindowsObjectKind::File)?;
+                }
+            }
+        }
+
         Ok(Self {
             dir,
             password: Zeroizing::new(password.into()),
@@ -115,6 +127,9 @@ impl Keyring for FileKeyring {
         #[cfg(not(unix))]
         {
             fs::write(&path, cipher)?;
+
+            #[cfg(windows)]
+            restrict_owner_access(&path, WindowsObjectKind::File)?;
         }
 
         Ok(())
@@ -166,5 +181,39 @@ impl Keyring for FileKeyring {
             }
         }
         Ok(keys)
+    }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+enum WindowsObjectKind {
+    Directory,
+    File,
+}
+
+#[cfg(windows)]
+fn restrict_owner_access(path: &Path, kind: WindowsObjectKind) -> Result<()> {
+    use std::process::Command;
+
+    let mut grant = String::from("*S-1-3-4:");
+    grant.push_str(match kind {
+        WindowsObjectKind::Directory => "(OI)(CI)F",
+        WindowsObjectKind::File => "F",
+    });
+
+    let status = Command::new("icacls")
+        .arg(path)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg(&grant)
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error::Io(std::io::Error::other(format!(
+            "failed to restrict ACLs with icacls for {}",
+            path.display()
+        ))))
     }
 }

@@ -16,7 +16,7 @@ use crate::message::{
 };
 use crate::replicator::ReplicatorInfo;
 use crate::topics::DefraTopic;
-use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, ResponseToken, TransportEvent};
+use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, TransportEvent};
 use crate::QueryId;
 
 /// Libp2p-backed P2P transport.
@@ -64,6 +64,8 @@ fn parse_multiaddr(addr: &PeerAddr) -> Result<libp2p::Multiaddr> {
 
 #[async_trait]
 impl P2PTransport for Libp2pTransport {
+    type ResponseToken = ResponseChannel;
+
     fn local_peer_id(&self) -> &PeerId {
         &self.local_peer_id
     }
@@ -133,11 +135,12 @@ impl P2PTransport for Libp2pTransport {
             .collect())
     }
 
-    async fn send_pushlog_response(&self, token: ResponseToken, reply: PushLogReply) -> Result<()> {
-        let channel: ResponseChannel = token
-            .downcast::<ResponseChannel>()
-            .ok_or_else(|| Error::ResponseSend("invalid response token type".to_string()))?;
-        self.handle.send_pushlog_response(channel, reply).await
+    async fn send_pushlog_response(
+        &self,
+        token: Self::ResponseToken,
+        reply: PushLogReply,
+    ) -> Result<()> {
+        self.handle.send_pushlog_response(token, reply).await
     }
 
     async fn send_two_stream_request(
@@ -194,7 +197,7 @@ impl P2PTransport for Libp2pTransport {
 
     async fn send_car_response_token(
         &self,
-        _token: ResponseToken,
+        _token: Self::ResponseToken,
         _car_data: Vec<u8>,
     ) -> Result<()> {
         Err(Error::ResponseSend(
@@ -204,7 +207,7 @@ impl P2PTransport for Libp2pTransport {
 
     async fn send_doc_sync_response_token(
         &self,
-        _token: ResponseToken,
+        _token: Self::ResponseToken,
         _reply: DocSyncReply,
     ) -> Result<()> {
         Err(Error::ResponseSend(
@@ -214,7 +217,7 @@ impl P2PTransport for Libp2pTransport {
 
     async fn send_branchable_sync_response_token(
         &self,
-        _token: ResponseToken,
+        _token: Self::ResponseToken,
         _reply: BranchableSyncReply,
     ) -> Result<()> {
         Err(Error::ResponseSend(
@@ -282,7 +285,7 @@ impl P2PTransport for Libp2pTransport {
 }
 
 /// Convert a `HostEvent` into a `TransportEvent`.
-pub fn convert_host_event(event: crate::host::HostEvent) -> TransportEvent {
+pub fn convert_host_event(event: crate::host::HostEvent) -> TransportEvent<ResponseChannel> {
     use crate::host::HostEvent;
 
     match event {
@@ -295,7 +298,7 @@ pub fn convert_host_event(event: crate::host::HostEvent) -> TransportEvent {
         } => TransportEvent::PushLogRequest {
             peer_id: PeerId::from(peer_id),
             request,
-            token: ResponseToken::new(channel),
+            token: channel,
         },
         HostEvent::Listening(addr) => TransportEvent::Listening(PeerAddr::from(addr)),
         HostEvent::GossipMessage {
