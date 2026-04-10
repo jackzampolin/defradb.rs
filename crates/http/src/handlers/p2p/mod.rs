@@ -9,10 +9,20 @@
 //!
 //! All endpoints enforce NAC permissions when NAC is enabled.
 
+use crate::error::HttpError;
+
 mod collections;
 mod documents;
 mod peers;
 mod replicators;
+
+fn map_p2p_bad_request(error: String) -> HttpError {
+    HttpError::BadRequest(error)
+}
+
+fn map_p2p_internal(error: String) -> HttpError {
+    HttpError::Internal(error)
+}
 
 pub use collections::{
     add_collections, list_collections, remove_collections, sync_branchable, sync_versions,
