@@ -168,7 +168,7 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .map_err(|e| Error::storage_txn("put_tuple:begin", e))?;
 
         let key = tuple.storage_key();
-        let value = serde_json::to_vec(tuple).map_err(|e| Error::Serialization(e.to_string()))?;
+        let value = serde_json::to_vec(tuple)?;
 
         txn.set(key.as_bytes(), &value)
             .await
@@ -245,8 +245,7 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .await
             .map_err(|e| Error::storage_iter("get_doc_tuples:next", e))?
         {
-            let tuple: RelationTuple = serde_json::from_slice(&kv.value)
-                .map_err(|e| Error::Serialization(e.to_string()))?;
+            let tuple: RelationTuple = serde_json::from_slice(&kv.value)?;
             tuples.push(tuple);
         }
 
@@ -284,8 +283,7 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .await
             .map_err(|e| Error::storage_iter("get_relation_subjects:next", e))?
         {
-            let tuple: RelationTuple = serde_json::from_slice(&kv.value)
-                .map_err(|e| Error::Serialization(e.to_string()))?;
+            let tuple: RelationTuple = serde_json::from_slice(&kv.value)?;
             subjects.push(tuple.subject().clone());
         }
 
@@ -323,8 +321,7 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
             .await
             .map_err(|e| Error::storage_iter("get_subject_relations:next", e))?
         {
-            let tuple: RelationTuple = serde_json::from_slice(&kv.value)
-                .map_err(|e| Error::Serialization(e.to_string()))?;
+            let tuple: RelationTuple = serde_json::from_slice(&kv.value)?;
             if tuple.subject() == subject {
                 relations.push(tuple.relation().to_string());
             }
@@ -438,7 +435,7 @@ impl<S: Store + Send + Sync> AcpStore for PersistentAcpStore<S> {
 
         let tuple = RelationTuple::owner(owner.clone(), collection_id, doc_id);
         let key = tuple.storage_key();
-        let value = serde_json::to_vec(&tuple).map_err(|e| Error::Serialization(e.to_string()))?;
+        let value = serde_json::to_vec(&tuple)?;
 
         txn.set(key.as_bytes(), &value)
             .await
