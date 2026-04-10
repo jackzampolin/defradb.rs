@@ -26,7 +26,6 @@ use tracing::warn;
 use crate::block_builder::{write_collection_block, write_delete_block, write_document_blocks};
 use crate::collection::collection_short_id;
 use crate::database::DB;
-use crate::index_manager::IndexManager;
 use crate::lensed_fetcher::LensedDocFetcher;
 use defra_core::encryption::{get_doc_encryption, get_encryption_config, store_doc_encryption};
 use defra_core::signing::get_signing_config;

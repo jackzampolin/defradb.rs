@@ -1,3 +1,7 @@
+use super::helpers::{
+    blockstore_for_txn, commit_txn, create_result_from_commit, discard_txn, headstore_for_txn,
+    map_create_error, write_document_commit_result,
+};
 use super::*;
 
 #[allow(clippy::type_complexity)]
@@ -10,9 +14,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let collection = self.get_collection_or_err(collection_name)?;
 
         // Create a write transaction
-        let txn = self.db.new_txn(false).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
+        let txn = self.new_write_txn().await?;
 
         // Generate embeddings before doc ID (embedding values affect content hash)
         let embedding_config = self.db.options().embedding_config();
@@ -42,22 +44,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         // Execute the mutation in a block to drop datastore before commit
         let result = {
-            let datastore = txn.datastore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get datastore for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?;
+            let datastore = self.datastore_for_collection(&txn, collection_name)?;
 
             // Create an IndexManager for unique constraint enforcement
-            let short_id = collection_short_id(collection.collection_id());
-            let index_manager = IndexManager::from_collection(short_id, collection.schema())
-                .map_err(|e| {
-                    query::error::QueryError::execution(format!(
-                        "failed to create index manager for collection '{}': {}",
-                        collection_name, e
-                    ))
-                })?;
+            let index_manager = self.index_manager_for_collection(&collection, collection_name)?;
 
             self.db
                 .validate_downsample_write(&datastore, collection.schema(), &doc, None)
@@ -69,18 +59,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             collection
                 .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
                 .await
-                .map_err(|e| {
-                    let msg = e.to_string();
-                    // If this is a unique constraint violation, return the core message without wrapping
-                    if msg.contains("can not index a doc's field(s) that violates unique index") {
-                        query::error::QueryError::execution(
-                            "can not index a doc's field(s) that violates unique index."
-                                .to_string(),
-                        )
-                    } else {
-                        query::error::QueryError::execution(format!("create error: {}", e))
-                    }
-                })
+                .map_err(map_create_error)
         };
 
         match result {
@@ -90,21 +69,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 // The stores must be dropped before commit, so scope them
                 // (composite_cid, composite_bytes, optional (collection_cid, collection_bytes))
                 let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
-                    let blockstore = txn.blockstore().map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to get blockstore: {}",
-                            e
-                        ))
-                    })?;
-                    let headstore = txn.headstore().map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to get headstore: {}",
-                            e
-                        ))
-                    })?;
-
-                    // Use version_id for collectionVersionID (matches Go's VersionID())
-                    let schema_version_id = collection.version_id();
+                    let blockstore = blockstore_for_txn(&txn)?;
+                    let headstore = headstore_for_txn(&txn)?;
 
                     // Get encryption config from thread-local (set by plan nodes)
                     let enc_config = get_encryption_config();
@@ -117,77 +83,23 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     );
 
                     // For create operations, all fields are new - pass None for modified_fields
-                    match write_document_blocks(
+                    write_document_commit_result(
+                        collection_name,
+                        "create",
+                        &collection,
                         &blockstore,
                         &headstore,
                         &doc,
-                        schema_version_id,
                         None,
                         enc_config.as_ref(),
                         sign_config.as_ref(),
+                        true,
                     )
                     .await
-                    {
-                        Ok(block_result) => {
-                            // Store encryption config per-document so updates re-apply it
-                            if let Some(ref config) = enc_config {
-                                store_doc_encryption(&doc_id.to_string(), config.clone());
-                            }
-
-                            // For branchable collections, create a collection-level block
-                            let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
-                            if collection.schema().is_branchable {
-                                let short_id = collection_short_id(collection.collection_id());
-                                match write_collection_block(
-                                    &blockstore,
-                                    &headstore,
-                                    short_id,
-                                    schema_version_id,
-                                    block_result.cid,
-                                    sign_config.as_ref(),
-                                )
-                                .await
-                                {
-                                    Ok((col_cid, col_bytes)) => {
-                                        col_block_data = Some((col_cid, col_bytes));
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            collection = %collection_name,
-                                            error = %e,
-                                            "Failed to write collection block for branchable create"
-                                        );
-                                    }
-                                }
-                            }
-
-                            Some((block_result.cid, block_result.block, col_block_data))
-                        }
-                        Err(e) => {
-                            warn!(
-                                collection = %collection_name,
-                                error = %e,
-                                "Failed to write document blocks - commits queries may not work"
-                            );
-                            // Don't fail the mutation, just log the warning
-                            // The document was stored successfully, blocks are for commit history
-                            None
-                        }
-                    }
                 }; // blockstore and headstore dropped here
 
                 // Commit the transaction (all store references now dropped)
-                if let Err(e) = txn.commit().await {
-                    warn!(
-                        collection = %collection_name,
-                        error = %e,
-                        "Failed to commit transaction after create"
-                    );
-                    return Err(query::error::QueryError::execution(format!(
-                        "commit error: {}",
-                        e
-                    )));
-                }
+                commit_txn(txn, collection_name, "create").await?;
 
                 // Emit update event for subscriptions
                 let cid = commit_result
@@ -197,27 +109,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 self.emit_update_events(&collection, &doc_id.to_string(), cid);
 
                 // Return result with commit CID and block if available
-                match commit_result {
-                    Some((cid, block, col_data)) => {
-                        let mut result = CreateResult::with_commit(doc_id, doc, cid, block);
-                        if let Some((col_cid, col_bytes)) = col_data {
-                            result.broadcast_cid = Some(col_cid);
-                            result.broadcast_block = Some(col_bytes);
-                        }
-                        Ok(result)
-                    }
-                    None => Ok(CreateResult::new(doc_id, doc)),
-                }
+                Ok(create_result_from_commit(doc_id, doc, commit_result))
             }
             Err(e) => {
                 // Discard the transaction on error
-                if let Err(discard_err) = txn.discard() {
-                    warn!(
-                        collection = %collection_name,
-                        error = %discard_err,
-                        "Failed to discard transaction after create error"
-                    );
-                }
+                discard_txn(txn, collection_name, "create");
                 Err(e)
             }
         }

@@ -1,3 +1,6 @@
+use super::helpers::{
+    blockstore_for_txn, commit_txn, create_result_from_commit, headstore_for_txn, map_create_error,
+};
 use super::*;
 
 use crate::block_builder::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
@@ -30,13 +33,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let enc_config = get_encryption_config();
 
         // Build IndexManager once for the entire batch (schema is identical for all docs)
-        let index_manager =
-            IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to create index manager for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?;
+        let index_manager = self.index_manager_for_collection(&collection, collection_name)?;
 
         // === Phase 1: Prepare documents (sequential — embeddings are async/external) ===
         let mut prepared_docs: Vec<(Document, bool)> = Vec::with_capacity(docs.len());
@@ -116,9 +113,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .collect();
 
         // === Phase 3: Transaction — sequential writes ===
-        let txn = self.db.new_txn(false).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
+        let txn = self.new_write_txn().await?;
 
         let mut results: Vec<(
             DocID,
@@ -135,12 +130,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
             // Datastore + index writes
             {
-                let datastore = txn.datastore().map_err(|e| {
-                    query::error::QueryError::execution(format!(
-                        "failed to get datastore for collection '{}': {}",
-                        collection_name, e
-                    ))
-                })?;
+                let datastore = self.datastore_for_collection(&txn, collection_name)?;
 
                 self.db
                     .validate_downsample_write(&datastore, collection.schema(), &doc, None)
@@ -150,35 +140,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 collection
                     .create_with_indexes(&datastore, &doc, &index_manager, id_was_generated)
                     .await
-                    .map_err(|e| {
-                        let msg = e.to_string();
-                        if msg.contains("can not index a doc's field(s) that violates unique index")
-                        {
-                            query::error::QueryError::execution(
-                                "can not index a doc's field(s) that violates unique index."
-                                    .to_string(),
-                            )
-                        } else {
-                            query::error::QueryError::execution(format!("create error: {}", e))
-                        }
-                    })?;
+                    .map_err(map_create_error)?;
             } // datastore dropped
 
             // Insert pre-computed blocks + collection blocks
             let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = match blocks {
                 Some(computed) => {
-                    let blockstore = txn.blockstore().map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to get blockstore: {}",
-                            e
-                        ))
-                    })?;
-                    let headstore = txn.headstore().map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to get headstore: {}",
-                            e
-                        ))
-                    })?;
+                    let blockstore = blockstore_for_txn(&txn)?;
+                    let headstore = headstore_for_txn(&txn)?;
 
                     match insert_computed_blocks(&blockstore, &headstore, &computed).await {
                         Ok(()) => {
@@ -234,17 +203,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
 
         // Commit ONCE for the entire batch
-        if let Err(e) = txn.commit().await {
-            warn!(
-                collection = %collection_name,
-                error = %e,
-                "Failed to commit batch transaction"
-            );
-            return Err(query::error::QueryError::execution(format!(
-                "commit error: {}",
-                e
-            )));
-        }
+        commit_txn(txn, collection_name, "batch").await?;
 
         // Emit events and build results
         let mut create_results = Vec::with_capacity(results.len());
@@ -255,19 +214,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .unwrap_or_default();
             self.emit_update_events(&collection, &doc_id.to_string(), cid);
 
-            match commit_result {
-                Some((cid, block, col_data)) => {
-                    let mut result = CreateResult::with_commit(doc_id, doc, cid, block);
-                    if let Some((col_cid, col_bytes)) = col_data {
-                        result.broadcast_cid = Some(col_cid);
-                        result.broadcast_block = Some(col_bytes);
-                    }
-                    create_results.push(result);
-                }
-                None => {
-                    create_results.push(CreateResult::new(doc_id, doc));
-                }
-            }
+            create_results.push(create_result_from_commit(doc_id, doc, commit_result));
         }
 
         Ok(create_results)

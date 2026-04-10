@@ -1,3 +1,6 @@
+use super::helpers::{
+    blockstore_for_txn, commit_txn, headstore_for_txn, map_delete_error, write_delete_commit_result,
+};
 use super::*;
 
 impl<S: Store + 'static> AutoCommitMutator<S> {
@@ -24,34 +27,19 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
 
         let collection = self.get_collection_or_err(collection_name)?;
-        let short_id = collection_short_id(collection.collection_id());
-        let schema_version_id = collection.version_id().to_string();
         let sign_config = get_signing_config();
 
-        let index_manager =
-            IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to create index manager for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?;
+        let index_manager = self.index_manager_for_collection(&collection, collection_name)?;
 
         // Single transaction for all deletes
-        let txn = self.db.new_txn(false).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
+        let txn = self.new_write_txn().await?;
 
         let mut results: Vec<(DocID, bool, Option<Cid>)> = Vec::with_capacity(doc_ids.len());
 
         for doc_id in doc_ids {
             // Delete from datastore + indexes
             let existed = {
-                let datastore = txn.datastore().map_err(|e| {
-                    query::error::QueryError::execution(format!(
-                        "failed to get datastore for collection '{}': {}",
-                        collection_name, e
-                    ))
-                })?;
+                let datastore = self.datastore_for_collection(&txn, collection_name)?;
 
                 match collection
                     .delete_with_indexes(&datastore, doc_id, &index_manager)
@@ -59,10 +47,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 {
                     Ok(existed) => existed,
                     Err(e) => {
+                        let mapped_error = map_delete_error(e);
                         warn!(
                             collection = %collection_name,
                             doc_id = %doc_id,
-                            error = %e,
+                            error = %mapped_error,
                             "Failed to delete document in batch"
                         );
                         results.push((doc_id.clone(), false, None));
@@ -73,55 +62,22 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
             // Write delete block (composite with status=2)
             let commit_cid = {
-                let blockstore = txn.blockstore().map_err(|e| {
-                    query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
-                })?;
-                let headstore = txn.headstore().map_err(|e| {
-                    query::error::QueryError::execution(format!("failed to get headstore: {}", e))
-                })?;
+                let blockstore = blockstore_for_txn(&txn)?;
+                let headstore = headstore_for_txn(&txn)?;
 
-                match write_delete_block(
+                match write_delete_commit_result(
+                    collection_name,
+                    "delete",
+                    &collection,
                     &blockstore,
                     &headstore,
-                    &doc_id.to_string(),
-                    &schema_version_id,
+                    doc_id,
                     sign_config.as_ref(),
                 )
                 .await
                 {
-                    Ok(block_result) => {
-                        let composite_cid = block_result.cid;
-
-                        if collection.schema().is_branchable {
-                            if let Err(e) = write_collection_block(
-                                &blockstore,
-                                &headstore,
-                                short_id,
-                                &schema_version_id,
-                                composite_cid,
-                                sign_config.as_ref(),
-                            )
-                            .await
-                            {
-                                warn!(
-                                    collection = %collection_name,
-                                    error = %e,
-                                    "Failed to write collection block for branchable delete"
-                                );
-                            }
-                        }
-
-                        Some(composite_cid)
-                    }
-                    Err(e) => {
-                        warn!(
-                            collection = %collection_name,
-                            doc_id = %doc_id,
-                            error = %e,
-                            "Failed to write delete block in batch"
-                        );
-                        None
-                    }
+                    Some((composite_cid, _)) => Some(composite_cid),
+                    None => None,
                 }
             };
 
@@ -129,17 +85,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
 
         // Single commit for entire batch
-        if let Err(e) = txn.commit().await {
-            warn!(
-                collection = %collection_name,
-                error = %e,
-                "Failed to commit batch delete transaction"
-            );
-            return Err(query::error::QueryError::execution(format!(
-                "commit error: {}",
-                e
-            )));
-        }
+        commit_txn(txn, collection_name, "batch delete").await?;
 
         // Emit events after commit
         let mut delete_results = Vec::with_capacity(results.len());
