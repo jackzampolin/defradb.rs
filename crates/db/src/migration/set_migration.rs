@@ -51,10 +51,13 @@ impl<S: Store> DB<S> {
                 .map_err(Error::Storage)?;
             let mut source_col: schema::CollectionVersion = match src_data {
                 Some(data) => serde_json::from_slice(&data).map_err(|e| {
-                    Error::Serialization(format!(
-                        "failed to deserialize source schema '{}': {}",
-                        source_version_id, e
-                    ))
+                    Error::collection_schema_json(
+                        format!(
+                            "failed to deserialize source schema '{}'",
+                            source_version_id
+                        ),
+                        e,
+                    )
                 })?,
                 None => {
                     let mut placeholder = create_orphan_placeholder(&source_version_id, "", "");
@@ -64,10 +67,13 @@ impl<S: Store> DB<S> {
                     )
                     .await?;
                     let data = serde_json::to_vec(&placeholder).map_err(|e| {
-                        Error::Serialization(format!(
-                            "failed to serialize source placeholder '{}': {}",
-                            source_version_id, e
-                        ))
+                        Error::collection_schema_json(
+                            format!(
+                                "failed to serialize source placeholder '{}'",
+                                source_version_id
+                            ),
+                            e,
+                        )
                     })?;
                     systemstore
                         .set(&src_key.bytes(), &data)
@@ -84,10 +90,13 @@ impl<S: Store> DB<S> {
                 .map_err(Error::Storage)?;
             let mut dst_col: schema::CollectionVersion = match dst_data {
                 Some(data) => serde_json::from_slice(&data).map_err(|e| {
-                    Error::Serialization(format!(
-                        "failed to deserialize destination schema '{}': {}",
-                        dest_version_id, e
-                    ))
+                    Error::collection_schema_json(
+                        format!(
+                            "failed to deserialize destination schema '{}'",
+                            dest_version_id
+                        ),
+                        e,
+                    )
                 })?,
                 None => {
                     let mut placeholder = create_placeholder_with_source(
@@ -101,10 +110,13 @@ impl<S: Store> DB<S> {
                     )
                     .await?;
                     let data = serde_json::to_vec(&placeholder).map_err(|e| {
-                        Error::Serialization(format!(
-                            "failed to serialize destination placeholder '{}': {}",
-                            dest_version_id, e
-                        ))
+                        Error::collection_schema_json(
+                            format!(
+                                "failed to serialize destination placeholder '{}'",
+                                dest_version_id
+                            ),
+                            e,
+                        )
                     })?;
                     systemstore
                         .set(&dst_key.bytes(), &data)
@@ -164,10 +176,13 @@ impl<S: Store> DB<S> {
         let collection_name = dst_col.name.clone();
         let dst_key = CollectionKey::new(&dest_version_id);
         let dst_data = serde_json::to_vec(&dst_col).map_err(|e| {
-            Error::Serialization(format!(
-                "failed to serialize destination schema '{}': {}",
-                dest_version_id, e
-            ))
+            Error::collection_schema_json(
+                format!(
+                    "failed to serialize destination schema '{}'",
+                    dest_version_id
+                ),
+                e,
+            )
         })?;
 
         {
@@ -279,10 +294,13 @@ impl<S: Store> DB<S> {
                 .map_err(Error::Storage)?;
             let mut source_col: schema::CollectionVersion = match src_data {
                 Some(data) => serde_json::from_slice(&data).map_err(|e| {
-                    Error::Serialization(format!(
-                        "failed to deserialize source schema '{}': {}",
-                        source_version_id, e
-                    ))
+                    Error::collection_schema_json(
+                        format!(
+                            "failed to deserialize source schema '{}'",
+                            source_version_id
+                        ),
+                        e,
+                    )
                 })?,
                 None => {
                     let mut placeholder = create_orphan_placeholder(&source_version_id, "", "");
@@ -292,10 +310,13 @@ impl<S: Store> DB<S> {
                     )
                     .await?;
                     let data = serde_json::to_vec(&placeholder).map_err(|e| {
-                        Error::Serialization(format!(
-                            "failed to serialize source placeholder '{}': {}",
-                            source_version_id, e
-                        ))
+                        Error::collection_schema_json(
+                            format!(
+                                "failed to serialize source placeholder '{}'",
+                                source_version_id
+                            ),
+                            e,
+                        )
                     })?;
                     systemstore
                         .set(&src_key.bytes(), &data)
@@ -312,10 +333,13 @@ impl<S: Store> DB<S> {
                 .map_err(Error::Storage)?;
             let mut dst_col: schema::CollectionVersion = match dst_data {
                 Some(data) => serde_json::from_slice(&data).map_err(|e| {
-                    Error::Serialization(format!(
-                        "failed to deserialize destination schema '{}': {}",
-                        dest_version_id, e
-                    ))
+                    Error::collection_schema_json(
+                        format!(
+                            "failed to deserialize destination schema '{}'",
+                            dest_version_id
+                        ),
+                        e,
+                    )
                 })?,
                 None => {
                     let mut placeholder = create_placeholder_with_source(
@@ -329,10 +353,13 @@ impl<S: Store> DB<S> {
                     )
                     .await?;
                     let data = serde_json::to_vec(&placeholder).map_err(|e| {
-                        Error::Serialization(format!(
-                            "failed to serialize destination placeholder '{}': {}",
-                            dest_version_id, e
-                        ))
+                        Error::collection_schema_json(
+                            format!(
+                                "failed to serialize destination placeholder '{}'",
+                                dest_version_id
+                            ),
+                            e,
+                        )
                     })?;
                     systemstore
                         .set(&dst_key.bytes(), &data)
@@ -387,10 +414,13 @@ impl<S: Store> DB<S> {
 
         let dst_key = CollectionKey::new(&dest_version_id);
         let dst_data = serde_json::to_vec(&dst_col).map_err(|e| {
-            Error::Serialization(format!(
-                "failed to serialize destination schema '{}': {}",
-                dest_version_id, e
-            ))
+            Error::collection_schema_json(
+                format!(
+                    "failed to serialize destination schema '{}'",
+                    dest_version_id
+                ),
+                e,
+            )
         })?;
 
         {
