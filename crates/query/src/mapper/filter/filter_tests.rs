@@ -1124,3 +1124,37 @@ fn test_filter_op_is_array_element_op() {
     assert!(!FilterOp::Eq.is_array_element_op());
     assert!(!FilterOp::Contains.is_array_element_op());
 }
+
+#[test]
+fn test_to_explain_json_without_docid_preserves_shape() {
+    let filter = Filter::from_conditions(map([(
+        "_and".to_string(),
+        json!([
+            {"_docID": {"_eq": "doc-1"}},
+            {
+                "_or": [
+                    {"_docID": {"_eq": "doc-2"}},
+                    {"name": {"_eq": "Alice"}}
+                ]
+            }
+        ]),
+    )]));
+
+    assert_eq!(
+        filter.to_explain_json_without_docid(),
+        json!({"name": {"_eq": "Alice"}})
+    );
+}
+
+#[test]
+fn test_to_explain_json_without_docid_returns_null_when_only_docid_remains() {
+    let filter = Filter::from_conditions(map([(
+        "_and".to_string(),
+        json!([
+            {"_docID": {"_eq": "doc-1"}},
+            {"_or": [{"_docID": {"_eq": "doc-2"}}]}
+        ]),
+    )]));
+
+    assert_eq!(filter.to_explain_json_without_docid(), JsonValue::Null);
+}
