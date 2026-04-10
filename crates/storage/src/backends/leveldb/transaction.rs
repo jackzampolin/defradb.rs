@@ -3,6 +3,7 @@ use parking_lot::Mutex;
 use rusty_leveldb::{WriteBatch, DB};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::iterator::LevelDbIterator;
 use crate::backends::shared::CallbackManager;
@@ -28,10 +29,10 @@ pub(crate) struct LevelDbTxn {
     pub(crate) readonly: bool,
 
     /// Whether the transaction has been discarded
-    pub(crate) discarded: Mutex<bool>,
+    pub(crate) discarded: AtomicBool,
 
     /// Whether the transaction has been committed
-    pub(crate) committed: Mutex<bool>,
+    pub(crate) committed: AtomicBool,
 
     /// Transaction lifecycle callbacks
     pub(crate) callbacks: CallbackManager,
@@ -68,7 +69,7 @@ impl crate::corekv::private::Sealed for LevelDbTxn {}
 #[async_trait(?Send)]
 impl Reader for LevelDbTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -80,7 +81,7 @@ impl Reader for LevelDbTxn {
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -92,7 +93,7 @@ impl Reader for LevelDbTxn {
     }
 
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -104,7 +105,7 @@ impl Reader for LevelDbTxn {
     }
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -129,7 +130,7 @@ impl Reader for LevelDbTxn {
 #[async_trait(?Send)]
 impl Writer for LevelDbTxn {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -148,7 +149,7 @@ impl Writer for LevelDbTxn {
     }
 
     async fn delete(&mut self, key: &[u8]) -> Result<()> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -169,7 +170,7 @@ impl Writer for LevelDbTxn {
 impl Txn for LevelDbTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
         // Check discarded first
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             tracing::warn!("Attempted to commit a discarded transaction");
             CallbackManager::execute_callbacks(self.callbacks.take_error());
             CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
@@ -177,13 +178,13 @@ impl Txn for LevelDbTxn {
         }
 
         // Check if already committed
-        if *self.committed.lock() {
+        if self.committed.load(Ordering::Acquire) {
             tracing::warn!("Attempted to commit an already committed transaction");
             return Err(Error::Other("Transaction already committed".into()));
         }
 
         // Mark as committed
-        *self.committed.lock() = true;
+        self.committed.store(true, Ordering::Release);
 
         // Clone pending changes before accessing DB
         let pending = self.pending.lock().clone();
@@ -213,7 +214,7 @@ impl Txn for LevelDbTxn {
     }
 
     fn discard(self: Box<Self>) {
-        *self.discarded.lock() = true;
+        self.discarded.store(true, Ordering::Release);
 
         // Execute sync discard callbacks
         CallbackManager::execute_callbacks(self.callbacks.take_discard());
