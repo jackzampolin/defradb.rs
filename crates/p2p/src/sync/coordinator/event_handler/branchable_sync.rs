@@ -11,6 +11,37 @@ use crate::signing::sign_with_transport;
 use crate::transport::{P2PTransport, PeerId, ResponseToken};
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
+    async fn send_branchable_sync_reply(
+        &self,
+        peer_id: &PeerId,
+        token: Option<ResponseToken>,
+        mut reply: BranchableSyncReply,
+    ) -> Result<()> {
+        sign_with_transport(&self.runtime.transport, &mut reply)?;
+
+        let send_result = if let Some(token) = token {
+            self.runtime
+                .transport
+                .send_branchable_sync_response_token(token, reply)
+                .await
+        } else {
+            self.runtime
+                .transport
+                .send_branchable_sync_response(peer_id, reply)
+                .await
+        };
+
+        if let Err(e) = send_result {
+            tracing::warn!(
+                peer_id = %peer_id,
+                error = %e,
+                "Failed to send BranchableSync response"
+            );
+        }
+
+        Ok(())
+    }
+
     pub(super) async fn handle_branchable_sync_request(
         &self,
         peer_id: PeerId,
@@ -50,14 +81,19 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             }
         };
 
-        let mut reply = BranchableSyncReply::success(
-            &request.metadata.message_id,
-            &request.collection_id,
-            heads,
-        );
-
-        if let Err(e) = sign_with_transport(&self.runtime.transport, &mut reply) {
-            tracing::error!(
+        if let Err(e) = self
+            .send_branchable_sync_reply(
+                &peer_id,
+                token,
+                BranchableSyncReply::success(
+                    &request.metadata.message_id,
+                    &request.collection_id,
+                    heads,
+                ),
+            )
+            .await
+        {
+            tracing::warn!(
                 peer_id = %peer_id,
                 error = %e,
                 "Failed to sign BranchableSync response"
@@ -65,24 +101,6 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return Err(e);
         }
 
-        let send_result = if let Some(token) = token {
-            self.runtime
-                .transport
-                .send_branchable_sync_response_token(token, reply)
-                .await
-        } else {
-            self.runtime
-                .transport
-                .send_branchable_sync_response(&peer_id, reply)
-                .await
-        };
-        if let Err(e) = send_result {
-            tracing::warn!(
-                peer_id = %peer_id,
-                error = %e,
-                "Failed to send BranchableSync response"
-            );
-        }
         Ok(())
     }
 
