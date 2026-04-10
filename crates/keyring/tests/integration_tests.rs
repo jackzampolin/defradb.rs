@@ -411,3 +411,74 @@ fn test_file_keyring_key_file_permissions() {
         mode
     );
 }
+
+#[cfg(windows)]
+fn read_acl(path: &std::path::Path) -> String {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "icacls failed for {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[cfg(windows)]
+fn assert_owner_rights_only(path: &std::path::Path, expect_container_flags: bool) {
+    let acl = read_acl(path);
+    assert!(
+        acl.contains("OWNER RIGHTS:") || acl.contains("S-1-3-4:"),
+        "expected owner-rights ACE in ACL for {}:\n{}",
+        path.display(),
+        acl
+    );
+
+    if expect_container_flags {
+        assert!(
+            acl.contains("(OI)(CI)(F)") || acl.contains("(OI)(CI)"),
+            "expected inheritable full-control ACE in ACL for {}:\n{}",
+            path.display(),
+            acl
+        );
+    } else {
+        assert!(
+            acl.contains("(F)"),
+            "expected full-control ACE in ACL for {}:\n{}",
+            path.display(),
+            acl
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn test_file_keyring_windows_directory_and_file_permissions() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let keyring_path = temp_dir.path().join("secure_keyring");
+
+    let keyring = FileKeyring::open(&keyring_path, b"permissions-test").unwrap();
+    keyring.set("secure_key", b"secret-data").unwrap();
+
+    assert_owner_rights_only(&keyring_path, true);
+    assert_owner_rights_only(&keyring_path.join("secure_key"), false);
+}
+
+#[cfg(windows)]
+#[test]
+fn test_file_keyring_windows_migrates_existing_files_on_open() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let keyring_path = temp_dir.path().join("secure_keyring");
+    std::fs::create_dir_all(&keyring_path).unwrap();
+
+    let existing_key = keyring_path.join("existing_key");
+    std::fs::write(&existing_key, b"preexisting").unwrap();
+
+    let _keyring = FileKeyring::open(&keyring_path, b"permissions-test").unwrap();
+
+    assert_owner_rights_only(&keyring_path, true);
+    assert_owner_rights_only(&existing_key, false);
+}
