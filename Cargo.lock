@@ -9787,6 +9787,7 @@ dependencies = [
  "proptest",
  "query-model",
  "query-parse",
+ "query-plan-core",
  "query-sdl",
  "regex",
  "schema",
@@ -9821,6 +9822,16 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "query-plan-core"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "query-model",
+ "serde_json",
+ "storage",
 ]
 
 [[package]]

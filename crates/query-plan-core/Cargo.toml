@@ -1,0 +1,15 @@
+[package]
+name = "query-plan-core"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+query-model = { path = "../query-model" }
+storage = { path = "../storage" }
+
+async-trait.workspace = true
+serde_json.workspace = true

@@ -1,15 +1,13 @@
 //! Core planner traits implementing the Volcano Iterator Model
 
 use async_trait::async_trait;
+use query_model::document::DocumentMapping;
+use query_model::error::Result;
 use serde_json::Value as JsonValue;
 use storage::corekv::MaybeSendSync;
 
-use crate::document::DocumentMapping;
-use crate::error::Result;
-
 /// Document status (active or deleted)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
 pub enum DocStatus {
     #[default]
     Active,
