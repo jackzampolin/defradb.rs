@@ -23,7 +23,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             })?;
 
             // Create an IndexManager for index maintenance
-            let short_id = collection_short_id(collection.collection_id());
+            let short_id = collection.resolved_root_id();
             let index_manager = IndexManager::from_collection(short_id, collection.schema())
                 .map_err(|e| {
                     query::error::QueryError::execution(format!(
@@ -75,7 +75,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
                             // For branchable collections, also create a collection-level block
                             if collection.schema().is_branchable {
-                                let short_id = collection_short_id(collection.collection_id());
+                                let short_id = collection.resolved_root_id();
                                 if let Err(e) = write_collection_block(
                                     &blockstore,
                                     &headstore,

@@ -7,7 +7,6 @@ use query::planner::index_selection::{IndexScanParams, IndexScanType};
 use storage::corekv::Store;
 use storage::index::IndexIterator;
 
-use crate::collection::collection_short_id;
 use crate::index_manager::IndexManager;
 
 use super::LensedAutoCommitFetcher;
@@ -40,7 +39,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             query::error::QueryError::execution(format!("failed to get datastore: {}", e))
         })?;
 
-        let short_id = collection_short_id(collection.collection_id());
+        let short_id = collection.resolved_root_id();
         let index_manager =
             IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
                 query::error::QueryError::execution(format!(

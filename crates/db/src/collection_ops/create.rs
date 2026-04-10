@@ -125,8 +125,7 @@ impl<S: Store> crate::database::DB<S> {
         // Go assigns them via IndexManager.next_index_id() which uses a per-collection
         // sequence key. We replicate that here so IDs match Go exactly.
         if !schema.indexes.is_empty() {
-            let col_short_id = crate::collection::collection_short_id(collection_id.as_str());
-            let seq_key = IndexIDSequenceKey::new(format!("{}", col_short_id));
+            let seq_key = IndexIDSequenceKey::new(format!("{}", short_id));
             let key_bytes = seq_key.bytes();
             let mut current: u32 =
                 match systemstore.get(&key_bytes).await.map_err(Error::Storage)? {

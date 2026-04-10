@@ -7,9 +7,19 @@ use crate::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 /// Sentinel collection ID for placeholder versions whose real collection is unknown.
 pub const ORPHAN_COLLECTION_ID: &str = "OrphanCollectionID";
+
+/// Legacy short-ID derivation used before collections persisted a unique root ID.
+///
+/// This remains the compatibility fallback for older metadata that has no `root_id`.
+pub fn legacy_collection_short_id(collection_id: &str) -> u32 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    collection_id.hash(&mut hasher);
+    hasher.finish() as u32
+}
 
 /// Helper to deserialize `null` as an empty Vec (Go serializes empty slices as null).
 fn deserialize_null_as_empty_vec<'de, D, T>(
@@ -174,6 +184,18 @@ fn default_active() -> bool {
 }
 
 impl CollectionVersion {
+    /// Returns the collection storage prefix ID used for indexes, heads, and view cache keys.
+    ///
+    /// New collections persist a unique sequential `root_id`. Older metadata may not have it, so
+    /// we fall back to the legacy hash to preserve backwards compatibility.
+    pub fn resolved_root_id(&self) -> u32 {
+        if self.root_id > 0 {
+            self.root_id
+        } else {
+            legacy_collection_short_id(&self.collection_id)
+        }
+    }
+
     /// Create a new collection version with default values for optional fields.
     pub fn new(
         name: impl Into<String>,
@@ -485,5 +507,36 @@ impl CollectionBuilder {
             field.name.hash(&mut hasher);
         }
         format!("v{:x}", hasher.finish())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{legacy_collection_short_id, CollectionVersion};
+
+    #[test]
+    fn legacy_short_id_collision_exists_for_known_pair() {
+        let left = "coll_test_000029de";
+        let right = "coll_test_0000b4ed";
+
+        assert_eq!(
+            legacy_collection_short_id(left),
+            legacy_collection_short_id(right)
+        );
+    }
+
+    #[test]
+    fn resolved_root_id_prefers_persisted_root_id() {
+        let mut left = CollectionVersion::new("left", "v1", "coll_test_000029de", Vec::new());
+        let mut right = CollectionVersion::new("right", "v2", "coll_test_0000b4ed", Vec::new());
+
+        assert_eq!(left.resolved_root_id(), right.resolved_root_id());
+
+        left.root_id = 101;
+        right.root_id = 202;
+
+        assert_eq!(left.resolved_root_id(), 101);
+        assert_eq!(right.resolved_root_id(), 202);
+        assert_ne!(left.resolved_root_id(), right.resolved_root_id());
     }
 }

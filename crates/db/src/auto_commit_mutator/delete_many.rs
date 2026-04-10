@@ -24,7 +24,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
 
         let collection = self.get_collection_or_err(collection_name)?;
-        let short_id = collection_short_id(collection.collection_id());
+        let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id().to_string();
         let sign_config = get_signing_config();
 

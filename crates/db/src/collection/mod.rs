@@ -15,22 +15,45 @@ mod crud_datastore;
 mod index_ops;
 mod validation;
 
-use std::hash::{Hash, Hasher};
-
 use crate::error::{Error, Result};
 use crate::index_manager::IndexManager;
 use crate::txn::DbTxn;
 use datastore::NamespaceView;
 use document::{DocID, Document, NormalValue};
-use schema::{CollectionVersion, FieldKind, IndexDescription, ScalarArrayKind, ScalarKind};
-use storage::corekv::{IterOptions, Store};
+use schema::{
+    legacy_collection_short_id, CollectionVersion, FieldKind, IndexDescription, ScalarArrayKind,
+    ScalarKind,
+};
+use storage::corekv::{IterOptions, Key, Store};
+use storage::keys::systemstore::CollectionID;
 
-/// Derive a short u32 ID from a collection_id string.
-/// Uses a simple hash to ensure determinism and uniqueness.
+/// Derive the legacy short ID from a collection_id string.
+///
+/// New code should prefer `CollectionVersion::resolved_root_id()` or `Collection::resolved_root_id()`
+/// so persisted root IDs win whenever they are available.
 pub fn collection_short_id(collection_id: &str) -> u32 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    collection_id.hash(&mut hasher);
-    hasher.finish() as u32
+    legacy_collection_short_id(collection_id)
+}
+
+/// Load the persisted short ID for a collection if one exists.
+pub async fn load_persisted_collection_short_id(
+    systemstore: &NamespaceView,
+    collection_id: &str,
+) -> Result<Option<u32>> {
+    let short_id_key = CollectionID::new(collection_id);
+    let Some(short_id_bytes) = systemstore
+        .get(&short_id_key.bytes())
+        .await
+        .map_err(Error::Storage)?
+    else {
+        return Ok(None);
+    };
+
+    let Ok(short_id_str) = String::from_utf8(short_id_bytes.to_vec()) else {
+        return Ok(None);
+    };
+
+    Ok(short_id_str.parse::<u32>().ok())
 }
 
 /// Key prefix for document data in datastore.
@@ -76,6 +99,11 @@ impl Collection {
     /// Get the collection schema.
     pub fn schema(&self) -> &CollectionVersion {
         &self.def
+    }
+
+    /// Get the storage prefix ID used for indexes, heads, and view cache keys.
+    pub fn resolved_root_id(&self) -> u32 {
+        self.def.resolved_root_id()
     }
 
     /// Get all indexes defined on this collection.

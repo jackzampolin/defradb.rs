@@ -24,7 +24,6 @@ use storage::corekv::Store;
 use tracing::warn;
 
 use crate::block_builder::{write_collection_block, write_delete_block, write_document_blocks};
-use crate::collection::collection_short_id;
 use crate::database::DB;
 use crate::index_manager::IndexManager;
 use crate::lensed_fetcher::LensedDocFetcher;

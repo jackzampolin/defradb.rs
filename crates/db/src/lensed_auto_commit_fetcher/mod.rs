@@ -135,7 +135,7 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
             query::error::QueryError::execution(format!("failed to get datastore: {}", e))
         })?;
 
-        let short_id = crate::collection::collection_short_id(collection.collection_id());
+        let short_id = collection.resolved_root_id();
         let index_manager =
             crate::index_manager::IndexManager::from_collection(short_id, collection.schema())
                 .map_err(|e| {

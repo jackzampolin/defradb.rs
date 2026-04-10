@@ -1,7 +1,6 @@
 //! ScanNode for scanning collection documents
 
 use async_trait::async_trait;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use schema::CollectionVersion;
@@ -13,14 +12,6 @@ use crate::error::Result;
 use crate::fetcher::DocFetcher;
 use crate::mapper::Filter;
 use crate::planner::{Doc, ExecInfo, PlanNode};
-
-/// Derive a short u32 ID from a collection_id string.
-/// Uses the same hash as db::collection_short_id for consistency.
-fn collection_short_id(collection_id: &str) -> u32 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    collection_id.hash(&mut hasher);
-    hasher.finish() as u32
-}
 
 /// ScanNode scans documents from a collection.
 ///
@@ -143,15 +134,8 @@ impl ScanNode {
     }
 
     /// Get the storage prefix for this collection.
-    ///
-    /// Uses the sequential root_id if available (assigned during collection creation),
-    /// falling back to hash-based short_id for backwards compatibility.
     fn collection_prefix(&self) -> u32 {
-        if self.collection.root_id > 0 {
-            self.collection.root_id
-        } else {
-            collection_short_id(&self.collection.collection_id)
-        }
+        self.collection.resolved_root_id()
     }
 }
 

@@ -12,7 +12,7 @@ use storage::corekv::{Key, Store};
 use storage::keys::systemstore::{CollectionID, CollectionKey, CollectionNameKey};
 use tracing::{error, warn};
 
-use crate::collection::{collection_short_id, Collection};
+use crate::collection::Collection;
 use crate::index_manager::IndexManager;
 use crate::txn::DbTxn;
 
@@ -183,13 +183,8 @@ pub(crate) async fn get_collection_with_index_manager<S: Store + 'static>(
 ) -> query::error::Result<(Collection, NamespaceView, IndexManager)> {
     let (collection, datastore) = get_collection_with_lazy_load(txn, collection_name).await?;
 
-    // Create an IndexManager from the collection schema
-    // Use sequential root_id if available, fall back to hash-based short_id
-    let short_id = if collection.schema().root_id > 0 {
-        collection.schema().root_id
-    } else {
-        collection_short_id(collection.collection_id())
-    };
+    // Create an IndexManager from the collection schema.
+    let short_id = collection.resolved_root_id();
     let index_manager =
         IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
             query::error::QueryError::execution(format!(
