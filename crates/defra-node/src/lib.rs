@@ -48,6 +48,10 @@ impl HttpP2PAdapter {
     fn unsupported() -> String {
         "not supported by embedded defra-node HTTP adapter".to_string()
     }
+
+    fn p2p_error_to_http_string(error: embedded::P2PError) -> String {
+        error.to_string()
+    }
 }
 
 #[cfg(all(feature = "http", feature = "p2p"))]
@@ -65,14 +69,14 @@ impl defra_http::P2POperations for HttpP2PAdapter {
         self.inner
             .connected_peers()
             .await
-            .map_err(|e| e.to_string())
+            .map_err(Self::p2p_error_to_http_string)
     }
 
     async fn connect_peer(&self, addr: &str) -> Result<(), String> {
         self.inner
             .connect_peer(addr)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(Self::p2p_error_to_http_string)
     }
 
     async fn get_replicators(&self) -> Result<Vec<defra_http::router::ReplicatorInfo>, String> {
@@ -90,7 +94,7 @@ impl defra_http::P2POperations for HttpP2PAdapter {
         self.inner
             .set_replicator(addr, collections)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(Self::p2p_error_to_http_string)
     }
 
     async fn remove_replicator(
@@ -110,7 +114,7 @@ impl defra_http::P2POperations for HttpP2PAdapter {
             self.inner
                 .subscribe_collection(&collection)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(Self::p2p_error_to_http_string)?;
         }
         Ok(())
     }
@@ -160,15 +164,18 @@ impl defra_http::P2POperations for HttpP2PAdapter {
 pub trait P2POps: Send + Sync {
     async fn local_peer_id(&self) -> String;
     async fn listen_addresses(&self) -> Vec<String>;
-    async fn connected_peers(&self) -> anyhow::Result<Vec<String>>;
-    async fn connect_peer(&self, addr: &str) -> anyhow::Result<()>;
-    async fn notify_network_change(&self) -> anyhow::Result<()>;
-    async fn subscribe_collection(&self, name: &str) -> anyhow::Result<()>;
+    async fn connected_peers(&self) -> embedded::P2PResult<Vec<String>>;
+    async fn connect_peer(&self, addr: &str) -> embedded::P2PResult<()>;
+    async fn notify_network_change(&self) -> embedded::P2PResult<()>;
+    async fn subscribe_collection(&self, name: &str) -> embedded::P2PResult<()>;
     /// Set up push replication to a peer for the given collections.
     /// The peer address may be an endpoint ticket, `<node-id>@<ip>:<port>`,
     /// or just `<node-id>`.
-    async fn set_replicator(&self, peer_addr: &str, collections: Vec<String>)
-        -> anyhow::Result<()>;
+    async fn set_replicator(
+        &self,
+        peer_addr: &str,
+        collections: Vec<String>,
+    ) -> embedded::P2PResult<()>;
 }
 
 /// Type-erased schema operations so we can store DB<S> without leaking the Store generic.
