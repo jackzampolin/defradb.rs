@@ -95,13 +95,8 @@ impl Collection {
                 continue;
             }
 
-            let mut doc = Document::from_cbor(&pair.value).map_err(|e| {
-                Error::Serialization(format!(
-                    "failed to deserialize document at key {:?}: {}",
-                    String::from_utf8_lossy(&pair.key),
-                    e
-                ))
-            })?;
+            let mut doc = Document::from_cbor(&pair.value)
+                .map_err(|e| Error::document_at_key(&pair.key, e))?;
 
             // Extract doc_id from key (format: /d/<collection_id>/<doc_id>)
             // Find the last '/' and extract the doc_id string after it

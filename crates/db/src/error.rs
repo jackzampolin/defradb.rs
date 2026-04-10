@@ -16,6 +16,12 @@ pub enum Error {
     #[error("document error: {0}")]
     Document(#[from] document::Error),
 
+    #[error("failed to deserialize document at key {key:?}: {source}")]
+    DocumentAtKey {
+        key: String,
+        source: document::Error,
+    },
+
     #[error("collection '{0}' not found")]
     CollectionNotFound(String),
 
@@ -94,6 +100,15 @@ impl From<acp::Error> for Error {
 impl From<lens::Error> for Error {
     fn from(err: lens::Error) -> Self {
         Error::Lens(err.to_string())
+    }
+}
+
+impl Error {
+    pub fn document_at_key(key: &[u8], source: document::Error) -> Self {
+        Self::DocumentAtKey {
+            key: String::from_utf8_lossy(key).into_owned(),
+            source,
+        }
     }
 }
 
