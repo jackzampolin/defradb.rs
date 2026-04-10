@@ -6,8 +6,10 @@ use acp::nac::NodePermission;
 use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
+use crate::try_ffi;
 use crate::types::FfiResult;
-use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
+
+use super::{into_ffi_ok, into_ffi_result, FfiP2PError};
 
 /// Get local P2P peer info.
 ///
@@ -39,13 +41,13 @@ pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_c
                         .ops()
                         .local_peer_id()
                         .await
-                        .map_err(|error| error.to_string())?;
+                        .map_err(FfiP2PError::from)?;
                     let addresses = p2p
                         .system
                         .ops()
                         .listen_addresses()
                         .await
-                        .map_err(|error| error.to_string())?;
+                        .map_err(FfiP2PError::from)?;
 
                     let full_addrs = match p2p.system.kind() {
                         embedded::TransportKind::Libp2p => addresses
@@ -58,16 +60,18 @@ pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_c
                     };
 
                     serde_json::to_string(&full_addrs)
-                        .map_err(|error| format!("failed to serialize peer info: {}", error))
+                        .map_err(|error| {
+                            FfiP2PError::internal(format!(
+                                "failed to serialize peer info: {}",
+                                error
+                            ))
+                        })
                 })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(json) => FfiResult::success(json),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_result(result)
     }
 }
 
@@ -95,7 +99,7 @@ pub unsafe extern "C" fn p2p_notify_network_change(
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
                     Some(p2p) => p2p,
-                    None => return Err("no p2p system configured".to_string()),
+                    None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
                 rt.block_on(async {
@@ -103,16 +107,13 @@ pub unsafe extern "C" fn p2p_notify_network_change(
                         .ops()
                         .notify_network_change()
                         .await
-                        .map_err(|error| error.to_string())
+                        .map_err(FfiP2PError::from)
                 })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(()) => FfiResult::ok(),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_ok(result)
     }
 }
 
@@ -140,23 +141,29 @@ pub unsafe extern "C" fn p2p_active_peers(
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
                     Some(p2p) => p2p,
-                    None => return Err("no p2p system configured".to_string()),
+                    None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
                 rt.block_on(async {
-                    let peers = p2p.system.ops().connected_peers().await
-                        .map_err(|error| error.to_string())?;
+                    let peers = p2p
+                        .system
+                        .ops()
+                        .connected_peers()
+                        .await
+                        .map_err(FfiP2PError::from)?;
                     serde_json::to_string(&peers)
-                        .map_err(|error| format!("failed to serialize peer list: {}", error))
+                        .map_err(|error| {
+                            FfiP2PError::internal(format!(
+                                "failed to serialize peer list: {}",
+                                error
+                            ))
+                        })
                 })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(json) => FfiResult::success(json),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_result(result)
     }
 }
 
@@ -187,7 +194,7 @@ pub unsafe extern "C" fn p2p_connect(
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
                     Some(p2p) => p2p,
-                    None => return Err("no p2p system configured".to_string()),
+                    None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
                 rt.block_on(async {
@@ -195,15 +202,12 @@ pub unsafe extern "C" fn p2p_connect(
                         .ops()
                         .connect_peer(&addr_str)
                         .await
-                        .map_err(|error| error.to_string())
+                        .map_err(FfiP2PError::from)
                 })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(()) => FfiResult::ok(),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_ok(result)
     }
 }

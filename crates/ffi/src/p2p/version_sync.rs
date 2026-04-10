@@ -6,8 +6,10 @@ use acp::nac::NodePermission;
 use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
+use crate::try_ffi;
 use crate::types::FfiResult;
-use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
+
+use super::{into_ffi_ok, FfiP2PError};
 
 /// Sync collection versions (schema definitions) from connected peers.
 ///
@@ -33,10 +35,13 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
         let version_ids: Vec<String> = match serde_json::from_str(&version_ids_str) {
             Ok(ids) => ids,
             Err(error) => {
-                return FfiResult::error(format!(
-                    "failed to parse version_ids_json: {}",
-                    error
-                ));
+                return FfiResult::error(
+                    FfiP2PError::invalid_input(format!(
+                        "failed to parse version_ids_json: {}",
+                        error
+                    ))
+                    .message,
+                );
             }
         };
 
@@ -48,7 +53,7 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
                     Some(p2p) => p2p,
-                    None => return Err("no p2p system configured".to_string()),
+                    None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
                 let version_ids = version_ids.clone();
@@ -57,15 +62,12 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                         .ops()
                         .sync_collection_versions(version_ids)
                         .await
-                        .map_err(|error| error.to_string())
+                        .map_err(FfiP2PError::from)
                 })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(()) => FfiResult::ok(),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_ok(result)
     }
 }

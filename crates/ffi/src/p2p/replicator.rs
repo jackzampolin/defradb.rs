@@ -6,10 +6,10 @@ use acp::nac::NodePermission;
 use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
+use crate::try_ffi;
 use crate::types::{c_str_to_string, FfiResult};
-use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
-use super::parse_collections_json;
+use super::{into_ffi_ok, into_ffi_result, parse_collections_json, FfiP2PError};
 
 fn replicator_push_options(state: &crate::state::NodeState) -> embedded::ReplicatorPushOptions {
     embedded::ReplicatorPushOptions {
@@ -46,14 +46,14 @@ pub unsafe extern "C" fn p2p_add_replicator(
         let collections_str = try_ffi!(require_c_str(collections_json, "collections_json"));
         let collections = match parse_collections_json(&collections_str) {
             Ok(collections) => collections,
-            Err(error) => return FfiResult::error(error),
+            Err(error) => return FfiResult::error(error.message),
         };
 
         let result = NODES
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
                     Some(p2p) => p2p,
-                    None => return Err("no p2p system configured".to_string()),
+                    None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
                 let addr = addr_str.clone();
@@ -64,16 +64,13 @@ pub unsafe extern "C" fn p2p_add_replicator(
                         .ops()
                         .add_replicator(collections, Some(&addr), push_options)
                         .await
-                        .map_err(|error| error.to_string())
+                        .map_err(FfiP2PError::from)
                 })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(()) => FfiResult::ok(),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_ok(result)
     }
 }
 
@@ -105,7 +102,7 @@ pub unsafe extern "C" fn p2p_delete_replicator(
             match c_str_to_string(collections_json) {
                 Some(s) if !s.is_empty() => match parse_collections_json(&s) {
                     Ok(collections) => collections,
-                    Err(error) => return FfiResult::error(error),
+                    Err(error) => return FfiResult::error(error.message),
                 },
                 _ => Vec::new(),
             }
@@ -115,7 +112,7 @@ pub unsafe extern "C" fn p2p_delete_replicator(
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
                     Some(p2p) => p2p,
-                    None => return Err("no p2p system configured".to_string()),
+                    None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
                 let peer = peer_str.clone();
@@ -125,16 +122,13 @@ pub unsafe extern "C" fn p2p_delete_replicator(
                         .ops()
                         .remove_replicator(collections, Some(&peer))
                         .await
-                        .map_err(|error| error.to_string())
+                        .map_err(FfiP2PError::from)
                 })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(()) => FfiResult::ok(),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_ok(result)
     }
 }
 
@@ -163,22 +157,28 @@ pub unsafe extern "C" fn p2p_list_replicators(
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
                     Some(p2p) => p2p,
-                    None => return Err("no p2p system configured".to_string()),
+                    None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
                 rt.block_on(async {
-                    let replicators = p2p.system.ops().get_replicators().await
-                        .map_err(|error| error.to_string())?;
+                    let replicators = p2p
+                        .system
+                        .ops()
+                        .get_replicators()
+                        .await
+                        .map_err(FfiP2PError::from)?;
                     serde_json::to_string(&replicators)
-                        .map_err(|error| format!("failed to serialize replicators: {}", error))
+                        .map_err(|error| {
+                            FfiP2PError::internal(format!(
+                                "failed to serialize replicators: {}",
+                                error
+                            ))
+                        })
                 })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(json) => FfiResult::success(json),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_result(result)
     }
 }

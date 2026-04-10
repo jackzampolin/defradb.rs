@@ -6,10 +6,10 @@ use acp::nac::NodePermission;
 use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
+use crate::try_ffi;
 use crate::types::FfiResult;
-use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
-use super::parse_doc_ids_json;
+use super::{into_ffi_ok, into_ffi_result, parse_doc_ids_json, FfiP2PError};
 
 /// Add tracked P2P documents to the node.
 ///
@@ -35,7 +35,7 @@ pub unsafe extern "C" fn p2p_add_documents(
         let doc_ids_str = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
         let doc_ids = match parse_doc_ids_json(&doc_ids_str) {
             Ok(doc_ids) => doc_ids,
-            Err(error) => return FfiResult::error(error),
+            Err(error) => return FfiResult::error(error.message),
         };
 
         let docs = doc_ids
@@ -50,7 +50,7 @@ pub unsafe extern "C" fn p2p_add_documents(
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
                     Some(p2p) => p2p,
-                    None => return Err("no p2p system configured".to_string()),
+                    None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
                 rt.block_on(async {
@@ -58,16 +58,13 @@ pub unsafe extern "C" fn p2p_add_documents(
                         .ops()
                         .add_documents(docs)
                         .await
-                        .map_err(|error| error.to_string())
+                        .map_err(FfiP2PError::from)
                 })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(()) => FfiResult::ok(),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_ok(result)
     }
 }
 
@@ -95,7 +92,7 @@ pub unsafe extern "C" fn p2p_delete_documents(
         let doc_ids_str = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
         let doc_ids = match parse_doc_ids_json(&doc_ids_str) {
             Ok(doc_ids) => doc_ids,
-            Err(error) => return FfiResult::error(error),
+            Err(error) => return FfiResult::error(error.message),
         };
 
         let docs = doc_ids
@@ -110,7 +107,7 @@ pub unsafe extern "C" fn p2p_delete_documents(
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
                     Some(p2p) => p2p,
-                    None => return Err("no p2p system configured".to_string()),
+                    None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
                 rt.block_on(async {
@@ -118,16 +115,13 @@ pub unsafe extern "C" fn p2p_delete_documents(
                         .ops()
                         .remove_documents(docs)
                         .await
-                        .map_err(|error| error.to_string())
+                        .map_err(FfiP2PError::from)
                 })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(()) => FfiResult::ok(),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_ok(result)
     }
 }
 
@@ -155,25 +149,31 @@ pub unsafe extern "C" fn p2p_list_documents(
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
                     Some(p2p) => p2p,
-                    None => return Err("no p2p system configured".to_string()),
+                    None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
                 rt.block_on(async {
-                    let documents = p2p.system.ops().get_documents().await
-                        .map_err(|error| error.to_string())?;
+                    let documents = p2p
+                        .system
+                        .ops()
+                        .get_documents()
+                        .await
+                        .map_err(FfiP2PError::from)?;
                     let mut doc_ids: Vec<String> =
                         documents.into_iter().map(|doc| doc.doc_id).collect();
                     doc_ids.sort();
                     serde_json::to_string(&doc_ids)
-                        .map_err(|error| format!("failed to serialize documents: {}", error))
+                        .map_err(|error| {
+                            FfiP2PError::internal(format!(
+                                "failed to serialize documents: {}",
+                                error
+                            ))
+                        })
                 })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(json) => FfiResult::success(json),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_result(result)
     }
 }
