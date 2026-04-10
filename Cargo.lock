@@ -8686,6 +8686,7 @@ dependencies = [
  "blake3",
  "blockstore",
  "bytes",
+ "ciborium",
  "cid 0.10.1",
  "crdt",
  "crypto",
