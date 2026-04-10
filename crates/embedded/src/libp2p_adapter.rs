@@ -27,7 +27,7 @@ pub trait VersionSyncer: Send + Sync {
         handle: &P2PHostHandle,
         version_ids: Vec<String>,
         connected_peers: Vec<libp2p::PeerId>,
-    ) -> Result<(), String>;
+    ) -> P2PResult<()>;
 }
 
 /// Adapter implementing embedded P2P operations on top of `P2PHostHandle`.
