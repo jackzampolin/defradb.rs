@@ -37,8 +37,11 @@ pub const AES_KEY_SIZE: usize = 32;
 /// X25519 public key size in bytes
 pub const X25519_PUBLIC_KEY_SIZE: usize = 32;
 
-/// HMAC-SHA256 output size in bytes
+/// HMAC-SHA256 tag size in bytes
 pub const HMAC_SIZE: usize = 32;
+
+/// ECIES HMAC-SHA256 key size in bytes
+pub const HMAC_KEY_SIZE: usize = 32;
 
 /// Ed25519 public key size in bytes
 pub const ED25519_PUBLIC_KEY_SIZE: usize = 32;
@@ -99,6 +102,7 @@ mod tests {
         assert_eq!(AES_KEY_SIZE, 32);
         assert_eq!(X25519_PUBLIC_KEY_SIZE, 32);
         assert_eq!(HMAC_SIZE, 32);
+        assert_eq!(HMAC_KEY_SIZE, 32);
         assert_eq!(ED25519_PUBLIC_KEY_SIZE, 32);
         assert_eq!(ED25519_PRIVATE_KEY_SIZE, 64);
         assert_eq!(SECP256K1_COMPRESSED_PUBLIC_KEY_SIZE, 33);

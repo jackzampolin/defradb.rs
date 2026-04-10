@@ -17,7 +17,7 @@ use crate::encryption::aes::{decrypt_aes, encrypt_aes};
 use crate::error::{
     crypto_error, failed_to_parse_ephemeral_public_key, verification_with_hmac_failed,
 };
-use crate::types::{AES_KEY_SIZE, HMAC_SIZE, X25519_PUBLIC_KEY_SIZE};
+use crate::types::{AES_KEY_SIZE, HMAC_KEY_SIZE, HMAC_SIZE, X25519_PUBLIC_KEY_SIZE};
 
 /// Options for ECIES encryption/decryption
 #[derive(Default)]
@@ -127,12 +127,12 @@ pub fn encrypt_ecies(
     // Empty salt and info parameters match the Go implementation.
     let hkdf = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
 
-    let mut keys = [0u8; AES_KEY_SIZE + AES_KEY_SIZE];
+    let mut keys = [0u8; AES_KEY_SIZE + HMAC_KEY_SIZE];
     hkdf.expand(&[], &mut keys)
         .map_err(|e| crypto_error(format!("HKDF expansion failed: {}", e)))?;
 
     let aes_key: [u8; AES_KEY_SIZE] = keys[..AES_KEY_SIZE].try_into().unwrap();
-    let hmac_key: [u8; AES_KEY_SIZE] = keys[AES_KEY_SIZE..].try_into().unwrap();
+    let hmac_key: [u8; HMAC_KEY_SIZE] = keys[AES_KEY_SIZE..].try_into().unwrap();
 
     // 4. Build AAD: ephemeral public key + optional additional data
     let mut aad = ephemeral_public.as_bytes().to_vec();
@@ -231,12 +231,12 @@ pub fn decrypt_ecies(
     // This matches Go's sequential hkdf.Read() calls for P2P compatibility.
     let hkdf = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
 
-    let mut keys = [0u8; AES_KEY_SIZE + AES_KEY_SIZE];
+    let mut keys = [0u8; AES_KEY_SIZE + HMAC_KEY_SIZE];
     hkdf.expand(&[], &mut keys)
         .map_err(|e| crypto_error(format!("HKDF expansion failed: {}", e)))?;
 
     let aes_key: [u8; AES_KEY_SIZE] = keys[..AES_KEY_SIZE].try_into().unwrap();
-    let hmac_key: [u8; AES_KEY_SIZE] = keys[AES_KEY_SIZE..].try_into().unwrap();
+    let hmac_key: [u8; HMAC_KEY_SIZE] = keys[AES_KEY_SIZE..].try_into().unwrap();
 
     // 5. Verify HMAC
     let mut mac = Hmac::<Sha256>::new_from_slice(&hmac_key)

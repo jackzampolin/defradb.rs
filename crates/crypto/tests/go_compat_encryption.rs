@@ -6,6 +6,7 @@
 use crypto::encryption::aes::{decrypt_aes, encrypt_aes};
 use crypto::encryption::ecies::{decrypt_ecies, encrypt_ecies, EciesOptions};
 use crypto::encryption::nonce::USE_DETERMINISTIC_NONCE;
+use crypto::types::{AES_KEY_SIZE, HMAC_KEY_SIZE};
 use hkdf::Hkdf;
 use serial_test::serial;
 use sha2::Sha256;
@@ -110,11 +111,11 @@ fn test_hkdf_key_derivation_matches_go() {
     // Use the shared secret from Go
     let hkdf = Hkdf::<Sha256>::new(None, &X25519_SHARED_SECRET);
 
-    let mut keys = [0u8; 64];
+    let mut keys = [0u8; AES_KEY_SIZE + HMAC_KEY_SIZE];
     hkdf.expand(&[], &mut keys).unwrap();
 
-    let aes_key = &keys[..32];
-    let hmac_key = &keys[32..];
+    let aes_key = &keys[..AES_KEY_SIZE];
+    let hmac_key = &keys[AES_KEY_SIZE..];
 
     assert_eq!(
         aes_key, &HKDF_AES_KEY,
