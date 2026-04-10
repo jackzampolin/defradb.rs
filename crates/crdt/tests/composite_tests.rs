@@ -261,11 +261,11 @@ async fn test_composite_doc_id_mismatch() {
 #[tokio::test]
 async fn test_composite_float64_counter_overflow_becomes_positive_infinity() {
     let store = MemoryStore::new();
-    let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+    let mut composite = CompositeDAG::new(DocId::new("doc1").unwrap(), "v1".to_string());
     composite.register_counter_field("count".to_string(), true, NumericKind::Float64);
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new("doc1").unwrap(),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -310,11 +310,11 @@ async fn test_composite_float64_counter_overflow_becomes_positive_infinity() {
 #[tokio::test]
 async fn test_composite_float64_counter_nan_increment_propagates_nan() {
     let store = MemoryStore::new();
-    let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+    let mut composite = CompositeDAG::new(DocId::new("doc1").unwrap(), "v1".to_string());
     composite.register_counter_field("count".to_string(), true, NumericKind::Float64);
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new("doc1").unwrap(),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -345,11 +345,11 @@ async fn test_composite_float64_counter_nan_increment_propagates_nan() {
 #[tokio::test]
 async fn test_composite_float64_counter_negative_zero_normalizes_to_positive_zero() {
     let store = MemoryStore::new();
-    let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+    let mut composite = CompositeDAG::new(DocId::new("doc1").unwrap(), "v1".to_string());
     composite.register_counter_field("count".to_string(), true, NumericKind::Float64);
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new("doc1").unwrap(),
         schema_version: "v1".to_string(),
         is_create: false,
     };
