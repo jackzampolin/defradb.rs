@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::compute_range_bounds;
@@ -23,8 +23,8 @@ pub(crate) struct FjallTxn {
     /// Pending changes (Some(value) = set, None = delete)
     pub(crate) pending: Mutex<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
     pub(crate) readonly: bool,
-    pub(crate) discarded: Mutex<bool>,
-    pub(crate) committed: Mutex<bool>,
+    pub(crate) discarded: AtomicBool,
+    pub(crate) committed: AtomicBool,
     pub(crate) callbacks: CallbackManager,
     pub(crate) durability: DurabilityMode,
 }
@@ -33,8 +33,8 @@ impl Drop for FjallTxn {
     fn drop(&mut self) {
         self.active_txn_count.fetch_sub(1, Ordering::AcqRel);
 
-        let was_committed = *self.committed.lock();
-        let was_discarded = *self.discarded.lock();
+        let was_committed = self.committed.load(Ordering::Acquire);
+        let was_discarded = self.discarded.load(Ordering::Acquire);
         if !was_committed && !was_discarded {
             let has_pending = !self.pending.lock().is_empty();
             let total_skipped =
@@ -96,7 +96,7 @@ impl crate::corekv::private::Sealed for FjallTxn {}
 #[async_trait]
 impl Reader for FjallTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
         if key.is_empty() {
@@ -106,7 +106,7 @@ impl Reader for FjallTxn {
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
         if key.is_empty() {
@@ -116,7 +116,7 @@ impl Reader for FjallTxn {
     }
 
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
         if key.is_empty() {
@@ -126,7 +126,7 @@ impl Reader for FjallTxn {
     }
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -204,7 +204,7 @@ fn bound_as_ref(bound: &std::ops::Bound<Vec<u8>>) -> std::ops::Bound<&[u8]> {
 #[async_trait]
 impl Writer for FjallTxn {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
         if self.readonly {
@@ -220,7 +220,7 @@ impl Writer for FjallTxn {
     }
 
     async fn delete(&mut self, key: &[u8]) -> Result<()> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
         if self.readonly {
@@ -237,14 +237,14 @@ impl Writer for FjallTxn {
 #[async_trait]
 impl Txn for FjallTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             tracing::warn!("Attempted to commit a discarded transaction");
             CallbackManager::execute_callbacks(self.callbacks.take_error());
             CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
             return Err(Error::DiscardedTxn);
         }
 
-        if *self.committed.lock() {
+        if self.committed.load(Ordering::Acquire) {
             tracing::warn!("Attempted to commit an already committed transaction");
             return Err(Error::Other("Transaction already committed".into()));
         }
@@ -291,7 +291,7 @@ impl Txn for FjallTxn {
             }
         }
 
-        *self.committed.lock() = true;
+        self.committed.store(true, Ordering::Release);
 
         CallbackManager::execute_callbacks(self.callbacks.take_success());
         CallbackManager::execute_async_callbacks(self.callbacks.take_success_async()).await;
@@ -300,7 +300,7 @@ impl Txn for FjallTxn {
     }
 
     fn discard(self: Box<Self>) {
-        *self.discarded.lock() = true;
+        self.discarded.store(true, Ordering::Release);
 
         CallbackManager::execute_callbacks(self.callbacks.take_discard());
 
