@@ -17,14 +17,14 @@ use storage::{MemoryStore, Store};
 #[tokio::test]
 async fn test_composite_multiple_fields() {
     let store = MemoryStore::new();
-    let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+    let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
 
     // Register fields
     composite.register_lww_field("name".to_string());
     composite.register_counter_field("count".to_string(), true, NumericKind::Int64);
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -72,13 +72,13 @@ async fn test_composite_multiple_fields() {
 #[tokio::test]
 async fn test_composite_field_type_mismatch_lww_to_counter() {
     let store = MemoryStore::new();
-    let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+    let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
 
     // Register field as LWW
     composite.register_lww_field("value".to_string());
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -108,13 +108,13 @@ async fn test_composite_field_type_mismatch_lww_to_counter() {
 #[tokio::test]
 async fn test_composite_field_type_mismatch_counter_to_lww() {
     let store = MemoryStore::new();
-    let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+    let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
 
     // Register field as Counter
     composite.register_counter_field("count".to_string(), true, NumericKind::Int64);
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -143,12 +143,12 @@ async fn test_composite_field_type_mismatch_counter_to_lww() {
 #[tokio::test]
 async fn test_composite_unknown_field() {
     let store = MemoryStore::new();
-    let composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+    let composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
 
     // Don't register any fields
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -174,13 +174,13 @@ async fn test_composite_unknown_field() {
 #[tokio::test]
 async fn test_composite_schema_evolution_type_change() {
     let store = MemoryStore::new();
-    let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+    let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
 
     // Register field as LWW in schema v1
     composite.register_lww_field("score".to_string());
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -227,12 +227,12 @@ async fn test_composite_schema_evolution_type_change() {
 #[tokio::test]
 async fn test_composite_doc_id_mismatch() {
     let store = MemoryStore::new();
-    let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+    let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
 
     composite.register_lww_field("name".to_string());
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -380,12 +380,12 @@ async fn test_composite_float64_counter_negative_zero_normalizes_to_positive_zer
 #[tokio::test]
 async fn test_composite_schema_version_mismatch() {
     let store = MemoryStore::new();
-    let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+    let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
 
     composite.register_lww_field("name".to_string());
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };

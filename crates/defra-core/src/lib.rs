@@ -9,6 +9,7 @@ pub mod block_delta;
 pub mod block_signature;
 pub mod collection;
 pub mod dac_bypass;
+pub mod doc_id;
 pub mod document;
 pub mod encryption;
 pub mod error;

@@ -92,7 +92,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
 
         let seed_ctx = Context {
-            doc_id: DocId::new(doc_id_str),
+            doc_id: DocId::new(doc_id_str).map_err(|e| MergeError::MergeFailed(e.to_string()))?,
             schema_version: payload.schema_version_id.clone(),
             is_create: true,
         };
@@ -157,7 +157,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 )
                 .await?;
             let ctx = Context {
-                doc_id: DocId::new(&doc_id_str),
+                doc_id: DocId::new(&doc_id_str)
+                    .map_err(|e| MergeError::MergeFailed(e.to_string()))?,
                 schema_version: payload.schema_version_id.clone(),
                 is_create: payload.priority == 1 && !doc_exists,
             };
@@ -271,7 +272,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             )
             .await?;
         let ctx = Context {
-            doc_id: DocId::new(&doc_id_str),
+            doc_id: DocId::new(&doc_id_str).map_err(|e| MergeError::MergeFailed(e.to_string()))?,
             schema_version: payload.schema_version_id.clone(),
             is_create: payload.priority == 1 && !doc_exists,
         };

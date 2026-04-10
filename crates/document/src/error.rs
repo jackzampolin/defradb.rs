@@ -62,4 +62,7 @@ pub enum Error {
 
     #[error("schema error: {0}")]
     Schema(#[from] schema::SchemaError),
+
+    #[error("{0}")]
+    CoreDocID(#[from] defra_core::doc_id::DocIdFormatError),
 }

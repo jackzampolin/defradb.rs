@@ -3611,6 +3611,7 @@ dependencies = [
  "cid 0.10.1",
  "criterion 0.5.1",
  "libipld",
+ "multibase",
  "multihash 0.18.1",
  "serde",
  "serde_bytes",
@@ -3619,6 +3620,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 1.0.69",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4023,6 +4025,7 @@ dependencies = [
  "ciborium",
  "cid 0.10.1",
  "crypto",
+ "defra-core",
  "multibase",
  "multihash 0.18.1",
  "pretty_assertions",
