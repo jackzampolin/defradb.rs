@@ -3,7 +3,7 @@ use schema::{IndexDescription, IndexedFieldDescription};
 use serde_json::{json, Map, Value as JsonValue};
 use storage::index::Bound;
 
-use crate::mapper::{Filter, FilterOp};
+use query_model::mapper::{Filter, FilterOp};
 
 use super::values::json_to_normal_value;
 use super::*;

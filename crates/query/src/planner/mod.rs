@@ -18,7 +18,7 @@ mod mapping;
 mod view_builder;
 
 pub use builder::{PlanResult, Planner};
-pub use index_selection::{
+pub use query_plan_core::index_selection::{
     can_use_index, extract_field_conditions, filter_to_index_scan, select_best_index,
     ConditionValue, FieldCondition, IndexScanParams, IndexScanType, ScanValueFilter,
 };

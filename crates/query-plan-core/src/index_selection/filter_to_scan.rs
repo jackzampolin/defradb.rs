@@ -4,7 +4,7 @@ use document::{JsonLeafValue, JsonPath, JsonScalarValue, NormalValue};
 use schema::{FieldKind, IndexDescription, ScalarKind};
 use storage::index::Bound;
 
-use crate::mapper::{Filter, FilterOp, OrderBy};
+use query_model::mapper::{Filter, FilterOp, OrderBy};
 
 use super::conditions::{
     can_be_ordered_by_index, can_use_index, extract_field_conditions, should_fallback_to_full_scan,

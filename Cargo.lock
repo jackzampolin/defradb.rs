@@ -9829,7 +9829,10 @@ name = "query-plan-core"
 version = "0.5.0"
 dependencies = [
  "async-trait",
+ "chrono",
+ "document",
  "query-model",
+ "schema",
  "serde_json",
  "storage",
 ]
