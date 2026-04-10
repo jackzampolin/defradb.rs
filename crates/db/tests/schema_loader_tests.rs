@@ -11,6 +11,10 @@ use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
+fn new_txn(basic_txn: BasicTxn) -> DbTxn<MemoryStore> {
+    DbTxn::new(basic_txn)
+}
+
 #[tokio::test]
 async fn test_load_empty_database() {
     let store = MemoryStore::new();
@@ -38,7 +42,7 @@ async fn test_load_single_collection() {
 
     {
         let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-        let txn = DbTxn::new(basic_txn, store.clone());
+        let txn = new_txn(basic_txn);
 
         // Store the collection definition at /collection/id/<id>
         txn.systemstore()
@@ -77,7 +81,7 @@ async fn test_load_multiple_collections() {
 
     {
         let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-        let txn = DbTxn::new(basic_txn, store.clone());
+        let txn = new_txn(basic_txn);
 
         for (name, id) in &collections {
             let collection = CollectionVersion::new(*name, *id, *id, vec![]);
@@ -119,7 +123,7 @@ async fn test_load_missing_collection_definition_returns_error() {
     // Store only the name mapping, NOT the collection definition
     {
         let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-        let txn = DbTxn::new(basic_txn, store.clone());
+        let txn = new_txn(basic_txn);
 
         let name_key = CollectionNameKey::new("orphan_collection");
         txn.systemstore()
@@ -174,7 +178,7 @@ async fn test_load_invalid_json_collection_returns_error() {
     // Store name mapping pointing to invalid JSON
     {
         let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-        let txn = DbTxn::new(basic_txn, store.clone());
+        let txn = new_txn(basic_txn);
 
         let name_key = CollectionNameKey::new("bad_collection");
         let collection_key = CollectionKey::new("bad_id_456");
