@@ -120,12 +120,12 @@ impl Block {
 
     /// Serialize to DAG-CBOR bytes
     pub fn to_dag_cbor(&self) -> Result<Vec<u8>> {
-        serde_ipld_dagcbor::to_vec(self).map_err(|e| Error::Serialization(e.to_string()))
+        Ok(serde_ipld_dagcbor::to_vec(self)?)
     }
 
     /// Deserialize from DAG-CBOR bytes
     pub fn from_dag_cbor(bytes: &[u8]) -> Result<Self> {
-        serde_ipld_dagcbor::from_slice(bytes).map_err(|e| Error::Serialization(e.to_string()))
+        Ok(serde_ipld_dagcbor::from_slice(bytes)?)
     }
 
     /// Generate CID from block content

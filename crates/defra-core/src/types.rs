@@ -166,7 +166,7 @@ pub struct CID(cid::Cid);
 impl CID {
     /// Create a CID from bytes with validation
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let c = cid::Cid::try_from(bytes).map_err(|e| Error::InvalidCID(e.to_string()))?;
+        let c = cid::Cid::try_from(bytes)?;
 
         // Validate version
         match c.version() {
@@ -188,7 +188,7 @@ impl CID {
 
     /// Create a CID from a string
     pub fn from_string(s: &str) -> Result<Self> {
-        let c = cid::Cid::try_from(s).map_err(|e| Error::InvalidCID(e.to_string()))?;
+        let c = cid::Cid::try_from(s)?;
 
         // Validate version
         match c.version() {
