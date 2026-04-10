@@ -33,6 +33,7 @@ use crate::database::DB;
 use crate::error::{Error, Result};
 use crate::lensed_fetcher::LensedDocFetcher;
 use crate::txn_context::DbTransactionContext;
+use crate::txn_lens_store::TxnLensStore;
 
 /// Result of a stale transaction cleanup operation.
 ///
@@ -79,7 +80,6 @@ impl CleanupResult {
 pub struct DbTransactionRegistry<S: Store> {
     db: Arc<DB<S>>,
     transactions: RwLock<HashMap<String, Arc<DbTransactionContext<S>>>>,
-    pending_lenses: RwLock<HashMap<String, HashMap<String, LensConfig>>>,
     id_counter: AtomicU64,
 }
 
@@ -91,7 +91,6 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         Self {
             db,
             transactions: RwLock::new(HashMap::new()),
-            pending_lenses: RwLock::new(HashMap::new()),
             id_counter: AtomicU64::new(0),
         }
     }
@@ -308,11 +307,70 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 
         // Get the shared transaction from the fetcher
         let shared_txn = ctx.fetcher_shared_txn();
-        let txn_guard = shared_txn.lock().await;
-        let txn = txn_guard.as_ref().ok_or(Error::TxnNotActive)?;
+        let mut txn_guard = shared_txn.lock().await;
+        let txn = txn_guard.as_mut().ok_or(Error::TxnNotActive)?;
+        let txn_lens_store = ctx.lens_store();
 
-        // Call the database's transaction-aware set_migration
-        self.db.set_migration_in_txn(txn, config).await
+        let outcome = self
+            .db
+            .set_migration_in_txn_with_store(txn, txn_lens_store.clone(), config.clone())
+            .await?;
+        let transform_id = outcome.transform_id.clone();
+        let updated_destination = outcome.updated_destination.clone();
+
+        let db = self.db.clone();
+        let transform_id_for_commit = transform_id.clone();
+        let destination_version_id = updated_destination.version_id.clone();
+        txn.on_success_async(Box::new(move || {
+            let db = db.clone();
+            let config = config.clone();
+            let transform_id = transform_id_for_commit.clone();
+            let updated_destination = updated_destination.clone();
+            let destination_version_id = destination_version_id.clone();
+            Box::pin(async move {
+                if let Err(error) = db
+                    .lens_store()
+                    .add_with_id(transform_id.clone(), config)
+                    .await
+                {
+                    tracing::warn!(
+                        transform_id = %transform_id,
+                        error = %error,
+                        "failed to promote committed transaction migration lens"
+                    );
+                }
+
+                if !updated_destination.name.is_empty() {
+                    if let Ok(mut cache) = db.collections.write() {
+                        if let Some(cached) = cache.get(&updated_destination.name) {
+                            if cached.schema().version_id == destination_version_id {
+                                cache.insert(
+                                    updated_destination.name.clone(),
+                                    Collection::new(updated_destination.clone()),
+                                );
+                            }
+                        }
+                    }
+
+                    if let Err(error) = db
+                        .maybe_reindex_after_migration(
+                            &updated_destination.name,
+                            &updated_destination.version_id,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            collection = %updated_destination.name,
+                            version_id = %updated_destination.version_id,
+                            error = %error,
+                            "failed to reindex committed transaction migration"
+                        );
+                    }
+                }
+            })
+        }))?;
+
+        Ok(transform_id)
     }
 
     /// Add a schema within an existing transaction.
@@ -378,26 +436,16 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let shared_txn = ctx.fetcher_shared_txn();
         let mut txn_guard = shared_txn.lock().await;
         let txn = txn_guard.as_mut().ok_or(Error::TxnNotActive)?;
+        let txn_lens_store = ctx.lens_store();
 
         let transform_id = Self::compute_lens_transform_id(&config).await?;
-        let transform_id_str = transform_id.to_string();
-
-        {
-            let pending = self.pending_lenses.read().map_err(|_| {
-                Error::LockPoisoned("failed to acquire pending lens read lock".into())
-            })?;
-            if pending
-                .get(txn_id)
-                .and_then(|m| m.get(&transform_id_str))
-                .is_some()
-            {
-                return Ok(transform_id);
-            }
+        if txn_lens_store.has_transform(&transform_id) {
+            return Ok(transform_id);
         }
 
         let db = self.db.clone();
         let config_for_commit = config.clone();
-        let transform_id_for_log = transform_id_str.clone();
+        let transform_id_for_log = transform_id.to_string();
         txn.on_success_async(Box::new(move || {
             let db = db.clone();
             Box::pin(async move {
@@ -411,14 +459,10 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             })
         }))?;
 
-        let mut pending = self
-            .pending_lenses
-            .write()
-            .map_err(|_| Error::LockPoisoned("failed to acquire pending lens write lock".into()))?;
-        pending
-            .entry(txn_id.to_string())
-            .or_default()
-            .insert(transform_id_str, config);
+        txn_lens_store
+            .add_with_id(transform_id.clone(), config)
+            .await
+            .map_err(Error::from)?;
 
         Ok(transform_id)
     }
@@ -459,29 +503,14 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         &self,
         txn_id: &str,
     ) -> Result<std::collections::HashMap<String, LensModule>> {
-        self.get_ctx(txn_id)?
+        let ctx = self
+            .get_ctx(txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
 
-        let mut lenses = self
-            .db
-            .lens_store()
+        ctx.lens_store()
             .list()
             .await
-            .map_err(|e| Error::Lens(e.to_string()))?;
-
-        let pending = self
-            .pending_lenses
-            .read()
-            .map_err(|_| Error::LockPoisoned("failed to acquire pending lens read lock".into()))?;
-        if let Some(txn_lenses) = pending.get(txn_id) {
-            for (id, config) in txn_lenses {
-                if let Some(module) = config.lens().cloned() {
-                    lenses.insert(id.clone(), module);
-                }
-            }
-        }
-
-        Ok(lenses)
+            .map_err(|e| Error::Lens(e.to_string()))
     }
 
     /// Get all collection versions visible within a transaction.
@@ -557,7 +586,14 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         // from the SystemStore on first access within the transaction. Once loaded,
         // the collection metadata is cached for the transaction's duration.
         // Use LensedDocFetcher to support lens migrations within transactions.
-        let lens_store = self.db.lens_store().clone();
+        let lens_store = Arc::new(TxnLensStore::new(self.db.lens_store().clone()).map_err(
+            |e| {
+                TransactionError::execution(format!(
+                    "failed to create transaction lens store: {}",
+                    e
+                ))
+            },
+        )?);
         let fetcher = Arc::new(LensedDocFetcher::new(db_txn, lens_store));
         let ctx = Arc::new(DbTransactionContext::new(
             self.db.clone(),
@@ -610,11 +646,6 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
                 TransactionError::not_found(format!("transaction '{}' not found", handle))
             })?;
 
-        let _ = self
-            .pending_lenses
-            .write()
-            .map(|mut guard| guard.remove(handle.as_str()));
-
         let txn = ctx.take_txn().await.ok_or_else(|| {
             TransactionError::already_finalized(format!(
                 "transaction '{}' was already consumed (double commit/rollback?)",
@@ -644,11 +675,6 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
             .ok_or_else(|| {
                 TransactionError::not_found(format!("transaction '{}' not found", handle))
             })?;
-
-        let _ = self
-            .pending_lenses
-            .write()
-            .map(|mut guard| guard.remove(handle.as_str()));
 
         let txn = ctx.take_txn().await.ok_or_else(|| {
             TransactionError::already_finalized(format!(

@@ -1,5 +1,6 @@
 use super::*;
 use document::NormalValue;
+use lens::{LensConfig, LensModule};
 use schema::{CollectionVersion, FieldDescription, FieldKind};
 use storage::backends::MemoryStore;
 
@@ -23,6 +24,10 @@ async fn test_db_with_collections() -> Arc<DB<MemoryStore>> {
         db.create_collection(schema).await.unwrap();
     }
     db
+}
+
+fn empty_wasm_module() -> LensModule {
+    LensModule::from_bytes(vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
 }
 
 #[tokio::test]
@@ -195,6 +200,62 @@ async fn test_get_returns_not_found_after_rollback() {
         registry.get(&txn_id),
         GetTransactionResult::NotFound
     ));
+}
+
+#[tokio::test]
+async fn test_set_migration_in_txn_is_only_visible_inside_transaction() {
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
+
+    let txn_id = registry.begin(false).await.unwrap();
+    let config = LensConfig::new("users-v1", "users-v2", empty_wasm_module());
+
+    let transform_id = registry
+        .set_migration_in_txn(&txn_id, config)
+        .await
+        .unwrap();
+
+    let global_lenses = db.lens_store().list().await.unwrap();
+    assert!(
+        !global_lenses.contains_key(&transform_id.to_string()),
+        "uncommitted migration leaked into global lens list"
+    );
+
+    let txn_lenses = registry.list_lenses_in_txn(&txn_id).await.unwrap();
+    assert!(
+        txn_lenses.contains_key(&transform_id.to_string()),
+        "transaction-local migration should be visible inside the transaction"
+    );
+
+    registry.rollback(&txn_id).await.unwrap();
+
+    let global_after_rollback = db.lens_store().list().await.unwrap();
+    assert!(
+        !global_after_rollback.contains_key(&transform_id.to_string()),
+        "rolled back migration leaked into global lens list"
+    );
+}
+
+#[tokio::test]
+async fn test_set_migration_in_txn_promotes_transform_on_commit() {
+    let db = test_db_with_collections().await;
+    let registry = DbTransactionRegistry::new(db.clone());
+
+    let txn_id = registry.begin(false).await.unwrap();
+    let config = LensConfig::new("users-v1", "users-v2", empty_wasm_module());
+
+    let transform_id = registry
+        .set_migration_in_txn(&txn_id, config)
+        .await
+        .unwrap();
+
+    registry.commit(&txn_id).await.unwrap();
+
+    let global_lenses = db.lens_store().list().await.unwrap();
+    assert!(
+        global_lenses.contains_key(&transform_id.to_string()),
+        "committed migration should be promoted into the global lens store"
+    );
 }
 
 #[tokio::test]
