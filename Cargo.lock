@@ -9818,9 +9818,12 @@ dependencies = [
 name = "query-parse"
 version = "0.5.0"
 dependencies = [
+ "async-trait",
  "graphql-parser",
  "query-model",
+ "schema",
  "serde_json",
+ "storage",
  "tokio",
  "tracing",
 ]

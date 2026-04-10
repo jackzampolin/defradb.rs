@@ -16,6 +16,8 @@ pub mod limits;
 mod mutations;
 mod ordering;
 mod parser;
+mod provider;
+mod validation;
 mod values;
 mod variables;
 
@@ -24,3 +26,5 @@ pub use parser::{
     ExplainType, ParsedOperation, parse_mutations, parse_mutations_with_variables, parse_query,
     parse_query_with_variables, parse_request, parse_request_with_variables,
 };
+pub use provider::{CollectionProvider, StaticCollectionProvider};
+pub use validation::validate_parsed_operation;
