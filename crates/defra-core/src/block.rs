@@ -7,6 +7,7 @@ use cid::Cid;
 use multihash::MultihashGeneric;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
 
 use crate::{Error, Result};
 
@@ -87,7 +88,7 @@ impl Block {
 
         // Sort and normalize links
         let mut sorted_links = links;
-        sorted_links.sort_by_cached_key(|link| link.link.to_string());
+        sorted_links.sort();
         let links = if sorted_links.is_empty() {
             None
         } else {
@@ -187,13 +188,16 @@ impl Block {
 ///
 /// Matches Go's `internal/core/block/block.go:DAGLink`.
 /// The name is typically a field name or "_head" for composite head links.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DAGLink {
     /// Field name or "_head" for composite head
     pub name: String,
 
     /// CID of the linked block
     pub link: Cid,
+
+    #[serde(skip)]
+    sort_key: OnceLock<String>,
 }
 
 impl DAGLink {
@@ -202,9 +206,22 @@ impl DAGLink {
         Self {
             name: name.into(),
             link,
+            sort_key: OnceLock::new(),
         }
     }
+
+    fn sort_key(&self) -> &str {
+        self.sort_key.get_or_init(|| self.link.to_string())
+    }
 }
+
+impl PartialEq for DAGLink {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.link == other.link
+    }
+}
+
+impl Eq for DAGLink {}
 
 impl PartialOrd for DAGLink {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
@@ -215,7 +232,7 @@ impl PartialOrd for DAGLink {
 impl Ord for DAGLink {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Sort by link CID multibase string (matching Go's strings.Compare)
-        self.link.to_string().cmp(&other.link.to_string())
+        self.sort_key().cmp(other.sort_key())
     }
 }
 

@@ -393,6 +393,15 @@ fn test_block_new_sorts_links_by_cid_string() {
 }
 
 #[test]
+fn test_dag_link_equality_ignores_sort_cache_state() {
+    let link = DAGLink::new("field", test_cid());
+    let mut sorted = [link.clone()];
+    sorted.sort();
+
+    assert_eq!(sorted[0], link);
+}
+
+#[test]
 fn test_encryption_roundtrip() {
     let enc = Encryption::new(b"doc1".to_vec(), b"key123".to_vec());
 
