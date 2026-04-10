@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::future::Future;
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use acp::nac::NodePermission;
 use identity::Did;
@@ -130,6 +130,29 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 };
             }
         };
+
+        if matches!(&parsed, ParsedOperation::Query { .. }) {
+            match self.registry.begin(true).await {
+                Ok(handle) => {
+                    let response = self.execute_in_txn(request.clone(), &handle).await;
+                    if let Err(error) = self.registry.rollback(&handle).await {
+                        warn!(
+                            txn_id = %handle,
+                            error = %error,
+                            "Failed to close implicit read-only transaction after query execution"
+                        );
+                    }
+                    return response;
+                }
+                Err(TransactionError::NotSupported(_)) => {}
+                Err(error) => {
+                    return QueryResponse::error(format!(
+                        "failed to create implicit read-only transaction: {}",
+                        error
+                    ));
+                }
+            }
+        }
 
         // Validate that all referenced collections exist before execution
         if let Err(e) = validate_parsed_operation(&parsed, self.effective_provider().as_ref()).await
@@ -498,5 +521,106 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             schema_str.push_str("}\n\n");
         }
         Ok(schema_str)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use async_trait::async_trait;
+    use document::Document;
+    use serde_json::json;
+
+    use crate::fetcher::{DocFetcher, FetchByIdsResult};
+    use crate::test_utils::{MockFetcher, MockTxnRegistry};
+
+    struct ChangingFetcher {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ChangingFetcher {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn make_doc(&self, name: String) -> Document {
+            let mut doc = Document::new();
+            doc.generate_and_set_doc_id().expect("doc id");
+            doc.set("name", serde_json::Value::String(name));
+            doc
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl DocFetcher for ChangingFetcher {
+        async fn get_all(&self, _collection_name: &str) -> Result<Vec<Document>> {
+            let call = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            Ok(vec![self.make_doc(format!("auto-{call}"))])
+        }
+
+        async fn get_by_ids(
+            &self,
+            collection_name: &str,
+            _doc_ids: &[String],
+        ) -> Result<FetchByIdsResult> {
+            let docs = self.get_all(collection_name).await?;
+            Ok(FetchByIdsResult::all_found(docs))
+        }
+
+        async fn get_by_field_value(
+            &self,
+            collection_name: &str,
+            _field_name: &str,
+            _value: &str,
+        ) -> Result<Vec<Document>> {
+            self.get_all(collection_name).await
+        }
+    }
+
+    fn make_users_doc(name: &str) -> Document {
+        let mut doc = Document::new();
+        doc.generate_and_set_doc_id().expect("doc id");
+        doc.set("name", serde_json::Value::String(name.to_string()));
+        doc
+    }
+
+    #[tokio::test]
+    async fn execute_uses_implicit_read_txn_when_registry_is_available() {
+        let collections = crate::parse_sdl("type Users { name: String }").expect("schema");
+
+        let txn_fetcher = MockFetcher::new();
+        txn_fetcher.add_doc("Users", make_users_doc("txn-snapshot"));
+
+        let runner = QueryRunner::with_registry(
+            ChangingFetcher::new(),
+            collections,
+            MockTxnRegistry::new(txn_fetcher),
+        );
+
+        let response = runner
+            .execute(QueryRequest::new(
+                "{ first: Users { name } second: Users { name } }",
+            ))
+            .await;
+
+        assert!(
+            !response.has_errors(),
+            "unexpected errors: {:?}",
+            response.errors
+        );
+        assert_eq!(
+            response.data,
+            Some(json!({
+                "first": [{"name": "txn-snapshot"}],
+                "second": [{"name": "txn-snapshot"}],
+            }))
+        );
     }
 }
