@@ -3,11 +3,11 @@
 //! These test vectors were generated from the Go DefraDB implementation
 //! to ensure the Rust crypto implementation produces identical outputs.
 
-use k256::ecdsa::Signature;
 use crypto::keys::ed25519::{Ed25519PrivateKey, Ed25519PublicKey};
 use crypto::keys::secp256k1::{Secp256k1PrivateKey, Secp256k1PublicKey};
 use crypto::keys::secp256r1::Secp256r1PublicKey;
 use crypto::keys::{Key, PrivateKey, PublicKey};
+use k256::ecdsa::Signature;
 
 // ===== Ed25519 Test Vectors =====
 const ED25519_PRIVATE_KEY: [u8; 64] = [
