@@ -42,7 +42,7 @@ mod tests {
     use crate::sync::manager::SyncEvent;
     use crate::sync::merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
     use crate::topics::DefraTopic;
-    use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, ResponseToken};
+    use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId};
     use crate::QueryId;
     use crate::ReplicatorInfo;
     use async_trait::async_trait;
@@ -115,6 +115,8 @@ mod tests {
 
     #[async_trait]
     impl P2PTransport for NoopTransport {
+        type ResponseToken = ();
+
         fn local_peer_id(&self) -> &PeerId {
             &self.peer_id
         }
@@ -177,7 +179,7 @@ mod tests {
 
         async fn send_pushlog_response(
             &self,
-            _token: ResponseToken,
+            _token: Self::ResponseToken,
             _reply: PushLogReply,
         ) -> P2PResult<()> {
             Ok(())
@@ -241,7 +243,7 @@ mod tests {
 
         async fn send_car_response_token(
             &self,
-            _token: ResponseToken,
+            _token: Self::ResponseToken,
             _car_data: Vec<u8>,
         ) -> P2PResult<()> {
             Ok(())
@@ -249,7 +251,7 @@ mod tests {
 
         async fn send_doc_sync_response_token(
             &self,
-            _token: ResponseToken,
+            _token: Self::ResponseToken,
             _reply: DocSyncReply,
         ) -> P2PResult<()> {
             Ok(())
@@ -257,7 +259,7 @@ mod tests {
 
         async fn send_branchable_sync_response_token(
             &self,
-            _token: ResponseToken,
+            _token: Self::ResponseToken,
             _reply: BranchableSyncReply,
         ) -> P2PResult<()> {
             Ok(())
