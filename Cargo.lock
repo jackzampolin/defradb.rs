@@ -9787,6 +9787,7 @@ dependencies = [
  "proptest",
  "query-model",
  "query-parse",
+ "query-sdl",
  "regex",
  "schema",
  "serde",
@@ -9820,6 +9821,20 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "query-sdl"
+version = "0.5.0"
+dependencies = [
+ "chrono",
+ "cid 0.10.1",
+ "graphql-parser",
+ "query-model",
+ "regex",
+ "schema",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

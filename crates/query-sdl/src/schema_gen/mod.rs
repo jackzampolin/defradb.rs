@@ -1,6 +1,8 @@
-//! Dynamic GraphQL schema generation facade.
+//! Dynamic GraphQL schema generation from CollectionVersion
 
-pub use query_sdl::schema_gen::{
+mod generator;
+
+pub use generator::{
     field_kind_to_gql_type, generate_mutation_type, generate_query_type, generate_schema,
     scalar_to_gql_type, GeneratedSchema, GqlField, GqlInputType, GqlObjectType, GqlType,
 };

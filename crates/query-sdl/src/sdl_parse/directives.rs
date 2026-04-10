@@ -3,7 +3,7 @@
 //! Contains known directive definitions and helper functions for extracting
 //! arguments from GraphQL directives.
 
-use crate::error::QueryError;
+use query_model::error::QueryError;
 use graphql_parser::schema::Directive;
 use schema::CType;
 

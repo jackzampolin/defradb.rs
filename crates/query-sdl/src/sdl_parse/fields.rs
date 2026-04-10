@@ -9,7 +9,7 @@
 use graphql_parser::schema::{Directive, Field};
 use schema::CType;
 
-use crate::error::{QueryError, Result};
+use query_model::error::{QueryError, Result};
 
 use super::directives::{
     default_type_error, get_directive_arg, get_directive_string, get_directive_string_list,

@@ -10,7 +10,7 @@
 use cid::Cid;
 use std::sync::LazyLock;
 
-use crate::error::{QueryError, Result};
+use query_model::error::{QueryError, Result};
 use graphql_parser::schema::{Directive, Type};
 use regex::Regex;
 use schema::{CType, FieldDescription, FieldKind, ScalarKind};

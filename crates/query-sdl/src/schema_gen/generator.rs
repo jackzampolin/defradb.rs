@@ -1,6 +1,6 @@
 //! Dynamic GraphQL schema generation from CollectionVersion
 
-use crate::error::{QueryError, Result};
+use query_model::error::{QueryError, Result};
 use schema::{CollectionVersion, FieldKind, ScalarKind};
 
 /// GraphQL type representation

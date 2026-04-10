@@ -3,7 +3,7 @@
 //! Contains SdlParser validation methods:
 //! - `validate_types()` - Validates parsed type definitions
 
-use crate::error::{QueryError, Result};
+use query_model::error::{QueryError, Result};
 
 use super::parser::SdlParser;
 

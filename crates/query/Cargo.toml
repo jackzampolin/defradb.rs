@@ -20,6 +20,7 @@ acp = { path = "../acp" }
 lens = { path = "../lens", default-features = false }
 query-model = { path = "../query-model" }
 query-parse = { path = "../query-parse" }
+query-sdl = { path = "../query-sdl" }
 
 # Async runtime
 async-trait.workspace = true
