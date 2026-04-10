@@ -29,8 +29,9 @@ use storage::keys::systemstore::CollectionID;
 
 /// Derive the legacy short ID from a collection_id string.
 ///
-/// New code should prefer `CollectionVersion::resolved_root_id()` or `Collection::resolved_root_id()`
-/// so persisted root IDs win whenever they are available.
+/// This is retained only for compatibility with older metadata and tests. Store-backed code
+/// should resolve or require the persisted `root_id` instead.
+#[deprecated(note = "use persisted collection root IDs instead")]
 pub fn collection_short_id(collection_id: &str) -> u32 {
     legacy_collection_short_id(collection_id)
 }
@@ -54,6 +55,33 @@ pub async fn load_persisted_collection_short_id(
     };
 
     Ok(short_id_str.parse::<u32>().ok())
+}
+
+/// Load the persisted root ID for a collection, returning an error if the mapping is missing.
+pub async fn require_persisted_collection_short_id(
+    systemstore: &NamespaceView,
+    collection_id: &str,
+) -> Result<u32> {
+    load_persisted_collection_short_id(systemstore, collection_id)
+        .await?
+        .ok_or_else(|| {
+            Error::Other(format!(
+                "missing persisted collection root_id for collection_id '{}'",
+                collection_id
+            ))
+        })
+}
+
+/// Populate a deserialized collection schema with its persisted root ID.
+pub async fn populate_collection_root_id(
+    systemstore: &NamespaceView,
+    schema: &mut CollectionVersion,
+) -> Result<()> {
+    if schema.root_id == 0 {
+        schema.root_id =
+            require_persisted_collection_short_id(systemstore, &schema.collection_id).await?;
+    }
+    Ok(())
 }
 
 /// Key prefix for document data in datastore.

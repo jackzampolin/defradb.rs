@@ -45,7 +45,7 @@ use storage::corekv::{Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
 use zeroize::Zeroizing;
 
-use crate::collection::{collection_short_id, Collection};
+use crate::collection::Collection;
 use crate::database::DB;
 use crate::index_manager::IndexManager;
 use hook::CompositeMergeHook;

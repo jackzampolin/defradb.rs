@@ -244,11 +244,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let txn = self.db.new_txn(false).await?;
         let collection_id = metadata.collection_id.unwrap_or(&payload.schema_version_id);
         let short_id = if let Ok(systemstore) = txn.systemstore() {
-            crate::collection::load_persisted_collection_short_id(&systemstore, collection_id)
+            crate::collection::require_persisted_collection_short_id(&systemstore, collection_id)
                 .await?
-                .unwrap_or_else(|| collection_short_id(collection_id))
         } else {
-            collection_short_id(collection_id)
+            return Err(MergeError::Database(crate::error::Error::Other(
+                "failed to access systemstore while resolving collection root_id".to_string(),
+            )));
         };
         if let Ok(headstore) = txn.headstore() {
             // Remove only the heads that this block supersedes (its parents).
@@ -500,11 +501,15 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let short_id = {
             let txn = self.db.new_txn(true).await?;
             let short_id = if let Ok(systemstore) = txn.systemstore() {
-                crate::collection::load_persisted_collection_short_id(&systemstore, collection_id)
-                    .await?
-                    .unwrap_or_else(|| collection_short_id(collection_id))
+                crate::collection::require_persisted_collection_short_id(
+                    &systemstore,
+                    collection_id,
+                )
+                .await?
             } else {
-                collection_short_id(collection_id)
+                return Err(MergeError::Database(crate::error::Error::Other(
+                    "failed to access systemstore while resolving collection root_id".to_string(),
+                )));
             };
             let _ = txn.discard();
             short_id

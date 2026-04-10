@@ -9,10 +9,10 @@ use async_lock::Mutex as TokioMutex;
 use datastore::NamespaceView;
 use schema::CollectionVersion;
 use storage::corekv::{Key, Store};
-use storage::keys::systemstore::{CollectionID, CollectionKey, CollectionNameKey};
+use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 use tracing::{error, warn};
 
-use crate::collection::Collection;
+use crate::collection::{populate_collection_root_id, Collection};
 use crate::index_manager::IndexManager;
 use crate::txn::DbTxn;
 
@@ -85,13 +85,14 @@ pub(crate) async fn load_collection_from_systemstore(
                 ))
             })?;
 
-            // Load sequential short ID from /collection/shortID/{collection_id}
-            let short_id_key = CollectionID::new(&schema.collection_id);
-            if let Ok(Some(short_id_bytes)) = systemstore.get(&short_id_key.bytes()).await {
-                if let Ok(short_id_str) = String::from_utf8(short_id_bytes) {
-                    schema.root_id = short_id_str.parse::<u32>().unwrap_or(0);
-                }
-            }
+            populate_collection_root_id(systemstore, &mut schema)
+                .await
+                .map_err(|e| {
+                    query::error::QueryError::execution(format!(
+                        "failed to load persisted root_id for collection '{}': {}",
+                        name, e
+                    ))
+                })?;
 
             Ok(Some(Collection::new(schema)))
         }

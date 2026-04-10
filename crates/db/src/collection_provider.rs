@@ -16,6 +16,7 @@ use schema::CollectionVersion;
 use std::sync::Arc;
 use storage::corekv::{Key, Store};
 
+use crate::collection;
 use crate::database::DB;
 use crate::txn::DbTxn;
 
@@ -93,7 +94,10 @@ impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
                 let version_id = match String::from_utf8(data.clone()) {
                     Ok(vid) if !vid.starts_with('{') => vid,
                     _ => {
-                        let schema: CollectionVersion = serde_json::from_slice(&data)
+                        let mut schema: CollectionVersion = serde_json::from_slice(&data)
+                            .map_err(|e| QueryError::execution(e.to_string()))?;
+                        collection::populate_collection_root_id(&systemstore, &mut schema)
+                            .await
                             .map_err(|e| QueryError::execution(e.to_string()))?;
                         return Ok(Some(Arc::new(schema)));
                     }
@@ -105,7 +109,10 @@ impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
                     .await
                     .map_err(|e| QueryError::execution(e.to_string()))?
                 {
-                    let schema: CollectionVersion = serde_json::from_slice(&data)
+                    let mut schema: CollectionVersion = serde_json::from_slice(&data)
+                        .map_err(|e| QueryError::execution(e.to_string()))?;
+                    collection::populate_collection_root_id(&systemstore, &mut schema)
+                        .await
                         .map_err(|e| QueryError::execution(e.to_string()))?;
                     return Ok(Some(Arc::new(schema)));
                 }

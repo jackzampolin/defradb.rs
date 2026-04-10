@@ -9,7 +9,7 @@ use db::txn::DbTxn;
 use schema::CollectionVersion;
 use storage::backends::MemoryStore;
 use storage::corekv::Key;
-use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
+use storage::keys::systemstore::{CollectionID, CollectionKey, CollectionNameKey};
 
 #[tokio::test]
 async fn test_load_empty_database() {
@@ -29,12 +29,14 @@ async fn test_load_single_collection() {
     let db = DB::new((*store).clone()).unwrap();
 
     // Manually insert a collection into systemstore
-    let collection = CollectionVersion::new("users", "bafytest123", "bafytest123", vec![]);
+    let mut collection = CollectionVersion::new("users", "bafytest123", "bafytest123", vec![]);
+    collection.root_id = 1;
 
     // Store collection definition
     let collection_json = serde_json::to_vec(&collection).unwrap();
     let collection_key = CollectionKey::new(&collection.version_id);
     let name_key = CollectionNameKey::new(&collection.name);
+    let short_id_key = CollectionID::new(&collection.collection_id);
 
     {
         let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
@@ -51,6 +53,11 @@ async fn test_load_single_collection() {
         txn.systemstore()
             .unwrap()
             .set(&name_key.bytes(), collection.version_id.as_bytes())
+            .await
+            .unwrap();
+        txn.systemstore()
+            .unwrap()
+            .set(&short_id_key.bytes(), b"1")
             .await
             .unwrap();
 
@@ -80,11 +87,19 @@ async fn test_load_multiple_collections() {
         let txn = DbTxn::new(basic_txn, store.clone());
 
         for (name, id) in &collections {
-            let collection = CollectionVersion::new(*name, *id, *id, vec![]);
+            let mut collection = CollectionVersion::new(*name, *id, *id, vec![]);
+            let root_id = match *name {
+                "users" => 1,
+                "posts" => 2,
+                "comments" => 3,
+                _ => unreachable!(),
+            };
+            collection.root_id = root_id;
 
             let collection_json = serde_json::to_vec(&collection).unwrap();
             let collection_key = CollectionKey::new(*id);
             let name_key = CollectionNameKey::new(*name);
+            let short_id_key = CollectionID::new(*id);
 
             txn.systemstore()
                 .unwrap()
@@ -94,6 +109,11 @@ async fn test_load_multiple_collections() {
             txn.systemstore()
                 .unwrap()
                 .set(&name_key.bytes(), id.as_bytes())
+                .await
+                .unwrap();
+            txn.systemstore()
+                .unwrap()
+                .set(&short_id_key.bytes(), root_id.to_string().as_bytes())
                 .await
                 .unwrap();
         }
@@ -109,6 +129,38 @@ async fn test_load_multiple_collections() {
     assert!(names.contains(&"users"));
     assert!(names.contains(&"posts"));
     assert!(names.contains(&"comments"));
+}
+
+#[tokio::test]
+async fn test_load_collection_requires_short_id_mapping() {
+    let store = Arc::new(MemoryStore::new());
+    let db = DB::new((*store).clone()).unwrap();
+
+    let collection = CollectionVersion::new("users", "bafytest123", "bafytest123", vec![]);
+    let collection_json = serde_json::to_vec(&collection).unwrap();
+    let collection_key = CollectionKey::new(&collection.version_id);
+    let name_key = CollectionNameKey::new(&collection.name);
+
+    {
+        let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
+        let txn = DbTxn::new(basic_txn, store.clone());
+
+        txn.systemstore()
+            .unwrap()
+            .set(&collection_key.bytes(), &collection_json)
+            .await
+            .unwrap();
+        txn.systemstore()
+            .unwrap()
+            .set(&name_key.bytes(), collection.version_id.as_bytes())
+            .await
+            .unwrap();
+
+        txn.commit().await.unwrap();
+    }
+
+    let err = load_active_collections(&db).await.unwrap_err().to_string();
+    assert!(err.contains("missing persisted collection root_id"));
 }
 
 #[tokio::test]
