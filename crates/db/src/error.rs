@@ -71,6 +71,12 @@ pub enum Error {
     },
 
     #[error("{context}: {source}")]
+    LensConfigJson {
+        context: String,
+        source: serde_json::Error,
+    },
+
+    #[error("{context}: {source}")]
     TextDecode {
         context: String,
         source: std::string::FromUtf8Error,
@@ -135,6 +141,13 @@ impl Error {
 
     pub fn text_decode(context: impl Into<String>, source: std::string::FromUtf8Error) -> Self {
         Self::TextDecode {
+            context: context.into(),
+            source,
+        }
+    }
+
+    pub fn lens_config_json(context: impl Into<String>, source: serde_json::Error) -> Self {
+        Self::LensConfigJson {
             context: context.into(),
             source,
         }

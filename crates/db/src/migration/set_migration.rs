@@ -210,9 +210,8 @@ impl<S: Store> DB<S> {
             }
 
             let lens_key = LensConfigKey::new(transform_id.to_string());
-            let lens_data = serde_json::to_vec(&config_for_persistence).map_err(|e| {
-                Error::Serialization(format!("failed to serialize lens config: {}", e))
-            })?;
+            let lens_data = serde_json::to_vec(&config_for_persistence)
+                .map_err(|e| Error::lens_config_json("failed to serialize lens config", e))?;
             systemstore
                 .set(&lens_key.bytes(), &lens_data)
                 .await
@@ -448,9 +447,8 @@ impl<S: Store> DB<S> {
             }
 
             let lens_key = LensConfigKey::new(transform_id.to_string());
-            let lens_data = serde_json::to_vec(&config_for_persistence).map_err(|e| {
-                Error::Serialization(format!("failed to serialize lens config: {}", e))
-            })?;
+            let lens_data = serde_json::to_vec(&config_for_persistence)
+                .map_err(|e| Error::lens_config_json("failed to serialize lens config", e))?;
             systemstore
                 .set(&lens_key.bytes(), &lens_data)
                 .await
