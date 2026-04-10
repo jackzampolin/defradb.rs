@@ -6,7 +6,8 @@ use datastore::BasicTxn;
 use db::database::DB;
 use db::schema_loader::load_active_collections;
 use db::txn::DbTxn;
-use schema::CollectionVersion;
+use lens::{LensConfig, LensModule};
+use schema::{CollectionVersion, ORPHAN_COLLECTION_ID};
 use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::keys::systemstore::{CollectionID, CollectionKey, CollectionNameKey};
@@ -255,5 +256,35 @@ async fn test_load_invalid_json_collection_returns_error() {
         err_msg.contains("deserialize"),
         "Error should mention 'deserialize', got: {}",
         err_msg
+    );
+}
+
+#[tokio::test]
+async fn test_set_migration_placeholder_persists_short_id_mapping() {
+    let store = Arc::new(MemoryStore::new());
+    let db = DB::new((*store).clone()).unwrap();
+
+    let config = LensConfig::new(
+        "missing-src",
+        "missing-dst",
+        LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
+    );
+    db.set_migration(config).await.unwrap();
+
+    let versions = db.get_all_collection_versions().await.unwrap();
+    assert_eq!(versions.len(), 2);
+
+    let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
+    let txn = DbTxn::new(basic_txn, store.clone());
+    let systemstore = txn.systemstore().unwrap();
+    let short_id = systemstore
+        .get(&CollectionID::new(ORPHAN_COLLECTION_ID).bytes())
+        .await
+        .unwrap();
+    let _ = txn.discard();
+
+    assert!(
+        short_id.is_some(),
+        "expected placeholder root_id mapping to exist"
     );
 }

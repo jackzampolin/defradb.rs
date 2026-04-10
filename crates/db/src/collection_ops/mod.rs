@@ -21,8 +21,7 @@ use datastore::NamespaceView;
 use schema::CollectionVersion;
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::{
-    CollectionID, CollectionIDSequenceKey, CollectionKey, CollectionNameKey, CollectionVersionKey,
-    IndexIDSequenceKey,
+    CollectionKey, CollectionNameKey, CollectionVersionKey, IndexIDSequenceKey,
 };
 use tracing::instrument;
 

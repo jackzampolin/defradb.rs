@@ -484,11 +484,14 @@ mod tests {
     use blockstore::{Blockstore as _, DefraBlockstore};
     use crypto::PrivateKey as _;
     use defra_core::block::{
-        Block, CrdtDelta, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
+        Block, CollectionDefinitionDeltaPayload, CrdtDelta, LwwDeltaPayload, Signature,
+        SignatureHeader, SignatureType,
     };
     use events::{Bus, ChannelBus, EventName};
     use schema::{CollectionVersion, FieldDescription, FieldKind};
     use storage::backends::MemoryStore;
+    use storage::corekv::Key;
+    use storage::keys::systemstore::CollectionID;
     use tokio::time::{timeout, Duration};
 
     fn make_handler() -> (
@@ -963,6 +966,45 @@ mod tests {
         assert!(
             subscription.try_recv().is_err(),
             "batch merge should publish exactly the queued update events"
+        );
+    }
+
+    #[tokio::test]
+    async fn synced_collection_definition_persists_short_id_mapping() {
+        let (handler, _blockstore) = make_handler();
+
+        let payload = CollectionDefinitionDeltaPayload::new(1).with_name("Users");
+        let block = Block {
+            delta: CrdtDelta::CollectionDefinition(payload.clone()),
+            heads: None,
+            links: None,
+            encryption: None,
+            signature: None,
+        };
+        let cid = block.generate_cid().unwrap();
+
+        let outcome = handler
+            .process_collection_definition_delta(
+                &cid,
+                &block,
+                &payload,
+                &BlockMetadata::schema_sync(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, MergeOutcome::Merged);
+
+        let txn = handler.db.new_txn(true).await.unwrap();
+        let systemstore = txn.systemstore().unwrap();
+        let mapping = systemstore
+            .get(&CollectionID::new(cid.to_string()).bytes())
+            .await
+            .unwrap();
+        let _ = txn.discard();
+
+        assert!(
+            mapping.is_some(),
+            "expected synced schema to persist a root_id mapping"
         );
     }
 }

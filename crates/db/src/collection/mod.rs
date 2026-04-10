@@ -25,7 +25,7 @@ use schema::{
     ScalarKind,
 };
 use storage::corekv::{IterOptions, Key, Store};
-use storage::keys::systemstore::CollectionID;
+use storage::keys::systemstore::{CollectionID, CollectionIDSequenceKey};
 
 /// Derive the legacy short ID from a collection_id string.
 ///
@@ -70,6 +70,38 @@ pub async fn require_persisted_collection_short_id(
                 collection_id
             ))
         })
+}
+
+/// Load the persisted root ID for a collection, allocating one if it does not exist yet.
+pub async fn ensure_persisted_collection_short_id(
+    systemstore: &NamespaceView,
+    collection_id: &str,
+) -> Result<u32> {
+    if let Some(short_id) = load_persisted_collection_short_id(systemstore, collection_id).await? {
+        return Ok(short_id);
+    }
+
+    let seq_key = CollectionIDSequenceKey;
+    let key_bytes = seq_key.bytes();
+    let current: u32 = match systemstore.get(&key_bytes).await.map_err(Error::Storage)? {
+        Some(bytes) if bytes.len() == 4 => {
+            u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        }
+        _ => 0,
+    };
+    let next = current + 1;
+    systemstore
+        .set(&key_bytes, &next.to_be_bytes())
+        .await
+        .map_err(Error::Storage)?;
+
+    let short_id_key = CollectionID::new(collection_id);
+    systemstore
+        .set(&short_id_key.bytes(), next.to_string().as_bytes())
+        .await
+        .map_err(Error::Storage)?;
+
+    Ok(next)
 }
 
 /// Populate a deserialized collection schema with its persisted root ID.
