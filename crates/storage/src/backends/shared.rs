@@ -120,34 +120,17 @@ impl CallbackManager {
 
     // Static execution methods
 
-    /// Execute sync callbacks with panic protection.
+    /// Execute sync callbacks directly.
     pub(crate) fn execute_callbacks(callbacks: Vec<TxnCallback>) {
-        for (i, callback) in callbacks.into_iter().enumerate() {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
-            if let Err(panic_info) = result {
-                tracing::error!(
-                    callback_index = i,
-                    panic = ?panic_info,
-                    "Transaction callback panicked - continuing with remaining callbacks"
-                );
-            }
+        for callback in callbacks {
+            callback();
         }
     }
 
-    /// Execute async callbacks with panic protection.
+    /// Execute async callbacks directly.
     pub(crate) async fn execute_async_callbacks(callbacks: Vec<AsyncTxnCallback>) {
-        use futures::FutureExt;
-
-        for (i, callback) in callbacks.into_iter().enumerate() {
-            let future = callback();
-            let result = std::panic::AssertUnwindSafe(future).catch_unwind().await;
-            if let Err(panic_info) = result {
-                tracing::error!(
-                    callback_index = i,
-                    panic = ?panic_info,
-                    "Async callback panicked during execution - continuing with remaining callbacks"
-                );
-            }
+        for callback in callbacks {
+            callback().await;
         }
     }
 }
