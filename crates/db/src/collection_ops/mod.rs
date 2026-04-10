@@ -155,10 +155,10 @@ impl<S: Store> crate::database::DB<S> {
                             json_preview = %String::from_utf8_lossy(&collection_json[..collection_json.len().min(200)]),
                             "Failed to deserialize collection schema"
                         );
-                        Error::Serialization(format!(
-                            "failed to deserialize schema for collection '{}': {}",
-                            name, e
-                        ))
+                        Error::collection_schema_json(
+                            format!("failed to deserialize schema for collection '{}'", name),
+                            e,
+                        )
                     })?;
 
                 populate_collection_root_id(&systemstore, &mut schema).await?;

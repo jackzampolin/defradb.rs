@@ -61,6 +61,12 @@ pub enum Error {
     #[error("serialization error: {0}")]
     Serialization(String),
 
+    #[error("{context}: {source}")]
+    CollectionSchemaJson {
+        context: String,
+        source: serde_json::Error,
+    },
+
     #[error("query error: {0}")]
     Query(#[from] query::error::QueryError),
 
@@ -107,6 +113,13 @@ impl Error {
     pub fn document_at_key(key: &[u8], source: document::Error) -> Self {
         Self::DocumentAtKey {
             key: String::from_utf8_lossy(key).into_owned(),
+            source,
+        }
+    }
+
+    pub fn collection_schema_json(context: impl Into<String>, source: serde_json::Error) -> Self {
+        Self::CollectionSchemaJson {
+            context: context.into(),
             source,
         }
     }
