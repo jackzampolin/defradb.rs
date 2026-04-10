@@ -22,6 +22,7 @@ query-model = { path = "../query-model" }
 query-parse = { path = "../query-parse" }
 query-sdl = { path = "../query-sdl" }
 query-plan-core = { path = "../query-plan-core" }
+query-plan = { path = "../query-plan" }
 
 # Async runtime
 async-trait.workspace = true

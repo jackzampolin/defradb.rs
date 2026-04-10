@@ -8,6 +8,7 @@ members = [
     "crates/query-parse",
     "crates/query-sdl",
     "crates/query-plan-core",
+    "crates/query-plan",
     "crates/blockstore",
     "crates/embedded",
     "crates/schema",

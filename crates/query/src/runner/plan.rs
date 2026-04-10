@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use acp::{DocumentACP, Identity};
+use async_trait::async_trait;
 use schema::CollectionVersion;
 use serde_json::Value as JsonValue;
 
@@ -11,7 +12,7 @@ use crate::error::{QueryError, Result};
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
     AllDocsNode, ChildSelectMeta, GroupAlias, GroupByNode, LimitNode, OrderByNode,
-    PermissionFilterNode, ScanNode, SelectNode,
+    DocPermissionChecker, PermissionFilterNode, ScanNode, SelectNode,
 };
 use crate::planner::{Doc, PlanNode};
 
@@ -24,6 +25,43 @@ pub(crate) struct AcpFilter {
     pub identity: Identity,
     pub policy_id: String,
     pub resource_name: String,
+}
+
+struct OverlayPermissionChecker {
+    acp: Arc<dyn DocumentACP>,
+    identity: Identity,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl DocPermissionChecker for OverlayPermissionChecker {
+    async fn has_read_permission(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<bool> {
+        Ok(crate::txn::check_doc_access_with_overlay(
+            self.acp.as_ref(),
+            &self.identity,
+            acp::DocumentPermission::Read,
+            policy_id,
+            resource_name,
+            doc_id,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                doc_id = %doc_id,
+                policy_id,
+                resource_name,
+                identity = %self.identity,
+                error = %e,
+                "Permission check failed, denying access to document"
+            );
+            false
+        }))
+    }
 }
 
 /// Build the document mapping for a select operation.
@@ -271,10 +309,12 @@ pub(crate) fn build_plan(
     // Insert ACP permission filter after Select, before OrderBy/Limit/Aggregates.
     // This ensures aggregates (count, average, etc.) operate on filtered documents.
     if let Some(acf) = acp_filter {
-        plan = Box::new(PermissionFilterNode::new(
+        plan = Box::new(PermissionFilterNode::with_checker(
             plan,
-            acf.acp,
-            acf.identity,
+            Arc::new(OverlayPermissionChecker {
+                acp: acf.acp,
+                identity: acf.identity,
+            }),
             acf.policy_id,
             acf.resource_name,
         ));

@@ -9787,6 +9787,7 @@ dependencies = [
  "proptest",
  "query-model",
  "query-parse",
+ "query-plan",
  "query-plan-core",
  "query-sdl",
  "regex",
@@ -9820,6 +9821,29 @@ dependencies = [
  "graphql-parser",
  "query-model",
  "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "query-plan"
+version = "0.5.0"
+dependencies = [
+ "acp",
+ "async-trait",
+ "bm25",
+ "chrono",
+ "cid 0.10.1",
+ "defra-core",
+ "document",
+ "futures",
+ "identity",
+ "lens",
+ "query-model",
+ "query-plan-core",
+ "schema",
+ "serde_json",
+ "storage",
  "tokio",
  "tracing",
 ]

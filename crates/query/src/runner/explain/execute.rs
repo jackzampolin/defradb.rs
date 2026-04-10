@@ -1,4 +1,5 @@
 use acp::Identity;
+use async_trait::async_trait;
 use identity::Did;
 use schema::CollectionVersion;
 use serde_json::{Map, Value as JsonValue};
@@ -8,7 +9,7 @@ use std::sync::Arc;
 use crate::document::{documents_to_plan_docs, documents_with_status_to_plan_docs};
 use crate::error::{QueryError, Result};
 use crate::mapper::{Requestable, Select};
-use crate::plan::PermissionFilterNode;
+use crate::plan::{DocPermissionChecker, PermissionFilterNode};
 use crate::planner::index_selection::{
     can_be_ordered_by_index, can_or_filter_use_index, select_best_index,
 };
@@ -19,6 +20,43 @@ use crate::txn::TransactionRegistry;
 use super::super::fetcher::FetcherWrapper;
 use super::super::plan;
 use super::super::{DocFetcher, QueryRunner};
+
+struct OverlayPermissionChecker {
+    acp: Arc<dyn acp::DocumentACP>,
+    identity: Identity,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl DocPermissionChecker for OverlayPermissionChecker {
+    async fn has_read_permission(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<bool> {
+        Ok(crate::txn::check_doc_access_with_overlay(
+            self.acp.as_ref(),
+            &self.identity,
+            acp::DocumentPermission::Read,
+            policy_id,
+            resource_name,
+            doc_id,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                doc_id = %doc_id,
+                policy_id,
+                resource_name,
+                identity = %self.identity,
+                error = %e,
+                "Permission check failed, denying access to document"
+            );
+            false
+        }))
+    }
+}
 
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Execute the query with variables and return explain output with execution metrics.
@@ -267,10 +305,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
             // Wrap with permission filter if needed (explain path)
             if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
-                plan = Box::new(PermissionFilterNode::new(
+                plan = Box::new(PermissionFilterNode::with_checker(
                     plan,
-                    acp.clone(),
-                    Identity::from(caller_identity),
+                    Arc::new(OverlayPermissionChecker {
+                        acp: acp.clone(),
+                        identity: Identity::from(caller_identity),
+                    }),
                     &policy.id,
                     &policy.resource_name,
                 ));
