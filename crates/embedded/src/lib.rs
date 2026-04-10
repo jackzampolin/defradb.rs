@@ -21,6 +21,8 @@ pub use libp2p_adapter::{CollectionLookup, P2PAdapter, VersionSyncer};
 pub use libp2p_doc_pusher::{DbDocPusher, DocPusher};
 pub use node::{build_with_store, EmbeddedNode, NodeBuilder};
 pub use node_tasks::BackgroundTasks;
+mod p2p_error;
+pub use p2p_error::{P2PError, P2PResult};
 pub use transport_doc_pusher::{DbTransportDocPusher, TransportDocPusher};
 pub use transport_version_syncer::{DbTransportVersionSyncer, TransportVersionSyncer};
 pub use version_syncer::DbVersionSyncer;

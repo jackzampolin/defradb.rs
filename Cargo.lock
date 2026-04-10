@@ -4212,6 +4212,7 @@ dependencies = [
  "sourcehub",
  "storage",
  "tempfile",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
