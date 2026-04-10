@@ -375,7 +375,7 @@ async fn test_counter_float64_nan_increment_propagates_nan() {
     .unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -412,7 +412,7 @@ async fn test_counter_float64_negative_zero_normalizes_to_positive_zero() {
     .unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
