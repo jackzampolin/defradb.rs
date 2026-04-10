@@ -221,13 +221,14 @@ pub async fn get_collections_by_collection_id(
         let collection_key = CollectionKey::new(version_id);
         match systemstore.get(&collection_key.bytes()).await {
             Ok(Some(json)) => {
-                let mut collection: CollectionVersion =
-                    serde_json::from_slice(&json).map_err(|e| {
-                        Error::Other(format!(
-                            "Failed to deserialize collection version {}: {}",
-                            version_id, e
-                        ))
-                    })?;
+                let mut collection: CollectionVersion = serde_json::from_slice(&json).map_err(
+                    |e| {
+                        Error::collection_schema_json(
+                            format!("failed to deserialize collection version '{}'", version_id),
+                            e,
+                        )
+                    },
+                )?;
                 crate::collection::populate_collection_root_id(systemstore, &mut collection)
                     .await?;
 
@@ -284,10 +285,10 @@ pub async fn get_collection_by_version_id(
     match systemstore.get(&collection_key.bytes()).await {
         Ok(Some(json)) => {
             let mut collection: CollectionVersion = serde_json::from_slice(&json).map_err(|e| {
-                Error::Other(format!(
-                    "Failed to deserialize collection version {}: {}",
-                    version_id, e
-                ))
+                Error::collection_schema_json(
+                    format!("failed to deserialize collection version '{}'", version_id),
+                    e,
+                )
             })?;
             crate::collection::populate_collection_root_id(systemstore, &mut collection).await?;
             Ok(Some(collection))
