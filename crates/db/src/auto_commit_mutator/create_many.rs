@@ -179,8 +179,16 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             e
                         ))
                     })?;
+                    let encstore = txn.encstore().map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to get encstore: {}",
+                            e
+                        ))
+                    })?;
 
-                    match insert_computed_blocks(&blockstore, &headstore, &computed).await {
+                    match insert_computed_blocks(&blockstore, &encstore, &headstore, &computed)
+                        .await
+                    {
                         Ok(()) => {
                             if let Some(ref config) = enc_config {
                                 store_doc_encryption(&doc_id.to_string(), config.clone());

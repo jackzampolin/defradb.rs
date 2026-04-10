@@ -102,6 +102,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             e
                         ))
                     })?;
+                    let encstore = txn.encstore().map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to get encstore: {}",
+                            e
+                        ))
+                    })?;
 
                     // Use version_id for collectionVersionID (matches Go's VersionID())
                     let schema_version_id = collection.version_id();
@@ -119,6 +125,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     // For create operations, all fields are new - pass None for modified_fields
                     match write_document_blocks(
                         &blockstore,
+                        &encstore,
                         &headstore,
                         &doc,
                         schema_version_id,

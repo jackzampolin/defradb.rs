@@ -139,6 +139,9 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             let blockstore = txn.blockstore().map_err(|e| {
                 query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
             })?;
+            let encstore = txn.encstore().map_err(|e| {
+                query::error::QueryError::execution(format!("failed to get encstore: {}", e))
+            })?;
             let headstore = txn.headstore().map_err(|e| {
                 query::error::QueryError::execution(format!("failed to get headstore: {}", e))
             })?;
@@ -149,6 +152,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
             match write_document_blocks(
                 &blockstore,
+                &encstore,
                 &headstore,
                 &doc,
                 schema_version_id,

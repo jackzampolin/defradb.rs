@@ -138,7 +138,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
     /// Decrypt block delta data using the encryption metadata block.
     ///
-    /// If `encryption_cid` is Some, loads the Encryption block from blockstore,
+    /// If `encryption_cid` is Some, loads the Encryption block from encstore,
+    /// falling back to blockstore for older Rust-written data,
     /// extracts the AES key, and decrypts the data. Returns data unchanged if
     /// no encryption CID is present.
     pub(crate) async fn decrypt_block_data(
@@ -151,15 +152,30 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             None => return Ok(data.to_vec()),
         };
 
-        // Load the Encryption block from blockstore
-        let enc_data = self
+        // Go stores encryption metadata in encstore; older Rust builds stored it
+        // in blockstore, so keep a fallback for backwards compatibility.
+        let enc_txn = self.db.new_txn(true).await.map_err(MergeError::Database)?;
+        let encstore = enc_txn.encstore().map_err(MergeError::Database)?;
+        let enc_cid_bytes = enc_cid.to_bytes();
+        let enc_data = if let Some(enc_data) = encstore
+            .get(&enc_cid_bytes)
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))?
+        {
+            enc_data
+        } else if let Some(enc_data) = self
             .blockstore
             .get(enc_cid)
             .await
             .map_err(|e| MergeError::Storage(e.to_string()))?
-            .ok_or_else(|| {
-                MergeError::Storage(format!("Encryption block {} not found", enc_cid))
-            })?;
+        {
+            enc_data.to_vec()
+        } else {
+            return Err(MergeError::Storage(format!(
+                "Encryption block {} not found",
+                enc_cid
+            )));
+        };
 
         let enc_block = Encryption::from_dag_cbor(&enc_data).map_err(|e| {
             MergeError::BlockDecode(format!("Failed to decode encryption block: {}", e))
@@ -484,7 +500,7 @@ mod tests {
     use blockstore::{Blockstore as _, DefraBlockstore};
     use crypto::PrivateKey as _;
     use defra_core::block::{
-        Block, CrdtDelta, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
+        Block, CrdtDelta, Encryption, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
     };
     use events::{Bus, ChannelBus, EventName};
     use schema::{CollectionVersion, FieldDescription, FieldKind};
@@ -718,6 +734,36 @@ mod tests {
             ),
             "expected SignatureVerificationFailed"
         );
+    }
+
+    #[tokio::test]
+    async fn decrypt_block_data_falls_back_to_legacy_blockstore_encryption_blocks() {
+        let (handler, blockstore) = make_handler();
+
+        let key = [7u8; 32];
+        let plaintext = b"secret payload";
+        let (ciphertext, _nonce) = crypto::encryption::aes::encrypt_aes(plaintext, &key, &[], true)
+            .expect("ciphertext should encrypt");
+
+        let enc_block = Encryption {
+            doc_id: b"doc1".to_vec(),
+            field_name: Some("name".to_string()),
+            key: key.to_vec(),
+        };
+        let enc_bytes = enc_block.to_dag_cbor().expect("enc block should encode");
+        let enc_cid = enc_block.generate_cid().expect("enc cid should generate");
+
+        blockstore
+            .put(&enc_cid, &enc_bytes)
+            .await
+            .expect("legacy encryption block should store in blockstore");
+
+        let decrypted = handler
+            .decrypt_block_data(&ciphertext, Some(&enc_cid))
+            .await
+            .expect("legacy blockstore fallback should decrypt");
+
+        assert_eq!(decrypted, plaintext);
     }
 
     #[tokio::test]

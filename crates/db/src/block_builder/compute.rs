@@ -7,6 +7,7 @@ use super::*;
 #[derive(Debug, Clone)]
 pub struct ComputedBlocks {
     pub blockstore_entries: Vec<(Vec<u8>, Vec<u8>)>,
+    pub encstore_entries: Vec<(Vec<u8>, Vec<u8>)>,
     pub headstore_entries: Vec<(Vec<u8>, Vec<u8>)>,
     pub block_result: BlockResult,
 }
@@ -33,6 +34,7 @@ pub fn compute_document_blocks(
     let doc_id_bytes = doc_id_str.as_bytes().to_vec();
 
     let mut blockstore_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut encstore_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut headstore_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut field_links: Vec<DAGLink> = Vec::new();
     let mut field_cids: Vec<Cid> = Vec::new();
@@ -56,7 +58,7 @@ pub fn compute_document_blocks(
         // Encrypt delta and create Encryption metadata block if configured
         let (value_bytes, encryption_cid) = if let Some(enc) = encryption_config {
             if enc.should_encrypt_field(field_name) {
-                let key = enc.derive_key(field_name, &doc_id_str);
+                let key = enc.get_or_generate_key(field_name, &doc_id_str);
                 let encrypted = encrypt_delta(&value_bytes, &key)?;
 
                 let is_field_level = enc.encrypt_fields.iter().any(|f| f == field_name);
@@ -74,7 +76,7 @@ pub fn compute_document_blocks(
                     .map_err(|e| format!("Failed to encode encryption block: {}", e))?;
                 let enc_cid = generate_cid_from_bytes(&enc_bytes)
                     .map_err(|e| format!("Failed to generate encryption CID: {}", e))?;
-                blockstore_entries.push((enc_cid.to_bytes(), enc_bytes));
+                encstore_entries.push((enc_cid.to_bytes(), enc_bytes));
 
                 (encrypted, Some(enc_cid))
             } else {
@@ -144,7 +146,7 @@ pub fn compute_document_blocks(
     // Composite encryption CID for doc-level encryption
     let composite_encryption_cid = if let Some(enc) = encryption_config {
         if enc.encrypt_doc {
-            let key = enc.derive_key("", &doc_id_str);
+            let key = enc.get_or_generate_key("", &doc_id_str);
             let enc_block = Encryption {
                 doc_id: doc_id_str.as_bytes().to_vec(),
                 field_name: None,
@@ -155,7 +157,7 @@ pub fn compute_document_blocks(
                 .map_err(|e| format!("Failed to encode composite encryption block: {}", e))?;
             let enc_cid = generate_cid_from_bytes(&enc_bytes)
                 .map_err(|e| format!("Failed to generate composite encryption CID: {}", e))?;
-            blockstore_entries.push((enc_cid.to_bytes(), enc_bytes));
+            encstore_entries.push((enc_cid.to_bytes(), enc_bytes));
             Some(enc_cid)
         } else {
             None
@@ -204,6 +206,7 @@ pub fn compute_document_blocks(
 
     Ok(ComputedBlocks {
         blockstore_entries,
+        encstore_entries,
         headstore_entries,
         block_result: BlockResult {
             cid: composite_cid,
@@ -217,6 +220,7 @@ pub fn compute_document_blocks(
 /// Batch-insert pre-computed blocks into blockstore and headstore.
 pub async fn insert_computed_blocks(
     blockstore: &NamespaceView,
+    encstore: &NamespaceView,
     headstore: &NamespaceView,
     blocks: &ComputedBlocks,
 ) -> Result<(), String> {
@@ -225,6 +229,12 @@ pub async fn insert_computed_blocks(
             .set(key, value)
             .await
             .map_err(|e| format!("Failed to store block: {}", e))?;
+    }
+    for (key, value) in &blocks.encstore_entries {
+        encstore
+            .set(key, value)
+            .await
+            .map_err(|e| format!("Failed to store encryption block: {}", e))?;
     }
     for (key, value) in &blocks.headstore_entries {
         headstore

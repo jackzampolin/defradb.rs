@@ -3,7 +3,7 @@
 //! Provides the EncryptionConfig type and thread-local storage for passing
 //! encryption config from the query layer to the block builder layer.
 
-use sha2::{Digest, Sha256};
+use rand::RngCore;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -76,25 +76,40 @@ impl EncryptionConfig {
         self.encrypt_doc || self.encrypt_fields.iter().any(|f| f == field_name)
     }
 
-    /// Derive the encryption key for a specific field and document.
-    ///
-    /// Key derivation: `SHA-256(fieldName + docID + masterKey)`
-    /// - Doc-level: fieldName = "" (empty string)
-    /// - Field-level: fieldName = specific field name
-    ///
-    /// Uses SHA-256 to ensure all input material (including the master key)
-    /// contributes to the derived key regardless of field name or doc ID length.
-    pub fn derive_key(&self, field_name: &str, doc_id: &str) -> [u8; 32] {
-        let field = if self.encrypt_fields.iter().any(|f| f == field_name) {
-            field_name
+    fn effective_field_name(&self, field_name: &str) -> Option<String> {
+        if self.encrypt_fields.iter().any(|f| f == field_name) {
+            Some(field_name.to_string())
         } else {
-            "" // doc-level
-        };
-        let mut hasher = Sha256::new();
-        hasher.update(field.as_bytes());
-        hasher.update(doc_id.as_bytes());
-        hasher.update(&self.encryption_key);
-        hasher.finalize().into()
+            None
+        }
+    }
+
+    /// Return the key used for the given doc/field pair, generating one if needed.
+    ///
+    /// This mirrors Go's document encryptor behavior:
+    /// - doc-level encryption reuses one key per document
+    /// - field-level encryption reuses one key per `(doc, field)` pair
+    /// - production keys are generated randomly instead of being derived
+    pub fn get_or_generate_key(&self, field_name: &str, doc_id: &str) -> [u8; 32] {
+        let field = self.effective_field_name(field_name);
+        let cache_key = (doc_id.to_string(), field);
+
+        let mut store = doc_encryption_key_store()
+            .lock()
+            .expect("doc encryption key store poisoned");
+
+        if store.len() >= MAX_DOC_ENCRYPTION_ENTRIES {
+            store.clear();
+        }
+
+        if let Some(existing) = store.get(&cache_key) {
+            return *existing;
+        }
+
+        let mut key = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut key);
+        store.insert(cache_key, key);
+        key
     }
 }
 
@@ -120,8 +135,16 @@ pub fn get_encryption_config() -> Option<EncryptionConfig> {
 static DOC_ENCRYPTION_STORE: std::sync::OnceLock<Mutex<HashMap<String, EncryptionConfig>>> =
     std::sync::OnceLock::new();
 
+static DOC_ENCRYPTION_KEY_STORE: std::sync::OnceLock<
+    Mutex<HashMap<(String, Option<String>), [u8; 32]>>,
+> = std::sync::OnceLock::new();
+
 fn doc_encryption_store() -> &'static Mutex<HashMap<String, EncryptionConfig>> {
     DOC_ENCRYPTION_STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn doc_encryption_key_store() -> &'static Mutex<HashMap<(String, Option<String>), [u8; 32]>> {
+    DOC_ENCRYPTION_KEY_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 const MAX_DOC_ENCRYPTION_ENTRIES: usize = 10_000;
@@ -149,6 +172,9 @@ pub fn clear_doc_encryption_store() {
     if let Ok(mut store) = doc_encryption_store().lock() {
         store.clear();
     }
+    if let Ok(mut store) = doc_encryption_key_store().lock() {
+        store.clear();
+    }
 }
 
 #[cfg(test)]
@@ -156,22 +182,35 @@ mod tests {
     use super::EncryptionConfig;
 
     #[test]
-    fn derive_key_mixes_in_master_key_for_long_doc_ids() {
-        let doc_id = "bae-c94acbfa-1234-5678-90ab-cdef12345678";
-        let config_a = EncryptionConfig {
+    fn generated_key_is_reused_for_same_doc_and_field() {
+        super::clear_doc_encryption_store();
+        let config = EncryptionConfig {
             encrypt_doc: true,
             encrypt_fields: vec![],
-            encryption_key: b"first-master-key-material-123456".to_vec(),
-        };
-        let config_b = EncryptionConfig {
-            encrypt_doc: true,
-            encrypt_fields: vec![],
-            encryption_key: b"second-master-key-material654321".to_vec(),
+            encryption_key: Vec::new(),
         };
 
-        assert_ne!(
-            config_a.derive_key("", doc_id),
-            config_b.derive_key("", doc_id)
-        );
+        let key_a = config.get_or_generate_key("", "bae-c94acbfa-1234-5678-90ab-cdef12345678");
+        let key_b = config.get_or_generate_key("", "bae-c94acbfa-1234-5678-90ab-cdef12345678");
+
+        assert_eq!(key_a, key_b);
+    }
+
+    #[test]
+    fn generated_keys_differ_for_distinct_field_scopes() {
+        super::clear_doc_encryption_store();
+        let config = EncryptionConfig {
+            encrypt_doc: false,
+            encrypt_fields: vec!["name".to_string(), "email".to_string()],
+            encryption_key: Vec::new(),
+        };
+
+        let name_key = config.get_or_generate_key("name", "doc1");
+        let email_key = config.get_or_generate_key("email", "doc1");
+        let doc_level_key = config.get_or_generate_key("other", "doc1");
+
+        assert_ne!(name_key, email_key);
+        assert_ne!(name_key, doc_level_key);
+        assert_ne!(email_key, doc_level_key);
     }
 }

@@ -108,6 +108,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
                     // Use version_id for collectionVersionID (matches Go's VersionID())
                     let schema_version_id = collection.version_id();
+                    let encstore = txn.encstore().map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to get encstore: {}",
+                            e
+                        ))
+                    })?;
 
                     // Get encryption config: first try thread-local (explicit in mutation),
                     // then fall back to per-document stored config (from create with encryption).
@@ -121,6 +127,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     // for the fields that actually changed
                     match write_document_blocks(
                         &blockstore,
+                        &encstore,
                         &headstore,
                         &doc,
                         schema_version_id,

@@ -61,6 +61,16 @@ impl<S: Store> BatchMutator<S> {
         })
     }
 
+    async fn encstore(&self) -> query::error::Result<datastore::NamespaceView> {
+        let txn = self.txn.lock().await;
+        let txn = txn.as_ref().ok_or_else(|| {
+            query::error::QueryError::execution("mutation batch transaction is no longer active")
+        })?;
+        txn.encstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get encstore: {}", e))
+        })
+    }
+
     async fn take_txn(&self) -> query::error::Result<DbTxn<S>> {
         self.txn.lock().await.take().ok_or_else(|| {
             query::error::QueryError::execution("mutation batch transaction is no longer active")
@@ -200,10 +210,12 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
             let blockstore = self.blockstore().await?;
+            let encstore = self.encstore().await?;
             let headstore = self.headstore().await?;
 
             match write_document_blocks(
                 &blockstore,
+                &encstore,
                 &headstore,
                 &doc,
                 schema_version_id,
@@ -343,10 +355,12 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
             let blockstore = self.blockstore().await?;
+            let encstore = self.encstore().await?;
             let headstore = self.headstore().await?;
 
             match write_document_blocks(
                 &blockstore,
+                &encstore,
                 &headstore,
                 &doc,
                 schema_version_id,

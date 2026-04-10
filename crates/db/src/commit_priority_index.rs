@@ -163,6 +163,7 @@ mod tests {
             let write_txn = seed_db.new_txn(false).await.unwrap();
             let doc_id = {
                 let blockstore = write_txn.blockstore().unwrap();
+                let encstore = write_txn.encstore().unwrap();
                 let headstore = write_txn.headstore().unwrap();
 
                 let mut doc = Document::new();
@@ -171,14 +172,24 @@ mod tests {
                 doc.set("age", NormalValue::Int(30));
 
                 let doc_id = doc.id().unwrap().to_string();
-                write_document_blocks(&blockstore, &headstore, &doc, "schema-v1", None, None, None)
-                    .await
-                    .unwrap();
+                write_document_blocks(
+                    &blockstore,
+                    &encstore,
+                    &headstore,
+                    &doc,
+                    "schema-v1",
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
 
                 doc.set("age", NormalValue::Int(31));
                 let age_only = std::iter::once("age".to_string()).collect();
                 write_document_blocks(
                     &blockstore,
+                    &encstore,
                     &headstore,
                     &doc,
                     "schema-v1",
@@ -193,6 +204,7 @@ mod tests {
                 let name_only = std::iter::once("name".to_string()).collect();
                 write_document_blocks(
                     &blockstore,
+                    &encstore,
                     &headstore,
                     &doc,
                     "schema-v1",
@@ -295,6 +307,7 @@ mod tests {
             let write_txn = seed_db.new_txn(false).await.unwrap();
             {
                 let blockstore = write_txn.blockstore().unwrap();
+                let encstore = write_txn.encstore().unwrap();
                 let headstore = write_txn.headstore().unwrap();
 
                 let mut doc = Document::new();
@@ -302,14 +315,24 @@ mod tests {
                 doc.set("name", NormalValue::String("Alice".to_string()));
                 doc.set("age", NormalValue::Int(30));
 
-                write_document_blocks(&blockstore, &headstore, &doc, "schema-v1", None, None, None)
-                    .await
-                    .unwrap();
+                write_document_blocks(
+                    &blockstore,
+                    &encstore,
+                    &headstore,
+                    &doc,
+                    "schema-v1",
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
 
                 doc.set("age", NormalValue::Int(31));
                 let age_only = std::iter::once("age".to_string()).collect();
                 write_document_blocks(
                     &blockstore,
+                    &encstore,
                     &headstore,
                     &doc,
                     "schema-v1",
