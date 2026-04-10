@@ -5,6 +5,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+
     #[error("invalid DID: {0}")]
     InvalidDid(String),
 
@@ -49,8 +52,14 @@ pub enum Error {
     Serialization(String),
 }
 
-impl From<serde_json::Error> for Error {
-    fn from(err: serde_json::Error) -> Self {
-        Error::Serialization(err.to_string())
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    #[test]
+    fn json_errors_preserve_their_type() {
+        let err = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let error: Error = err.into();
+        assert!(matches!(error, Error::Json(_)));
     }
 }
