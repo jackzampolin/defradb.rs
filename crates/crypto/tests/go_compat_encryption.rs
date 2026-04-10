@@ -5,7 +5,7 @@
 
 use crypto::encryption::aes::{decrypt_aes, encrypt_aes};
 use crypto::encryption::ecies::{decrypt_ecies, encrypt_ecies, EciesOptions};
-use crypto::encryption::nonce::USE_DETERMINISTIC_NONCE;
+use crypto::encryption::nonce::set_deterministic_nonce;
 use hkdf::Hkdf;
 use serial_test::serial;
 use sha2::Sha256;
@@ -147,7 +147,7 @@ fn test_ecies_decrypt_go_ciphertext() {
 #[serial]
 fn test_ecies_encrypt_matches_go_with_deterministic_nonce() {
     // Enable deterministic nonce mode
-    USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(true);
 
     let sender_private = StaticSecret::from(X25519_SENDER_PRIVATE);
     let recipient_public = X25519PublicKey::from(X25519_RECIPIENT_PUBLIC);
@@ -161,7 +161,7 @@ fn test_ecies_encrypt_matches_go_with_deterministic_nonce() {
         .expect("Should encrypt with ECIES");
 
     // Restore random nonce mode
-    USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(false);
 
     assert_eq!(
         ciphertext, ECIES_CIPHERTEXT,
@@ -212,7 +212,7 @@ fn test_ecies_ciphertext_format_matches_go() {
     // Verify the ciphertext structure matches what Go expects:
     // [32-byte ephemeral public key][12-byte nonce][ciphertext][16-byte auth tag][32-byte HMAC]
 
-    USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(true);
 
     let sender_private = StaticSecret::from(X25519_SENDER_PRIVATE);
     let recipient_public = X25519PublicKey::from(X25519_RECIPIENT_PUBLIC);
@@ -225,7 +225,7 @@ fn test_ecies_ciphertext_format_matches_go() {
 
     let ciphertext = encrypt_ecies(plaintext, &recipient_public, options).expect("Should encrypt");
 
-    USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(false);
 
     // Expected structure:
     // 32 (ephemeral pubkey) + 12 (nonce) + 4 (plaintext) + 16 (auth tag) + 32 (HMAC) = 96
@@ -258,13 +258,13 @@ fn test_aes_decrypt_go_ciphertext() {
 #[serial]
 fn test_aes_encrypt_matches_go_with_deterministic_nonce() {
     // Enable deterministic nonce mode
-    USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(true);
 
     let (ciphertext, nonce) =
         encrypt_aes(AES_PLAINTEXT, &AES_KEY, AES_AAD, true).expect("Should encrypt with AES");
 
     // Restore random nonce mode
-    USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(false);
 
     assert_eq!(
         nonce, AES_NONCE,
@@ -293,13 +293,13 @@ fn test_deterministic_nonce_value() {
 #[serial]
 fn test_aes_empty_plaintext() {
     // Empty plaintext should encrypt/decrypt correctly
-    USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(true);
 
     let empty_plaintext: &[u8] = b"";
     let (ciphertext, _nonce) = encrypt_aes(empty_plaintext, &AES_KEY, AES_AAD, true)
         .expect("Should encrypt empty plaintext");
 
-    USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(false);
 
     // Ciphertext should only contain nonce (12) + auth tag (16) = 28 bytes
     assert_eq!(
@@ -321,13 +321,13 @@ fn test_aes_empty_plaintext() {
 #[serial]
 fn test_aes_empty_aad() {
     // Empty AAD should work correctly
-    USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(true);
 
     let empty_aad: &[u8] = b"";
     let (ciphertext, _nonce) = encrypt_aes(AES_PLAINTEXT, &AES_KEY, empty_aad, true)
         .expect("Should encrypt with empty AAD");
 
-    USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(false);
 
     let decrypted =
         decrypt_aes(None, &ciphertext, &AES_KEY, empty_aad).expect("Should decrypt with empty AAD");
@@ -379,12 +379,12 @@ fn test_aes_binary_plaintext() {
 #[test]
 #[serial]
 fn test_aes_wrong_key_fails() {
-    USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(true);
 
     let (ciphertext, _nonce) =
         encrypt_aes(AES_PLAINTEXT, &AES_KEY, AES_AAD, true).expect("Should encrypt");
 
-    USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(false);
 
     // Try to decrypt with wrong key
     let wrong_key: [u8; 32] = [0xFF; 32];
@@ -395,12 +395,12 @@ fn test_aes_wrong_key_fails() {
 #[test]
 #[serial]
 fn test_aes_wrong_aad_fails() {
-    USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(true);
 
     let (ciphertext, _nonce) =
         encrypt_aes(AES_PLAINTEXT, &AES_KEY, AES_AAD, true).expect("Should encrypt");
 
-    USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(false);
 
     // Try to decrypt with wrong AAD
     let wrong_aad: &[u8] = b"wrong additional data";
@@ -411,12 +411,12 @@ fn test_aes_wrong_aad_fails() {
 #[test]
 #[serial]
 fn test_aes_tampered_ciphertext_fails() {
-    USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(true);
 
     let (mut ciphertext, _nonce) =
         encrypt_aes(AES_PLAINTEXT, &AES_KEY, AES_AAD, true).expect("Should encrypt");
 
-    USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(false);
 
     // Tamper with ciphertext (flip a bit in the encrypted portion)
     if ciphertext.len() > 15 {
@@ -433,12 +433,12 @@ fn test_aes_tampered_ciphertext_fails() {
 #[test]
 #[serial]
 fn test_aes_truncated_ciphertext_fails() {
-    USE_DETERMINISTIC_NONCE.store(true, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(true);
 
     let (ciphertext, _nonce) =
         encrypt_aes(AES_PLAINTEXT, &AES_KEY, AES_AAD, true).expect("Should encrypt");
 
-    USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+    set_deterministic_nonce(false);
 
     // Truncate the ciphertext (remove auth tag)
     let truncated = &ciphertext[..ciphertext.len() - 5];
