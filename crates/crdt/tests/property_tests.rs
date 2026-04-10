@@ -26,7 +26,7 @@ mod lww_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -79,7 +79,7 @@ mod lww_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -113,7 +113,7 @@ mod lww_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -154,7 +154,7 @@ mod lww_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -183,7 +183,7 @@ mod lww_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -215,7 +215,7 @@ mod lww_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -269,7 +269,7 @@ mod lww_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -328,7 +328,7 @@ mod lww_properties {
     #[tokio::test]
     async fn test_lww_priority_ordering_exhaustive() {
         let ctx = Context {
-            doc_id: DocId::new("doc1"),
+            doc_id: DocId::new_unchecked("doc1"),
             schema_version: "v1".to_string(),
             is_create: false,
         };
@@ -367,7 +367,7 @@ mod lww_properties {
     #[tokio::test]
     async fn test_lww_tie_breaking_lexicographic() {
         let ctx = Context {
-            doc_id: DocId::new("doc1"),
+            doc_id: DocId::new_unchecked("doc1"),
             schema_version: "v1".to_string(),
             is_create: false,
         };
@@ -406,7 +406,7 @@ mod lww_properties {
     #[tokio::test]
     async fn test_lww_empty_value_handling() {
         let ctx = Context {
-            doc_id: DocId::new("doc1"),
+            doc_id: DocId::new_unchecked("doc1"),
             schema_version: "v1".to_string(),
             is_create: false,
         };
@@ -435,7 +435,7 @@ mod lww_properties {
     #[tokio::test]
     async fn test_lww_large_payload() {
         let ctx = Context {
-            doc_id: DocId::new("doc1"),
+            doc_id: DocId::new_unchecked("doc1"),
             schema_version: "v1".to_string(),
             is_create: false,
         };
@@ -481,7 +481,7 @@ mod counter_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -530,7 +530,7 @@ mod counter_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -563,7 +563,7 @@ mod counter_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -604,7 +604,7 @@ mod counter_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -652,7 +652,7 @@ mod counter_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -720,7 +720,7 @@ mod counter_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -773,7 +773,7 @@ mod counter_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -835,7 +835,7 @@ mod counter_properties {
     #[tokio::test]
     async fn test_counter_multiple_nonces() {
         let ctx = Context {
-            doc_id: DocId::new("doc1"),
+            doc_id: DocId::new_unchecked("doc1"),
             schema_version: "v1".to_string(),
             is_create: false,
         };
@@ -872,7 +872,7 @@ mod counter_properties {
     #[tokio::test]
     async fn test_counter_nonce_replay_protection() {
         let ctx = Context {
-            doc_id: DocId::new("doc1"),
+            doc_id: DocId::new_unchecked("doc1"),
             schema_version: "v1".to_string(),
             is_create: false,
         };
@@ -910,7 +910,7 @@ mod counter_properties {
     #[tokio::test]
     async fn test_counter_decrement_not_allowed() {
         let ctx = Context {
-            doc_id: DocId::new("doc1"),
+            doc_id: DocId::new_unchecked("doc1"),
             schema_version: "v1".to_string(),
             is_create: false,
         };
@@ -963,7 +963,7 @@ mod float64_counter_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -1014,7 +1014,7 @@ mod float64_counter_properties {
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 let ctx = Context {
-                    doc_id: DocId::new("doc1"),
+                    doc_id: DocId::new_unchecked("doc1"),
                     schema_version: "v1".to_string(),
                     is_create: false,
                 };
@@ -1046,7 +1046,7 @@ mod float64_counter_properties {
     #[tokio::test]
     async fn test_float64_counter_basic() {
         let ctx = Context {
-            doc_id: DocId::new("doc1"),
+            doc_id: DocId::new_unchecked("doc1"),
             schema_version: "v1".to_string(),
             is_create: false,
         };
@@ -1103,13 +1103,13 @@ mod composite_tests {
     #[tokio::test]
     async fn test_composite_multi_field_atomicity() {
         let ctx = Context {
-            doc_id: DocId::new("doc1"),
+            doc_id: DocId::new_unchecked("doc1"),
             schema_version: "v1".to_string(),
             is_create: false,
         };
 
         let store = MemoryStore::new();
-        let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+        let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
         composite.register_lww_field("name".to_string());
         composite.register_counter_field("count".to_string(), true, NumericKind::Int64);
         let mut txn = store.new_txn(false).await.unwrap();
@@ -1140,13 +1140,13 @@ mod composite_tests {
     #[tokio::test]
     async fn test_composite_doc_id_mismatch() {
         let ctx = Context {
-            doc_id: DocId::new("doc1"),
+            doc_id: DocId::new_unchecked("doc1"),
             schema_version: "v1".to_string(),
             is_create: false,
         };
 
         let store = MemoryStore::new();
-        let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+        let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
         composite.register_lww_field("name".to_string());
         let mut txn = store.new_txn(false).await.unwrap();
 
@@ -1163,13 +1163,13 @@ mod composite_tests {
     #[tokio::test]
     async fn test_composite_schema_version_mismatch() {
         let ctx = Context {
-            doc_id: DocId::new("doc1"),
+            doc_id: DocId::new_unchecked("doc1"),
             schema_version: "v1".to_string(),
             is_create: false,
         };
 
         let store = MemoryStore::new();
-        let mut composite = CompositeDAG::new(DocId::new("doc1"), "v1".to_string());
+        let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
         composite.register_lww_field("name".to_string());
         let mut txn = store.new_txn(false).await.unwrap();
 

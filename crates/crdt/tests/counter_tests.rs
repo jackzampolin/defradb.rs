@@ -25,7 +25,7 @@ async fn test_counter_increment() {
     .unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -77,7 +77,7 @@ async fn test_counter_idempotency() {
     .unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -119,7 +119,7 @@ async fn test_counter_decrement_not_allowed() {
     .unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -154,7 +154,7 @@ async fn test_counter_overflow_wrapping() {
     .unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -207,7 +207,7 @@ async fn test_counter_field_name_mismatch() {
     .unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -246,7 +246,7 @@ async fn test_counter_schema_version_mismatch() {
     .unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -330,7 +330,7 @@ async fn test_counter_float64_overflow() {
     .unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -378,7 +378,7 @@ async fn test_counter_float64_basic() {
     .unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -430,7 +430,7 @@ async fn test_counter_merge_result_applied() {
     .unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -464,7 +464,7 @@ async fn test_counter_merge_result_skipped_already_applied() {
     .unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -506,7 +506,7 @@ async fn test_counter_wrong_delta_type() {
     .unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -544,7 +544,7 @@ async fn test_counter_numeric_kind_mismatch() {
     .unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };

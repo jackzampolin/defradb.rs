@@ -1,6 +1,7 @@
 //! Input validation utilities for HTTP handlers.
 
 use crate::error::HttpError;
+use defra_core::types::DocId;
 
 /// Validate that a string is a valid identifier (collection name, field name, etc.)
 ///
@@ -58,8 +59,7 @@ pub fn validate_multiaddr(address: &str) -> Result<(), HttpError> {
 
 /// Validate a document ID format.
 ///
-/// DefraDB document IDs have the format "bae-" followed by a UUID-like string.
-/// This performs basic validation; full validation happens in the document layer.
+/// DefraDB document IDs use the canonical DocID parser shared with the document layer.
 pub fn validate_doc_id(doc_id: &str) -> Result<(), HttpError> {
     if doc_id.trim().is_empty() {
         return Err(HttpError::BadRequest(
@@ -67,33 +67,9 @@ pub fn validate_doc_id(doc_id: &str) -> Result<(), HttpError> {
         ));
     }
 
-    // DefraDB doc IDs start with "bae-"
-    if !doc_id.starts_with("bae-") {
-        return Err(HttpError::BadRequest(format!(
-            "invalid document ID '{}': must start with 'bae-'",
-            doc_id
-        )));
-    }
-
-    // Basic format check: bae- followed by alphanumeric and dashes
-    let suffix = &doc_id[4..];
-    if suffix.is_empty() {
-        return Err(HttpError::BadRequest(format!(
-            "invalid document ID '{}': missing ID after 'bae-' prefix",
-            doc_id
-        )));
-    }
-
-    // Validate the suffix contains only valid characters (hex digits and dashes)
-    let valid = suffix.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
-    if !valid {
-        return Err(HttpError::BadRequest(format!(
-            "invalid document ID '{}': ID suffix must contain only hex digits and dashes",
-            doc_id
-        )));
-    }
-
-    Ok(())
+    DocId::new(doc_id)
+        .map(|_| ())
+        .map_err(|e| HttpError::BadRequest(format!("invalid document ID '{}': {}", doc_id, e)))
 }
 
 #[cfg(test)]
@@ -199,8 +175,7 @@ mod tests {
     #[test]
     fn test_validate_doc_id_valid() {
         assert!(validate_doc_id("bae-3fc941b7-505c-5ce2-91a0-b180930ec8a9").is_ok());
-        assert!(validate_doc_id("bae-abcd1234").is_ok());
-        assert!(validate_doc_id("bae-0123456789abcdef").is_ok());
+        assert!(validate_doc_id("bae-c94acbfa-dd53-40d0-97f3-29ce16c333fc").is_ok());
     }
 
     #[test]
