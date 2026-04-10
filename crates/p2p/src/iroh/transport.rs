@@ -18,7 +18,7 @@ use crate::message::{
 };
 use crate::replicator::ReplicatorInfo;
 use crate::topics::DefraTopic;
-use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, ResponseToken};
+use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId};
 use crate::QueryId;
 
 use super::command::IrohCommand;
@@ -73,6 +73,8 @@ impl IrohTransport {
 
 #[async_trait]
 impl P2PTransport for IrohTransport {
+    type ResponseToken = iroh::endpoint::SendStream;
+
     fn local_peer_id(&self) -> &PeerId {
         &self.local_peer_id
     }
@@ -150,11 +152,11 @@ impl P2PTransport for IrohTransport {
             .await
     }
 
-    async fn send_pushlog_response(&self, token: ResponseToken, reply: PushLogReply) -> Result<()> {
-        let send_stream: iroh::endpoint::SendStream = token
-            .downcast::<iroh::endpoint::SendStream>()
-            .ok_or_else(|| Error::ResponseSend("invalid response token type".to_string()))?;
-
+    async fn send_pushlog_response(
+        &self,
+        send_stream: Self::ResponseToken,
+        reply: PushLogReply,
+    ) -> Result<()> {
         self.send_command(|r| IrohCommand::SendPushLogResponse {
             send_stream,
             reply_msg: reply,
@@ -249,13 +251,9 @@ impl P2PTransport for IrohTransport {
 
     async fn send_doc_sync_response_token(
         &self,
-        token: ResponseToken,
+        send_stream: Self::ResponseToken,
         reply: DocSyncReply,
     ) -> Result<()> {
-        let send_stream: iroh::endpoint::SendStream = token
-            .downcast::<iroh::endpoint::SendStream>()
-            .ok_or_else(|| Error::ResponseSend("invalid response token type".to_string()))?;
-
         self.send_command(|r| IrohCommand::SendDocSyncResponseToken {
             send_stream,
             reply_msg: reply,
@@ -266,13 +264,9 @@ impl P2PTransport for IrohTransport {
 
     async fn send_branchable_sync_response_token(
         &self,
-        token: ResponseToken,
+        send_stream: Self::ResponseToken,
         reply: BranchableSyncReply,
     ) -> Result<()> {
-        let send_stream: iroh::endpoint::SendStream = token
-            .downcast::<iroh::endpoint::SendStream>()
-            .ok_or_else(|| Error::ResponseSend("invalid response token type".to_string()))?;
-
         self.send_command(|r| IrohCommand::SendBranchableSyncResponseToken {
             send_stream,
             reply_msg: reply,
@@ -281,11 +275,11 @@ impl P2PTransport for IrohTransport {
         .await
     }
 
-    async fn send_car_response_token(&self, token: ResponseToken, car_data: Vec<u8>) -> Result<()> {
-        let mut send_stream: iroh::endpoint::SendStream = token
-            .downcast::<iroh::endpoint::SendStream>()
-            .ok_or_else(|| Error::ResponseSend("invalid response token type".to_string()))?;
-
+    async fn send_car_response_token(
+        &self,
+        mut send_stream: Self::ResponseToken,
+        car_data: Vec<u8>,
+    ) -> Result<()> {
         send_stream
             .write_all(&car_data)
             .await
