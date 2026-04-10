@@ -7,6 +7,7 @@ use crypto::keys::ed25519::{Ed25519PrivateKey, Ed25519PublicKey};
 use crypto::keys::secp256k1::{Secp256k1PrivateKey, Secp256k1PublicKey};
 use crypto::keys::secp256r1::Secp256r1PublicKey;
 use crypto::keys::{Key, PrivateKey, PublicKey};
+use k256::ecdsa::Signature;
 
 // ===== Ed25519 Test Vectors =====
 const ED25519_PRIVATE_KEY: [u8; 64] = [
@@ -116,8 +117,103 @@ const SECP256K1_PUBLIC_KEY_UNCOMPRESSED: [u8; 65] = [
 const SECP256K1_TEST_MESSAGE: &[u8] = b"test message";
 const SECP256K1_DID: &str =
     "did:key:z7r8or8ecagY9LD87s54K2arcXmgmw6bUhyvq83RrnB2hJiUb2ug5YGAk1ZUaimewnoLL1ZGzXuTCnWRSrRZgR3v2PLPH";
+const SECP256K1_CURVE_ORDER: [u8; 32] = [
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+    0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
+];
 
 // ===== secp256r1 (P-256) Test Vectors =====
+
+fn parse_der_integer(input: &[u8], offset: &mut usize) -> Vec<u8> {
+    assert_eq!(input[*offset], 0x02, "DER integer tag expected");
+    *offset += 1;
+
+    let len = input[*offset] as usize;
+    *offset += 1;
+
+    let value = input[*offset..*offset + len].to_vec();
+    *offset += len;
+    value
+}
+
+fn left_pad_to_32(bytes: &[u8]) -> [u8; 32] {
+    assert!(
+        bytes.len() <= 32,
+        "Expected integer to fit in 32 bytes, got {}",
+        bytes.len()
+    );
+
+    let mut padded = [0u8; 32];
+    padded[32 - bytes.len()..].copy_from_slice(bytes);
+    padded
+}
+
+fn subtract_32(lhs: &[u8; 32], rhs: &[u8; 32]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let mut borrow = 0u16;
+
+    for idx in (0..32).rev() {
+        let lhs = lhs[idx] as u16;
+        let rhs = rhs[idx] as u16 + borrow;
+
+        if lhs >= rhs {
+            out[idx] = (lhs - rhs) as u8;
+            borrow = 0;
+        } else {
+            out[idx] = ((lhs + 256) - rhs) as u8;
+            borrow = 1;
+        }
+    }
+
+    assert_eq!(borrow, 0, "underflow while subtracting curve scalars");
+    out
+}
+
+fn trim_leading_zeroes(bytes: &[u8; 32]) -> Vec<u8> {
+    let first_non_zero = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(bytes.len().saturating_sub(1));
+    bytes[first_non_zero..].to_vec()
+}
+
+fn encode_der_integer(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() + 3);
+    out.push(0x02);
+
+    let needs_leading_zero = bytes.first().is_some_and(|byte| byte & 0x80 != 0);
+    let len = bytes.len() + usize::from(needs_leading_zero);
+    out.push(len as u8);
+
+    if needs_leading_zero {
+        out.push(0x00);
+    }
+
+    out.extend_from_slice(bytes);
+    out
+}
+
+fn to_high_s_der(signature: &[u8]) -> Vec<u8> {
+    assert_eq!(signature[0], 0x30, "DER sequence tag expected");
+
+    let mut offset = 2;
+    let r = parse_der_integer(signature, &mut offset);
+    let s = parse_der_integer(signature, &mut offset);
+
+    let s = left_pad_to_32(&s);
+    let high_s = subtract_32(&SECP256K1_CURVE_ORDER, &s);
+    let high_s = trim_leading_zeroes(&high_s);
+
+    let r = encode_der_integer(&r);
+    let high_s = encode_der_integer(&high_s);
+
+    let mut der = Vec::with_capacity(2 + r.len() + high_s.len());
+    der.push(0x30);
+    der.push((r.len() + high_s.len()) as u8);
+    der.extend_from_slice(&r);
+    der.extend_from_slice(&high_s);
+    der
+}
 // Generated from Go for Rust compatibility testing
 #[allow(dead_code)]
 const SECP256R1_PRIVATE_KEY: [u8; 32] = [
@@ -589,6 +685,46 @@ fn test_secp256k1_signature_verification_from_go() {
         .verify(SECP256K1_TEST_MESSAGE, go_signature)
         .unwrap();
     assert!(valid, "Should verify Go-generated secp256k1 signature");
+}
+
+#[test]
+fn test_secp256k1_high_s_signature_is_rejected() {
+    let public_key = Secp256k1PublicKey::from_bytes(&SECP256K1_PUBLIC_KEY_COMPRESSED)
+        .expect("Should parse Go public key");
+
+    let low_s_signature: &[u8] = &[
+        0x30, 0x44, 0x02, 0x20, 0x3d, 0x46, 0x09, 0xf4, 0xd7, 0x62, 0x05, 0xd3, 0x49, 0x16, 0x0f,
+        0xf7, 0x90, 0x4c, 0xf9, 0x14, 0x38, 0xe0, 0xbb, 0x5f, 0x9b, 0x98, 0x42, 0xc2, 0x8b, 0x4e,
+        0x9d, 0xe7, 0x6b, 0x28, 0x36, 0xf8, 0x02, 0x20, 0x2e, 0xe2, 0x7f, 0x4e, 0x70, 0x62, 0x1e,
+        0x98, 0x55, 0xd7, 0x92, 0x68, 0xaf, 0x70, 0x95, 0x46, 0x18, 0x05, 0x34, 0x19, 0x99, 0x0a,
+        0x6c, 0x09, 0xcf, 0x71, 0x52, 0xc5, 0x30, 0x15, 0x6a, 0xf0,
+    ];
+
+    let high_s_signature = to_high_s_der(low_s_signature);
+    assert_ne!(high_s_signature, low_s_signature);
+    let high_s = Signature::from_der(&high_s_signature).expect("High-S variant should parse");
+    assert!(
+        high_s.normalize_s().is_some(),
+        "Derived signature must actually be high-S"
+    );
+    assert_eq!(
+        high_s
+            .normalize_s()
+            .expect("High-S signature should normalize")
+            .to_der()
+            .as_bytes(),
+        low_s_signature,
+        "High-S variant should be mathematically equivalent to the known-valid low-S signature"
+    );
+
+    let valid = public_key
+        .verify(SECP256K1_TEST_MESSAGE, &high_s_signature)
+        .unwrap();
+
+    assert!(
+        !valid,
+        "Verifier must reject high-S secp256k1 signatures instead of normalizing them"
+    );
 }
 
 #[test]
