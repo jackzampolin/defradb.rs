@@ -20,9 +20,9 @@ use crate::error::{
 };
 use crate::types::{AES_KEY_SIZE, HMAC_SIZE, X25519_PUBLIC_KEY_SIZE};
 
-fn derive_ecies_keys(
-    shared_secret: &[u8],
-) -> Result<(Zeroizing<[u8; AES_KEY_SIZE]>, Zeroizing<[u8; HMAC_SIZE]>)> {
+type DerivedKeys = (Zeroizing<[u8; AES_KEY_SIZE]>, Zeroizing<[u8; HMAC_SIZE]>);
+
+fn derive_ecies_keys(shared_secret: &[u8]) -> Result<DerivedKeys> {
     let hkdf = Hkdf::<Sha256>::new(None, shared_secret);
 
     let mut keys = Zeroizing::new([0u8; AES_KEY_SIZE + HMAC_SIZE]);
