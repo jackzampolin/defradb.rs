@@ -22,6 +22,7 @@ use super::*;
 /// # Returns
 ///
 /// Returns `BlockResult` containing the composite block and metadata.
+#[allow(clippy::too_many_arguments)]
 pub async fn write_document_blocks(
     blockstore: &NamespaceView,
     encstore: &NamespaceView,

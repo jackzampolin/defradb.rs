@@ -135,15 +135,17 @@ pub fn get_encryption_config() -> Option<EncryptionConfig> {
 static DOC_ENCRYPTION_STORE: std::sync::OnceLock<Mutex<HashMap<String, EncryptionConfig>>> =
     std::sync::OnceLock::new();
 
-static DOC_ENCRYPTION_KEY_STORE: std::sync::OnceLock<
-    Mutex<HashMap<(String, Option<String>), [u8; 32]>>,
-> = std::sync::OnceLock::new();
+type DocEncryptionKeyScope = (String, Option<String>);
+type DocEncryptionKeyStore = Mutex<HashMap<DocEncryptionKeyScope, [u8; 32]>>;
+
+static DOC_ENCRYPTION_KEY_STORE: std::sync::OnceLock<DocEncryptionKeyStore> =
+    std::sync::OnceLock::new();
 
 fn doc_encryption_store() -> &'static Mutex<HashMap<String, EncryptionConfig>> {
     DOC_ENCRYPTION_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn doc_encryption_key_store() -> &'static Mutex<HashMap<(String, Option<String>), [u8; 32]>> {
+fn doc_encryption_key_store() -> &'static DocEncryptionKeyStore {
     DOC_ENCRYPTION_KEY_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
