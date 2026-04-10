@@ -26,7 +26,8 @@ use crate::sync::rate_limiter::PeerRateLimiter;
 use crate::transport::{PeerId, ResponseToken, TransportEvent};
 
 use super::{
-    SyncCoordinator, DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+    SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState,
+    DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
 };
 
 type TestBlockstore = DefraBlockstore<MemoryStore>;
@@ -49,26 +50,32 @@ fn create_test_coordinator(
     let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), SyncConfig::default());
 
     let coordinator = SyncCoordinator {
-        transport,
-        broadcaster,
+        runtime: SyncRuntime {
+            transport,
+            broadcaster,
+            failure_tx: None,
+            dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
+            )),
+            push_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+            )),
+            rate_limiter: Arc::new(PeerRateLimiter::default()),
+        },
         manager,
-        peer_state,
-        local_peer_id,
-        access_mode,
-        replicators,
-        subscribed_collections: Arc::new(
-            tokio::sync::RwLock::new(std::collections::HashSet::new()),
-        ),
-        collection_store: Arc::new(NoOpCollectionStorage),
-        head_provider: Arc::new(NoOpHeadProvider),
-        failure_tx: None,
-        dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(
-            DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
-        )),
-        push_semaphore: Arc::new(tokio::sync::Semaphore::new(
-            DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
-        )),
-        rate_limiter: Arc::new(PeerRateLimiter::default()),
+        access: SyncAccessState {
+            peer_state,
+            local_peer_id,
+            access_mode,
+            replicators,
+        },
+        subscriptions: SyncSubscriptionState {
+            subscribed_collections: Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
+            collection_store: Arc::new(NoOpCollectionStorage),
+            head_provider: Arc::new(NoOpHeadProvider),
+        },
     };
 
     (coordinator, events)

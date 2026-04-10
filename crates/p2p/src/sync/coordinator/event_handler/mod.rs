@@ -25,20 +25,24 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         match event {
             TransportEvent::PeerConnected(peer_id) => {
                 tracing::debug!(peer_id = %peer_id, "Peer connected");
-                self.peer_state.peer_connected(peer_id.as_str());
+                self.access.peer_state.peer_connected(peer_id.as_str());
             }
             TransportEvent::PeerDisconnected(peer_id) => {
                 tracing::debug!(peer_id = %peer_id, "Peer disconnected");
-                self.peer_state.peer_disconnected(peer_id.as_str());
-                self.rate_limiter.remove_peer(&peer_id);
+                self.access.peer_state.peer_disconnected(peer_id.as_str());
+                self.runtime.rate_limiter.remove_peer(&peer_id);
             }
             TransportEvent::PeerSubscribed { peer_id, topic } => {
                 tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer subscribed to topic");
-                self.peer_state.peer_subscribed(peer_id.as_str(), topic);
+                self.access
+                    .peer_state
+                    .peer_subscribed(peer_id.as_str(), topic);
             }
             TransportEvent::PeerUnsubscribed { peer_id, topic } => {
                 tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer unsubscribed from topic");
-                self.peer_state.peer_unsubscribed(peer_id.as_str(), &topic);
+                self.access
+                    .peer_state
+                    .peer_unsubscribed(peer_id.as_str(), &topic);
             }
             TransportEvent::GossipMessage {
                 propagation_source,
@@ -46,7 +50,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 topic,
                 ..
             } => {
-                if !self.rate_limiter.check(&propagation_source) {
+                if !self.runtime.rate_limiter.check(&propagation_source) {
                     tracing::debug!(
                         peer_id = %propagation_source,
                         "Rate limit exceeded for GossipMessage, dropping"
@@ -64,13 +68,17 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 request,
                 token,
             } => {
-                if !self.rate_limiter.check(&peer_id) {
+                if !self.runtime.rate_limiter.check(&peer_id) {
                     tracing::debug!(
                         peer_id = %peer_id,
                         "Rate limit exceeded for PushLogRequest, sending backpressure reply"
                     );
                     let reply = PushLogReply::error(&request.metadata.message_id, RATE_LIMITED_MSG);
-                    let _ = self.transport.send_pushlog_response(token, reply).await;
+                    let _ = self
+                        .runtime
+                        .transport
+                        .send_pushlog_response(token, reply)
+                        .await;
                     return Err(Error::AccessDenied {
                         peer_id: peer_id.to_string(),
                         collection_id: "rate-limited".into(),
@@ -85,14 +93,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 is_explicit_replicator,
                 explicit_replay_authorization,
             } => {
-                if !self.rate_limiter.check(&peer_id) {
+                if !self.runtime.rate_limiter.check(&peer_id) {
                     tracing::debug!(
                         peer_id = %peer_id,
                         "Rate limit exceeded for TwoStreamRequest, sending backpressure reply"
                     );
                     let mut reply =
                         PushLogReply::error(&request.metadata.message_id, RATE_LIMITED_MSG);
-                    let _ = sign_with_transport(&self.transport, &mut reply);
+                    let _ = sign_with_transport(&self.runtime.transport, &mut reply);
                     self.send_two_stream_reply(&peer_id, reply, token).await;
                     return Err(Error::AccessDenied {
                         peer_id: peer_id.to_string(),
@@ -129,7 +137,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 request,
                 token,
             } => {
-                if !self.rate_limiter.check(&peer_id) {
+                if !self.runtime.rate_limiter.check(&peer_id) {
                     tracing::debug!(
                         peer_id = %peer_id,
                         "Rate limit exceeded for DocSyncRequest, sending backpressure reply"
@@ -137,11 +145,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     let reply = DocSyncReply::error(&request.metadata.message_id, RATE_LIMITED_MSG);
                     if let Some(token) = token {
                         let _ = self
+                            .runtime
                             .transport
                             .send_doc_sync_response_token(token, reply)
                             .await;
                     } else {
-                        let _ = self.transport.send_doc_sync_response(&peer_id, reply).await;
+                        let _ = self
+                            .runtime
+                            .transport
+                            .send_doc_sync_response(&peer_id, reply)
+                            .await;
                     }
                     return Err(Error::AccessDenied {
                         peer_id: peer_id.to_string(),
@@ -159,7 +172,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 request,
                 token,
             } => {
-                if !self.rate_limiter.check(&peer_id) {
+                if !self.runtime.rate_limiter.check(&peer_id) {
                     tracing::debug!(
                         peer_id = %peer_id,
                         "Rate limit exceeded for BranchableSyncRequest, sending backpressure reply"
@@ -171,11 +184,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     );
                     if let Some(token) = token {
                         let _ = self
+                            .runtime
                             .transport
                             .send_branchable_sync_response_token(token, reply)
                             .await;
                     } else {
                         let _ = self
+                            .runtime
                             .transport
                             .send_branchable_sync_response(&peer_id, reply)
                             .await;
@@ -196,7 +211,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 request,
                 token,
             } => {
-                if !self.rate_limiter.check(&peer_id) {
+                if !self.runtime.rate_limiter.check(&peer_id) {
                     tracing::debug!(
                         peer_id = %peer_id,
                         "Rate limit exceeded for CarFetchRequest, sending empty backpressure reply"
@@ -206,11 +221,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     // a hung stream / timeout.
                     if let Some(token) = token {
                         let _ = self
+                            .runtime
                             .transport
                             .send_car_response_token(token, Vec::new())
                             .await;
                     } else {
-                        let _ = self.transport.send_car_response(&peer_id, Vec::new()).await;
+                        let _ = self
+                            .runtime
+                            .transport
+                            .send_car_response(&peer_id, Vec::new())
+                            .await;
                     }
                     return Err(Error::AccessDenied {
                         peer_id: peer_id.to_string(),

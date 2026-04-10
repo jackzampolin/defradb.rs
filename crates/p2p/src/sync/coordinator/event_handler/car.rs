@@ -73,11 +73,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         if let Some(token) = token {
-            self.transport
+            self.runtime
+                .transport
                 .send_car_response_token(token, car_data)
                 .await?;
         } else {
-            self.transport.send_car_response(&peer_id, car_data).await?;
+            self.runtime
+                .transport
+                .send_car_response(&peer_id, car_data)
+                .await?;
         }
         Ok(())
     }

@@ -27,6 +27,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         );
 
         let heads = match self
+            .subscriptions
             .head_provider
             .get_collection_heads(&request.collection_id)
             .await
@@ -55,7 +56,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             heads,
         );
 
-        if let Err(e) = sign_with_transport(&self.transport, &mut reply) {
+        if let Err(e) = sign_with_transport(&self.runtime.transport, &mut reply) {
             tracing::error!(
                 peer_id = %peer_id,
                 error = %e,
@@ -65,11 +66,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         let send_result = if let Some(token) = token {
-            self.transport
+            self.runtime
+                .transport
                 .send_branchable_sync_response_token(token, reply)
                 .await
         } else {
-            self.transport
+            self.runtime
+                .transport
                 .send_branchable_sync_response(&peer_id, reply)
                 .await
         };
@@ -135,10 +138,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 "Spawning poll-based DAG fetchers for collection blocks"
             );
 
-            let transport = self.transport.clone();
+            let transport = self.runtime.transport.clone();
             let blockstore = self.manager.blockstore().clone();
             let event_tx = self.manager.event_sender();
-            let semaphore = self.dag_fetch_semaphore.clone();
+            let semaphore = self.runtime.dag_fetch_semaphore.clone();
 
             for root_cid in cids_to_fetch {
                 let transport = transport.clone();

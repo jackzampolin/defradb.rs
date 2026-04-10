@@ -16,7 +16,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         collections: Vec<String>,
         auto_subscribe: bool,
     ) -> Result<CreateReplicatorResult> {
-        self.transport
+        self.runtime
+            .transport
             .create_replicator(peer_id, collections.clone())
             .await?;
 
@@ -65,12 +66,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
     /// Delete a replicator.
     pub async fn delete_replicator(&self, peer_id: &PeerId) -> Result<()> {
-        let removed_collections = match self.transport.get_replicator(peer_id).await? {
+        let removed_collections = match self.runtime.transport.get_replicator(peer_id).await? {
             Some(info) => info.collections,
             None => Vec::new(),
         };
 
-        self.transport.delete_replicator(peer_id).await?;
+        self.runtime.transport.delete_replicator(peer_id).await?;
         tracing::info!(peer_id = %peer_id, "Deleted replicator");
 
         self.unsubscribe_orphaned_collections(&removed_collections)
@@ -86,12 +87,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         collections: Vec<String>,
     ) -> Result<bool> {
         if collections.is_empty() {
-            let removed_collections = match self.transport.get_replicator(peer_id).await? {
+            let removed_collections = match self.runtime.transport.get_replicator(peer_id).await? {
                 Some(info) => info.collections,
                 None => Vec::new(),
             };
 
-            self.transport.delete_replicator(peer_id).await?;
+            self.runtime.transport.delete_replicator(peer_id).await?;
             tracing::info!(peer_id = %peer_id, "Deleted replicator (empty collections = delete all)");
 
             self.unsubscribe_orphaned_collections(&removed_collections)
@@ -101,6 +102,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         let fully_deleted = self
+            .runtime
             .transport
             .remove_replicator_collections(peer_id, collections.clone())
             .await?;
@@ -127,7 +129,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Unsubscribe from collection topics that no longer have any replicators.
     async fn unsubscribe_orphaned_collections(&self, collections: &[String]) {
         for collection_id in collections {
-            let remaining = match self.transport.list_replicators().await {
+            let remaining = match self.runtime.transport.list_replicators().await {
                 Ok(reps) => reps.iter().any(|r| r.collections.contains(collection_id)),
                 Err(e) => {
                     tracing::warn!(
@@ -154,12 +156,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
     /// Get all registered replicators.
     pub async fn list_replicators(&self) -> Result<Vec<ReplicatorInfo>> {
-        self.transport.list_replicators().await
+        self.runtime.transport.list_replicators().await
     }
 
     /// Get replicator info for a specific peer.
     pub async fn get_replicator(&self, peer_id: &PeerId) -> Result<Option<ReplicatorInfo>> {
-        self.transport.get_replicator(peer_id).await
+        self.runtime.transport.get_replicator(peer_id).await
     }
 
     /// Load replicators from stored ReplicatorInfo records.

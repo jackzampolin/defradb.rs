@@ -40,10 +40,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         collection_id: &str,
         creator_override: Option<&str>,
     ) -> Result<BroadcastResult> {
-        let creator = creator_override.unwrap_or(&self.local_peer_id);
+        let creator = creator_override.unwrap_or(&self.access.local_peer_id);
         let broadcast =
             Broadcaster::<T>::create_broadcast(cid, block, doc_id, collection_id, creator);
-        self.broadcaster.broadcast_update(&broadcast).await
+        self.runtime.broadcaster.broadcast_update(&broadcast).await
     }
 
     /// Push a full document DAG to replicator peers.
@@ -67,8 +67,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         collection_id: &str,
         creator_override: Option<&str>,
     ) {
-        let creator = creator_override.unwrap_or(&self.local_peer_id);
-        let replicators = match self.transport.list_replicators().await {
+        let creator = creator_override.unwrap_or(&self.access.local_peer_id);
+        let replicators = match self.runtime.transport.list_replicators().await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to get replicators for push");
@@ -115,18 +115,18 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     creator.to_string(),
                     block_data.clone(),
                 );
-                if sign_with_transport(&self.transport, &mut req).is_ok() {
+                if sign_with_transport(&self.runtime.transport, &mut req).is_ok() {
                     requests.push((*block_cid, req));
                 }
             }
 
             // Spawn a task per peer, bounded by push_semaphore to prevent
             // resource exhaustion during document creation bursts.
-            let transport = self.transport.clone();
-            let failure_tx = self.failure_tx.clone();
+            let transport = self.runtime.transport.clone();
+            let failure_tx = self.runtime.failure_tx.clone();
             let doc_id_owned = doc_id.to_string();
             let collection_id_owned = collection_id.to_string();
-            let semaphore = self.push_semaphore.clone();
+            let semaphore = self.runtime.push_semaphore.clone();
             tokio::spawn(async move {
                 let _permit = semaphore.acquire().await;
                 let any_failed =
@@ -165,8 +165,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         collection_id: &str,
         creator_override: Option<&str>,
     ) {
-        let creator = creator_override.unwrap_or(&self.local_peer_id);
-        let replicators = match self.transport.list_replicators().await {
+        let creator = creator_override.unwrap_or(&self.access.local_peer_id);
+        let replicators = match self.runtime.transport.list_replicators().await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to get replicators for push");
@@ -194,17 +194,17 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 Bytes::copy_from_slice(block),
             );
 
-            if let Err(e) = sign_with_transport(&self.transport, &mut request) {
+            if let Err(e) = sign_with_transport(&self.runtime.transport, &mut request) {
                 tracing::debug!(error = %e, "Failed to sign PushLog request");
                 continue;
             }
 
-            let transport = self.transport.clone();
+            let transport = self.runtime.transport.clone();
             let cid_clone = *cid;
-            let failure_tx = self.failure_tx.clone();
+            let failure_tx = self.runtime.failure_tx.clone();
             let doc_id_owned = doc_id.to_string();
             let collection_id_owned = collection_id.to_string();
-            let semaphore = self.push_semaphore.clone();
+            let semaphore = self.runtime.push_semaphore.clone();
             let peer_id_clone = peer_id.clone();
             tokio::spawn(async move {
                 let _permit = semaphore.acquire().await;
