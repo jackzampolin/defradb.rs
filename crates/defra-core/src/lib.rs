@@ -26,6 +26,7 @@ pub use block::{
     FieldDefinitionDeltaPayload, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
     DAG_CBOR_CODEC, SHA2_256_CODE,
 };
+pub use collection::collection_short_id;
 pub use encryption::EncryptionKey;
 pub use error::{Error, Result};
 pub use ipld::{collect_block_links, extract_links, walk_ipld, IpldVisitor};
