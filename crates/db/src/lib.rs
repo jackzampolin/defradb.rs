@@ -159,6 +159,7 @@ pub use view_ops::RefreshViewsOptions;
 
 // NAC exports
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
 pub use nac::create_persistent_nac_manager;
 pub use nac::{create_memory_nac_manager, NacConfig, NacInfo, NacManager, NacManagerApi};
 

@@ -11,6 +11,7 @@ description = "Access Control Policy for DefraDB"
 [features]
 default = ["native"]
 native = []
+redb = ["storage/redb"]
 
 [dependencies]
 defra-core = { path = "../defra-core" }

@@ -10,6 +10,7 @@ use crate::config::{Config, DatastoreType};
 use crate::error::Result;
 #[cfg(feature = "fjall")]
 use storage::backends::FjallStoreOptions;
+#[cfg(feature = "redb")]
 use storage::backends::RedbStoreOptions;
 #[cfg(feature = "rocksdb")]
 use storage::backends::RocksDbStoreOptions;
@@ -93,6 +94,7 @@ impl Node {
                     )
                     .await?
                 }
+                #[cfg(feature = "redb")]
                 DatastoreType::Redb => {
                     info!("Using Redb datastore at {}", config.data_path().display());
                     let opts = RedbStoreOptions::new()
@@ -118,6 +120,12 @@ impl Node {
                         node_identity_did.clone(),
                     )
                     .await?
+                }
+                #[cfg(not(feature = "redb"))]
+                DatastoreType::Redb => {
+                    return Err(crate::error::Error::InvalidDatastore(
+                        "redb backend not enabled. Rebuild with --features redb".into(),
+                    ));
                 }
                 #[cfg(feature = "fjall")]
                 DatastoreType::Fjall => {
