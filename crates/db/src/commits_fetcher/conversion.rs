@@ -27,8 +27,7 @@ impl<S: Store> CommitsFetcher<S> {
                 Error::Serialization("cid either does not exist or belong to document".to_string())
             })?;
 
-        let block = Block::from_dag_cbor(&data)
-            .map_err(|e| Error::Serialization(format!("Failed to decode block: {}", e)))?;
+        let block = Block::from_dag_cbor(&data)?;
         tracing::debug!(
             cid = %cid,
             data_len = data.len(),
@@ -53,8 +52,7 @@ impl<S: Store> CommitsFetcher<S> {
             .map_err(Error::Storage)?
             .ok_or_else(|| Error::Serialization("signature block not found".to_string()))?;
 
-        Signature::from_dag_cbor(&data)
-            .map_err(|e| Error::Serialization(format!("Failed to decode signature block: {}", e)))
+        Ok(Signature::from_dag_cbor(&data)?)
     }
 
     /// Convert a block to a commit document.
@@ -211,8 +209,7 @@ impl<S: Store> CommitsFetcher<S> {
         };
         map.insert("signature".to_string(), sig_value);
 
-        Document::from_map(map)
-            .map_err(|e| Error::Serialization(format!("Failed to create document: {}", e)))
+        Ok(Document::from_map(map)?)
     }
 
     /// Build simple links array (without recursive nesting) for nested queries.

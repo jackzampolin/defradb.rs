@@ -16,6 +16,9 @@ pub enum Error {
     #[error("document error: {0}")]
     Document(#[from] document::Error),
 
+    #[error("core error: {0}")]
+    Core(#[from] defra_core::Error),
+
     #[error("failed to deserialize document at key {key:?}: {source}")]
     DocumentAtKey {
         key: String,

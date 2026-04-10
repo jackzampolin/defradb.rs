@@ -304,8 +304,7 @@ impl<S: Store> VersionedFetcher<S> {
                 )
             })?;
 
-        Block::from_dag_cbor(&data)
-            .map_err(|e| Error::Serialization(format!("Failed to decode block: {}", e)))
+        Ok(Block::from_dag_cbor(&data)?)
     }
 
     /// Replay CRDT deltas to reconstruct document state.
