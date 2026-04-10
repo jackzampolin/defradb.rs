@@ -9,7 +9,6 @@ use crate::collection_cache::CollectionCache;
 use crate::error::{Error, Result};
 use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};
 use schema::CollectionVersion;
-use std::sync::Arc;
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
@@ -46,7 +45,7 @@ pub struct DbTxn<S: Store> {
 
 impl<S: Store> DbTxn<S> {
     /// Create a new implicit DbTxn.
-    pub fn new(txn: BasicTxn, _store: Arc<S>) -> Self {
+    pub fn new(txn: BasicTxn) -> Self {
         Self {
             txn: Some(txn),
             explicit: false,
@@ -56,7 +55,7 @@ impl<S: Store> DbTxn<S> {
     }
 
     /// Create a new explicit DbTxn.
-    pub fn new_explicit(txn: BasicTxn, _store: Arc<S>) -> Self {
+    pub fn new_explicit(txn: BasicTxn) -> Self {
         Self {
             txn: Some(txn),
             explicit: true,
