@@ -3,7 +3,9 @@
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock};
 
-use crate::router::{P2POperations, P2pDocumentInfo, P2pDocumentRequest, ReplicatorInfo};
+use crate::router::{
+    P2PError, P2POperations, P2PResult, P2pDocumentInfo, P2pDocumentRequest, ReplicatorInfo,
+};
 
 /// Mock P2P operations for testing P2P handlers.
 #[derive(Debug)]
@@ -70,19 +72,19 @@ impl MockP2POperations {
 
 #[async_trait]
 impl P2POperations for MockP2POperations {
-    async fn local_peer_id(&self) -> Result<String, String> {
+    async fn local_peer_id(&self) -> P2PResult<String> {
         Ok(self.peer_id.clone())
     }
 
-    async fn listen_addresses(&self) -> Result<Vec<String>, String> {
+    async fn listen_addresses(&self) -> P2PResult<Vec<String>> {
         Ok(self.addresses.clone())
     }
 
-    async fn connected_peers(&self) -> Result<Vec<String>, String> {
+    async fn connected_peers(&self) -> P2PResult<Vec<String>> {
         Ok(self.peers.read().unwrap().clone())
     }
 
-    async fn connect_peer(&self, addr: &str) -> Result<(), String> {
+    async fn connect_peer(&self, addr: &str) -> P2PResult<()> {
         // Extract a mock peer ID from the address
         let peer_id = if addr.contains("/p2p/") {
             addr.split("/p2p/").last().unwrap_or("unknown").to_string()
@@ -93,7 +95,7 @@ impl P2POperations for MockP2POperations {
         Ok(())
     }
 
-    async fn get_replicators(&self) -> Result<Vec<ReplicatorInfo>, String> {
+    async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
         Ok(self.replicators.read().unwrap().clone())
     }
 
@@ -103,7 +105,7 @@ impl P2POperations for MockP2POperations {
         addr: Option<&str>,
         _explicit_replay_capabilities: Vec<crate::router::ExplicitReplayCapabilityInput>,
         _expected_authorizer_did: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> P2PResult<()> {
         self.replicators.write().unwrap().push(ReplicatorInfo {
             id: Some("12D3KooWNewReplicator".to_string()),
             collections,
@@ -116,17 +118,17 @@ impl P2POperations for MockP2POperations {
         &self,
         collections: Vec<String>,
         _addr: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> P2PResult<()> {
         let mut replicators = self.replicators.write().unwrap();
         replicators.retain(|r| !collections.iter().all(|c| r.collections.contains(c)));
         Ok(())
     }
 
-    async fn get_collections(&self) -> Result<Vec<String>, String> {
+    async fn get_collections(&self) -> P2PResult<Vec<String>> {
         Ok(self.collections.read().unwrap().clone())
     }
 
-    async fn add_collections(&self, collections: Vec<String>) -> Result<(), String> {
+    async fn add_collections(&self, collections: Vec<String>) -> P2PResult<()> {
         let mut existing = self.collections.write().unwrap();
         for col in collections {
             if !existing.contains(&col) {
@@ -136,37 +138,33 @@ impl P2POperations for MockP2POperations {
         Ok(())
     }
 
-    async fn remove_collections(&self, collections: Vec<String>) -> Result<(), String> {
+    async fn remove_collections(&self, collections: Vec<String>) -> P2PResult<()> {
         let mut existing = self.collections.write().unwrap();
         existing.retain(|c| !collections.contains(c));
         Ok(())
     }
 
-    async fn get_documents(&self) -> Result<Vec<P2pDocumentInfo>, String> {
+    async fn get_documents(&self) -> P2PResult<Vec<P2pDocumentInfo>> {
         Ok(vec![])
     }
 
-    async fn add_documents(&self, _docs: Vec<P2pDocumentRequest>) -> Result<(), String> {
+    async fn add_documents(&self, _docs: Vec<P2pDocumentRequest>) -> P2PResult<()> {
         Ok(())
     }
 
-    async fn remove_documents(&self, _docs: Vec<P2pDocumentRequest>) -> Result<(), String> {
+    async fn remove_documents(&self, _docs: Vec<P2pDocumentRequest>) -> P2PResult<()> {
         Ok(())
     }
 
-    async fn sync_documents(
-        &self,
-        _collection_name: &str,
-        _doc_ids: Vec<String>,
-    ) -> Result<(), String> {
+    async fn sync_documents(&self, _collection_name: &str, _doc_ids: Vec<String>) -> P2PResult<()> {
         Ok(())
     }
 
-    async fn sync_branchable_collection(&self, _collection_id: &str) -> Result<(), String> {
+    async fn sync_branchable_collection(&self, _collection_id: &str) -> P2PResult<()> {
         Ok(())
     }
 
-    async fn sync_collection_versions(&self, _version_ids: Vec<String>) -> Result<(), String> {
+    async fn sync_collection_versions(&self, _version_ids: Vec<String>) -> P2PResult<()> {
         Ok(())
     }
 }
@@ -188,24 +186,24 @@ impl FailingMockP2POperations {
 
 #[async_trait]
 impl P2POperations for FailingMockP2POperations {
-    async fn local_peer_id(&self) -> Result<String, String> {
-        Err(self.error.clone())
+    async fn local_peer_id(&self) -> P2PResult<String> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
-    async fn listen_addresses(&self) -> Result<Vec<String>, String> {
-        Err(self.error.clone())
+    async fn listen_addresses(&self) -> P2PResult<Vec<String>> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
-    async fn connected_peers(&self) -> Result<Vec<String>, String> {
-        Err(self.error.clone())
+    async fn connected_peers(&self) -> P2PResult<Vec<String>> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
-    async fn connect_peer(&self, _addr: &str) -> Result<(), String> {
-        Err(self.error.clone())
+    async fn connect_peer(&self, _addr: &str) -> P2PResult<()> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
-    async fn get_replicators(&self) -> Result<Vec<ReplicatorInfo>, String> {
-        Err(self.error.clone())
+    async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
     async fn add_replicator(
@@ -214,55 +212,51 @@ impl P2POperations for FailingMockP2POperations {
         _addr: Option<&str>,
         _explicit_replay_capabilities: Vec<crate::router::ExplicitReplayCapabilityInput>,
         _expected_authorizer_did: Option<&str>,
-    ) -> Result<(), String> {
-        Err(self.error.clone())
+    ) -> P2PResult<()> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
     async fn remove_replicator(
         &self,
         _collections: Vec<String>,
         _addr: Option<&str>,
-    ) -> Result<(), String> {
-        Err(self.error.clone())
+    ) -> P2PResult<()> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
-    async fn get_collections(&self) -> Result<Vec<String>, String> {
-        Err(self.error.clone())
+    async fn get_collections(&self) -> P2PResult<Vec<String>> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
-    async fn add_collections(&self, _collections: Vec<String>) -> Result<(), String> {
-        Err(self.error.clone())
+    async fn add_collections(&self, _collections: Vec<String>) -> P2PResult<()> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
-    async fn remove_collections(&self, _collections: Vec<String>) -> Result<(), String> {
-        Err(self.error.clone())
+    async fn remove_collections(&self, _collections: Vec<String>) -> P2PResult<()> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
-    async fn get_documents(&self) -> Result<Vec<P2pDocumentInfo>, String> {
-        Err(self.error.clone())
+    async fn get_documents(&self) -> P2PResult<Vec<P2pDocumentInfo>> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
-    async fn add_documents(&self, _docs: Vec<P2pDocumentRequest>) -> Result<(), String> {
-        Err(self.error.clone())
+    async fn add_documents(&self, _docs: Vec<P2pDocumentRequest>) -> P2PResult<()> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
-    async fn remove_documents(&self, _docs: Vec<P2pDocumentRequest>) -> Result<(), String> {
-        Err(self.error.clone())
+    async fn remove_documents(&self, _docs: Vec<P2pDocumentRequest>) -> P2PResult<()> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
-    async fn sync_documents(
-        &self,
-        _collection_name: &str,
-        _doc_ids: Vec<String>,
-    ) -> Result<(), String> {
-        Err(self.error.clone())
+    async fn sync_documents(&self, _collection_name: &str, _doc_ids: Vec<String>) -> P2PResult<()> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
-    async fn sync_branchable_collection(&self, _collection_id: &str) -> Result<(), String> {
-        Err(self.error.clone())
+    async fn sync_branchable_collection(&self, _collection_id: &str) -> P2PResult<()> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 
-    async fn sync_collection_versions(&self, _version_ids: Vec<String>) -> Result<(), String> {
-        Err(self.error.clone())
+    async fn sync_collection_versions(&self, _version_ids: Vec<String>) -> P2PResult<()> {
+        Err(P2PError::Internal(self.error.clone()))
     }
 }

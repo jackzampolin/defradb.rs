@@ -6,7 +6,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use blockstore::Blockstore;
 
-use defra_http::router::{ExplicitReplayCapabilityInput, P2POperations, ReplicatorInfo};
+use defra_http::router::{
+    ExplicitReplayCapabilityInput, P2PError, P2POperations, P2PResult, ReplicatorInfo,
+};
 use p2p::sync::Libp2pSyncCoordinator;
 use p2p::topics::DefraTopic;
 use p2p::P2PHostHandle;
@@ -221,28 +223,28 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
 
 #[async_trait]
 impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
-    async fn local_peer_id(&self) -> Result<String, String> {
+    async fn local_peer_id(&self) -> P2PResult<String> {
         self.handle
             .local_peer_id()
             .await
             .map(|id| id.to_string())
-            .map_err(|e| e.to_string())
+            .map_err(|e| P2PError::Transport(e.to_string()))
     }
 
-    async fn listen_addresses(&self) -> Result<Vec<String>, String> {
+    async fn listen_addresses(&self) -> P2PResult<Vec<String>> {
         self.handle
             .listen_addresses()
             .await
             .map(|addrs| addrs.into_iter().map(|a| a.to_string()).collect())
-            .map_err(|e| e.to_string())
+            .map_err(|e| P2PError::Transport(e.to_string()))
     }
 
-    async fn connected_peers(&self) -> Result<Vec<String>, String> {
+    async fn connected_peers(&self) -> P2PResult<Vec<String>> {
         let connected = self
             .handle
             .connected_peers()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| P2PError::Transport(e.to_string()))?;
 
         let all_addrs = self
             .handle
@@ -250,23 +252,24 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 self.peer_addresses.read().ok()?.get(pid).cloned()
             })
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| P2PError::Transport(e.to_string()))?;
 
         Ok(all_addrs)
     }
 
-    async fn connect_peer(&self, addr: &str) -> Result<(), String> {
-        let parsed = p2p::parse_multiaddr_with_peer_id(addr).map_err(|e| e.to_string())?;
+    async fn connect_peer(&self, addr: &str) -> P2PResult<()> {
+        let parsed = p2p::parse_multiaddr_with_peer_id(addr)
+            .map_err(|e| P2PError::InvalidInput(e.to_string()))?;
 
         self.handle
             .dial(parsed.peer_id, vec![parsed.transport_addr])
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| P2PError::Transport(e.to_string()))?;
 
         self.handle
             .poll_until_connected(parsed.peer_id, std::time::Duration::from_secs(10))
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| P2PError::Transport(e.to_string()))?;
 
         // Cache the full multiaddr for connected_peers resolution
         if let Ok(mut addrs) = self.peer_addresses.write() {
@@ -276,12 +279,12 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         Ok(())
     }
 
-    async fn get_replicators(&self) -> Result<Vec<ReplicatorInfo>, String> {
+    async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
         let p2p_infos = self
             .handle
             .list_replicators()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| P2PError::Transport(e.to_string()))?;
 
         let http_infos: Vec<ReplicatorInfo> = p2p_infos
             .into_iter()
@@ -304,16 +307,19 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         addr: Option<&str>,
         explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
         expected_authorizer_did: Option<&str>,
-    ) -> Result<(), String> {
-        let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
-        let parsed = p2p::parse_multiaddr_with_peer_id(addr_str).map_err(|e| e.to_string())?;
+    ) -> P2PResult<()> {
+        let addr_str = addr.ok_or_else(|| P2PError::InvalidInput("address is required".into()))?;
+        let parsed = p2p::parse_multiaddr_with_peer_id(addr_str)
+            .map_err(|e| P2PError::InvalidInput(e.to_string()))?;
 
         // If collections empty, replicate all (matching Go behavior)
         let effective_collections = if collections.is_empty() {
             if let Some(ref pusher) = self.doc_pusher {
                 pusher.list_collections()?
             } else {
-                return Err("no database context to list collections".to_string());
+                return Err(P2PError::Unsupported(
+                    "no database context to list collections".into(),
+                ));
             }
         } else {
             collections
@@ -326,7 +332,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 if let Some(cid) = pusher.get_collection_id(name) {
                     collection_cids.push(cid);
                 } else {
-                    return Err(format!("collection '{}' not found", name));
+                    return Err(P2PError::NotFound(format!(
+                        "collection '{}' not found",
+                        name
+                    )));
                 }
             }
         } else {
@@ -341,15 +350,17 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
         if !explicit_replay_capabilities.is_empty() {
             let expected_authorizer_did = expected_authorizer_did.ok_or_else(|| {
-                "explicit replay capabilities require an authenticated identity".to_string()
+                P2PError::InvalidInput(
+                    "explicit replay capabilities require an authenticated identity".into(),
+                )
             })?;
 
             for capability in explicit_replay_capabilities {
                 if !requested_collections.contains(&capability.collection_id) {
-                    return Err(format!(
+                    return Err(P2PError::InvalidInput(format!(
                         "explicit replay capability collection '{}' was not requested",
                         capability.collection_id
-                    ));
+                    )));
                 }
 
                 let authorization = p2p::verify_explicit_replay_capability(
@@ -359,17 +370,17 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                     &capability.collection_id,
                 )
                 .map_err(|error| {
-                    format!(
+                    P2PError::InvalidInput(format!(
                         "invalid explicit replay capability for collection '{}': {}",
                         capability.collection_id, error
-                    )
+                    ))
                 })?;
 
                 if authorization.authorizer_did != expected_authorizer_did {
-                    return Err(format!(
+                    return Err(P2PError::InvalidInput(format!(
                         "explicit replay capability authorizer '{}' did not match authenticated identity '{}'",
                         authorization.authorizer_did, expected_authorizer_did
-                    ));
+                    )));
                 }
 
                 validated_capabilities.push((capability.collection_id, capability.capability));
@@ -411,12 +422,12 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 coordinator
                     .get_replicator(&transport_pid)
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| P2PError::Transport(e.to_string()))
             } else {
                 self.handle
                     .get_replicator(peer_id)
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| P2PError::Transport(e.to_string()))
             };
             match result {
                 Ok(Some(info)) => info.collections.into_iter().collect(),
@@ -436,7 +447,9 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         self.handle
             .dial(peer_id, vec![parsed.transport_addr])
             .await
-            .map_err(|e| format!("failed to connect to replicator peer: {}", e))?;
+            .map_err(|e| {
+                P2PError::Transport(format!("failed to connect to replicator peer: {}", e))
+            })?;
 
         // Cache peer address for connected_peers resolution
         if let Ok(mut addrs) = self.peer_addresses.write() {
@@ -449,12 +462,12 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             coordinator
                 .create_replicator(&transport_pid, collection_cids.clone(), true)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| P2PError::Transport(e.to_string()))?;
         } else {
             self.handle
                 .create_replicator(peer_id, collection_cids.clone())
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| P2PError::Transport(e.to_string()))?;
         }
 
         // Persist to peerstore (best-effort, log warning on failure)
@@ -529,9 +542,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
-    ) -> Result<(), String> {
-        let addr_str = addr.ok_or_else(|| "address is required".to_string())?;
-        let parsed = p2p::parse_multiaddr_with_peer_id(addr_str).map_err(|e| e.to_string())?;
+    ) -> P2PResult<()> {
+        let addr_str = addr.ok_or_else(|| P2PError::InvalidInput("address is required".into()))?;
+        let parsed = p2p::parse_multiaddr_with_peer_id(addr_str)
+            .map_err(|e| P2PError::InvalidInput(e.to_string()))?;
         let peer_id = parsed.peer_id;
 
         if let Some(ref coordinator) = self.sync_coordinator {
@@ -539,7 +553,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             coordinator
                 .remove_replicator_collections(&transport_pid, collections)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| P2PError::Transport(e.to_string()))?;
         } else {
             if !collections.is_empty() {
                 tracing::warn!(
@@ -551,7 +565,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             self.handle
                 .delete_replicator(peer_id)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| P2PError::Transport(e.to_string()))?;
         }
 
         // Delete from peerstore (best-effort, log warning on failure)
@@ -576,18 +590,18 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         Ok(())
     }
 
-    async fn get_collections(&self) -> Result<Vec<String>, String> {
+    async fn get_collections(&self) -> P2PResult<Vec<String>> {
         if let Some(ref coordinator) = self.sync_coordinator {
             coordinator
                 .get_subscribed_collections()
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| P2PError::Transport(e.to_string()))
         } else {
             Ok(Vec::new())
         }
     }
 
-    async fn add_collections(&self, collections: Vec<String>) -> Result<(), String> {
+    async fn add_collections(&self, collections: Vec<String>) -> P2PResult<()> {
         if let Some(ref coordinator) = self.sync_coordinator {
             for collection_name in collections {
                 let topic_id = if let Some(ref pusher) = self.doc_pusher {
@@ -599,10 +613,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                         );
                         collection_id
                     } else {
-                        return Err(format!(
+                        return Err(P2PError::NotFound(format!(
                             "collection '{}' not found - add schema before subscribing to P2P",
                             collection_name
-                        ));
+                        )));
                     }
                 } else {
                     tracing::warn!(
@@ -615,7 +629,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 coordinator
                     .subscribe_collection(&topic_id)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| P2PError::Transport(e.to_string()))?;
             }
 
             // Persist all subscribed collections (best-effort)
@@ -623,7 +637,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 let all_cols = coordinator
                     .get_subscribed_collections()
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| P2PError::Transport(e.to_string()))?;
                 if let Err(e) = pusher.persist_p2p_collections(&all_cols).await {
                     tracing::warn!(error = %e, "failed to persist P2P collections");
                 }
@@ -631,11 +645,13 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
             Ok(())
         } else {
-            Err("p2p collections functionality requires sync coordinator".to_string())
+            Err(P2PError::Unsupported(
+                "p2p collections functionality requires sync coordinator".into(),
+            ))
         }
     }
 
-    async fn remove_collections(&self, collections: Vec<String>) -> Result<(), String> {
+    async fn remove_collections(&self, collections: Vec<String>) -> P2PResult<()> {
         if let Some(ref coordinator) = self.sync_coordinator {
             let topic_ids = collections
                 .into_iter()
@@ -654,14 +670,14 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 coordinator
                     .unsubscribe_collection(&topic_id)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| P2PError::Transport(e.to_string()))?;
             }
 
             if let Some(ref pusher) = self.doc_pusher {
                 let all_cols = coordinator
                     .get_subscribed_collections()
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| P2PError::Transport(e.to_string()))?;
                 if let Err(e) = pusher.persist_p2p_collections(&all_cols).await {
                     tracing::warn!(error = %e, "failed to persist P2P collections after removal");
                 }
@@ -669,15 +685,17 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
             Ok(())
         } else {
-            Err("p2p collections functionality requires sync coordinator".to_string())
+            Err(P2PError::Unsupported(
+                "p2p collections functionality requires sync coordinator".into(),
+            ))
         }
     }
 
-    async fn get_documents(&self) -> Result<Vec<defra_http::router::P2pDocumentInfo>, String> {
+    async fn get_documents(&self) -> P2PResult<Vec<defra_http::router::P2pDocumentInfo>> {
         let docs = self
             .tracked_documents
             .read()
-            .map_err(|e| format!("failed to read tracked documents: {}", e))?;
+            .map_err(|e| P2PError::Internal(format!("failed to read tracked documents: {}", e)))?;
         let mut sorted: Vec<String> = docs.iter().cloned().collect();
         sorted.sort();
         Ok(sorted
@@ -692,12 +710,13 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     async fn add_documents(
         &self,
         docs: Vec<defra_http::router::P2pDocumentRequest>,
-    ) -> Result<(), String> {
+    ) -> P2PResult<()> {
         let doc_ids: Vec<String> = docs.into_iter().map(|d| d.doc_id).collect();
 
         // Validate all document IDs have valid format (atomic: all or nothing)
-        document::validate_doc_ids(&doc_ids)
-            .map_err(|_| "malformed document ID, missing either version or cid".to_string())?;
+        document::validate_doc_ids(&doc_ids).map_err(|_| {
+            P2PError::InvalidInput("malformed document ID, missing either version or cid".into())
+        })?;
 
         for doc_id in &doc_ids {
             let topic = DefraTopic::document(doc_id);
@@ -727,12 +746,13 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
     async fn remove_documents(
         &self,
         docs: Vec<defra_http::router::P2pDocumentRequest>,
-    ) -> Result<(), String> {
+    ) -> P2PResult<()> {
         let doc_ids: Vec<String> = docs.into_iter().map(|d| d.doc_id).collect();
 
         // Validate all document IDs have valid format (atomic: all or nothing)
-        document::validate_doc_ids(&doc_ids)
-            .map_err(|_| "malformed document ID, missing either version or cid".to_string())?;
+        document::validate_doc_ids(&doc_ids).map_err(|_| {
+            P2PError::InvalidInput("malformed document ID, missing either version or cid".into())
+        })?;
 
         for doc_id in &doc_ids {
             let topic = DefraTopic::document(doc_id);
@@ -747,11 +767,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         Ok(())
     }
 
-    async fn sync_documents(
-        &self,
-        collection_name: &str,
-        doc_ids: Vec<String>,
-    ) -> Result<(), String> {
+    async fn sync_documents(&self, collection_name: &str, doc_ids: Vec<String>) -> P2PResult<()> {
         let pusher = self
             .doc_pusher
             .as_ref()
@@ -763,11 +779,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .as_ref()
             .ok_or_else(|| "no event bus for sync".to_string())?;
 
-        let connected_peers = self
-            .handle
-            .connected_peers()
-            .await
-            .map_err(|e| format!("failed to get connected peers: {}", e))?;
+        let connected_peers =
+            self.handle.connected_peers().await.map_err(|e| {
+                P2PError::Transport(format!("failed to get connected peers: {}", e))
+            })?;
 
         if connected_peers.is_empty() {
             return Ok(());
@@ -791,7 +806,10 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             let mut request = p2p::message::DocSyncRequest::new(doc_ids.clone());
             if let Err(e) = p2p::signing::sign_message(self.handle.keypair(), &mut request) {
                 event_bus.unsubscribe(sub.id());
-                return Err(format!("failed to sign DocSync request: {}", e));
+                return Err(P2PError::Internal(format!(
+                    "failed to sign DocSync request: {}",
+                    e
+                )));
             }
 
             let mut any_sent = false;
@@ -838,26 +856,26 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         Ok(())
     }
 
-    async fn sync_branchable_collection(&self, collection_id: &str) -> Result<(), String> {
+    async fn sync_branchable_collection(&self, collection_id: &str) -> P2PResult<()> {
         let pusher = self
             .doc_pusher
             .as_ref()
             .ok_or_else(|| "no database context for sync".to_string())?;
         pusher.validate_branchable_collection(collection_id)?;
 
-        let connected_peers = self
-            .handle
-            .connected_peers()
-            .await
-            .map_err(|e| format!("failed to get connected peers: {}", e))?;
+        let connected_peers =
+            self.handle.connected_peers().await.map_err(|e| {
+                P2PError::Transport(format!("failed to get connected peers: {}", e))
+            })?;
 
         if connected_peers.is_empty() {
             return Ok(());
         }
 
         let mut request = p2p::message::BranchableSyncRequest::new(collection_id.to_string());
-        p2p::signing::sign_message(self.handle.keypair(), &mut request)
-            .map_err(|e| format!("failed to sign BranchableSync request: {}", e))?;
+        p2p::signing::sign_message(self.handle.keypair(), &mut request).map_err(|e| {
+            P2PError::Internal(format!("failed to sign BranchableSync request: {}", e))
+        })?;
 
         for peer_id in &connected_peers {
             let request_clone = request.clone();
@@ -877,21 +895,21 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         Ok(())
     }
 
-    async fn sync_collection_versions(&self, version_ids: Vec<String>) -> Result<(), String> {
+    async fn sync_collection_versions(&self, version_ids: Vec<String>) -> P2PResult<()> {
         if version_ids.is_empty() {
             return Ok(());
         }
 
         // Validate all CIDs upfront before attempting sync (matches Go behavior).
         for vid in &version_ids {
-            cid::Cid::try_from(vid.as_str()).map_err(|e| format!("invalid cid: {}", e))?;
+            cid::Cid::try_from(vid.as_str())
+                .map_err(|e| P2PError::InvalidInput(format!("invalid cid: {}", e)))?;
         }
 
-        let connected_peers = self
-            .handle
-            .connected_peers()
-            .await
-            .map_err(|e| format!("failed to get connected peers: {}", e))?;
+        let connected_peers =
+            self.handle.connected_peers().await.map_err(|e| {
+                P2PError::Transport(format!("failed to get connected peers: {}", e))
+            })?;
 
         if connected_peers.is_empty() {
             return Ok(());
@@ -905,5 +923,6 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         syncer
             .sync_versions(&self.handle, version_ids, connected_peers)
             .await
+            .map_err(P2PError::from)
     }
 }
