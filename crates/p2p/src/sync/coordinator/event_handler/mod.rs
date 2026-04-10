@@ -18,6 +18,31 @@ use crate::transport::{P2PTransport, PeerId, ResponseToken, TransportEvent};
 const RATE_LIMITED_MSG: &str = "rate limited: too many requests, retry later";
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
+    fn handle_peer_connected(&self, peer_id: PeerId) {
+        tracing::debug!(peer_id = %peer_id, "Peer connected");
+        self.access.peer_state.peer_connected(peer_id.as_str());
+    }
+
+    fn handle_peer_disconnected(&self, peer_id: PeerId) {
+        tracing::debug!(peer_id = %peer_id, "Peer disconnected");
+        self.access.peer_state.peer_disconnected(peer_id.as_str());
+        self.runtime.rate_limiter.remove_peer(&peer_id);
+    }
+
+    fn handle_peer_subscribed(&self, peer_id: PeerId, topic: String) {
+        tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer subscribed to topic");
+        self.access
+            .peer_state
+            .peer_subscribed(peer_id.as_str(), topic);
+    }
+
+    fn handle_peer_unsubscribed(&self, peer_id: PeerId, topic: String) {
+        tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer unsubscribed from topic");
+        self.access
+            .peer_state
+            .peer_unsubscribed(peer_id.as_str(), &topic);
+    }
+
     fn rate_limited_error(peer_id: &PeerId) -> Error {
         Error::AccessDenied {
             peer_id: peer_id.to_string(),
@@ -149,25 +174,16 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub async fn handle_transport_event(&self, event: TransportEvent) -> Result<()> {
         match event {
             TransportEvent::PeerConnected(peer_id) => {
-                tracing::debug!(peer_id = %peer_id, "Peer connected");
-                self.access.peer_state.peer_connected(peer_id.as_str());
+                self.handle_peer_connected(peer_id);
             }
             TransportEvent::PeerDisconnected(peer_id) => {
-                tracing::debug!(peer_id = %peer_id, "Peer disconnected");
-                self.access.peer_state.peer_disconnected(peer_id.as_str());
-                self.runtime.rate_limiter.remove_peer(&peer_id);
+                self.handle_peer_disconnected(peer_id);
             }
             TransportEvent::PeerSubscribed { peer_id, topic } => {
-                tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer subscribed to topic");
-                self.access
-                    .peer_state
-                    .peer_subscribed(peer_id.as_str(), topic);
+                self.handle_peer_subscribed(peer_id, topic);
             }
             TransportEvent::PeerUnsubscribed { peer_id, topic } => {
-                tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer unsubscribed from topic");
-                self.access
-                    .peer_state
-                    .peer_unsubscribed(peer_id.as_str(), &topic);
+                self.handle_peer_unsubscribed(peer_id, topic);
             }
             TransportEvent::GossipMessage {
                 propagation_source,
