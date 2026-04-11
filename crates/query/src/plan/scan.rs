@@ -3,7 +3,6 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use defra_core::collection_short_id;
 use schema::CollectionVersion;
 
 use tracing::debug;

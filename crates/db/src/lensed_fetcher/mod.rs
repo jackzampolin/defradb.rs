@@ -130,7 +130,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         let (collection, datastore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
-        let short_id = collection_short_id(collection.collection_id());
+        let short_id = collection.resolved_root_id();
         let index_manager =
             IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
                 query::error::QueryError::execution(format!(
