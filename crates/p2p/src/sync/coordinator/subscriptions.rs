@@ -13,15 +13,22 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Uses a write lock for the entire operation to prevent concurrent
     /// subscribe calls from racing past the contains-check.
     pub async fn subscribe_collection(&self, collection_id: &str) -> Result<bool> {
-        let mut subscribed_collections = self.subscribed_collections.write().await;
+        let mut subscribed_collections = self.subscriptions.subscribed_collections.write().await;
 
         if subscribed_collections.contains(collection_id) {
             return Ok(false);
         }
 
-        self.collection_store.add_collection(collection_id).await?;
+        self.subscriptions
+            .collection_store
+            .add_collection(collection_id)
+            .await?;
 
-        let result = self.broadcaster.subscribe_collection(collection_id).await;
+        let result = self
+            .runtime
+            .broadcaster
+            .subscribe_collection(collection_id)
+            .await;
 
         match result {
             Ok(subscribed) => {
@@ -33,8 +40,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 Ok(subscribed)
             }
             Err(e) => {
-                if let Err(remove_err) =
-                    self.collection_store.remove_collection(collection_id).await
+                if let Err(remove_err) = self
+                    .subscriptions
+                    .collection_store
+                    .remove_collection(collection_id)
+                    .await
                 {
                     tracing::error!(
                         collection_id = %collection_id,
@@ -50,21 +60,24 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
     /// Subscribe to a specific document for sync.
     pub async fn subscribe_document(&self, doc_id: &str) -> Result<bool> {
-        self.broadcaster.subscribe_document(doc_id).await
+        self.runtime.broadcaster.subscribe_document(doc_id).await
     }
 
     /// Unsubscribe from a collection.
     pub async fn unsubscribe_collection(&self, collection_id: &str) -> Result<bool> {
         let result = self
+            .runtime
             .broadcaster
             .unsubscribe_collection(collection_id)
             .await?;
         if result {
-            self.collection_store
+            self.subscriptions
+                .collection_store
                 .remove_collection(collection_id)
                 .await?;
 
-            self.subscribed_collections
+            self.subscriptions
+                .subscribed_collections
                 .write()
                 .await
                 .remove(collection_id);
@@ -76,18 +89,22 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
     /// Unsubscribe from a document.
     pub async fn unsubscribe_document(&self, doc_id: &str) -> Result<bool> {
-        self.broadcaster.unsubscribe_document(doc_id).await
+        self.runtime.broadcaster.unsubscribe_document(doc_id).await
     }
 
     /// Get the list of subscribed collection IDs.
     pub async fn get_subscribed_collections(&self) -> Result<Vec<String>> {
-        let collections = self.subscribed_collections.read().await;
+        let collections = self.subscriptions.subscribed_collections.read().await;
         Ok(collections.iter().cloned().collect())
     }
 
     /// Load and subscribe to all persisted P2P collections.
     pub async fn load_p2p_collections(&self) -> Result<usize> {
-        let collections = self.collection_store.get_all_collections().await?;
+        let collections = self
+            .subscriptions
+            .collection_store
+            .get_all_collections()
+            .await?;
         let count = collections.len();
 
         if count == 0 {
@@ -99,9 +116,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
         let mut loaded = 0;
         for collection_id in collections {
-            match self.broadcaster.subscribe_collection(&collection_id).await {
+            match self
+                .runtime
+                .broadcaster
+                .subscribe_collection(&collection_id)
+                .await
+            {
                 Ok(true) => {
-                    self.subscribed_collections
+                    self.subscriptions
+                        .subscribed_collections
                         .write()
                         .await
                         .insert(collection_id.clone());
@@ -109,7 +132,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     tracing::debug!(collection_id = %collection_id, "Loaded P2P collection subscription");
                 }
                 Ok(false) => {
-                    self.subscribed_collections
+                    self.subscriptions
+                        .subscribed_collections
                         .write()
                         .await
                         .insert(collection_id.clone());
