@@ -200,7 +200,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
         let effective_collections = if collections.is_empty() {
             if let Some(ref pusher) = self.doc_pusher {
-                pusher.list_collections().map_err(P2PError::from)?
+                pusher.list_collections()?
             } else {
                 return Err(P2PError::unsupported(
                     "no database context to list collections",
@@ -415,7 +415,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .doc_pusher
             .as_ref()
             .ok_or_else(|| P2PError::unsupported("no database context to retry replicators"))?;
-        let collections = pusher.list_collections().map_err(P2PError::from)?;
+        let collections = pusher.list_collections()?;
         let replicators =
             self.handle.list_replicators().await.map_err(|error| {
                 P2PError::transport(format!("failed to get replicators: {error}"))
@@ -626,16 +626,11 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .sync_coordinator
             .as_ref()
             .ok_or_else(|| P2PError::unsupported("no sync coordinator for republish"))?;
-        pusher
-            .validate_collection_exists(collection_name)
-            .map_err(P2PError::from)?;
+        pusher.validate_collection_exists(collection_name)?;
         let collection_id = pusher.get_collection_id(collection_name).ok_or_else(|| {
             P2PError::not_found(format!("collection '{collection_name}' not found"))
         })?;
-        let head_blocks = pusher
-            .load_document_head_blocks(doc_id)
-            .await
-            .map_err(P2PError::from)?;
+        let head_blocks = pusher.load_document_head_blocks(doc_id).await?;
 
         for (cid, block) in head_blocks {
             coordinator
@@ -654,9 +649,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .doc_pusher
             .as_ref()
             .ok_or_else(|| P2PError::unsupported("no database context for sync"))?;
-        pusher
-            .validate_collection_exists(collection_name)
-            .map_err(P2PError::from)?;
+        pusher.validate_collection_exists(collection_name)?;
 
         let event_bus = self
             .event_bus
@@ -732,9 +725,7 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
             .doc_pusher
             .as_ref()
             .ok_or_else(|| P2PError::unsupported("no database context for sync"))?;
-        pusher
-            .validate_branchable_collection(collection_id)
-            .map_err(P2PError::from)?;
+        pusher.validate_branchable_collection(collection_id)?;
 
         let connected_peers = self.handle.connected_peers().await.map_err(|error| {
             P2PError::transport(format!("failed to get connected peers: {error}"))
@@ -788,6 +779,5 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         syncer
             .sync_versions(&self.handle, version_ids, connected_peers)
             .await
-            .map_err(P2PError::from)
     }
 }
