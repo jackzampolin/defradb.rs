@@ -2,6 +2,7 @@
 
 use axum::{extract::State, Json};
 
+use super::{map_p2p_bad_request, map_p2p_internal};
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
@@ -21,7 +22,7 @@ pub async fn list_collections(
 
     let p2p = state.require_p2p()?;
 
-    let collections = p2p.get_collections().await.map_err(HttpError::Internal)?;
+    let collections = p2p.get_collections().await.map_err(map_p2p_internal)?;
 
     Ok(Json(collections))
 }
@@ -55,7 +56,7 @@ pub async fn add_collections(
 
     p2p.add_collections(collections)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(map_p2p_bad_request)?;
 
     // Go returns 200 OK with empty body
     Ok(())
@@ -90,7 +91,7 @@ pub async fn remove_collections(
 
     p2p.remove_collections(collections)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(map_p2p_bad_request)?;
 
     // Go returns 200 OK with empty body
     Ok(())
@@ -119,7 +120,7 @@ pub async fn sync_branchable(
 
     p2p.sync_branchable_collection(&body.collection_id)
         .await
-        .map_err(HttpError::Internal)?;
+        .map_err(map_p2p_internal)?;
 
     Ok(Json(()))
 }
@@ -142,7 +143,7 @@ pub async fn sync_versions(
 
     p2p.sync_collection_versions(body.version_ids)
         .await
-        .map_err(HttpError::Internal)?;
+        .map_err(map_p2p_internal)?;
 
     Ok(Json(()))
 }

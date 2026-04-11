@@ -9,10 +9,33 @@
 //!
 //! All endpoints enforce NAC permissions when NAC is enabled.
 
+use crate::error::HttpError;
+use crate::router::P2PError;
+
 mod collections;
 mod documents;
 mod peers;
 mod replicators;
+
+fn map_p2p_bad_request(error: P2PError) -> HttpError {
+    match error {
+        P2PError::InvalidInput(message) => HttpError::BadRequest(message),
+        P2PError::NotFound(message) => HttpError::NotFound(message),
+        P2PError::Unsupported(message) => HttpError::NotImplemented(message),
+        P2PError::Transport(message) => HttpError::BadRequest(message),
+        P2PError::Internal(message) => HttpError::Internal(message),
+    }
+}
+
+fn map_p2p_internal(error: P2PError) -> HttpError {
+    match error {
+        P2PError::InvalidInput(message) => HttpError::BadRequest(message),
+        P2PError::NotFound(message) => HttpError::NotFound(message),
+        P2PError::Unsupported(message) => HttpError::NotImplemented(message),
+        P2PError::Transport(message) => HttpError::Internal(message),
+        P2PError::Internal(message) => HttpError::Internal(message),
+    }
+}
 
 pub use collections::{
     add_collections, list_collections, remove_collections, sync_branchable, sync_versions,

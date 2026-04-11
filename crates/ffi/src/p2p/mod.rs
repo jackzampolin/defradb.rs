@@ -5,6 +5,8 @@
 //! - Replicator management
 //! - P2P collection management
 
+use std::fmt;
+
 mod collections;
 mod documents;
 mod node;
@@ -23,18 +25,154 @@ pub use replicator::{p2p_add_replicator, p2p_delete_replicator, p2p_list_replica
 pub use sync::{p2p_sync_branchable_collection, p2p_sync_documents};
 pub use version_sync::p2p_sync_collection_versions;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FfiP2PErrorCode {
+    InvalidInput,
+    NotFound,
+    Unsupported,
+    Transport,
+    Internal,
+}
+
+/// Internal P2P error classification for the FFI layer.
+///
+/// The public C ABI still only exposes `status + error string`, but keeping
+/// a structured error inside Rust lets us standardize the boundary now and add
+/// error codes later without re-auditing every entrypoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FfiP2PError {
+    pub(crate) code: FfiP2PErrorCode,
+    pub(crate) message: String,
+}
+
+pub(crate) type FfiP2PResult<T> = Result<T, FfiP2PError>;
+
+impl FfiP2PError {
+    pub(crate) fn invalid_input(message: impl Into<String>) -> Self {
+        Self {
+            code: FfiP2PErrorCode::InvalidInput,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: FfiP2PErrorCode::NotFound,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn unsupported(message: impl Into<String>) -> Self {
+        Self {
+            code: FfiP2PErrorCode::Unsupported,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn transport(message: impl Into<String>) -> Self {
+        Self {
+            code: FfiP2PErrorCode::Transport,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn internal(message: impl Into<String>) -> Self {
+        Self {
+            code: FfiP2PErrorCode::Internal,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn no_p2p_system() -> Self {
+        Self::unsupported("no p2p system configured")
+    }
+
+    pub(crate) fn invalid_node_handle() -> Self {
+        Self::invalid_input(crate::ERR_INVALID_NODE_HANDLE)
+    }
+}
+
+impl fmt::Display for FfiP2PError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<embedded::P2PError> for FfiP2PError {
+    fn from(error: embedded::P2PError) -> Self {
+        match error {
+            embedded::P2PError::InvalidInput(message) => Self::invalid_input(message),
+            embedded::P2PError::NotFound(message) => Self::not_found(message),
+            embedded::P2PError::Unsupported(message) => Self::unsupported(message),
+            embedded::P2PError::Transport(message) => Self::transport(message),
+            embedded::P2PError::Persistence(message) => Self::internal(message),
+            embedded::P2PError::Internal(message) => Self::internal(message),
+            _ => Self::internal(error.to_string()),
+        }
+    }
+}
+
+impl From<String> for FfiP2PError {
+    fn from(message: String) -> Self {
+        Self::internal(message)
+    }
+}
+
+impl From<&str> for FfiP2PError {
+    fn from(message: &str) -> Self {
+        Self::internal(message.to_string())
+    }
+}
+
+pub(crate) fn into_ffi_result(result: FfiP2PResult<String>) -> crate::types::FfiResult {
+    match result {
+        Ok(json) => crate::types::FfiResult::success(json),
+        Err(error) => crate::types::FfiResult::error(error.message),
+    }
+}
+
+pub(crate) fn into_ffi_ok(result: FfiP2PResult<()>) -> crate::types::FfiResult {
+    match result {
+        Ok(()) => crate::types::FfiResult::ok(),
+        Err(error) => crate::types::FfiResult::error(error.message),
+    }
+}
+
 /// Parse a JSON array of collection names.
 ///
 /// Expects format like: `["collection1", "collection2"]`
 /// Also handles JSON `null` (treated as empty array).
-pub(crate) fn parse_collections_json(json_str: &str) -> Result<Vec<String>, String> {
-    let opt: Option<Vec<String>> =
-        serde_json::from_str(json_str).map_err(|e| format!("invalid collections JSON: {}", e))?;
+pub(crate) fn parse_collections_json(json_str: &str) -> FfiP2PResult<Vec<String>> {
+    let opt: Option<Vec<String>> = serde_json::from_str(json_str)
+        .map_err(|e| FfiP2PError::invalid_input(format!("invalid collections JSON: {}", e)))?;
     Ok(opt.unwrap_or_default())
 }
 
-pub(crate) fn parse_doc_ids_json(json_str: &str) -> Result<Vec<String>, String> {
-    let opt: Option<Vec<String>> =
-        serde_json::from_str(json_str).map_err(|e| format!("invalid doc_ids JSON: {}", e))?;
+pub(crate) fn parse_doc_ids_json(json_str: &str) -> FfiP2PResult<Vec<String>> {
+    let opt: Option<Vec<String>> = serde_json::from_str(json_str)
+        .map_err(|e| FfiP2PError::invalid_input(format!("invalid doc_ids JSON: {}", e)))?;
     Ok(opt.unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_collections_json, FfiP2PError, FfiP2PErrorCode};
+
+    #[test]
+    fn maps_embedded_error_variants() {
+        let error = FfiP2PError::from(embedded::P2PError::invalid_input("bad addr"));
+        assert_eq!(error.code, FfiP2PErrorCode::InvalidInput);
+        assert_eq!(error.message, "bad addr");
+
+        let error = FfiP2PError::from(embedded::P2PError::transport("dial failed"));
+        assert_eq!(error.code, FfiP2PErrorCode::Transport);
+        assert_eq!(error.message, "dial failed");
+    }
+
+    #[test]
+    fn parses_invalid_collections_as_invalid_input() {
+        let error = parse_collections_json("{").unwrap_err();
+        assert_eq!(error.code, FfiP2PErrorCode::InvalidInput);
+        assert!(error.message.contains("invalid collections JSON"));
+    }
 }

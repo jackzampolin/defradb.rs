@@ -1,8 +1,10 @@
 use crate::ffi_entry;
 use crate::helpers::get_rt;
 use crate::state::NODES;
+use crate::try_ffi;
 use crate::types::FfiResult;
-use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
+
+use super::{into_ffi_ok, FfiP2PError};
 
 /// Retry pushing existing documents to all registered replicators.
 ///
@@ -18,7 +20,7 @@ pub unsafe extern "C" fn p2p_retry_replicators(node_ptr: usize) -> FfiResult {
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
                     Some(p2p) => p2p,
-                    None => return Err("no p2p system configured".to_string()),
+                    None => return Err(FfiP2PError::no_p2p_system()),
                 };
                 let push_options = embedded::ReplicatorPushOptions {
                     se_encryption_key: state.se_encryption_key.as_ref().map(|key| key.to_vec()),
@@ -28,14 +30,17 @@ pub unsafe extern "C" fn p2p_retry_replicators(node_ptr: usize) -> FfiResult {
                         .map(|identity| identity.as_bytes().to_vec()),
                 };
 
-                rt.block_on(async { p2p.system.ops().retry_replicators(push_options).await })
+                rt.block_on(async {
+                    p2p.system
+                        .ops()
+                        .retry_replicators(push_options)
+                        .await
+                        .map_err(FfiP2PError::from)
+                })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(()) => FfiResult::ok(),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_ok(result)
     }
 }

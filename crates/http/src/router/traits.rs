@@ -1,5 +1,7 @@
 //! Operation traits and supporting types for the HTTP router.
 
+use thiserror::Error;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExplicitReplayCapabilityInput {
     #[serde(rename = "CollectionID")]
@@ -8,31 +10,60 @@ pub struct ExplicitReplayCapabilityInput {
     pub capability: String,
 }
 
+/// HTTP-facing P2P error categories.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum P2PError {
+    #[error("invalid request: {0}")]
+    InvalidInput(String),
+
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    #[error("unsupported operation: {0}")]
+    Unsupported(String),
+
+    #[error("transport error: {0}")]
+    Transport(String),
+
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
+pub type P2PResult<T> = Result<T, P2PError>;
+
+impl From<String> for P2PError {
+    fn from(message: String) -> Self {
+        Self::Internal(message)
+    }
+}
+
+impl From<&str> for P2PError {
+    fn from(message: &str) -> Self {
+        Self::Internal(message.to_string())
+    }
+}
+
 /// Trait for P2P operations that can be accessed via HTTP.
 ///
 /// Abstracts P2P host functionality to decouple HTTP handlers from the
 /// actual P2P implementation, enabling both dependency injection and testing.
-///
-/// All methods return `Result<T, String>` where the error string should be
-/// a user-friendly message. For validation failures, use descriptive messages
-/// like "invalid address format". For internal errors, use messages like
-/// "failed to connect: <reason>".
 #[async_trait::async_trait]
 pub trait P2POperations: Send + Sync {
     /// Get the local peer ID.
-    async fn local_peer_id(&self) -> Result<String, String>;
+    async fn local_peer_id(&self) -> P2PResult<String>;
 
     /// Get listening addresses.
-    async fn listen_addresses(&self) -> Result<Vec<String>, String>;
+    async fn listen_addresses(&self) -> P2PResult<Vec<String>>;
 
     /// Get connected peers.
-    async fn connected_peers(&self) -> Result<Vec<String>, String>;
+    async fn connected_peers(&self) -> P2PResult<Vec<String>>;
 
     /// Connect to a peer at the given address.
-    async fn connect_peer(&self, addr: &str) -> Result<(), String>;
+    async fn connect_peer(&self, addr: &str) -> P2PResult<()>;
 
     /// Get all replicators.
-    async fn get_replicators(&self) -> Result<Vec<ReplicatorInfo>, String>;
+    async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>>;
 
     /// Add a replicator for collections.
     async fn add_replicator(
@@ -41,45 +72,41 @@ pub trait P2POperations: Send + Sync {
         addr: Option<&str>,
         explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
         expected_authorizer_did: Option<&str>,
-    ) -> Result<(), String>;
+    ) -> P2PResult<()>;
 
     /// Remove a replicator for collections.
     async fn remove_replicator(
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
-    ) -> Result<(), String>;
+    ) -> P2PResult<()>;
 
     /// Get P2P collections.
-    async fn get_collections(&self) -> Result<Vec<String>, String>;
+    async fn get_collections(&self) -> P2PResult<Vec<String>>;
 
     /// Add collections to P2P.
-    async fn add_collections(&self, collections: Vec<String>) -> Result<(), String>;
+    async fn add_collections(&self, collections: Vec<String>) -> P2PResult<()>;
 
     /// Remove collections from P2P.
-    async fn remove_collections(&self, collections: Vec<String>) -> Result<(), String>;
+    async fn remove_collections(&self, collections: Vec<String>) -> P2PResult<()>;
 
     /// Get P2P documents (for document-level replication).
-    async fn get_documents(&self) -> Result<Vec<P2pDocumentInfo>, String>;
+    async fn get_documents(&self) -> P2PResult<Vec<P2pDocumentInfo>>;
 
     /// Add documents to P2P replication.
-    async fn add_documents(&self, docs: Vec<P2pDocumentRequest>) -> Result<(), String>;
+    async fn add_documents(&self, docs: Vec<P2pDocumentRequest>) -> P2PResult<()>;
 
     /// Remove documents from P2P replication.
-    async fn remove_documents(&self, docs: Vec<P2pDocumentRequest>) -> Result<(), String>;
+    async fn remove_documents(&self, docs: Vec<P2pDocumentRequest>) -> P2PResult<()>;
 
     /// Sync specific documents from connected peers.
-    async fn sync_documents(
-        &self,
-        collection_name: &str,
-        doc_ids: Vec<String>,
-    ) -> Result<(), String>;
+    async fn sync_documents(&self, collection_name: &str, doc_ids: Vec<String>) -> P2PResult<()>;
 
     /// Sync a branchable collection from connected peers.
-    async fn sync_branchable_collection(&self, collection_id: &str) -> Result<(), String>;
+    async fn sync_branchable_collection(&self, collection_id: &str) -> P2PResult<()>;
 
     /// Sync collection versions (schema definitions) from connected peers via Bitswap.
-    async fn sync_collection_versions(&self, version_ids: Vec<String>) -> Result<(), String>;
+    async fn sync_collection_versions(&self, version_ids: Vec<String>) -> P2PResult<()>;
 }
 
 /// Replicator information for HTTP responses.

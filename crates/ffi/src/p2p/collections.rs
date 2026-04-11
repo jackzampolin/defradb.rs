@@ -6,10 +6,10 @@ use acp::nac::NodePermission;
 use crate::helpers::{get_rt, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
+use crate::try_ffi;
 use crate::types::FfiResult;
-use crate::{try_ffi, ERR_INVALID_NODE_HANDLE};
 
-use super::parse_collections_json;
+use super::{into_ffi_ok, into_ffi_result, parse_collections_json, FfiP2PError};
 
 /// Add P2P-enabled collections to the node.
 ///
@@ -35,25 +35,28 @@ pub unsafe extern "C" fn p2p_add_collections(
         let collections_str = try_ffi!(require_c_str(collections_json, "collections_json"));
         let collections = match parse_collections_json(&collections_str) {
             Ok(collections) => collections,
-            Err(error) => return FfiResult::error(error),
+            Err(error) => return FfiResult::error(error.message),
         };
 
         let result = NODES
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
                     Some(p2p) => p2p,
-                    None => return Err("no p2p system configured".to_string()),
+                    None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async { p2p.system.ops().add_collections(collections).await })
+                rt.block_on(async {
+                    p2p.system
+                        .ops()
+                        .add_collections(collections)
+                        .await
+                        .map_err(FfiP2PError::from)
+                })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(()) => FfiResult::ok(),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_ok(result)
     }
 }
 
@@ -81,25 +84,28 @@ pub unsafe extern "C" fn p2p_delete_collections(
         let collections_str = try_ffi!(require_c_str(collections_json, "collections_json"));
         let collections = match parse_collections_json(&collections_str) {
             Ok(collections) => collections,
-            Err(error) => return FfiResult::error(error),
+            Err(error) => return FfiResult::error(error.message),
         };
 
         let result = NODES
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
                     Some(p2p) => p2p,
-                    None => return Err("no p2p system configured".to_string()),
+                    None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async { p2p.system.ops().remove_collections(collections).await })
+                rt.block_on(async {
+                    p2p.system
+                        .ops()
+                        .remove_collections(collections)
+                        .await
+                        .map_err(FfiP2PError::from)
+                })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(()) => FfiResult::ok(),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_ok(result)
     }
 }
 
@@ -127,21 +133,28 @@ pub unsafe extern "C" fn p2p_list_collections(
             .get(node_ptr, |state| {
                 let p2p = match &state.p2p {
                     Some(p2p) => p2p,
-                    None => return Err("no p2p system configured".to_string()),
+                    None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
                 rt.block_on(async {
-                    let collections = p2p.system.ops().get_collections().await?;
+                    let collections = p2p
+                        .system
+                        .ops()
+                        .get_collections()
+                        .await
+                        .map_err(FfiP2PError::from)?;
                     serde_json::to_string(&collections)
-                        .map_err(|error| format!("failed to serialize collections: {}", error))
+                        .map_err(|error| {
+                            FfiP2PError::internal(format!(
+                                "failed to serialize collections: {}",
+                                error
+                            ))
+                        })
                 })
             })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())
+            .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);
 
-        match result {
-            Ok(json) => FfiResult::success(json),
-            Err(error) => FfiResult::error(error),
-        }
+        into_ffi_result(result)
     }
 }

@@ -3,6 +3,7 @@
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 
+use super::{map_p2p_bad_request, map_p2p_internal};
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
@@ -45,9 +46,9 @@ pub async fn get_info(
 
     let p2p = state.require_p2p()?;
 
-    let peer_id = p2p.local_peer_id().await.map_err(HttpError::Internal)?;
+    let peer_id = p2p.local_peer_id().await.map_err(map_p2p_internal)?;
 
-    let addresses = p2p.listen_addresses().await.map_err(HttpError::Internal)?;
+    let addresses = p2p.listen_addresses().await.map_err(map_p2p_internal)?;
 
     let full_addrs: Vec<String> = addresses
         .into_iter()
@@ -76,7 +77,7 @@ pub async fn list_peers(
 
     let p2p = state.require_p2p()?;
 
-    let peers = p2p.connected_peers().await.map_err(HttpError::Internal)?;
+    let peers = p2p.connected_peers().await.map_err(map_p2p_internal)?;
 
     let peer_infos: Vec<PeerInfo> = peers
         .into_iter()
@@ -101,7 +102,7 @@ pub async fn active_peers(
 
     let p2p = state.require_p2p()?;
 
-    let peers = p2p.connected_peers().await.map_err(HttpError::Internal)?;
+    let peers = p2p.connected_peers().await.map_err(map_p2p_internal)?;
 
     Ok(Json(peers))
 }
@@ -127,7 +128,7 @@ pub async fn connect_peer(
 
     p2p.connect_peer(&request.address)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(map_p2p_bad_request)?;
 
     Ok(Json(()))
 }
@@ -150,9 +151,7 @@ pub async fn connect(
 
     for addr in &addresses {
         validate_multiaddr(addr)?;
-        p2p.connect_peer(addr)
-            .await
-            .map_err(HttpError::BadRequest)?;
+        p2p.connect_peer(addr).await.map_err(map_p2p_bad_request)?;
     }
 
     Ok(())
