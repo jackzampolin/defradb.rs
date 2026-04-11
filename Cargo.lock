@@ -3695,6 +3695,7 @@ dependencies = [
  "schema",
  "serde",
  "serde_json",
+ "sourcehub",
  "storage",
  "tokio",
  "tracing",
