@@ -37,7 +37,8 @@ tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing.workspace = true
 
 [features]
-default = []
+default = ["redb"]
+redb = ["storage/redb"]
 iroh = ["p2p/iroh-transport"]
 
 [dev-dependencies]
