@@ -3,12 +3,15 @@
 use std::sync::Arc;
 
 use datastore::BasicTxn;
+use db::collection::ensure_persisted_collection_short_id;
 use db::txn::DbTxn;
 use db::Error;
 use storage::backends::MemoryStore;
+use storage::corekv::Key;
+use storage::keys::systemstore::{CollectionID, CollectionIDSequenceKey};
 
 fn new_txn(basic_txn: BasicTxn) -> DbTxn<MemoryStore> {
-    DbTxn::new(basic_txn)
+    DbTxn::<MemoryStore>::new(basic_txn)
 }
 
 fn new_explicit_txn(basic_txn: BasicTxn) -> DbTxn<MemoryStore> {
@@ -246,6 +249,74 @@ async fn test_db_txn_id_increments() {
     let basic_txn3 = BasicTxn::new(&*store, 100, false).await.unwrap();
     let txn3 = new_txn(basic_txn3);
     assert_eq!(txn3.id().unwrap(), 100);
+}
+
+#[tokio::test]
+async fn test_persisted_collection_root_id_allocation_conflicts_instead_of_duplicating() {
+    let store = Arc::new(MemoryStore::new());
+
+    let txn1 = DbTxn::<MemoryStore>::new(BasicTxn::new(&*store, 1, false).await.unwrap());
+    let txn2 = DbTxn::<MemoryStore>::new(BasicTxn::new(&*store, 2, false).await.unwrap());
+
+    let short_id_1 = {
+        let systemstore1 = txn1.systemstore().unwrap();
+        ensure_persisted_collection_short_id(&systemstore1, "collection-a")
+            .await
+            .unwrap()
+    };
+    let short_id_2 = {
+        let systemstore2 = txn2.systemstore().unwrap();
+        ensure_persisted_collection_short_id(&systemstore2, "collection-b")
+            .await
+            .unwrap()
+    };
+
+    assert_eq!(short_id_1, 1);
+    assert_eq!(
+        short_id_2, 1,
+        "concurrent snapshots may tentatively pick the same next ID"
+    );
+
+    txn1.commit().await.unwrap();
+
+    let err = txn2.commit().await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Datastore(datastore::Error::Storage(storage::Error::TxnConflict))
+        ),
+        "expected write-write conflict, got: {err}"
+    );
+
+    let retry_txn = DbTxn::<MemoryStore>::new(BasicTxn::new(&*store, 3, false).await.unwrap());
+    let retried_short_id = {
+        let retry_systemstore = retry_txn.systemstore().unwrap();
+        ensure_persisted_collection_short_id(&retry_systemstore, "collection-b")
+            .await
+            .unwrap()
+    };
+    assert_eq!(retried_short_id, 2);
+    retry_txn.commit().await.unwrap();
+
+    let read_txn = DbTxn::<MemoryStore>::new(BasicTxn::new(&*store, 4, true).await.unwrap());
+    let (collection_a_short_id, collection_b_short_id, sequence_value) = {
+        let read_systemstore = read_txn.systemstore().unwrap();
+        let sequence_key = CollectionIDSequenceKey;
+        let collection_a_short_id = read_systemstore
+            .get(&CollectionID::new("collection-a").bytes())
+            .await
+            .unwrap();
+        let collection_b_short_id = read_systemstore
+            .get(&CollectionID::new("collection-b").bytes())
+            .await
+            .unwrap();
+        let sequence_value = read_systemstore.get(&sequence_key.bytes()).await.unwrap();
+        (collection_a_short_id, collection_b_short_id, sequence_value)
+    };
+
+    assert_eq!(collection_a_short_id, Some(b"1".to_vec()));
+    assert_eq!(collection_b_short_id, Some(b"2".to_vec()));
+    assert_eq!(sequence_value, Some(2u32.to_be_bytes().to_vec()));
 }
 
 #[tokio::test]

@@ -3,7 +3,6 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use defra_core::collection_short_id;
 use schema::CollectionVersion;
 
 use tracing::debug;
@@ -135,15 +134,8 @@ impl ScanNode {
     }
 
     /// Get the storage prefix for this collection.
-    ///
-    /// Uses the sequential root_id if available (assigned during collection creation),
-    /// falling back to hash-based short_id for backwards compatibility.
     fn collection_prefix(&self) -> u32 {
-        if self.collection.root_id > 0 {
-            self.collection.root_id
-        } else {
-            collection_short_id(&self.collection.collection_id)
-        }
+        self.collection.resolved_root_id()
     }
 }
 

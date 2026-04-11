@@ -110,6 +110,7 @@ pub use block_builder::build_block_from_document;
 pub use block_builder::{build_blocks_from_document, BlockResult};
 #[cfg(feature = "p2p")]
 pub use broadcast_mutator::BroadcastMutator;
+#[allow(deprecated)]
 pub use collection::{collection_short_id, Collection};
 pub use collection_acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,

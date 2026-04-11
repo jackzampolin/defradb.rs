@@ -44,7 +44,7 @@ impl<S: Store> DB<S> {
                 .get(&src_key.bytes())
                 .await
                 .map_err(Error::Storage)?;
-            let source_col: schema::CollectionVersion = match src_data {
+            let mut source_col: schema::CollectionVersion = match src_data {
                 Some(data) => serde_json::from_slice(&data).map_err(|e| {
                     Error::Serialization(format!(
                         "failed to deserialize source schema '{}': {}",
@@ -52,7 +52,12 @@ impl<S: Store> DB<S> {
                     ))
                 })?,
                 None => {
-                    let placeholder = create_orphan_placeholder(&source_version_id, "", "");
+                    let mut placeholder = create_orphan_placeholder(&source_version_id, "", "");
+                    placeholder.root_id = crate::collection::ensure_persisted_collection_short_id(
+                        &systemstore,
+                        &placeholder.collection_id,
+                    )
+                    .await?;
                     let data = serde_json::to_vec(&placeholder).map_err(|e| {
                         Error::Serialization(format!(
                             "failed to serialize source placeholder '{}': {}",
@@ -72,7 +77,7 @@ impl<S: Store> DB<S> {
                 .get(&dst_key.bytes())
                 .await
                 .map_err(Error::Storage)?;
-            let dst_col: schema::CollectionVersion = match dst_data {
+            let mut dst_col: schema::CollectionVersion = match dst_data {
                 Some(data) => serde_json::from_slice(&data).map_err(|e| {
                     Error::Serialization(format!(
                         "failed to deserialize destination schema '{}': {}",
@@ -80,11 +85,16 @@ impl<S: Store> DB<S> {
                     ))
                 })?,
                 None => {
-                    let placeholder = create_placeholder_with_source(
+                    let mut placeholder = create_placeholder_with_source(
                         &dest_version_id,
                         &source_col.name,
                         &source_col.collection_id,
                     );
+                    placeholder.root_id = crate::collection::ensure_persisted_collection_short_id(
+                        &systemstore,
+                        &placeholder.collection_id,
+                    )
+                    .await?;
                     let data = serde_json::to_vec(&placeholder).map_err(|e| {
                         Error::Serialization(format!(
                             "failed to serialize destination placeholder '{}': {}",
@@ -98,6 +108,21 @@ impl<S: Store> DB<S> {
                     placeholder
                 }
             };
+
+            if !source_col.collection_id.is_empty() {
+                source_col.root_id = crate::collection::ensure_persisted_collection_short_id(
+                    &systemstore,
+                    &source_col.collection_id,
+                )
+                .await?;
+            }
+            if !dst_col.collection_id.is_empty() {
+                dst_col.root_id = crate::collection::ensure_persisted_collection_short_id(
+                    &systemstore,
+                    &dst_col.collection_id,
+                )
+                .await?;
+            }
 
             (source_col, dst_col)
         };
@@ -232,7 +257,7 @@ impl<S: Store> DB<S> {
                 .get(&src_key.bytes())
                 .await
                 .map_err(Error::Storage)?;
-            let source_col: schema::CollectionVersion = match src_data {
+            let mut source_col: schema::CollectionVersion = match src_data {
                 Some(data) => serde_json::from_slice(&data).map_err(|e| {
                     Error::Serialization(format!(
                         "failed to deserialize source schema '{}': {}",
@@ -240,7 +265,12 @@ impl<S: Store> DB<S> {
                     ))
                 })?,
                 None => {
-                    let placeholder = create_orphan_placeholder(&source_version_id, "", "");
+                    let mut placeholder = create_orphan_placeholder(&source_version_id, "", "");
+                    placeholder.root_id = crate::collection::ensure_persisted_collection_short_id(
+                        &systemstore,
+                        &placeholder.collection_id,
+                    )
+                    .await?;
                     let data = serde_json::to_vec(&placeholder).map_err(|e| {
                         Error::Serialization(format!(
                             "failed to serialize source placeholder '{}': {}",
@@ -260,7 +290,7 @@ impl<S: Store> DB<S> {
                 .get(&dst_key.bytes())
                 .await
                 .map_err(Error::Storage)?;
-            let dst_col: schema::CollectionVersion = match dst_data {
+            let mut dst_col: schema::CollectionVersion = match dst_data {
                 Some(data) => serde_json::from_slice(&data).map_err(|e| {
                     Error::Serialization(format!(
                         "failed to deserialize destination schema '{}': {}",
@@ -268,11 +298,16 @@ impl<S: Store> DB<S> {
                     ))
                 })?,
                 None => {
-                    let placeholder = create_placeholder_with_source(
+                    let mut placeholder = create_placeholder_with_source(
                         &dest_version_id,
                         &source_col.name,
                         &source_col.collection_id,
                     );
+                    placeholder.root_id = crate::collection::ensure_persisted_collection_short_id(
+                        &systemstore,
+                        &placeholder.collection_id,
+                    )
+                    .await?;
                     let data = serde_json::to_vec(&placeholder).map_err(|e| {
                         Error::Serialization(format!(
                             "failed to serialize destination placeholder '{}': {}",
@@ -286,6 +321,21 @@ impl<S: Store> DB<S> {
                     placeholder
                 }
             };
+
+            if !source_col.collection_id.is_empty() {
+                source_col.root_id = crate::collection::ensure_persisted_collection_short_id(
+                    &systemstore,
+                    &source_col.collection_id,
+                )
+                .await?;
+            }
+            if !dst_col.collection_id.is_empty() {
+                dst_col.root_id = crate::collection::ensure_persisted_collection_short_id(
+                    &systemstore,
+                    &dst_col.collection_id,
+                )
+                .await?;
+            }
 
             (source_col, dst_col)
         };

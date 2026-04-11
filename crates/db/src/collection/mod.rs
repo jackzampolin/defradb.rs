@@ -19,10 +19,102 @@ use crate::error::{Error, Result};
 use crate::index_manager::IndexManager;
 use crate::txn::DbTxn;
 use datastore::NamespaceView;
-pub use defra_core::collection_short_id;
 use document::{DocID, Document, NormalValue};
-use schema::{CollectionVersion, FieldKind, IndexDescription, ScalarArrayKind, ScalarKind};
-use storage::corekv::{IterOptions, Store};
+use schema::{
+    legacy_collection_short_id, CollectionVersion, FieldKind, IndexDescription, ScalarArrayKind,
+    ScalarKind,
+};
+use storage::corekv::{IterOptions, Key, Store};
+use storage::keys::systemstore::{CollectionID, CollectionIDSequenceKey};
+
+/// Derive the legacy short ID from a collection_id string.
+///
+/// This is retained only for compatibility with older metadata and tests. Store-backed code
+/// should resolve or require the persisted `root_id` instead.
+#[deprecated(note = "use persisted collection root IDs instead")]
+pub fn collection_short_id(collection_id: &str) -> u32 {
+    legacy_collection_short_id(collection_id)
+}
+
+/// Load the persisted short ID for a collection if one exists.
+pub async fn load_persisted_collection_short_id(
+    systemstore: &NamespaceView,
+    collection_id: &str,
+) -> Result<Option<u32>> {
+    let short_id_key = CollectionID::new(collection_id);
+    let Some(short_id_bytes) = systemstore
+        .get(&short_id_key.bytes())
+        .await
+        .map_err(Error::Storage)?
+    else {
+        return Ok(None);
+    };
+
+    let Ok(short_id_str) = String::from_utf8(short_id_bytes.to_vec()) else {
+        return Ok(None);
+    };
+
+    Ok(short_id_str.parse::<u32>().ok())
+}
+
+/// Load the persisted root ID for a collection, returning an error if the mapping is missing.
+pub async fn require_persisted_collection_short_id(
+    systemstore: &NamespaceView,
+    collection_id: &str,
+) -> Result<u32> {
+    load_persisted_collection_short_id(systemstore, collection_id)
+        .await?
+        .ok_or_else(|| {
+            Error::Other(format!(
+                "missing persisted collection root_id for collection_id '{}'",
+                collection_id
+            ))
+        })
+}
+
+/// Load the persisted root ID for a collection, allocating one if it does not exist yet.
+pub async fn ensure_persisted_collection_short_id(
+    systemstore: &NamespaceView,
+    collection_id: &str,
+) -> Result<u32> {
+    if let Some(short_id) = load_persisted_collection_short_id(systemstore, collection_id).await? {
+        return Ok(short_id);
+    }
+
+    let seq_key = CollectionIDSequenceKey;
+    let key_bytes = seq_key.bytes();
+    let current: u32 = match systemstore.get(&key_bytes).await.map_err(Error::Storage)? {
+        Some(bytes) if bytes.len() == 4 => {
+            u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        }
+        _ => 0,
+    };
+    let next = current + 1;
+    systemstore
+        .set(&key_bytes, &next.to_be_bytes())
+        .await
+        .map_err(Error::Storage)?;
+
+    let short_id_key = CollectionID::new(collection_id);
+    systemstore
+        .set(&short_id_key.bytes(), next.to_string().as_bytes())
+        .await
+        .map_err(Error::Storage)?;
+
+    Ok(next)
+}
+
+/// Populate a deserialized collection schema with its persisted root ID.
+pub async fn populate_collection_root_id(
+    systemstore: &NamespaceView,
+    schema: &mut CollectionVersion,
+) -> Result<()> {
+    if schema.root_id == 0 {
+        schema.root_id =
+            require_persisted_collection_short_id(systemstore, &schema.collection_id).await?;
+    }
+    Ok(())
+}
 
 /// Key prefix for document data in datastore.
 pub(super) const DOC_KEY_PREFIX: &[u8] = b"/d/";
@@ -67,6 +159,11 @@ impl Collection {
     /// Get the collection schema.
     pub fn schema(&self) -> &CollectionVersion {
         &self.def
+    }
+
+    /// Get the storage prefix ID used for indexes, heads, and view cache keys.
+    pub fn resolved_root_id(&self) -> u32 {
+        self.def.resolved_root_id()
     }
 
     /// Get all indexes defined on this collection.
