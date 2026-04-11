@@ -10,7 +10,6 @@ use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
-use zeroize::Zeroizing;
 
 use defra_core::Result;
 
@@ -18,30 +17,7 @@ use crate::encryption::aes::{decrypt_aes, encrypt_aes};
 use crate::error::{
     crypto_error, failed_to_parse_ephemeral_public_key, verification_with_hmac_failed,
 };
-use crate::types::{AES_KEY_SIZE, HMAC_SIZE, X25519_PUBLIC_KEY_SIZE};
-
-type DerivedKeys = (Zeroizing<[u8; AES_KEY_SIZE]>, Zeroizing<[u8; HMAC_SIZE]>);
-
-fn derive_ecies_keys(shared_secret: &[u8]) -> Result<DerivedKeys> {
-    let hkdf = Hkdf::<Sha256>::new(None, shared_secret);
-
-    let mut keys = Zeroizing::new([0u8; AES_KEY_SIZE + HMAC_SIZE]);
-    hkdf.expand(&[], &mut *keys)
-        .map_err(|e| crypto_error(format!("HKDF expansion failed: {}", e)))?;
-
-    let aes_key = Zeroizing::new(
-        keys[..AES_KEY_SIZE]
-            .try_into()
-            .map_err(|_| crypto_error("failed to derive AES key from HKDF output"))?,
-    );
-    let hmac_key = Zeroizing::new(
-        keys[AES_KEY_SIZE..]
-            .try_into()
-            .map_err(|_| crypto_error("failed to derive HMAC key from HKDF output"))?,
-    );
-
-    Ok((aes_key, hmac_key))
-}
+use crate::types::{AES_KEY_SIZE, HMAC_KEY_SIZE, HMAC_SIZE, X25519_PUBLIC_KEY_SIZE};
 
 /// Options for ECIES encryption/decryption
 #[derive(Default)]
@@ -149,7 +125,14 @@ pub fn encrypt_ecies(
     // We expand 64 bytes and split: first 32 for AES, next 32 for HMAC.
     // This matches Go's sequential hkdf.Read() calls for P2P compatibility.
     // Empty salt and info parameters match the Go implementation.
-    let (aes_key, hmac_key) = derive_ecies_keys(shared_secret.as_bytes())?;
+    let hkdf = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
+
+    let mut keys = [0u8; AES_KEY_SIZE + HMAC_KEY_SIZE];
+    hkdf.expand(&[], &mut keys)
+        .map_err(|e| crypto_error(format!("HKDF expansion failed: {}", e)))?;
+
+    let aes_key: [u8; AES_KEY_SIZE] = keys[..AES_KEY_SIZE].try_into().unwrap();
+    let hmac_key: [u8; HMAC_KEY_SIZE] = keys[AES_KEY_SIZE..].try_into().unwrap();
 
     // 4. Build AAD: ephemeral public key + optional additional data
     let mut aad = ephemeral_public.as_bytes().to_vec();
@@ -246,7 +229,14 @@ pub fn decrypt_ecies(
     // 4. HKDF-SHA256: derive AES and HMAC keys (RFC 5869)
     // We expand 64 bytes and split: first 32 for AES, next 32 for HMAC.
     // This matches Go's sequential hkdf.Read() calls for P2P compatibility.
-    let (aes_key, hmac_key) = derive_ecies_keys(shared_secret.as_bytes())?;
+    let hkdf = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
+
+    let mut keys = [0u8; AES_KEY_SIZE + HMAC_KEY_SIZE];
+    hkdf.expand(&[], &mut keys)
+        .map_err(|e| crypto_error(format!("HKDF expansion failed: {}", e)))?;
+
+    let aes_key: [u8; AES_KEY_SIZE] = keys[..AES_KEY_SIZE].try_into().unwrap();
+    let hmac_key: [u8; HMAC_KEY_SIZE] = keys[AES_KEY_SIZE..].try_into().unwrap();
 
     // 5. Verify HMAC
     let mut mac = Hmac::<Sha256>::new_from_slice(hmac_key.as_ref())
