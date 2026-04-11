@@ -4,7 +4,7 @@ use acp::DocumentACP;
 use cid::Cid;
 use storage::corekv::Reader;
 
-use crate::Collection;
+use db::Collection;
 
 /// Maximum concurrent per-document push tasks during initial replay.
 ///

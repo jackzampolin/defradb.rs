@@ -80,7 +80,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         se_key: Option<&[u8]>,
         se_identity_pubkey: Option<&[u8]>,
     ) -> P2PResult<()> {
-        db::push_existing_docs(
+        db_merge::push_existing_docs(
             handle,
             &self.db,
             self.document_acp.get().map(|acp| acp.as_ref()),
@@ -197,7 +197,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         doc_id: &str,
         collection_id: &str,
     ) -> P2PResult<()> {
-        db::retry_doc(
+        db_merge::retry_doc(
             handle,
             &self.db,
             self.document_acp.get().map(|acp| acp.as_ref()),
@@ -210,8 +210,8 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
     }
 
     async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>> {
-        let provider = db::DbHeadProvider::new(self.db.clone());
-        let heads = <db::DbHeadProvider<S> as p2p::sync::DocumentHeadProvider>::get_document_heads(
+        let provider = db_merge::DbHeadProvider::new(self.db.clone());
+        let heads = <db_merge::DbHeadProvider<S> as p2p::sync::DocumentHeadProvider>::get_document_heads(
             &provider, doc_id,
         )
         .await

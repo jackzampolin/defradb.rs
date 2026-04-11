@@ -170,7 +170,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         datastore
             .set(&deleted_key, &[DELETED_MARKER])
             .await
-            .map_err(|e| MergeError::Database(crate::error::Error::Storage(e)))?;
+            .map_err(|e| MergeError::Database(db::error::Error::Storage(e)))?;
 
         if context.mode.is_standalone() {
             tracing::info!(

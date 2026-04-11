@@ -14,7 +14,7 @@ use anyhow::{anyhow, Context, Result};
 use p2p::sync::SyncConfig;
 
 pub(crate) type EmbeddedBlockstore<S> = blockstore::DefraBlockstore<S>;
-pub(crate) type EmbeddedMergeHandler<S> = db::AcpMergeHandler<S, EmbeddedBlockstore<S>>;
+pub(crate) type EmbeddedMergeHandler<S> = db_merge::AcpMergeHandler<S, EmbeddedBlockstore<S>>;
 type EmbeddedTxnRegistry<S> = db::DbTransactionRegistry<S>;
 pub(crate) type WireDocumentAcpCallback = Box<dyn FnOnce(Arc<dyn acp::DocumentACP>)>;
 

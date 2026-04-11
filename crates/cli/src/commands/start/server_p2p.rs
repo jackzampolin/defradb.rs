@@ -96,7 +96,7 @@ impl Node {
         let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
             Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
         let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
-            Arc::new(db::DbHeadProvider::new(database.clone()));
+            Arc::new(db_merge::DbHeadProvider::new(database.clone()));
 
         let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_head_provider(
             p2p::Libp2pTransport::new(handle.clone()),
@@ -127,8 +127,8 @@ impl Node {
 
         let merge_blockstore_for_syncer = merge_blockstore.clone();
         let merge_handler_inner =
-            Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
-        let merge_handler = Arc::new(db::AcpMergeHandler::new(merge_handler_inner.clone()));
+            Arc::new(db_merge::DbMergeHandler::new(database.clone(), merge_blockstore));
+        let merge_handler = Arc::new(db_merge::AcpMergeHandler::new(merge_handler_inner.clone()));
         let merge_handler_for_acp = merge_handler.clone();
 
         let coordinator_for_replication = coordinator.clone();
@@ -378,7 +378,7 @@ impl Node {
                 failure_recorder_task,
                 retry_loop_task,
             }),
-            mutator: Arc::new(db::BroadcastMutator::new(database, coordinator)),
+            mutator: Arc::new(db_merge::BroadcastMutator::new(database, coordinator)),
             http_adapter: Some(Arc::new(adapter)),
             wire_merge_acp: Some(Box::new(move |acp| {
                 merge_handler_for_acp.set_document_acp(acp);
@@ -407,7 +407,7 @@ impl Node {
         let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
             Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
         let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
-            Arc::new(db::DbHeadProvider::new(database.clone()));
+            Arc::new(db_merge::DbHeadProvider::new(database.clone()));
 
         let iroh_secret_key = Self::iroh_secret_key(peer_keypair.as_ref())?;
         let (command_tx, mut iroh_events, host_task) =
@@ -456,8 +456,8 @@ impl Node {
 
         let merge_blockstore_for_syncer = merge_blockstore.clone();
         let merge_handler_inner =
-            Arc::new(db::DbMergeHandler::new(database.clone(), merge_blockstore));
-        let merge_handler = Arc::new(db::AcpMergeHandler::new(merge_handler_inner.clone()));
+            Arc::new(db_merge::DbMergeHandler::new(database.clone(), merge_blockstore));
+        let merge_handler = Arc::new(db_merge::AcpMergeHandler::new(merge_handler_inner.clone()));
         let merge_handler_for_acp = merge_handler.clone();
 
         let coordinator_for_replication = coordinator.clone();
@@ -677,7 +677,7 @@ impl Node {
                 failure_recorder_task,
                 retry_loop_task,
             }),
-            mutator: Arc::new(db::BroadcastMutator::new(database, coordinator)),
+            mutator: Arc::new(db_merge::BroadcastMutator::new(database, coordinator)),
             http_adapter: Some(Arc::new(adapter)),
             wire_merge_acp: Some(Box::new(move |acp| {
                 merge_handler_for_acp.set_document_acp(acp);

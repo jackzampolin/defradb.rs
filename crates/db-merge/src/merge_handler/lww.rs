@@ -1,5 +1,5 @@
 use super::*;
-use crate::block_builder::decode_priority_varint;
+use db_blocks::decode_priority_varint;
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     async fn current_field_priority(

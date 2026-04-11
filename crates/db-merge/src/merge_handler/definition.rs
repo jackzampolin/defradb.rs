@@ -138,7 +138,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let txn = self.db.new_txn(false).await.map_err(MergeError::Database)?;
         {
             let systemstore = txn.systemstore().map_err(MergeError::Database)?;
-            schema.root_id = crate::collection::ensure_persisted_collection_short_id(
+            schema.root_id = db::collection::ensure_persisted_collection_short_id(
                 &systemstore,
                 &collection_id,
             )

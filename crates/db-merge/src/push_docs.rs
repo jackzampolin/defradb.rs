@@ -6,7 +6,7 @@ use bytes::Bytes;
 use p2p::message::PushLogRequest;
 use storage::corekv::{IterOptions, Reader, Store};
 
-use crate::database::DB;
+use db::database::DB;
 use crate::push_docs_common::{
     load_push_dag_blocks, resolve_push_creator, MAX_CONCURRENT_REPLAY_TASKS,
 };

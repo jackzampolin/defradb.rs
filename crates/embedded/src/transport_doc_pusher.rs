@@ -75,7 +75,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         collections: &[String],
         se_key: Option<&[u8]>,
     ) -> P2PResult<()> {
-        db::push_existing_docs_via_transport(
+        db_merge::push_existing_docs_via_transport(
             &self.transport,
             &self.db,
             self.document_acp.get().map(|acp| acp.as_ref()),
@@ -93,7 +93,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         doc_id: &str,
         collection_id: &str,
     ) -> P2PResult<()> {
-        db::retry_doc_via_transport(
+        db_merge::retry_doc_via_transport(
             &self.transport,
             &self.db,
             self.document_acp.get().map(|acp| acp.as_ref()),
@@ -106,8 +106,8 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
     }
 
     async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>> {
-        let provider = db::DbHeadProvider::new(self.db.clone());
-        let heads = <db::DbHeadProvider<S> as p2p::sync::DocumentHeadProvider>::get_document_heads(
+        let provider = db_merge::DbHeadProvider::new(self.db.clone());
+        let heads = <db_merge::DbHeadProvider<S> as p2p::sync::DocumentHeadProvider>::get_document_heads(
             &provider, doc_id,
         )
         .await

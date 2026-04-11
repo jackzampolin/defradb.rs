@@ -2216,6 +2216,7 @@ dependencies = [
  "clap",
  "crypto",
  "db",
+ "db-merge",
  "defra-core",
  "defra-http",
  "defra-version",
@@ -3586,6 +3587,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "db-merge"
+version = "0.5.0"
+dependencies = [
+ "acp",
+ "async-lock",
+ "async-trait",
+ "blockstore",
+ "blst",
+ "bytes",
+ "ciborium",
+ "cid 0.10.1",
+ "crdt",
+ "crypto",
+ "datastore",
+ "db",
+ "db-blocks",
+ "defra-core",
+ "document",
+ "events",
+ "futures",
+ "getrandom 0.2.17",
+ "hex",
+ "identity",
+ "libp2p",
+ "p2p",
+ "parking_lot 0.12.5",
+ "query",
+ "schema",
+ "serde",
+ "serde_bytes",
+ "serde_cbor",
+ "serde_json",
+ "storage",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "db-nac"
 version = "0.5.0"
 dependencies = [
@@ -3730,6 +3771,7 @@ dependencies = [
  "axum 0.7.9",
  "blockstore",
  "db",
+ "db-merge",
  "defra-core",
  "defra-http",
  "events",
@@ -4245,6 +4287,7 @@ dependencies = [
  "cid 0.10.1",
  "crypto",
  "db",
+ "db-merge",
  "defra-core",
  "document",
  "events",
@@ -4512,6 +4555,7 @@ dependencies = [
  "cid 0.10.1",
  "crypto",
  "db",
+ "db-merge",
  "defra-core",
  "document",
  "embedded",

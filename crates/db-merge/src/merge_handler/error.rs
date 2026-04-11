@@ -24,7 +24,7 @@ pub enum MergeError {
 
     /// Database error.
     #[error("database error: {0}")]
-    Database(#[from] crate::error::Error),
+    Database(#[from] db::error::Error),
 
     /// Storage error.
     #[error("storage error: {0}")]
@@ -56,10 +56,10 @@ impl MergeError {
     pub(crate) fn is_txn_conflict(&self) -> bool {
         match self {
             MergeError::Database(db_err) => match db_err {
-                crate::error::Error::Datastore(datastore::Error::Storage(storage_err)) => {
+                db::error::Error::Datastore(datastore::Error::Storage(storage_err)) => {
                     storage_err.is_txn_conflict()
                 }
-                crate::error::Error::Storage(storage_err) => storage_err.is_txn_conflict(),
+                db::error::Error::Storage(storage_err) => storage_err.is_txn_conflict(),
                 _ => false,
             },
             _ => false,

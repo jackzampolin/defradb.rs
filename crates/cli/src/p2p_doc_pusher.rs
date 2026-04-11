@@ -10,7 +10,7 @@ use crate::p2p_adapter::DocPusher;
 
 /// Database-backed `DocPusher` implementation.
 ///
-/// Wraps `db::DB<S>` and delegates to `db::push_existing_docs` for push
+/// Wraps `db::DB<S>` and delegates to `db_merge::push_existing_docs` for push
 /// operations and `db::DB::get_collection` / `list_collections` for lookups.
 pub struct DbDocPusher<S: storage::corekv::Store> {
     db: Arc<db::DB<S>>,
@@ -44,7 +44,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         se_key: Option<&[u8]>,
         se_identity_pubkey: Option<&[u8]>,
     ) -> Result<(), String> {
-        db::push_existing_docs(
+        db_merge::push_existing_docs(
             handle,
             &self.db,
             self.document_acp.get().map(|acp| acp.as_ref()),
@@ -159,7 +159,7 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
         doc_id: &str,
         collection_id: &str,
     ) -> Result<(), String> {
-        db::retry_doc(
+        db_merge::retry_doc(
             handle,
             &self.db,
             self.document_acp.get().map(|acp| acp.as_ref()),
