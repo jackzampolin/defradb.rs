@@ -17,6 +17,7 @@ impl ServerDumpArgs {
                     "server-dump is not supported for in-memory datastore".into(),
                 ));
             }
+            #[cfg(feature = "redb")]
             DatastoreType::Redb => {
                 let opts = storage::backends::RedbStoreOptions::new()
                     .with_durability(config.datastore.durability);
@@ -28,6 +29,12 @@ impl ServerDumpArgs {
                     .await
                     .map_err(|e| Error::Server(e.to_string()))?;
                 database.print_dump().await.map_err(Error::Server)?
+            }
+            #[cfg(not(feature = "redb"))]
+            DatastoreType::Redb => {
+                return Err(Error::InvalidDatastore(
+                    "redb backend not enabled. Rebuild with --features redb".into(),
+                ));
             }
             #[cfg(feature = "fjall")]
             DatastoreType::Fjall => {

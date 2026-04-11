@@ -11,9 +11,9 @@ use std::sync::Arc;
 use storage::corekv::{IterOptions, Reader, Store, Writer};
 use storage::namespace::{Namespace, NamespacedStore};
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
 use std::path::Path;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
 use storage::RedbStore;
 
 use crate::error::{Error, Result};
@@ -74,7 +74,7 @@ impl<S: Store> PersistentAcpStore<S> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
 impl PersistentAcpStore<RedbStore> {
     /// Open a persistent ACP store at the given directory path.
     ///

@@ -143,11 +143,11 @@ impl std::str::FromStr for KeyringBackend {
 #[non_exhaustive]
 pub enum DatastoreType {
     #[default]
+    RocksDb,
     #[serde(alias = "badger")]
     Redb,
     Memory,
     Fjall,
-    RocksDb,
 }
 
 /// P2P transport backend options.

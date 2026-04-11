@@ -11,6 +11,39 @@ use crate::signing::sign_with_transport;
 use crate::transport::{P2PTransport, PeerId};
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
+    async fn send_doc_sync_reply(
+        &self,
+        peer_id: &PeerId,
+        token: Option<T::ResponseToken>,
+        mut reply: DocSyncReply,
+    ) -> Result<()> {
+        sign_with_transport(&self.runtime.transport, &mut reply)?;
+
+        let send_result = if let Some(token) = token {
+            self.runtime
+                .transport
+                .send_doc_sync_response_token(token, reply)
+                .await
+        } else {
+            self.runtime
+                .transport
+                .send_doc_sync_response(peer_id, reply)
+                .await
+        };
+
+        if let Err(e) = send_result {
+            tracing::warn!(
+                peer_id = %peer_id,
+                error = %e,
+                "Failed to send DocSync response"
+            );
+        } else {
+            tracing::debug!(peer_id = %peer_id, "Sent DocSync response");
+        }
+
+        Ok(())
+    }
+
     pub(super) async fn handle_doc_sync_request(
         &self,
         peer_id: PeerId,
@@ -43,7 +76,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let mut results: Vec<DocSyncItem> = Vec::new();
         for doc_id in &request.doc_ids {
             tracing::trace!(doc_id = %doc_id, "Looking up heads for document");
-            match self.head_provider.get_document_heads(doc_id).await {
+            match self
+                .subscriptions
+                .head_provider
+                .get_document_heads(doc_id)
+                .await
+            {
                 Ok(heads) => {
                     tracing::debug!(
                         doc_id = %doc_id,
@@ -73,10 +111,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             "Sending DocSync response"
         );
 
-        let mut reply = DocSyncReply::success(&request.metadata.message_id, results);
-
-        if let Err(e) = sign_with_transport(&self.transport, &mut reply) {
-            tracing::error!(
+        if let Err(e) = self
+            .send_doc_sync_reply(
+                &peer_id,
+                token,
+                DocSyncReply::success(&request.metadata.message_id, results),
+            )
+            .await
+        {
+            tracing::debug!(
                 peer_id = %peer_id,
                 error = %e,
                 "Failed to sign DocSync response"
@@ -84,25 +127,6 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             return Err(e);
         }
 
-        let send_result = if let Some(token) = token {
-            self.transport
-                .send_doc_sync_response_token(token, reply)
-                .await
-        } else {
-            self.transport.send_doc_sync_response(&peer_id, reply).await
-        };
-        if let Err(e) = send_result {
-            tracing::warn!(
-                peer_id = %peer_id,
-                error = %e,
-                "Failed to send DocSync response"
-            );
-        } else {
-            tracing::debug!(
-                peer_id = %peer_id,
-                "Sent DocSync response"
-            );
-        }
         Ok(())
     }
 
@@ -229,10 +253,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 "Spawning poll-based DAG fetchers for DocSync blocks"
             );
 
-            let transport = self.transport.clone();
+            let transport = self.runtime.transport.clone();
             let blockstore = self.manager.blockstore().clone();
             let event_tx = self.manager.event_sender();
-            let semaphore = self.dag_fetch_semaphore.clone();
+            let semaphore = self.runtime.dag_fetch_semaphore.clone();
 
             for (root_cid, doc_id) in cids_to_fetch {
                 tracing::debug!(

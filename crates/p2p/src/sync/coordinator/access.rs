@@ -35,11 +35,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         peer_id_str: &str,
         collection_id: &str,
     ) -> Result<()> {
-        if self.access_mode.is_open() {
+        if self.access.access_mode.is_open() {
             return Ok(());
         }
 
-        if self.replicators.is_replicator(collection_id, peer_id_str) {
+        if self
+            .access
+            .replicators
+            .is_replicator(collection_id, peer_id_str)
+        {
             return Ok(());
         }
 
@@ -48,7 +52,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         // controls what WE push; it should not gate what we ACCEPT from
         // authenticated peers. This matches Go DefraDB where the replicator
         // target accepts push-logs without explicit subscription.
-        if self.peer_state.is_connected(peer_id_str) {
+        if self.access.peer_state.is_connected(peer_id_str) {
             return Ok(());
         }
 
@@ -66,7 +70,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Returns true only when the peer is explicitly registered as a
     /// replicator for the collection.
     pub(super) fn is_registered_replicator(&self, peer_id_str: &str, collection_id: &str) -> bool {
-        self.replicators.is_replicator(collection_id, peer_id_str)
+        self.access
+            .replicators
+            .is_replicator(collection_id, peer_id_str)
     }
 
     /// Check if a peer is authorized as a replicator for any collection.
@@ -75,15 +81,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// In Open mode, all peers are allowed. In Controlled mode, the peer
     /// must be a connected peer or a replicator for at least one collection.
     pub(super) fn check_peer_is_replicator(&self, peer_id: &PeerId) -> Result<()> {
-        if self.access_mode.is_open() {
+        if self.access.access_mode.is_open() {
             return Ok(());
         }
 
-        if self.replicators.is_any_replicator(peer_id.as_str()) {
+        if self.access.replicators.is_any_replicator(peer_id.as_str()) {
             return Ok(());
         }
 
-        if self.peer_state.is_connected(peer_id.as_str()) {
+        if self.access.peer_state.is_connected(peer_id.as_str()) {
             return Ok(());
         }
 
@@ -99,6 +105,6 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
     /// Get the current access mode.
     pub fn access_mode(&self) -> AccessMode {
-        self.access_mode
+        self.access.access_mode
     }
 }
