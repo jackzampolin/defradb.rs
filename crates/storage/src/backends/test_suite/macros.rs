@@ -71,21 +71,21 @@ macro_rules! generate_backend_tests {
         }
 
         #[tokio::test]
-        async fn shared_test_callback_panic_safety() {
+        async fn shared_test_callback_panic_propagates() {
             let store = $store_fn().await;
-            test_suite::test_callback_panic_safety(&store).await;
+            test_suite::test_callback_panic_propagates(&store).await;
         }
 
         #[tokio::test]
-        async fn shared_test_async_callback_panic_safety() {
+        async fn shared_test_async_callback_panic_propagates() {
             let store = $store_fn().await;
-            test_suite::test_async_callback_panic_safety(&store).await;
+            test_suite::test_async_callback_panic_propagates(&store).await;
         }
 
         #[tokio::test]
-        async fn shared_test_discard_callback_panic_safety() {
+        async fn shared_test_discard_callback_panic_propagates() {
             let store = $store_fn().await;
-            test_suite::test_discard_callback_panic_safety(&store).await;
+            test_suite::test_discard_callback_panic_propagates(&store).await;
         }
 
         #[tokio::test]

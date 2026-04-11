@@ -263,20 +263,9 @@ pub trait Dropable: Store + private::Sealed {
 ///
 /// # Callback Panic Handling
 ///
-/// All callbacks (sync and async) are wrapped in `std::panic::catch_unwind` to
-/// prevent callback panics from crashing the application. If a callback panics:
-///
-/// - The panic is caught and logged via `tracing::error`
-/// - Remaining callbacks continue to execute
-/// - The return value of `commit()` or `discard()` reflects only the database
-///   operation result, not callback execution
-///
-/// This design ensures that:
-/// 1. A buggy callback cannot prevent transaction completion
-/// 2. All registered callbacks get a chance to run
-/// 3. Panic details are preserved in logs for debugging
-///
-/// Check error logs for callback panic details if callbacks don't appear to execute.
+/// Transaction callbacks run directly. In dev/test profiles, a callback panic
+/// unwinds through the transaction API. In release builds this workspace uses
+/// `panic = "abort"`, so a panicking callback aborts the process.
 ///
 /// # Example
 ///
@@ -305,10 +294,9 @@ pub trait Txn: ReaderWriter + private::Sealed {
     ///
     /// # Callback Panic Handling
     ///
-    /// Callback panics are caught and logged but do not affect the return value.
-    /// If a callback panics, remaining callbacks still execute, and `commit()`
-    /// returns `Ok(())` if the database commit succeeded. Check error logs for
-    /// callback panic details.
+    /// Callback panics are not recovered here. In dev/test profiles the panic
+    /// unwinds through `commit()`. In release builds this workspace uses
+    /// `panic = "abort"`, so a panicking callback aborts the process.
     ///
     /// # Note
     ///
@@ -322,8 +310,9 @@ pub trait Txn: ReaderWriter + private::Sealed {
     ///
     /// # Callback Panic Handling
     ///
-    /// Callback panics are caught and logged but do not prevent discard completion.
-    /// If a callback panics, remaining callbacks still execute.
+    /// Callback panics are not recovered here. In dev/test profiles the panic
+    /// unwinds through `discard()`. In release builds this workspace uses
+    /// `panic = "abort"`, so a panicking callback aborts the process.
     ///
     /// # Note
     ///
@@ -332,38 +321,38 @@ pub trait Txn: ReaderWriter + private::Sealed {
 
     /// Register a synchronous callback to be called on successful commit.
     ///
-    /// Multiple callbacks can be registered and will be executed in order.
-    /// Panics in callbacks are caught and logged; remaining callbacks still execute.
+    /// Multiple callbacks can be registered and will be executed in order until
+    /// one panics or the list completes.
     fn on_success(&mut self, callback: TxnCallback);
 
     /// Register an asynchronous callback to be called on successful commit.
     ///
-    /// Multiple callbacks can be registered and will be executed sequentially in registration order.
-    /// Panics in callbacks are caught and logged; remaining callbacks still execute.
+    /// Multiple callbacks can be registered and will be executed sequentially
+    /// in registration order until one panics or the list completes.
     fn on_success_async(&mut self, callback: AsyncTxnCallback);
 
     /// Register a synchronous callback to be called on commit error.
     ///
-    /// Multiple callbacks can be registered and will be executed in order.
-    /// Panics in callbacks are caught and logged; remaining callbacks still execute.
+    /// Multiple callbacks can be registered and will be executed in order until
+    /// one panics or the list completes.
     fn on_error(&mut self, callback: TxnCallback);
 
     /// Register an asynchronous callback to be called on commit error.
     ///
-    /// Multiple callbacks can be registered and will be executed sequentially in registration order.
-    /// Panics in callbacks are caught and logged; remaining callbacks still execute.
+    /// Multiple callbacks can be registered and will be executed sequentially
+    /// in registration order until one panics or the list completes.
     fn on_error_async(&mut self, callback: AsyncTxnCallback);
 
     /// Register a synchronous callback to be called on discard.
     ///
-    /// Multiple callbacks can be registered and will be executed in order.
-    /// Panics in callbacks are caught and logged; remaining callbacks still execute.
+    /// Multiple callbacks can be registered and will be executed in order until
+    /// one panics or the list completes.
     fn on_discard(&mut self, callback: TxnCallback);
 
     /// Register an asynchronous callback to be called on discard.
     ///
-    /// Multiple callbacks can be registered and will be executed sequentially in registration order.
-    /// Panics in callbacks are caught and logged; remaining callbacks still execute.
+    /// Multiple callbacks can be registered and will be executed sequentially
+    /// in registration order until one panics or the list completes.
     ///
     /// # Fire-and-Forget Warning
     ///

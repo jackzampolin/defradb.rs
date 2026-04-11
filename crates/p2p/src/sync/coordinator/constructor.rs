@@ -5,7 +5,7 @@ use std::sync::Arc;
 use blockstore::Blockstore;
 use tokio::sync::mpsc;
 
-use super::SyncCoordinator;
+use super::{SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState};
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Result;
 use crate::sync::broadcaster::Broadcaster;
@@ -103,22 +103,28 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
         Ok((
             Self {
-                transport,
-                broadcaster,
+                runtime: SyncRuntime {
+                    transport,
+                    broadcaster,
+                    failure_tx: None,
+                    dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(max_dag_fetches)),
+                    push_semaphore: Arc::new(tokio::sync::Semaphore::new(max_push_tasks)),
+                    rate_limiter: Arc::new(PeerRateLimiter::new(rate_limit_burst, rate_limit_rate)),
+                },
                 manager,
-                peer_state,
-                local_peer_id,
-                access_mode,
-                replicators,
-                subscribed_collections: Arc::new(tokio::sync::RwLock::new(
-                    std::collections::HashSet::new(),
-                )),
-                collection_store,
-                head_provider,
-                failure_tx: None,
-                dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(max_dag_fetches)),
-                push_semaphore: Arc::new(tokio::sync::Semaphore::new(max_push_tasks)),
-                rate_limiter: Arc::new(PeerRateLimiter::new(rate_limit_burst, rate_limit_rate)),
+                access: SyncAccessState {
+                    peer_state,
+                    local_peer_id,
+                    access_mode,
+                    replicators,
+                },
+                subscriptions: SyncSubscriptionState {
+                    subscribed_collections: Arc::new(tokio::sync::RwLock::new(
+                        std::collections::HashSet::new(),
+                    )),
+                    collection_store,
+                    head_provider,
+                },
             },
             events,
         ))
@@ -126,6 +132,6 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
     /// Set the failure channel for reporting push failures to the FFI layer.
     pub fn set_failure_channel(&mut self, tx: tokio::sync::mpsc::Sender<super::PushFailure>) {
-        self.failure_tx = Some(tx);
+        self.runtime.failure_tx = Some(tx);
     }
 }
