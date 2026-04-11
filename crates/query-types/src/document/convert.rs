@@ -5,7 +5,7 @@ use serde_json::Value as JsonValue;
 
 use crate::error::Result;
 use crate::json_convert::normal_value_to_json;
-use crate::planner::{Doc, DocStatus};
+use crate::doc::{Doc, DocStatus};
 
 use super::DocumentMapping;
 

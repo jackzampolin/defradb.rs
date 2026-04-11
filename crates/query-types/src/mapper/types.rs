@@ -5,7 +5,6 @@ use crate::mapper::filter::Filter;
 
 /// Order direction for sorting
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
 pub enum OrderDirection {
     #[default]
     Asc,
@@ -157,7 +156,6 @@ impl Field {
 
 /// Selection type for polymorphic queries
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-#[non_exhaustive]
 pub enum SelectionType {
     /// Normal object selection
     #[default]
@@ -231,7 +229,6 @@ impl FullTextSearch {
 
 /// Requestable items in a select (field, aggregate, sub-select, similarity, or full-text search)
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub enum Requestable {
     /// Simple field
     Field(Field),
@@ -247,7 +244,6 @@ pub enum Requestable {
 
 /// Aggregate function type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum AggregateType {
     Count,
     Sum,

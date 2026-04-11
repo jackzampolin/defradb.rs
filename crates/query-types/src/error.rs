@@ -11,7 +11,6 @@ pub type Result<T> = std::result::Result<T, QueryError>;
 /// (`begin_txn`, `commit_txn`, `rollback_txn`) enabling callers to handle
 /// different error conditions appropriately.
 #[derive(Debug, Error)]
-#[non_exhaustive]
 pub enum TransactionError {
     /// The transaction was not found (may have been committed/rolled back).
     #[error("transaction not found: {0}")]
@@ -88,7 +87,6 @@ impl TransactionError {
 
 /// Query error types
 #[derive(Debug, Error)]
-#[non_exhaustive]
 pub enum QueryError {
     /// GraphQL parse error
     #[error("parse error: {0}")]

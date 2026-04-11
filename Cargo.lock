@@ -9798,11 +9798,28 @@ dependencies = [
  "identity",
  "lens",
  "proptest",
+ "query-types",
  "regex",
  "schema",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "storage",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "query-types"
+version = "0.5.0"
+dependencies = [
+ "chrono",
+ "defra-core",
+ "document",
+ "schema",
+ "serde",
+ "serde_json",
  "storage",
  "thiserror 1.0.69",
  "tokio",

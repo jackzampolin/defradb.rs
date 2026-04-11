@@ -11,7 +11,6 @@ use crate::document::DocumentMapping;
 
 /// Type of mutation operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum MutationType {
     /// Create new documents
     Create,

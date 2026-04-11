@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::Value as JsonValue;
 
-use crate::planner::Doc;
+use crate::doc::Doc;
 
 /// Index of the DocID field in a document (always first)
 pub const DOC_ID_FIELD_INDEX: usize = 0;

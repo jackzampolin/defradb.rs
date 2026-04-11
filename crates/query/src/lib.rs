@@ -13,17 +13,20 @@
 //!
 //! # Main Components
 //!
-//! - `document`: Document mapping and field positioning
-//! - `mapper`: Query types (Select, Filter, Order, Aggregate)
+//! - `document`: Document mapping and field positioning (in query-types crate)
+//! - `mapper`: Query types (Select, Filter, Order, Aggregate) (in query-types crate)
 //! - `planner`: Plan node trait and execution info
 //! - `plan`: Concrete plan node implementations
 
-pub mod document;
-pub mod error;
+// Types extracted to query-types crate for shared use across parsing/planning/execution.
+// Re-export as module aliases so internal `use crate::document::` etc. still work.
+pub use query_types::document;
+pub use query_types::error;
+pub use query_types::json_convert;
+pub use query_types::mapper;
+
 pub mod executor;
 pub mod fetcher;
-mod json_convert;
-pub mod mapper;
 pub mod mutator;
 pub mod plan;
 pub mod planner;
