@@ -28,9 +28,9 @@ use storage::corekv::Store;
 use self::batch::BroadcastBatchMutator;
 use self::broadcast::{broadcast_with_retry_with_creator, log_broadcast_failure};
 use db::auto_commit_mutator::AutoCommitMutator;
-use db_blocks::{build_blocks_from_document, BlockResult};
 use db::block_reader::read_latest_composite_block;
 use db::database::DB;
+use db_blocks::{build_blocks_from_document, BlockResult};
 
 /// Document mutator that broadcasts changes to P2P network.
 ///

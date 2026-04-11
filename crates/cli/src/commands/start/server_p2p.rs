@@ -126,8 +126,10 @@ impl Node {
         }
 
         let merge_blockstore_for_syncer = merge_blockstore.clone();
-        let merge_handler_inner =
-            Arc::new(db_merge::DbMergeHandler::new(database.clone(), merge_blockstore));
+        let merge_handler_inner = Arc::new(db_merge::DbMergeHandler::new(
+            database.clone(),
+            merge_blockstore,
+        ));
         let merge_handler = Arc::new(db_merge::AcpMergeHandler::new(merge_handler_inner.clone()));
         let merge_handler_for_acp = merge_handler.clone();
 
@@ -455,8 +457,10 @@ impl Node {
         }
 
         let merge_blockstore_for_syncer = merge_blockstore.clone();
-        let merge_handler_inner =
-            Arc::new(db_merge::DbMergeHandler::new(database.clone(), merge_blockstore));
+        let merge_handler_inner = Arc::new(db_merge::DbMergeHandler::new(
+            database.clone(),
+            merge_blockstore,
+        ));
         let merge_handler = Arc::new(db_merge::AcpMergeHandler::new(merge_handler_inner.clone()));
         let merge_handler_for_acp = merge_handler.clone();
 

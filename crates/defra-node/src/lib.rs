@@ -700,8 +700,10 @@ impl NodeBuilder {
         }
 
         // 8. Merge handler
-        let merge_handler_inner =
-            Arc::new(db_merge::DbMergeHandler::new(database.clone(), sync_blockstore));
+        let merge_handler_inner = Arc::new(db_merge::DbMergeHandler::new(
+            database.clone(),
+            sync_blockstore,
+        ));
         let merge_handler = Arc::new(db_merge::AcpMergeHandler::new(merge_handler_inner));
         let merge_handler_for_acp = merge_handler.clone();
 

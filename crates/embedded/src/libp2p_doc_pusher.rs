@@ -211,11 +211,14 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
 
     async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>> {
         let provider = db_merge::DbHeadProvider::new(self.db.clone());
-        let heads = <db_merge::DbHeadProvider<S> as p2p::sync::DocumentHeadProvider>::get_document_heads(
-            &provider, doc_id,
-        )
-        .await
-        .map_err(|error| P2PError::internal(format!("failed to load document heads: {error}")))?;
+        let heads =
+            <db_merge::DbHeadProvider<S> as p2p::sync::DocumentHeadProvider>::get_document_heads(
+                &provider, doc_id,
+            )
+            .await
+            .map_err(|error| {
+                P2PError::internal(format!("failed to load document heads: {error}"))
+            })?;
 
         let txn = self.db.new_txn(true).await.map_err(|error| {
             P2PError::internal(format!("failed to create read transaction: {error}"))

@@ -501,11 +501,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let short_id = {
             let txn = self.db.new_txn(true).await?;
             let short_id = if let Ok(systemstore) = txn.systemstore() {
-                db::collection::require_persisted_collection_short_id(
-                    &systemstore,
-                    collection_id,
-                )
-                .await?
+                db::collection::require_persisted_collection_short_id(&systemstore, collection_id)
+                    .await?
             } else {
                 return Err(MergeError::Database(db::error::Error::Other(
                     "failed to access systemstore while resolving collection root_id".to_string(),

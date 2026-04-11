@@ -14,8 +14,8 @@ use storage::corekv::Store;
 use tracing::{error, warn};
 
 use db::auto_commit_mutator::BatchMutator;
-use db_blocks::BlockResult;
 use db::database::DB;
+use db_blocks::BlockResult;
 
 #[derive(Clone, Copy)]
 enum BroadcastKind {

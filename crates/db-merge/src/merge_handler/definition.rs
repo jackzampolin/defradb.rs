@@ -138,12 +138,10 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let txn = self.db.new_txn(false).await.map_err(MergeError::Database)?;
         {
             let systemstore = txn.systemstore().map_err(MergeError::Database)?;
-            schema.root_id = db::collection::ensure_persisted_collection_short_id(
-                &systemstore,
-                &collection_id,
-            )
-            .await
-            .map_err(MergeError::Database)?;
+            schema.root_id =
+                db::collection::ensure_persisted_collection_short_id(&systemstore, &collection_id)
+                    .await
+                    .map_err(MergeError::Database)?;
 
             // 1. Store full schema at /collection/id/{version_id}
             let collection_key = CollectionKey::new(&version_id);

@@ -159,7 +159,10 @@ where
         version_syncer,
     );
     adapter.set_initial_tracked_documents(restored_doc_ids);
-    let broadcast_mutator = Arc::new(db_merge::BroadcastMutator::new(database.clone(), coordinator));
+    let broadcast_mutator = Arc::new(db_merge::BroadcastMutator::new(
+        database.clone(),
+        coordinator,
+    ));
     let broadcast_mutator_for_acp = broadcast_mutator.clone();
     let system = Arc::new(ManagedP2PSystem::new(
         TransportKind::Libp2p,
@@ -288,7 +291,10 @@ where
         version_syncer,
     );
     adapter.set_initial_tracked_documents(restored_doc_ids);
-    let broadcast_mutator = Arc::new(db_merge::BroadcastMutator::new(database.clone(), coordinator));
+    let broadcast_mutator = Arc::new(db_merge::BroadcastMutator::new(
+        database.clone(),
+        coordinator,
+    ));
     let broadcast_mutator_for_acp = broadcast_mutator.clone();
     let system = Arc::new(ManagedP2PSystem::new(
         TransportKind::Iroh,
