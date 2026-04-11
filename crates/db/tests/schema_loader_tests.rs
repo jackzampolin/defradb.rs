@@ -148,7 +148,7 @@ async fn test_load_collection_requires_short_id_mapping() {
 
     {
         let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-        let txn = DbTxn::new(basic_txn, store.clone());
+        let txn = DbTxn::new(basic_txn);
 
         txn.systemstore()
             .unwrap()
@@ -279,7 +279,7 @@ async fn test_set_migration_placeholder_persists_short_id_mapping() {
     assert_eq!(versions.len(), 2);
 
     let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = DbTxn::new(basic_txn);
     let systemstore = txn.systemstore().unwrap();
     let short_id = systemstore
         .get(&CollectionID::new(ORPHAN_COLLECTION_ID).bytes())

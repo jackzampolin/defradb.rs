@@ -257,11 +257,9 @@ async fn test_persisted_collection_root_id_allocation_conflicts_instead_of_dupli
 
     let txn1 = DbTxn::new(
         BasicTxn::new(&*store, 1, false).await.unwrap(),
-        store.clone(),
     );
     let txn2 = DbTxn::new(
         BasicTxn::new(&*store, 2, false).await.unwrap(),
-        store.clone(),
     );
 
     let short_id_1 = {
@@ -296,7 +294,6 @@ async fn test_persisted_collection_root_id_allocation_conflicts_instead_of_dupli
 
     let retry_txn = DbTxn::new(
         BasicTxn::new(&*store, 3, false).await.unwrap(),
-        store.clone(),
     );
     let retried_short_id = {
         let retry_systemstore = retry_txn.systemstore().unwrap();
@@ -309,7 +306,6 @@ async fn test_persisted_collection_root_id_allocation_conflicts_instead_of_dupli
 
     let read_txn = DbTxn::new(
         BasicTxn::new(&*store, 4, true).await.unwrap(),
-        store.clone(),
     );
     let (collection_a_short_id, collection_b_short_id, sequence_value) = {
         let read_systemstore = read_txn.systemstore().unwrap();
