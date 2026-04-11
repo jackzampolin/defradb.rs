@@ -171,6 +171,34 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         true
     }
 
+    async fn get_document_at_cid(
+        &self,
+        cid: &str,
+        expected_doc_id: Option<&str>,
+    ) -> query::error::Result<Document> {
+        use crate::versioned_fetcher::VersionedFetcher;
+
+        let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
+        versioned_fetcher
+            .get_document_at_cid(cid, expected_doc_id)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))
+    }
+
+    async fn get_documents_at_cid(
+        &self,
+        cid: &str,
+        expected_doc_id: Option<&str>,
+    ) -> query::error::Result<Vec<Document>> {
+        use crate::versioned_fetcher::VersionedFetcher;
+
+        let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
+        versioned_fetcher
+            .get_documents_at_cid(cid, expected_doc_id)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))
+    }
+
     async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Vec<u8>>> {
         self.get_view_cache_items_impl(collection_id).await
     }
