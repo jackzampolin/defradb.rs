@@ -5,7 +5,7 @@
 
 use crypto::encryption::aes::{decrypt_aes, encrypt_aes};
 use crypto::encryption::ecies::{decrypt_ecies, encrypt_ecies, EciesOptions};
-use crypto::encryption::nonce::USE_DETERMINISTIC_NONCE;
+use crypto::encryption::nonce::set_deterministic_nonce;
 use crypto::types::{AES_KEY_SIZE, HMAC_KEY_SIZE};
 use hkdf::Hkdf;
 use serial_test::serial;
