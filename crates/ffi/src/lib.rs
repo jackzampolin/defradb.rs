@@ -219,18 +219,18 @@ mod negative_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crypto::encryption::nonce::USE_DETERMINISTIC_NONCE;
+    use crypto::encryption::nonce::{deterministic_nonce_enabled, set_deterministic_nonce};
     use std::ffi::CStr;
     use std::ptr;
 
     #[test]
     fn test_defra_init() {
-        USE_DETERMINISTIC_NONCE.store(false, std::sync::atomic::Ordering::Relaxed);
+        set_deterministic_nonce(false);
         defra_init();
         // Should be idempotent
         defra_init();
         assert!(
-            !USE_DETERMINISTIC_NONCE.load(std::sync::atomic::Ordering::Relaxed),
+            !deterministic_nonce_enabled(),
             "defra_init must not enable deterministic nonces"
         );
     }

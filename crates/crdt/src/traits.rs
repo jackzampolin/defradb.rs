@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn test_context_creation() {
         let ctx = Context {
-            doc_id: DocId::new("bae-test"),
+            doc_id: DocId::new_unchecked("bae-test"),
             schema_version: "v1".to_string(),
             is_create: false,
         };

@@ -10,11 +10,19 @@ use storage::backends::MemoryStore;
 use storage::corekv::Key;
 use storage::keys::systemstore::{CollectionID, CollectionIDSequenceKey};
 
+fn new_txn(basic_txn: BasicTxn) -> DbTxn<MemoryStore> {
+    DbTxn::new(basic_txn)
+}
+
+fn new_explicit_txn(basic_txn: BasicTxn) -> DbTxn<MemoryStore> {
+    DbTxn::new_explicit(basic_txn)
+}
+
 #[tokio::test]
 async fn test_db_txn_basic() {
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
 
     assert_eq!(txn.id().unwrap(), 1);
     assert!(!txn.is_readonly().unwrap());
@@ -25,7 +33,7 @@ async fn test_db_txn_basic() {
 async fn test_db_txn_explicit() {
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let txn = DbTxn::new_explicit(basic_txn, store.clone());
+    let txn = new_explicit_txn(basic_txn);
 
     assert!(txn.is_explicit());
 }
@@ -34,7 +42,7 @@ async fn test_db_txn_explicit() {
 async fn test_db_txn_make_explicit() {
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let mut txn = DbTxn::new(basic_txn, store.clone());
+    let mut txn = new_txn(basic_txn);
 
     assert!(!txn.is_explicit());
     txn.make_explicit();
@@ -45,7 +53,7 @@ async fn test_db_txn_make_explicit() {
 async fn test_db_txn_write_and_commit() {
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
 
     // Write data
     txn.datastore()
@@ -59,7 +67,7 @@ async fn test_db_txn_write_and_commit() {
 
     // Verify data persisted
     let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
     let value = txn.datastore().unwrap().get(b"key").await.unwrap();
     assert_eq!(value, Some(b"value".to_vec()));
 }
@@ -68,7 +76,7 @@ async fn test_db_txn_write_and_commit() {
 async fn test_db_txn_write_and_discard() {
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
 
     // Write data
     txn.datastore()
@@ -82,7 +90,7 @@ async fn test_db_txn_write_and_discard() {
 
     // Verify data NOT persisted
     let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
     let value = txn.datastore().unwrap().get(b"key").await.unwrap();
     assert_eq!(value, None);
 }
@@ -91,7 +99,7 @@ async fn test_db_txn_write_and_discard() {
 async fn test_db_txn_force_commit() {
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let txn = DbTxn::new_explicit(basic_txn, store.clone());
+    let txn = new_explicit_txn(basic_txn);
 
     // Write data
     txn.datastore()
@@ -105,7 +113,7 @@ async fn test_db_txn_force_commit() {
 
     // Verify data persisted
     let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
     let value = txn.datastore().unwrap().get(b"key").await.unwrap();
     assert_eq!(value, Some(b"value".to_vec()));
 }
@@ -116,7 +124,7 @@ async fn test_db_txn_force_commit() {
 async fn test_db_txn_explicit_commit_returns_error() {
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let txn = DbTxn::new_explicit(basic_txn, store.clone());
+    let txn = new_explicit_txn(basic_txn);
 
     // Commit on explicit transaction should return error
     let result = txn.commit().await;
@@ -127,7 +135,7 @@ async fn test_db_txn_explicit_commit_returns_error() {
 async fn test_db_txn_explicit_discard_returns_error() {
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let txn = DbTxn::new_explicit(basic_txn, store.clone());
+    let txn = new_explicit_txn(basic_txn);
 
     // Discard on explicit transaction should return error
     let result = txn.discard();
@@ -138,7 +146,7 @@ async fn test_db_txn_explicit_discard_returns_error() {
 async fn test_db_txn_force_discard() {
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let txn = DbTxn::new_explicit(basic_txn, store.clone());
+    let txn = new_explicit_txn(basic_txn);
 
     // Write data
     txn.datastore()
@@ -152,7 +160,7 @@ async fn test_db_txn_force_discard() {
 
     // Verify data NOT persisted
     let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
     let value = txn.datastore().unwrap().get(b"key").await.unwrap();
     assert_eq!(value, None);
 }
@@ -161,7 +169,7 @@ async fn test_db_txn_force_discard() {
 async fn test_db_txn_accessor_returns_all_stores() {
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
 
     // All accessor methods should succeed on active transaction
     assert!(txn.blockstore().is_ok());
@@ -181,7 +189,7 @@ async fn test_db_txn_callbacks_executed_on_commit() {
 
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let mut txn = DbTxn::new(basic_txn, store.clone());
+    let mut txn = new_txn(basic_txn);
 
     let success_called = Arc::new(AtomicBool::new(false));
     let success_clone = success_called.clone();
@@ -200,7 +208,7 @@ async fn test_db_txn_callbacks_executed_on_discard() {
 
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let mut txn = DbTxn::new(basic_txn, store.clone());
+    let mut txn = new_txn(basic_txn);
 
     let discard_called = Arc::new(AtomicBool::new(false));
     let discard_clone = discard_called.clone();
@@ -217,7 +225,7 @@ async fn test_db_txn_callbacks_executed_on_discard() {
 async fn test_db_txn_readonly_cannot_write() {
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, true).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
 
     assert!(txn.is_readonly().unwrap());
 
@@ -231,15 +239,15 @@ async fn test_db_txn_id_increments() {
     let store = Arc::new(MemoryStore::new());
 
     let basic_txn1 = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let txn1 = DbTxn::new(basic_txn1, store.clone());
+    let txn1 = new_txn(basic_txn1);
     assert_eq!(txn1.id().unwrap(), 1);
 
     let basic_txn2 = BasicTxn::new(&*store, 2, false).await.unwrap();
-    let txn2 = DbTxn::new(basic_txn2, store.clone());
+    let txn2 = new_txn(basic_txn2);
     assert_eq!(txn2.id().unwrap(), 2);
 
     let basic_txn3 = BasicTxn::new(&*store, 100, false).await.unwrap();
-    let txn3 = DbTxn::new(basic_txn3, store.clone());
+    let txn3 = new_txn(basic_txn3);
     assert_eq!(txn3.id().unwrap(), 100);
 }
 
@@ -327,7 +335,7 @@ async fn test_persisted_collection_root_id_allocation_conflicts_instead_of_dupli
 async fn test_db_txn_multiple_writes_single_commit() {
     let store = Arc::new(MemoryStore::new());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
 
     // Multiple writes in single transaction
     txn.datastore()
@@ -350,7 +358,7 @@ async fn test_db_txn_multiple_writes_single_commit() {
 
     // Verify all persisted
     let basic_txn = BasicTxn::new(&*store, 2, true).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
     assert_eq!(
         txn.datastore().unwrap().get(b"key1").await.unwrap(),
         Some(b"value1".to_vec())
@@ -371,7 +379,7 @@ async fn test_db_txn_overwrite_value() {
 
     // Write initial value
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
     txn.datastore()
         .unwrap()
         .set(b"key", b"initial")
@@ -381,7 +389,7 @@ async fn test_db_txn_overwrite_value() {
 
     // Overwrite value
     let basic_txn = BasicTxn::new(&*store, 2, false).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
     txn.datastore()
         .unwrap()
         .set(b"key", b"updated")
@@ -391,7 +399,7 @@ async fn test_db_txn_overwrite_value() {
 
     // Verify updated value
     let basic_txn = BasicTxn::new(&*store, 3, true).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
     assert_eq!(
         txn.datastore().unwrap().get(b"key").await.unwrap(),
         Some(b"updated".to_vec())
@@ -404,7 +412,7 @@ async fn test_db_txn_delete_value() {
 
     // Write initial value
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
     txn.datastore()
         .unwrap()
         .set(b"key", b"value")
@@ -414,12 +422,12 @@ async fn test_db_txn_delete_value() {
 
     // Delete value
     let basic_txn = BasicTxn::new(&*store, 2, false).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
     txn.datastore().unwrap().delete(b"key").await.unwrap();
     txn.commit().await.unwrap();
 
     // Verify deleted
     let basic_txn = BasicTxn::new(&*store, 3, true).await.unwrap();
-    let txn = DbTxn::new(basic_txn, store.clone());
+    let txn = new_txn(basic_txn);
     assert_eq!(txn.datastore().unwrap().get(b"key").await.unwrap(), None);
 }

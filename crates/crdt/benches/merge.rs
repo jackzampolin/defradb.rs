@@ -13,7 +13,7 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 
 fn make_context() -> Context {
     Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     }

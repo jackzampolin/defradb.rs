@@ -42,7 +42,7 @@ mod tests {
     use crate::sync::manager::SyncEvent;
     use crate::sync::merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
     use crate::topics::DefraTopic;
-    use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, ResponseToken};
+    use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId};
     use crate::QueryId;
     use crate::ReplicatorInfo;
     use async_trait::async_trait;
@@ -53,7 +53,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use storage::backends::MemoryStore;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, Semaphore};
 
     fn test_cid() -> Cid {
         Cid::from_str("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi").unwrap()
@@ -115,6 +115,8 @@ mod tests {
 
     #[async_trait]
     impl P2PTransport for NoopTransport {
+        type ResponseToken = ();
+
         fn local_peer_id(&self) -> &PeerId {
             &self.peer_id
         }
@@ -177,7 +179,7 @@ mod tests {
 
         async fn send_pushlog_response(
             &self,
-            _token: ResponseToken,
+            _token: Self::ResponseToken,
             _reply: PushLogReply,
         ) -> P2PResult<()> {
             Ok(())
@@ -241,7 +243,7 @@ mod tests {
 
         async fn send_car_response_token(
             &self,
-            _token: ResponseToken,
+            _token: Self::ResponseToken,
             _car_data: Vec<u8>,
         ) -> P2PResult<()> {
             Ok(())
@@ -249,7 +251,7 @@ mod tests {
 
         async fn send_doc_sync_response_token(
             &self,
-            _token: ResponseToken,
+            _token: Self::ResponseToken,
             _reply: DocSyncReply,
         ) -> P2PResult<()> {
             Ok(())
@@ -257,7 +259,7 @@ mod tests {
 
         async fn send_branchable_sync_response_token(
             &self,
-            _token: ResponseToken,
+            _token: Self::ResponseToken,
             _reply: BranchableSyncReply,
         ) -> P2PResult<()> {
             Ok(())
@@ -655,6 +657,66 @@ mod tests {
             }
             _ => panic!("Expected MergedButBroadcastFailed"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_run_parallel_exits_cleanly_when_worker_semaphore_closed() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let (coordinator, _events) =
+            crate::sync::coordinator::SyncCoordinator::with_access_control(
+                NoopTransport::new(),
+                blockstore,
+                crate::sync::SyncConfig::default(),
+                AccessMode::Open,
+                Arc::new(crate::ReplicatorRegistry::new()),
+                Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+            )
+            .await
+            .unwrap();
+
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(SyncEvent::BlockReceived {
+            cid: test_cid(),
+            doc_id: "doc1".to_string(),
+            collection_id: "col1".to_string(),
+            creator: "peer1".to_string(),
+            sender_peer: None,
+            is_explicit_replicator: false,
+            explicit_replay_authorization: None,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let semaphore = Arc::new(Semaphore::new(1));
+        semaphore.close();
+
+        let callback_count = Arc::new(AtomicUsize::new(0));
+        let callback_count_clone = callback_count.clone();
+        let handler = Arc::new(TestMergeHandler::new(true, false));
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            ReplicationLoop::run_parallel_with_semaphore(
+                Arc::new(coordinator),
+                rx,
+                handler,
+                ReplicationConfig::default(),
+                move |_| {
+                    callback_count_clone.fetch_add(1, Ordering::SeqCst);
+                },
+                semaphore,
+            ),
+        )
+        .await
+        .expect("parallel replication loop should exit when semaphore is closed");
+
+        assert_eq!(
+            callback_count.load(Ordering::SeqCst),
+            0,
+            "closed semaphore should stop the loop before any worker starts"
+        );
     }
 
     // =========================================================================

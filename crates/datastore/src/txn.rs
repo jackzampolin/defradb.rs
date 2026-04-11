@@ -6,7 +6,6 @@
 /// - Lifecycle callbacks (on_success, on_error, on_discard)
 use crate::error::{Error, Result};
 use crate::multistore::{NamespaceView, RootView, SharedTxn};
-use futures::FutureExt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -157,10 +156,9 @@ impl BasicTxn {
     ///
     /// # Callback Panic Handling
     ///
-    /// Callback panics are caught and logged but do not affect the return value.
-    /// If a callback panics, remaining callbacks still execute, and `commit()`
-    /// returns `Ok(())` if the database commit succeeded. Check error logs for
-    /// callback panic details.
+    /// Callback panics are not recovered here. In dev/test profiles the panic
+    /// unwinds through `commit()`. In release builds this workspace uses
+    /// `panic = "abort"`, so a panicking callback aborts the process.
     pub async fn commit(mut self) -> Result<()> {
         if self.state != TxnState::Active {
             return Err(match self.state {
@@ -189,32 +187,14 @@ impl BasicTxn {
             (self.error_fns, self.error_async_fns)
         };
 
-        // Execute async callbacks sequentially with panic protection (matches storage backend)
-        for (i, callback) in async_fns.into_iter().enumerate() {
-            let callback_result = std::panic::AssertUnwindSafe(callback())
-                .catch_unwind()
-                .await;
-            if let Err(e) = callback_result {
-                tracing::error!(
-                    txn_id = self.id,
-                    callback_index = i,
-                    error = ?e,
-                    "Transaction async callback panicked - continuing with remaining callbacks"
-                );
-            }
+        // Callbacks run directly so the runtime's panic strategy stays explicit:
+        // unwind propagates in dev/test, and release aborts the process.
+        for callback in async_fns {
+            callback().await;
         }
 
-        // Execute sync callbacks with panic protection
-        for (i, callback) in sync_fns.into_iter().enumerate() {
-            let callback_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
-            if let Err(e) = callback_result {
-                tracing::error!(
-                    txn_id = self.id,
-                    callback_index = i,
-                    error = ?e,
-                    "Transaction sync callback panicked - continuing with remaining callbacks"
-                );
-            }
+        for callback in sync_fns {
+            callback();
         }
 
         result.map_err(Error::Storage)
@@ -227,8 +207,9 @@ impl BasicTxn {
     ///
     /// # Callback Panic Handling
     ///
-    /// Callback panics are caught and logged but do not affect the return value.
-    /// If a callback panics, remaining callbacks still execute.
+    /// Callback panics are not recovered here. In dev/test profiles the panic
+    /// unwinds through `discard()`. In release builds this workspace uses
+    /// `panic = "abort"`, so a panicking callback aborts the process.
     ///
     /// # Async Callback Warning
     ///
@@ -252,7 +233,8 @@ impl BasicTxn {
 
         self.state = TxnState::Discarded;
 
-        // Execute async callbacks concurrently with panic protection (fire-and-forget for discard)
+        // Async discard callbacks are spawned and run directly. On native
+        // targets a panic in the task follows the runtime panic strategy.
         let txn_id = self.id;
         if !self.discard_async_fns.is_empty() {
             let callback_count = self.discard_async_fns.len();
@@ -261,42 +243,23 @@ impl BasicTxn {
                 count = callback_count,
                 "Spawning async discard callbacks in background"
             );
-            for (i, callback) in self.discard_async_fns.into_iter().enumerate() {
+            for callback in self.discard_async_fns {
                 #[cfg(not(target_arch = "wasm32"))]
                 tokio::spawn(async move {
-                    let result = std::panic::AssertUnwindSafe(callback())
-                        .catch_unwind()
-                        .await;
-                    if let Err(e) = result {
-                        tracing::error!(
-                            txn_id = txn_id,
-                            callback_index = i,
-                            error = ?e,
-                            "Transaction discard async callback panicked"
-                        );
-                    }
+                    callback().await;
                 });
                 // On wasm32, async callbacks cannot be spawned or awaited from
                 // a sync context. Since discard callbacks are fire-and-forget,
                 // we drop them. Use sync callbacks for critical cleanup on wasm32.
                 #[cfg(target_arch = "wasm32")]
                 {
-                    let _ = (callback, i);
+                    let _ = callback;
                 }
             }
         }
 
-        // Execute sync callbacks with panic protection
-        for (i, callback) in self.discard_fns.into_iter().enumerate() {
-            let callback_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
-            if let Err(e) = callback_result {
-                tracing::error!(
-                    txn_id = self.id,
-                    callback_index = i,
-                    error = ?e,
-                    "Transaction discard sync callback panicked - continuing with remaining callbacks"
-                );
-            }
+        for callback in self.discard_fns {
+            callback();
         }
 
         Ok(())

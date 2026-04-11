@@ -4,6 +4,21 @@ use bytes::Bytes;
 use p2p::message::{Message, MetaData, PushLogBroadcast, PushLogReply, PushLogRequest};
 use p2p::protocol::MESSAGE_VERSION;
 
+fn encode_with_ciborium<T: serde::Serialize>(value: &T) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes).expect("failed to encode with ciborium");
+    bytes
+}
+
+fn decode_with_ciborium<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> T {
+    ciborium::from_reader(bytes).expect("failed to decode with ciborium")
+}
+
+fn has_text_key(map: &[(ciborium::Value, ciborium::Value)], key: &str) -> bool {
+    map.iter()
+        .any(|(candidate, _)| candidate == &ciborium::Value::Text(key.to_string()))
+}
+
 #[test]
 fn test_pushlog_request_serialization() {
     let request = PushLogRequest::new(
@@ -14,8 +29,8 @@ fn test_pushlog_request_serialization() {
         Bytes::from(vec![5, 6, 7, 8]),
     );
 
-    let encoded = serde_cbor::to_vec(&request).expect("failed to encode");
-    let decoded: PushLogRequest = serde_cbor::from_slice(&encoded).expect("failed to decode");
+    let encoded = encode_with_ciborium(&request);
+    let decoded: PushLogRequest = decode_with_ciborium(&encoded);
 
     assert_eq!(decoded.doc_id, "doc123");
     assert_eq!(decoded.cid, vec![1, 2, 3, 4]);
@@ -122,32 +137,19 @@ fn test_pushlog_request_cbor_field_names() {
         Bytes::from(vec![4, 5, 6]),
     );
 
-    let encoded = serde_cbor::to_vec(&request).expect("failed to encode");
+    let encoded = encode_with_ciborium(&request);
 
     // Decode as a generic CBOR value to check field names
-    let value: serde_cbor::Value =
-        serde_cbor::from_slice(&encoded).expect("failed to decode as Value");
+    let value: ciborium::Value = decode_with_ciborium(&encoded);
 
-    if let serde_cbor::Value::Map(map) = value {
+    if let ciborium::Value::Map(map) = value {
         // Check that Go-compatible field names are used
-        let has_version = map
-            .iter()
-            .any(|(k, _)| k == &serde_cbor::Value::Text("Version".to_string()));
-        let has_doc_id = map
-            .iter()
-            .any(|(k, _)| k == &serde_cbor::Value::Text("DocID".to_string()));
-        let has_cid = map
-            .iter()
-            .any(|(k, _)| k == &serde_cbor::Value::Text("CID".to_string()));
-        let has_collection_id = map
-            .iter()
-            .any(|(k, _)| k == &serde_cbor::Value::Text("CollectionID".to_string()));
-        let has_creator = map
-            .iter()
-            .any(|(k, _)| k == &serde_cbor::Value::Text("Creator".to_string()));
-        let has_block = map
-            .iter()
-            .any(|(k, _)| k == &serde_cbor::Value::Text("Block".to_string()));
+        let has_version = has_text_key(&map, "Version");
+        let has_doc_id = has_text_key(&map, "DocID");
+        let has_cid = has_text_key(&map, "CID");
+        let has_collection_id = has_text_key(&map, "CollectionID");
+        let has_creator = has_text_key(&map, "Creator");
+        let has_block = has_text_key(&map, "Block");
 
         assert!(has_version, "Missing 'Version' field");
         assert!(has_doc_id, "Missing 'DocID' field");
@@ -165,17 +167,12 @@ fn test_pushlog_reply_cbor_field_names() {
     // Verify reply field names for Go compatibility
     let reply = PushLogReply::success("msg123");
 
-    let encoded = serde_cbor::to_vec(&reply).expect("failed to encode");
-    let value: serde_cbor::Value =
-        serde_cbor::from_slice(&encoded).expect("failed to decode as Value");
+    let encoded = encode_with_ciborium(&reply);
+    let value: ciborium::Value = decode_with_ciborium(&encoded);
 
-    if let serde_cbor::Value::Map(map) = value {
-        let has_version = map
-            .iter()
-            .any(|(k, _)| k == &serde_cbor::Value::Text("Version".to_string()));
-        let has_message_id = map
-            .iter()
-            .any(|(k, _)| k == &serde_cbor::Value::Text("MessageID".to_string()));
+    if let ciborium::Value::Map(map) = value {
+        let has_version = has_text_key(&map, "Version");
+        let has_message_id = has_text_key(&map, "MessageID");
 
         assert!(has_version, "Missing 'Version' field");
         assert!(has_message_id, "Missing 'MessageID' field");
@@ -189,18 +186,13 @@ fn test_optional_fields_omitted() {
     // Verify optional fields are omitted when None (matching Go's omitempty)
     let reply = PushLogReply::success("msg123");
 
-    let encoded = serde_cbor::to_vec(&reply).expect("failed to encode");
-    let value: serde_cbor::Value =
-        serde_cbor::from_slice(&encoded).expect("failed to decode as Value");
+    let encoded = encode_with_ciborium(&reply);
+    let value: ciborium::Value = decode_with_ciborium(&encoded);
 
-    if let serde_cbor::Value::Map(map) = value {
+    if let ciborium::Value::Map(map) = value {
         // Signature and ErrMessage should NOT be present when None
-        let has_signature = map
-            .iter()
-            .any(|(k, _)| k == &serde_cbor::Value::Text("Signature".to_string()));
-        let has_err_message = map
-            .iter()
-            .any(|(k, _)| k == &serde_cbor::Value::Text("ErrMessage".to_string()));
+        let has_signature = has_text_key(&map, "Signature");
+        let has_err_message = has_text_key(&map, "ErrMessage");
 
         assert!(!has_signature, "Signature should be omitted when None");
         assert!(!has_err_message, "ErrMessage should be omitted when None");
@@ -214,14 +206,11 @@ fn test_optional_fields_included_when_set() {
     // Verify optional fields ARE included when set
     let reply = PushLogReply::error("msg123", "error message");
 
-    let encoded = serde_cbor::to_vec(&reply).expect("failed to encode");
-    let value: serde_cbor::Value =
-        serde_cbor::from_slice(&encoded).expect("failed to decode as Value");
+    let encoded = encode_with_ciborium(&reply);
+    let value: ciborium::Value = decode_with_ciborium(&encoded);
 
-    if let serde_cbor::Value::Map(map) = value {
-        let has_err_message = map
-            .iter()
-            .any(|(k, _)| k == &serde_cbor::Value::Text("ErrMessage".to_string()));
+    if let ciborium::Value::Map(map) = value {
+        let has_err_message = has_text_key(&map, "ErrMessage");
 
         assert!(has_err_message, "ErrMessage should be present when set");
     } else {
@@ -242,9 +231,8 @@ fn test_large_block_data() {
         Bytes::from(large_block.clone()),
     );
 
-    let encoded = serde_cbor::to_vec(&request).expect("failed to encode large request");
-    let decoded: PushLogRequest =
-        serde_cbor::from_slice(&encoded).expect("failed to decode large request");
+    let encoded = encode_with_ciborium(&request);
+    let decoded: PushLogRequest = decode_with_ciborium(&encoded);
 
     assert_eq!(decoded.block.len(), 1024 * 1024);
     assert_eq!(decoded.block, large_block);
@@ -261,8 +249,8 @@ fn test_empty_fields() {
         Bytes::from(vec![]),
     );
 
-    let encoded = serde_cbor::to_vec(&request).expect("failed to encode");
-    let decoded: PushLogRequest = serde_cbor::from_slice(&encoded).expect("failed to decode");
+    let encoded = encode_with_ciborium(&request);
+    let decoded: PushLogRequest = decode_with_ciborium(&encoded);
 
     assert!(decoded.doc_id.is_empty());
     assert!(decoded.cid.is_empty());
@@ -281,8 +269,8 @@ fn test_pushlog_broadcast_serialization() {
         Bytes::from(vec![5, 6, 7, 8]),
     );
 
-    let encoded = serde_cbor::to_vec(&broadcast).expect("failed to encode");
-    let decoded: PushLogBroadcast = serde_cbor::from_slice(&encoded).expect("failed to decode");
+    let encoded = encode_with_ciborium(&broadcast);
+    let decoded: PushLogBroadcast = decode_with_ciborium(&encoded);
 
     assert_eq!(decoded.doc_id, "doc123");
     assert_eq!(decoded.cid, vec![1, 2, 3, 4]);
@@ -302,15 +290,14 @@ fn test_pushlog_broadcast_cbor_field_names() {
         Bytes::from(vec![4, 5, 6]),
     );
 
-    let encoded = serde_cbor::to_vec(&broadcast).expect("failed to encode");
-    let value: serde_cbor::Value =
-        serde_cbor::from_slice(&encoded).expect("failed to decode as Value");
+    let encoded = encode_with_ciborium(&broadcast);
+    let value: ciborium::Value = decode_with_ciborium(&encoded);
 
-    if let serde_cbor::Value::Map(map) = value {
+    if let ciborium::Value::Map(map) = value {
         let field_names: Vec<String> = map
             .iter()
             .filter_map(|(k, _)| {
-                if let serde_cbor::Value::Text(s) = k {
+                if let ciborium::Value::Text(s) = k {
                     Some(s.clone())
                 } else {
                     None

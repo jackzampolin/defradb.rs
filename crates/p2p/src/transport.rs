@@ -4,7 +4,6 @@
 //! from the concrete libp2p transport, enabling alternative implementations
 //! (e.g., iroh) without modifying the coordinator.
 
-use std::any::Any;
 use std::fmt;
 use std::time::Duration;
 
@@ -114,34 +113,12 @@ impl From<libp2p::gossipsub::MessageId> for MessageId {
     }
 }
 
-/// Opaque token for sending a response to a request.
-///
-/// For libp2p, this wraps a `ResponseChannel`. Other transports may
-/// wrap their own response correlation types.
-pub struct ResponseToken(Box<dyn Any + Send>);
-
-impl ResponseToken {
-    pub fn new<T: Any + Send + 'static>(inner: T) -> Self {
-        Self(Box::new(inner))
-    }
-
-    pub fn downcast<T: Any + Send + 'static>(self) -> Option<T> {
-        self.0.downcast::<T>().ok().map(|b| *b)
-    }
-}
-
-impl fmt::Debug for ResponseToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ResponseToken").finish()
-    }
-}
-
 /// Events from the transport layer, consumed by the sync coordinator.
 ///
 /// This mirrors `HostEvent` but uses transport-agnostic types.
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum TransportEvent {
+pub enum TransportEvent<ResponseToken> {
     PeerConnected(PeerId),
     PeerDisconnected(PeerId),
     PushLogRequest {
@@ -225,6 +202,8 @@ pub enum TransportEvent {
 /// implementations (libp2p, iroh) without modifying coordinator logic.
 #[async_trait]
 pub trait P2PTransport: Clone + Send + Sync + 'static {
+    type ResponseToken: Send + 'static;
+
     // ---- Identity ----
 
     fn local_peer_id(&self) -> &PeerId;
@@ -260,7 +239,11 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
 
     // ---- Messaging ----
 
-    async fn send_pushlog_response(&self, token: ResponseToken, reply: PushLogReply) -> Result<()>;
+    async fn send_pushlog_response(
+        &self,
+        token: Self::ResponseToken,
+        reply: PushLogReply,
+    ) -> Result<()>;
 
     async fn send_two_stream_request(
         &self,
@@ -290,17 +273,21 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
 
     async fn send_car_response(&self, peer_id: &PeerId, car_data: Vec<u8>) -> Result<()>;
 
-    async fn send_car_response_token(&self, token: ResponseToken, car_data: Vec<u8>) -> Result<()>;
+    async fn send_car_response_token(
+        &self,
+        token: Self::ResponseToken,
+        car_data: Vec<u8>,
+    ) -> Result<()>;
 
     async fn send_doc_sync_response_token(
         &self,
-        token: ResponseToken,
+        token: Self::ResponseToken,
         reply: DocSyncReply,
     ) -> Result<()>;
 
     async fn send_branchable_sync_response_token(
         &self,
-        token: ResponseToken,
+        token: Self::ResponseToken,
         reply: BranchableSyncReply,
     ) -> Result<()>;
 

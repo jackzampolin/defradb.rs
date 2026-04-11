@@ -99,7 +99,7 @@ impl TryFrom<&Ipld> for DAGLink {
             None => return Err(Error::IpldError("Missing 'link' in DAGLink".to_string())),
         };
 
-        Ok(DAGLink { name, link })
+        Ok(DAGLink::new(name, link))
     }
 }
 

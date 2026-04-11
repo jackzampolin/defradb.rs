@@ -19,6 +19,7 @@ use crate::error::{Error, Result};
 use crate::index_manager::IndexManager;
 use crate::txn::DbTxn;
 use datastore::NamespaceView;
+pub use defra_core::collection_short_id;
 use document::{DocID, Document, NormalValue};
 use schema::{
     legacy_collection_short_id, CollectionVersion, FieldKind, IndexDescription, ScalarArrayKind,

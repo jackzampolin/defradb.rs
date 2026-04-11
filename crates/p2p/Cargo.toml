@@ -76,3 +76,4 @@ iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-blobs", "dep:iroh-tic
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 p2p = { path = ".", features = ["test-utils"] }
+ciborium = { workspace = true }

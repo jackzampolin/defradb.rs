@@ -11,6 +11,12 @@ use p2p::error::Error;
 use p2p::message::{PushLogReply, PushLogRequest};
 use p2p::protocol::{rep_request_protocol, rep_response_protocol};
 
+fn encode_with_ciborium<T: serde::Serialize>(value: &T) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes).expect("failed to encode with ciborium");
+    bytes
+}
+
 #[tokio::test]
 async fn test_codec_roundtrip_request() {
     let mut codec = PushLogCodec::new();
@@ -125,7 +131,7 @@ async fn test_codec_truncated_cbor() {
     );
 
     // Encode then truncate
-    let full_data = serde_cbor::to_vec(&original).unwrap();
+    let full_data = encode_with_ciborium(&original);
     let truncated = &full_data[..full_data.len() / 2];
 
     let mut read_buf = Cursor::new(truncated.to_vec());
