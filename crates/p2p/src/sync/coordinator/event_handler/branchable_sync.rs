@@ -14,7 +14,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     async fn send_branchable_sync_reply(
         &self,
         peer_id: &PeerId,
-        token: Option<ResponseToken>,
+        token: Option<T::ResponseToken>,
         mut reply: BranchableSyncReply,
     ) -> Result<()> {
         sign_with_transport(&self.runtime.transport, &mut reply)?;
