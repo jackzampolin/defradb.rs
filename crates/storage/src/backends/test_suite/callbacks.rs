@@ -1,4 +1,5 @@
 use crate::corekv::Store;
+use futures::FutureExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -80,8 +81,8 @@ pub async fn test_async_success_callback<S: Store>(store: &S) {
     );
 }
 
-/// Test that one callback panic doesn't stop others
-pub async fn test_callback_panic_safety<S: Store>(store: &S) {
+/// Test that sync callback panic propagates to the caller.
+pub async fn test_callback_panic_propagates<S: Store>(store: &S) {
     let mut txn = store.new_txn(false).await.unwrap();
 
     let count = Arc::new(AtomicUsize::new(0));
@@ -97,24 +98,32 @@ pub async fn test_callback_panic_safety<S: Store>(store: &S) {
         panic!("Intentional panic in test");
     }));
 
-    // Third callback - should still run
+    // Third callback - should not run once panic propagation begins
     let count3 = count.clone();
     txn.on_success(Box::new(move || {
         count3.fetch_add(1, Ordering::SeqCst);
     }));
 
     txn.set(b"key", b"value").await.unwrap();
-    txn.commit().await.unwrap();
+    let panic = std::panic::AssertUnwindSafe(async move {
+        txn.commit().await.unwrap();
+    })
+    .catch_unwind()
+    .await;
 
+    assert!(
+        panic.is_err(),
+        "Callback panic should propagate from commit"
+    );
     assert_eq!(
         count.load(Ordering::SeqCst),
-        2,
-        "Both non-panicking callbacks should execute despite middle callback panic"
+        1,
+        "Callbacks after the panic should not execute"
     );
 }
 
-/// Test async callback panic safety
-pub async fn test_async_callback_panic_safety<S: Store>(store: &S) {
+/// Test that async callback panic propagates to the caller.
+pub async fn test_async_callback_panic_propagates<S: Store>(store: &S) {
     let mut txn = store.new_txn(false).await.unwrap();
 
     let count = Arc::new(AtomicUsize::new(0));
@@ -142,13 +151,21 @@ pub async fn test_async_callback_panic_safety<S: Store>(store: &S) {
     }));
 
     txn.set(b"key", b"value").await.unwrap();
-    txn.commit().await.unwrap();
+    let panic = std::panic::AssertUnwindSafe(async move {
+        txn.commit().await.unwrap();
+    })
+    .catch_unwind()
+    .await;
 
-    assert_eq!(count.load(Ordering::SeqCst), 2);
+    assert!(
+        panic.is_err(),
+        "Async callback panic should propagate from commit"
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
-/// Test discard callback panic safety
-pub async fn test_discard_callback_panic_safety<S: Store>(store: &S) {
+/// Test that discard callback panic propagates to the caller.
+pub async fn test_discard_callback_panic_propagates<S: Store>(store: &S) {
     let mut txn = store.new_txn(false).await.unwrap();
 
     let count = Arc::new(AtomicUsize::new(0));
@@ -168,7 +185,10 @@ pub async fn test_discard_callback_panic_safety<S: Store>(store: &S) {
     }));
 
     txn.set(b"key", b"value").await.unwrap();
-    txn.discard();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        txn.discard();
+    }));
 
-    assert_eq!(count.load(Ordering::SeqCst), 2);
+    assert!(panic.is_err(), "Discard callback panic should propagate");
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 }

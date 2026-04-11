@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn test_document_serialization() {
         let mut doc = Document::new();
-        doc.id = Some(DocId::new("bae-test"));
+        doc.id = Some(DocId::new("bae-c94acbfa-dd53-40d0-97f3-29ce16c333fc").unwrap());
         doc.set_field("name", json!("Bob"));
 
         let serialized = serde_json::to_string(&doc).unwrap();

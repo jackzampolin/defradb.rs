@@ -4,12 +4,11 @@
 /// - Explicit/implicit transaction handling
 /// - Transaction-scoped collection cache (lazy loading)
 /// - Reference to the database for collection operations
-use crate::collection::Collection;
+use crate::collection::{populate_collection_root_id, Collection};
 use crate::collection_cache::CollectionCache;
 use crate::error::{Error, Result};
 use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};
 use schema::CollectionVersion;
-use std::sync::Arc;
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
@@ -46,7 +45,7 @@ pub struct DbTxn<S: Store> {
 
 impl<S: Store> DbTxn<S> {
     /// Create a new implicit DbTxn.
-    pub fn new(txn: BasicTxn, _store: Arc<S>) -> Self {
+    pub fn new(txn: BasicTxn) -> Self {
         Self {
             txn: Some(txn),
             explicit: false,
@@ -56,7 +55,7 @@ impl<S: Store> DbTxn<S> {
     }
 
     /// Create a new explicit DbTxn.
-    pub fn new_explicit(txn: BasicTxn, _store: Arc<S>) -> Self {
+    pub fn new_explicit(txn: BasicTxn) -> Self {
         Self {
             txn: Some(txn),
             explicit: true,
@@ -252,7 +251,7 @@ impl<S: Store> DbTxn<S> {
                     _ => {
                         // Fallback: Old format where full JSON is stored at name key
                         // This handles backward compatibility during migration
-                        let schema: CollectionVersion =
+                        let mut schema: CollectionVersion =
                             serde_json::from_slice(&data).map_err(|e| {
                                 tracing::error!(
                                     error = ?e,
@@ -264,6 +263,7 @@ impl<S: Store> DbTxn<S> {
                                     name, e
                                 ))
                             })?;
+                        populate_collection_root_id(&systemstore, &mut schema).await?;
                         self.collection_cache.add(Collection::new(schema));
                         return Ok(self.collection_cache.get(name));
                     }
@@ -281,7 +281,7 @@ impl<S: Store> DbTxn<S> {
 
         // Process result and update cache
         if let Some(data) = maybe_data {
-            let schema: CollectionVersion = serde_json::from_slice(&data).map_err(|e| {
+            let mut schema: CollectionVersion = serde_json::from_slice(&data).map_err(|e| {
                 tracing::error!(
                     error = ?e,
                     collection_name = %name,
@@ -293,6 +293,7 @@ impl<S: Store> DbTxn<S> {
                     name, e
                 ))
             })?;
+            populate_collection_root_id(&systemstore, &mut schema).await?;
             self.collection_cache.add(Collection::new(schema));
             return Ok(self.collection_cache.get(name));
         }
@@ -372,19 +373,21 @@ impl<S: Store> DbTxn<S> {
             }
 
             // Old format: value is full JSON
-            let schema: CollectionVersion = serde_json::from_slice(&pair.value).map_err(|e| {
-                tracing::error!(
-                    error = ?e,
-                    collection_name = %name,
-                    "Failed to deserialize schema for collection '{}': {}",
-                    name,
-                    e
-                );
-                Error::Serialization(format!(
-                    "failed to deserialize schema for collection '{}': {}",
-                    name, e
-                ))
-            })?;
+            let mut schema: CollectionVersion =
+                serde_json::from_slice(&pair.value).map_err(|e| {
+                    tracing::error!(
+                        error = ?e,
+                        collection_name = %name,
+                        "Failed to deserialize schema for collection '{}': {}",
+                        name,
+                        e
+                    );
+                    Error::Serialization(format!(
+                        "failed to deserialize schema for collection '{}': {}",
+                        name, e
+                    ))
+                })?;
+            populate_collection_root_id(&systemstore, &mut schema).await?;
 
             collections.push(Collection::new(schema));
         }
@@ -399,18 +402,20 @@ impl<S: Store> DbTxn<S> {
             let collection_key = CollectionKey::new(&version_id);
             match systemstore.get(&collection_key.bytes()).await {
                 Ok(Some(data)) => {
-                    let schema: CollectionVersion = serde_json::from_slice(&data).map_err(|e| {
-                        tracing::error!(
-                            error = ?e,
-                            collection_name = %name,
-                            version_id = %version_id,
-                            "Failed to deserialize schema"
-                        );
-                        Error::Serialization(format!(
-                            "failed to deserialize schema for collection '{}': {}",
-                            name, e
-                        ))
-                    })?;
+                    let mut schema: CollectionVersion =
+                        serde_json::from_slice(&data).map_err(|e| {
+                            tracing::error!(
+                                error = ?e,
+                                collection_name = %name,
+                                version_id = %version_id,
+                                "Failed to deserialize schema"
+                            );
+                            Error::Serialization(format!(
+                                "failed to deserialize schema for collection '{}': {}",
+                                name, e
+                            ))
+                        })?;
+                    populate_collection_root_id(&systemstore, &mut schema).await?;
                     collections.push(Collection::new(schema));
                 }
                 Ok(None) => {

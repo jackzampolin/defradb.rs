@@ -1,7 +1,6 @@
 //! ScanNode for scanning collection documents
 
 use async_trait::async_trait;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use schema::CollectionVersion;
@@ -13,14 +12,6 @@ use crate::error::Result;
 use crate::fetcher::DocFetcher;
 use crate::mapper::Filter;
 use crate::planner::{Doc, ExecInfo, PlanNode};
-
-/// Derive a short u32 ID from a collection_id string.
-/// Uses the same hash as db::collection_short_id for consistency.
-fn collection_short_id(collection_id: &str) -> u32 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    collection_id.hash(&mut hasher);
-    hasher.finish() as u32
-}
 
 /// ScanNode scans documents from a collection.
 ///
@@ -143,15 +134,8 @@ impl ScanNode {
     }
 
     /// Get the storage prefix for this collection.
-    ///
-    /// Uses the sequential root_id if available (assigned during collection creation),
-    /// falling back to hash-based short_id for backwards compatibility.
     fn collection_prefix(&self) -> u32 {
-        if self.collection.root_id > 0 {
-            self.collection.root_id
-        } else {
-            collection_short_id(&self.collection.collection_id)
-        }
+        self.collection.resolved_root_id()
     }
 }
 
@@ -270,15 +254,11 @@ impl PlanNode for ScanNode {
         // (Go converts those to prefix scans). When _docID is a regular filter condition,
         // keep it in the filter output.
         if let Some(ref filter) = self.filter {
-            let conditions = filter.conditions();
             if self.doc_ids.is_some() {
                 // doc_ids provided → strip _docID (it's shown in prefixes)
-                let stripped = super::strip_docid_from_conditions(conditions);
-                obj.insert("filter".to_string(), stripped);
-            } else if conditions.is_empty() {
-                obj.insert("filter".to_string(), serde_json::Value::Null);
+                obj.insert("filter".to_string(), super::strip_docid_from_filter(filter));
             } else {
-                obj.insert("filter".to_string(), serde_json::json!(conditions));
+                obj.insert("filter".to_string(), filter.to_explain_json());
             }
         } else {
             obj.insert("filter".to_string(), serde_json::Value::Null);
@@ -340,5 +320,74 @@ impl PlanNode for ScanNode {
         );
 
         serde_json::Value::Object(obj)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use serde_json::json;
+
+    use super::ScanNode;
+    use crate::document::DocumentMapping;
+    use crate::mapper::Filter;
+    use crate::planner::PlanNode;
+
+    fn make_collection() -> CollectionVersion {
+        CollectionVersion::new(
+            "users",
+            "v1",
+            "users-v1",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+            ],
+        )
+    }
+
+    fn make_mapping() -> DocumentMapping {
+        let mut mapping = DocumentMapping::new();
+        mapping.add(0, "_docID");
+        mapping.add(1, "name");
+        mapping
+    }
+
+    #[test]
+    fn explain_keeps_docid_filter_without_doc_id_prefix_scan() {
+        let filter = Filter::from_conditions(serde_json::Map::from_iter([
+            ("_docID".to_string(), json!({"_eq": "doc-1"})),
+            ("name".to_string(), json!({"_eq": "Alice"})),
+        ]));
+
+        let explain = ScanNode::new(make_collection(), make_mapping())
+            .with_filter(filter)
+            .explain();
+
+        assert_eq!(
+            explain["scanNode"]["filter"],
+            json!({
+                "_docID": {"_eq": "doc-1"},
+                "name": {"_eq": "Alice"},
+            })
+        );
+    }
+
+    #[test]
+    fn explain_strips_docid_filter_when_doc_id_prefix_scan_is_present() {
+        let filter = Filter::from_conditions(serde_json::Map::from_iter([
+            ("_docID".to_string(), json!({"_eq": "doc-1"})),
+            ("name".to_string(), json!({"_eq": "Alice"})),
+        ]));
+
+        let explain = ScanNode::new(make_collection(), make_mapping())
+            .with_filter(filter)
+            .with_doc_ids(vec!["doc-1".to_string()])
+            .explain();
+
+        assert_eq!(
+            explain["scanNode"]["filter"],
+            json!({"name": {"_eq": "Alice"}})
+        );
+        assert!(explain["scanNode"]["prefixes"].is_array());
     }
 }

@@ -1,7 +1,6 @@
 use std::ffi::c_char;
 
 use acp::nac::NodePermission;
-use db::collection_short_id;
 use storage::corekv::Key;
 
 use crate::helpers::{get_node_database, get_rt, require_c_str};
@@ -105,7 +104,7 @@ pub unsafe extern "C" fn delete_index(
 
                 // Create the index manager
                 let mut index_manager = db::index_manager::IndexManager::from_collection(
-                    collection_short_id(collection.schema().collection_id.as_str()),
+                    collection.schema().resolved_root_id(),
                     collection.schema(),
                 )
                 .map_err(|e| format!("failed to create index manager: {}", e))?;

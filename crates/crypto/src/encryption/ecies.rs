@@ -17,7 +17,7 @@ use crate::encryption::aes::{decrypt_aes, encrypt_aes};
 use crate::error::{
     crypto_error, failed_to_parse_ephemeral_public_key, verification_with_hmac_failed,
 };
-use crate::types::{AES_KEY_SIZE, HMAC_SIZE, X25519_PUBLIC_KEY_SIZE};
+use crate::types::{AES_KEY_SIZE, HMAC_KEY_SIZE, HMAC_SIZE, X25519_PUBLIC_KEY_SIZE};
 
 /// Options for ECIES encryption/decryption
 #[derive(Default)]
@@ -127,12 +127,12 @@ pub fn encrypt_ecies(
     // Empty salt and info parameters match the Go implementation.
     let hkdf = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
 
-    let mut keys = [0u8; AES_KEY_SIZE + AES_KEY_SIZE];
+    let mut keys = [0u8; AES_KEY_SIZE + HMAC_KEY_SIZE];
     hkdf.expand(&[], &mut keys)
         .map_err(|e| crypto_error(format!("HKDF expansion failed: {}", e)))?;
 
     let aes_key: [u8; AES_KEY_SIZE] = keys[..AES_KEY_SIZE].try_into().unwrap();
-    let hmac_key: [u8; AES_KEY_SIZE] = keys[AES_KEY_SIZE..].try_into().unwrap();
+    let hmac_key: [u8; HMAC_KEY_SIZE] = keys[AES_KEY_SIZE..].try_into().unwrap();
 
     // 4. Build AAD: ephemeral public key + optional additional data
     let mut aad = ephemeral_public.as_bytes().to_vec();
@@ -141,10 +141,10 @@ pub fn encrypt_ecies(
     }
 
     // 5. Encrypt with AES-GCM (nonce prepended to ciphertext)
-    let (encrypted_data, _nonce) = encrypt_aes(plaintext, &aes_key, &aad, true)?;
+    let (encrypted_data, _nonce) = encrypt_aes(plaintext, aes_key.as_ref(), &aad, true)?;
 
     // 6. HMAC over the encrypted data
-    let mut mac = Hmac::<Sha256>::new_from_slice(&hmac_key)
+    let mut mac = Hmac::<Sha256>::new_from_slice(hmac_key.as_ref())
         .map_err(|e| crypto_error(format!("failed to create HMAC: {:?}", e)))?;
     mac.update(&encrypted_data);
     let mac_tag = mac.finalize().into_bytes();
@@ -231,15 +231,15 @@ pub fn decrypt_ecies(
     // This matches Go's sequential hkdf.Read() calls for P2P compatibility.
     let hkdf = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
 
-    let mut keys = [0u8; AES_KEY_SIZE + AES_KEY_SIZE];
+    let mut keys = [0u8; AES_KEY_SIZE + HMAC_KEY_SIZE];
     hkdf.expand(&[], &mut keys)
         .map_err(|e| crypto_error(format!("HKDF expansion failed: {}", e)))?;
 
     let aes_key: [u8; AES_KEY_SIZE] = keys[..AES_KEY_SIZE].try_into().unwrap();
-    let hmac_key: [u8; AES_KEY_SIZE] = keys[AES_KEY_SIZE..].try_into().unwrap();
+    let hmac_key: [u8; HMAC_KEY_SIZE] = keys[AES_KEY_SIZE..].try_into().unwrap();
 
     // 5. Verify HMAC
-    let mut mac = Hmac::<Sha256>::new_from_slice(&hmac_key)
+    let mut mac = Hmac::<Sha256>::new_from_slice(hmac_key.as_ref())
         .map_err(|e| crypto_error(format!("failed to create HMAC: {:?}", e)))?;
     mac.update(encrypted_data);
     mac.verify_slice(received_mac)
@@ -252,7 +252,7 @@ pub fn decrypt_ecies(
     }
 
     // 7. Decrypt with AES-GCM (nonce is prepended in encrypted_data)
-    let plaintext = decrypt_aes(None, encrypted_data, &aes_key, &aad)?;
+    let plaintext = decrypt_aes(None, encrypted_data, aes_key.as_ref(), &aad)?;
 
     Ok(plaintext)
 }

@@ -9,7 +9,6 @@ use storage::corekv::Store;
 use tracing::warn;
 
 use crate::block_builder::{write_collection_block, write_document_blocks};
-use crate::collection::collection_short_id;
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
 use crate::txn::DbTxn;
@@ -164,7 +163,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                     }
 
                     if collection.schema().is_branchable {
-                        let short_id = collection_short_id(collection.collection_id());
+                        let short_id = collection.resolved_root_id();
                         if let Err(error) = write_collection_block(
                             &blockstore,
                             &headstore,

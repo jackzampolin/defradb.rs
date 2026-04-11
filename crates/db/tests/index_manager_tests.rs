@@ -5,10 +5,13 @@ use db::index_manager::IndexManager;
 use db::Error;
 use document::{Document, NormalValue};
 use schema::{
-    CollectionVersion, FieldDescription, FieldKind, IndexDescription, IndexedFieldDescription,
+    CollectionVersion, FieldDescription, FieldKind, FullTextIndexDescription, IndexDescription,
+    IndexedFieldDescription,
 };
 use storage::backends::MemoryStore;
 use storage::index::IndexIterator;
+
+const RESERVED_FULLTEXT_INDEX_NAME_FOR_NAME: &str = "__fulltext__:name";
 
 fn test_schema() -> CollectionVersion {
     CollectionVersion::new(
@@ -277,6 +280,49 @@ async fn test_from_collection_with_indexes() {
     assert_eq!(manager.index_count(), 2);
     assert!(manager.has_index("idx_name"));
     assert!(manager.has_index("idx_email"));
+}
+
+#[tokio::test]
+async fn test_fulltext_indexes_use_reserved_internal_names() {
+    let mut schema = test_schema();
+    schema.fulltext_indexes = vec![FullTextIndexDescription::new("name")];
+
+    let manager = IndexManager::from_collection(1, &schema).unwrap();
+
+    assert!(manager.has_index(RESERVED_FULLTEXT_INDEX_NAME_FOR_NAME));
+    assert!(!manager.has_index("name_fulltext"));
+}
+
+#[tokio::test]
+async fn test_regular_index_named_field_fulltext_does_not_collide_with_fulltext_index() {
+    let store = MemoryStore::new();
+    let db = DB::new(store).unwrap();
+    let txn = db.new_txn(false).await.unwrap();
+    let datastore = txn.datastore().unwrap();
+
+    let mut schema = test_schema();
+    schema.fulltext_indexes = vec![FullTextIndexDescription::new("name")];
+
+    let mut manager = IndexManager::from_collection(1, &schema).unwrap();
+
+    let desc = manager
+        .create_index(
+            &datastore,
+            "users",
+            "name_fulltext".to_string(),
+            vec![IndexedFieldDescription {
+                name: "email".to_string(),
+                descending: false,
+            }],
+            false,
+            &schema.fields,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(desc.name, "name_fulltext");
+    assert!(manager.has_index("name_fulltext"));
+    assert!(manager.has_index(RESERVED_FULLTEXT_INDEX_NAME_FOR_NAME));
 }
 
 #[tokio::test]

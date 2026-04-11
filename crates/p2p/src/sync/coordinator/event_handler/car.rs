@@ -7,7 +7,7 @@ use crate::error::Result;
 use crate::message::CarFetchRequest;
 use crate::sync::car::{collect_dag_blocks, collect_exact_blocks, decode_car, encode_car};
 use crate::sync::coordinator::SyncCoordinator;
-use crate::transport::{P2PTransport, PeerId, ResponseToken};
+use crate::transport::{P2PTransport, PeerId};
 
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Handle an inbound CAR fetch request: collect the DAG and send CARv1 response.
@@ -15,7 +15,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         &self,
         peer_id: PeerId,
         request: CarFetchRequest,
-        token: Option<ResponseToken>,
+        token: Option<T::ResponseToken>,
     ) -> Result<()> {
         self.check_peer_is_replicator(&peer_id)?;
 
@@ -73,11 +73,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         }
 
         if let Some(token) = token {
-            self.transport
+            self.runtime
+                .transport
                 .send_car_response_token(token, car_data)
                 .await?;
         } else {
-            self.transport.send_car_response(&peer_id, car_data).await?;
+            self.runtime
+                .transport
+                .send_car_response(&peer_id, car_data)
+                .await?;
         }
         Ok(())
     }

@@ -57,6 +57,24 @@ impl Filter {
         &self.conditions
     }
 
+    /// Convert this filter to explain JSON using the existing raw filter shape.
+    pub fn to_explain_json(&self) -> JsonValue {
+        if self.conditions.is_empty() {
+            JsonValue::Null
+        } else {
+            JsonValue::Object(self.conditions.clone())
+        }
+    }
+
+    /// Convert this filter to explain JSON while stripping `_docID` conditions.
+    ///
+    /// Explain output represents docID lookups separately, so `_docID` should not
+    /// appear in the rendered filter value. The returned JSON preserves the same
+    /// object/array shape used elsewhere in explain output.
+    pub fn to_explain_json_without_docid(&self) -> JsonValue {
+        Self::strip_docid_for_explain(&self.to_explain_json())
+    }
+
     /// Evaluate the filter against document fields
     #[instrument(level = "trace", skip(self, fields, mapping))]
     pub fn matches(&self, fields: &[Option<JsonValue>], mapping: &DocumentMapping) -> Result<bool> {
@@ -259,5 +277,65 @@ impl Filter {
             }
         }
         Ok(true)
+    }
+
+    fn strip_docid_for_explain(value: &JsonValue) -> JsonValue {
+        match value {
+            JsonValue::Object(map) => {
+                let mut result = Map::new();
+
+                for (key, val) in map {
+                    if key == "_docID" {
+                        continue;
+                    }
+
+                    match FilterOp::parse(key) {
+                        Some(FilterOp::And | FilterOp::Or) => {
+                            if let JsonValue::Array(arr) = val {
+                                let filtered: Vec<JsonValue> = arr
+                                    .iter()
+                                    .map(Self::strip_docid_for_explain)
+                                    .filter(|item| {
+                                        !item.is_null()
+                                            && !item
+                                                .as_object()
+                                                .map(|object| object.is_empty())
+                                                .unwrap_or(false)
+                                    })
+                                    .collect();
+
+                                match filtered.len() {
+                                    0 => {}
+                                    1 => {
+                                        if let Some(JsonValue::Object(inner)) =
+                                            filtered.into_iter().next()
+                                        {
+                                            for (inner_key, inner_value) in inner {
+                                                result.insert(inner_key, inner_value);
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        result.insert(key.clone(), JsonValue::Array(filtered));
+                                    }
+                                }
+                            } else {
+                                result.insert(key.clone(), val.clone());
+                            }
+                        }
+                        _ => {
+                            result.insert(key.clone(), val.clone());
+                        }
+                    }
+                }
+
+                if result.is_empty() {
+                    JsonValue::Null
+                } else {
+                    JsonValue::Object(result)
+                }
+            }
+            _ => value.clone(),
+        }
     }
 }

@@ -7,7 +7,6 @@ use storage::corekv::Store;
 use tracing::instrument;
 
 use super::helpers::json_to_native_value;
-use crate::collection::collection_short_id;
 use crate::error::{Error, Result};
 use crate::index_manager::IndexManager;
 use crate::schema_loader::get_collections_by_collection_id;
@@ -107,7 +106,7 @@ impl<S: Store> DB<S> {
 
         let collection_id = collection.collection_id().to_string();
         let target_version_id = collection.version_id().to_string();
-        let short_id = collection_short_id(&collection_id);
+        let short_id = collection.resolved_root_id();
 
         let read_txn = self.new_txn(true).await?;
         let systemstore = read_txn.systemstore()?;

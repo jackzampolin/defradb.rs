@@ -15,6 +15,7 @@ pub mod coding_search;
 pub mod config;
 mod db_impls;
 pub mod dense_search;
+mod node_acp;
 #[cfg(feature = "p2p")]
 mod p2p_handle;
 pub mod search_chunks;
@@ -26,6 +27,9 @@ use std::sync::Arc;
 #[cfg(feature = "p2p")]
 use p2p::P2PTransport;
 
+#[cfg(feature = "p2p")]
+type WireDocumentAcpCallback = Box<dyn FnOnce(Arc<dyn acp::DocumentACP>, bool)>;
+
 pub use coding_search::{
     CodingHybridSearchHit, CodingHybridSearchRequest, CodingHybridSearchResponse,
     CodingSearchTarget,
@@ -34,6 +38,7 @@ pub use coding_search::{
 pub use config::HttpConfig;
 #[cfg(feature = "p2p")]
 pub use config::P2PConfig;
+pub use config::{DocumentAcpConfig, SourceHubConfig};
 pub use dense_search::{DenseHybridSearchHit, DenseHybridSearchRequest, DenseHybridSearchResponse};
 pub use events::EventName;
 pub use query::{QueryExecutor, QueryRequest, QueryResponse};
@@ -337,6 +342,7 @@ pub struct NodeBuilder {
     embedding_url: Option<String>,
     embedding_model: Option<String>,
     embedding_api_key: Option<String>,
+    document_acp: DocumentAcpConfig,
     #[cfg(feature = "http")]
     http_config: Option<HttpConfig>,
     #[cfg(feature = "p2p")]
@@ -375,6 +381,12 @@ impl NodeBuilder {
     /// Set the resolved embedding API key value used for Authorization headers.
     pub fn with_embedding_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.embedding_api_key = Some(api_key.into());
+        self
+    }
+
+    /// Configure the node to use SourceHub-backed document ACP.
+    pub fn with_sourcehub(mut self, config: SourceHubConfig) -> Self {
+        self.document_acp = DocumentAcpConfig::SourceHub(config);
         self
     }
 
@@ -436,6 +448,7 @@ impl NodeBuilder {
                     Self::build_with_store(
                         store,
                         acp_store,
+                        self.document_acp.clone(),
                         db_options.clone(),
                         event_bus,
                         #[cfg(feature = "p2p")]
@@ -456,6 +469,7 @@ impl NodeBuilder {
                     Self::build_with_store(
                         store,
                         acp_store,
+                        self.document_acp.clone(),
                         db_options.clone(),
                         event_bus,
                         #[cfg(feature = "p2p")]
@@ -478,6 +492,7 @@ impl NodeBuilder {
             Self::build_with_store(
                 store,
                 acp_store,
+                self.document_acp,
                 db_options,
                 event_bus,
                 #[cfg(feature = "p2p")]
@@ -550,6 +565,7 @@ impl NodeBuilder {
     async fn build_with_store<S: storage::corekv::Store + 'static>(
         store: Arc<S>,
         acp_store: Arc<dyn acp::AcpStore>,
+        document_acp_config: DocumentAcpConfig,
         db_options: db::DbOptions,
         event_bus: Arc<dyn events::Bus>,
         #[cfg(feature = "p2p")] p2p_config: Option<P2PConfig>,
@@ -567,7 +583,7 @@ impl NodeBuilder {
 
         // P2P setup (affects mutator choice)
         #[cfg(feature = "p2p")]
-        let p2p_result = if let Some(p2p_cfg) = p2p_config {
+        let mut p2p_result = if let Some(p2p_cfg) = p2p_config {
             Some(Self::setup_p2p(store.clone(), database.clone(), &p2p_cfg).await?)
         } else {
             None
@@ -589,8 +605,16 @@ impl NodeBuilder {
         let provider: Arc<dyn query::CollectionProvider> =
             db::DbCollectionProvider::new_arc(database.clone());
         let registry = Arc::new(db::DbTransactionRegistry::new(database.clone()));
-        let document_acp: Arc<dyn acp::DocumentACP> =
-            Arc::new(acp::LocalDocumentACP::new(acp_store));
+        let (document_acp, _strict_replicated_doc_access) =
+            node_acp::create_document_acp(acp_store, &document_acp_config).await?;
+
+        #[cfg(feature = "p2p")]
+        if let Some(wire_document_acp) = p2p_result
+            .as_mut()
+            .and_then(|result| result.wire_document_acp.take())
+        {
+            wire_document_acp(document_acp.clone(), _strict_replicated_doc_access);
+        }
 
         // Assemble query runner
         let query_runner =
@@ -676,7 +700,10 @@ impl NodeBuilder {
         }
 
         // 8. Merge handler
-        let merge_handler = Arc::new(db::DbMergeHandler::new(database.clone(), sync_blockstore));
+        let merge_handler_inner =
+            Arc::new(db::DbMergeHandler::new(database.clone(), sync_blockstore));
+        let merge_handler = Arc::new(db::AcpMergeHandler::new(merge_handler_inner));
+        let merge_handler_for_acp = merge_handler.clone();
 
         // 9. Replication loop (transport-generic)
         let coord_for_repl = coordinator.clone();
@@ -701,10 +728,12 @@ impl NodeBuilder {
         let collection_lookup: Arc<dyn CollectionLookup> = database.clone();
 
         // 12. BroadcastMutator (replaces AutoCommitMutator)
-        let mutator: Arc<dyn query::DocMutator> = Arc::new(db::BroadcastMutator::new(
+        let broadcast_mutator = Arc::new(db::BroadcastMutator::new(
             database.clone(),
             coordinator.clone(),
         ));
+        let broadcast_mutator_for_acp = broadcast_mutator.clone();
+        let mutator: Arc<dyn query::DocMutator> = broadcast_mutator;
 
         let peer_id = transport.local_peer_id().to_string();
         tracing::info!(peer_id = %peer_id, "P2P started (IROH/QUIC)");
@@ -714,7 +743,15 @@ impl NodeBuilder {
             collection_lookup,
         });
 
-        Ok(P2PSetupResult { ops, mutator })
+        Ok(P2PSetupResult {
+            ops,
+            mutator,
+            wire_document_acp: Some(Box::new(move |acp, strict| {
+                merge_handler_for_acp.set_document_acp(acp.clone());
+                merge_handler_for_acp.set_strict_replicated_doc_access(strict);
+                broadcast_mutator_for_acp.set_document_acp(acp);
+            })),
+        })
     }
 
     #[cfg(feature = "p2p")]
@@ -878,6 +915,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
 struct P2PSetupResult {
     ops: Arc<dyn P2POps>,
     mutator: Arc<dyn query::DocMutator>,
+    wire_document_acp: Option<WireDocumentAcpCallback>,
 }
 
 #[cfg(all(test, feature = "http"))]

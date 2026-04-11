@@ -87,6 +87,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     let missing = self.manager.pending_dag_missing(&root_cid);
                     if !missing.is_empty() {
                         let mut providers: Vec<PeerId> = self
+                            .access
                             .peer_state
                             .connected_peers()
                             .into_iter()
@@ -99,6 +100,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                             }
                         }
                         if let Err(e) = self
+                            .runtime
                             .transport
                             .sync_blocks(root_cid, providers, missing)
                             .await

@@ -18,6 +18,7 @@
 //! The migrated values and new version are cached in the datastore.
 
 mod fetcher;
+mod index_scan;
 mod migration;
 
 #[cfg(test)]
@@ -123,18 +124,13 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         field_name: &str,
         query: &str,
     ) -> query::error::Result<std::collections::HashMap<String, f64>> {
-        use crate::collection::collection_short_id;
         use crate::collection_loader::get_collection_with_lazy_load;
         use crate::index_manager::IndexManager;
 
         let (collection, datastore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
-        let short_id = if collection.schema().root_id > 0 {
-            collection.schema().root_id
-        } else {
-            collection_short_id(collection.collection_id())
-        };
+        let short_id = collection.resolved_root_id();
         let index_manager =
             IndexManager::from_collection(short_id, collection.schema()).map_err(|e| {
                 query::error::QueryError::execution(format!(
@@ -143,7 +139,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
                 ))
             })?;
 
-        let idx_name = format!("{}_fulltext", field_name);
+        let idx_name = crate::index_manager::fulltext_index_name(field_name);
         let ft_index = index_manager
             .get_index(&idx_name)
             .and_then(|idx| idx.as_fulltext())
@@ -160,6 +156,46 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
             .map_err(|e| {
                 query::error::QueryError::execution(format!("fulltext search error: {}", e))
             })
+    }
+
+    async fn get_by_index_scan(
+        &self,
+        collection_name: &str,
+        params: &query::planner::index_selection::IndexScanParams,
+    ) -> query::error::Result<query::fetcher::IndexScanResult> {
+        self.get_by_index_scan_impl(collection_name, params).await
+    }
+
+    fn supports_index_queries(&self) -> bool {
+        true
+    }
+
+    async fn get_document_at_cid(
+        &self,
+        cid: &str,
+        expected_doc_id: Option<&str>,
+    ) -> query::error::Result<Document> {
+        use crate::versioned_fetcher::VersionedFetcher;
+
+        let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
+        versioned_fetcher
+            .get_document_at_cid(cid, expected_doc_id)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))
+    }
+
+    async fn get_documents_at_cid(
+        &self,
+        cid: &str,
+        expected_doc_id: Option<&str>,
+    ) -> query::error::Result<Vec<Document>> {
+        use crate::versioned_fetcher::VersionedFetcher;
+
+        let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
+        versioned_fetcher
+            .get_documents_at_cid(cid, expected_doc_id)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }
 
     async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Vec<u8>>> {

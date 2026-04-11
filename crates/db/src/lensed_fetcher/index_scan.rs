@@ -1,4 +1,4 @@
-//! Index scan implementation for LensedAutoCommitFetcher.
+//! Index scan implementation for LensedDocFetcher.
 
 use std::collections::HashSet;
 
@@ -7,11 +7,12 @@ use query::planner::index_selection::{IndexScanParams, IndexScanType};
 use storage::corekv::Store;
 use storage::index::IndexIterator;
 
+use crate::collection_loader::get_collection_with_lazy_load;
 use crate::index_manager::IndexManager;
 
-use super::LensedAutoCommitFetcher;
+use super::LensedDocFetcher;
 
-impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
+impl<S: Store + 'static> LensedDocFetcher<S> {
     pub(super) fn get_by_index_scan_impl<'a>(
         &'a self,
         collection_name: &'a str,
@@ -25,19 +26,8 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         collection_name: &str,
         params: &IndexScanParams,
     ) -> query::error::Result<query::fetcher::IndexScanResult> {
-        let collection = self
-            .db
-            .get_collection(collection_name)
-            .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
-            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
-
-        let txn = self.db.new_txn(true).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
-
-        let datastore = txn.datastore().map_err(|e| {
-            query::error::QueryError::execution(format!("failed to get datastore: {}", e))
-        })?;
+        let (collection, datastore) =
+            get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
         let short_id = collection.resolved_root_id();
         let index_manager =
@@ -194,7 +184,6 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                 collect_with_limit(&mut iter, limit, offset, vf).await?
             }
             IndexScanType::OrScan { branches } => {
-                let _ = txn.discard();
                 let mut all_doc_ids = Vec::new();
                 let mut total_raw_fetches = 0u64;
                 for branch in branches {
@@ -223,8 +212,6 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             }
             _ => unreachable!(),
         };
-
-        let _ = txn.discard();
 
         let mut seen = HashSet::new();
         let doc_ids: Vec<String> = raw_doc_ids

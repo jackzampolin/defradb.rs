@@ -118,7 +118,7 @@ pub(super) async fn try_fetch_from_provider(
     provider: &PeerId,
     request: CarFetchRequest,
     direct_addr: Option<std::net::SocketAddr>,
-    event_tx: &mpsc::Sender<TransportEvent>,
+    event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) -> bool {
     let endpoint_id = match parse_endpoint_id(provider) {
         Ok(id) => id,
@@ -236,7 +236,7 @@ pub(super) async fn handle_block_sync(
     root: cid::Cid,
     providers: Vec<PeerId>,
     missing: Vec<cid::Cid>,
-    event_tx: mpsc::Sender<TransportEvent>,
+    event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) {
     use tokio::task::JoinHandle;
 

@@ -12,6 +12,7 @@ description = "DefraDB database and collection management"
 default = ["p2p", "native"]
 p2p = ["dep:p2p", "dep:libp2p"]
 native = ["dep:tokio", "lens/wasmtime-runtime", "events/channel", "acp/native"]
+redb = ["storage/redb", "acp/redb"]
 
 [dependencies]
 # Async runtime

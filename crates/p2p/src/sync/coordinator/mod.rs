@@ -83,40 +83,13 @@ pub struct PushFailure {
     pub collection_id: String,
 }
 
-/// Coordinator for P2P synchronization.
-///
-/// This is the main integration point between the P2P layer and the database.
-/// Generic over `T: P2PTransport` to support different transport backends.
-pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
-    /// Transport for sending responses and managing connections
+/// Runtime services and async limits used by coordinator handlers.
+pub(super) struct SyncRuntime<T: P2PTransport> {
+    /// Transport for sending responses and managing connections.
     pub(super) transport: T,
 
-    /// Broadcaster for publishing updates
+    /// Broadcaster for publishing updates.
     pub(super) broadcaster: Broadcaster<T>,
-
-    /// Sync manager for block storage
-    pub(super) manager: SyncManager<B>,
-
-    /// Peer state tracker
-    pub(super) peer_state: Arc<PeerStateTracker>,
-
-    /// Local peer ID (for creator field in broadcasts)
-    pub(super) local_peer_id: String,
-
-    /// Access control mode
-    pub(super) access_mode: AccessMode,
-
-    /// Replicator registry for access control checks
-    pub(super) replicators: Arc<ReplicatorRegistry>,
-
-    /// Set of subscribed collection IDs for P2P sync (in-memory cache)
-    pub(super) subscribed_collections: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
-
-    /// Persistent storage for P2P collection subscriptions
-    pub(super) collection_store: Arc<dyn P2PCollectionStorage>,
-
-    /// Document head provider for DocSync responses
-    pub(super) head_provider: Arc<dyn DocumentHeadProvider>,
 
     /// Channel for reporting push failures to the FFI layer for retry tracking.
     pub(super) failure_tx: Option<tokio::sync::mpsc::Sender<PushFailure>>,
@@ -129,6 +102,51 @@ pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
 
     /// Per-peer rate limiter applied at event dispatch to throttle abusive peers.
     pub(super) rate_limiter: Arc<PeerRateLimiter>,
+}
+
+/// Access control and peer identity state for the coordinator.
+pub(super) struct SyncAccessState {
+    /// Peer state tracker.
+    pub(super) peer_state: Arc<PeerStateTracker>,
+
+    /// Local peer ID (for creator field in broadcasts).
+    pub(super) local_peer_id: String,
+
+    /// Access control mode.
+    pub(super) access_mode: AccessMode,
+
+    /// Replicator registry for access control checks.
+    pub(super) replicators: Arc<ReplicatorRegistry>,
+}
+
+/// Subscription and document head support state for the coordinator.
+pub(super) struct SyncSubscriptionState {
+    /// Set of subscribed collection IDs for P2P sync (in-memory cache).
+    pub(super) subscribed_collections: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
+
+    /// Persistent storage for P2P collection subscriptions.
+    pub(super) collection_store: Arc<dyn P2PCollectionStorage>,
+
+    /// Document head provider for DocSync responses.
+    pub(super) head_provider: Arc<dyn DocumentHeadProvider>,
+}
+
+/// Coordinator for P2P synchronization.
+///
+/// This is the main integration point between the P2P layer and the database.
+/// Generic over `T: P2PTransport` to support different transport backends.
+pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
+    /// Runtime services and async coordination primitives.
+    pub(super) runtime: SyncRuntime<T>,
+
+    /// Sync manager for block storage.
+    pub(super) manager: SyncManager<B>,
+
+    /// Access control and peer identity state.
+    pub(super) access: SyncAccessState,
+
+    /// Subscription and doc-sync support state.
+    pub(super) subscriptions: SyncSubscriptionState,
 }
 
 /// Type alias for SyncCoordinator using the libp2p transport.

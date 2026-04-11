@@ -2,7 +2,7 @@
 
 use crypto::encryption::ecies::{decrypt_ecies, encrypt_ecies, EciesOptions};
 use crypto::keys::generation::generate_x25519;
-use crypto::types::{HMAC_SIZE, X25519_PUBLIC_KEY_SIZE};
+use crypto::types::{AES_KEY_SIZE, HMAC_KEY_SIZE, HMAC_SIZE, X25519_PUBLIC_KEY_SIZE};
 use hkdf::Hkdf;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -556,15 +556,15 @@ fn test_ecies_hkdf_key_derivation() {
 
     // Derive keys using HKDF-SHA256 with empty salt and info (matches Go)
     let hkdf = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
-    let mut keys = [0u8; 64];
+    let mut keys = [0u8; AES_KEY_SIZE + HMAC_KEY_SIZE];
     hkdf.expand(&[], &mut keys).unwrap();
 
-    let aes_key = &keys[..32];
-    let hmac_key = &keys[32..];
+    let aes_key = &keys[..AES_KEY_SIZE];
+    let hmac_key = &keys[AES_KEY_SIZE..];
 
     // Verify derived keys are deterministic
-    assert_eq!(aes_key.len(), 32, "AES key should be 32 bytes");
-    assert_eq!(hmac_key.len(), 32, "HMAC key should be 32 bytes");
+    assert_eq!(aes_key.len(), AES_KEY_SIZE, "AES key should be 32 bytes");
+    assert_eq!(hmac_key.len(), HMAC_KEY_SIZE, "HMAC key should be 32 bytes");
     assert_ne!(aes_key, hmac_key, "AES and HMAC keys should be different");
 
     // Verify keys are non-trivial
@@ -579,7 +579,7 @@ fn test_ecies_hkdf_key_derivation() {
 
     // Re-derive to ensure determinism
     let hkdf2 = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
-    let mut keys2 = [0u8; 64];
+    let mut keys2 = [0u8; AES_KEY_SIZE + HMAC_KEY_SIZE];
     hkdf2.expand(&[], &mut keys2).unwrap();
 
     assert_eq!(keys, keys2, "HKDF derivation should be deterministic");

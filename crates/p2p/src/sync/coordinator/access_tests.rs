@@ -14,8 +14,6 @@ use tokio::time::timeout;
 
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
 use crate::error::Error;
-use crate::host::libp2p_transport::Libp2pTransport;
-use crate::host::P2PHostHandle;
 use crate::message::{BranchableSyncRequest, DocSyncRequest, MetaData, PushLogRequest};
 use crate::sync::broadcaster::Broadcaster;
 use crate::sync::collection_store::NoOpCollectionStorage;
@@ -23,10 +21,15 @@ use crate::sync::head_provider::NoOpHeadProvider;
 use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager};
 use crate::sync::peer_state::PeerStateTracker;
 use crate::sync::rate_limiter::PeerRateLimiter;
-use crate::transport::{PeerId, ResponseToken, TransportEvent};
+use crate::topics::DefraTopic;
+use crate::transport::{MessageId, P2PTransport, PeerAddr, PeerId, TransportEvent};
+use crate::QueryId;
+use crate::ReplicatorInfo;
+use async_trait::async_trait;
 
 use super::{
-    SyncCoordinator, DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+    SyncAccessState, SyncCoordinator, SyncRuntime, SyncSubscriptionState,
+    DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
 };
 
 type TestBlockstore = DefraBlockstore<MemoryStore>;
@@ -37,44 +40,270 @@ fn create_test_coordinator(
     replicators: Arc<ReplicatorRegistry>,
     peer_state: Arc<PeerStateTracker>,
 ) -> (
-    SyncCoordinator<TestBlockstore, Libp2pTransport>,
+    SyncCoordinator<TestBlockstore, NoopTransport>,
     tokio::sync::mpsc::Receiver<crate::sync::manager::SyncEvent>,
 ) {
-    let host = P2PHostHandle::test_handle();
-    let local_peer_id = host.local_peer_id_cached().to_string();
-    let transport = Libp2pTransport::new(host);
+    let transport = NoopTransport::new();
+    let local_peer_id = transport.local_peer_id().to_string();
     let broadcaster = Broadcaster::new(transport.clone());
     let store = Arc::new(MemoryStore::new());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let (manager, events) = SyncManager::new(blockstore, peer_state.clone(), SyncConfig::default());
 
     let coordinator = SyncCoordinator {
-        transport,
-        broadcaster,
+        runtime: SyncRuntime {
+            transport,
+            broadcaster,
+            failure_tx: None,
+            dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
+            )),
+            push_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
+            )),
+            rate_limiter: Arc::new(PeerRateLimiter::default()),
+        },
         manager,
-        peer_state,
-        local_peer_id,
-        access_mode,
-        replicators,
-        subscribed_collections: Arc::new(
-            tokio::sync::RwLock::new(std::collections::HashSet::new()),
-        ),
-        collection_store: Arc::new(NoOpCollectionStorage),
-        head_provider: Arc::new(NoOpHeadProvider),
-        failure_tx: None,
-        dag_fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(
-            DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
-        )),
-        push_semaphore: Arc::new(tokio::sync::Semaphore::new(
-            DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
-        )),
-        rate_limiter: Arc::new(PeerRateLimiter::default()),
+        access: SyncAccessState {
+            peer_state,
+            local_peer_id,
+            access_mode,
+            replicators,
+        },
+        subscriptions: SyncSubscriptionState {
+            subscribed_collections: Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
+            collection_store: Arc::new(NoOpCollectionStorage),
+            head_provider: Arc::new(NoOpHeadProvider),
+        },
     };
 
     (coordinator, events)
 }
 
-fn doc_sync_event(peer_id: PeerId) -> TransportEvent {
+#[derive(Clone)]
+struct NoopTransport {
+    peer_id: PeerId,
+    pubkey: Vec<u8>,
+}
+
+impl NoopTransport {
+    fn new() -> Self {
+        Self {
+            peer_id: PeerId::new("local-peer".to_string()),
+            pubkey: vec![1, 2, 3],
+        }
+    }
+}
+
+#[async_trait]
+impl P2PTransport for NoopTransport {
+    type ResponseToken = ();
+
+    fn local_peer_id(&self) -> &PeerId {
+        &self.peer_id
+    }
+
+    fn local_public_key_proto(&self) -> &[u8] {
+        &self.pubkey
+    }
+
+    fn sign(&self, _data: &[u8]) -> crate::Result<Vec<u8>> {
+        Ok(vec![0])
+    }
+
+    async fn dial(&self, _peer_id: &PeerId, _addrs: Vec<PeerAddr>) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn listen(&self, _addr: PeerAddr) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn connected_peers(&self) -> crate::Result<Vec<PeerId>> {
+        Ok(Vec::new())
+    }
+
+    async fn listen_addresses(&self) -> crate::Result<Vec<PeerAddr>> {
+        Ok(Vec::new())
+    }
+
+    async fn poll_until_connected(
+        &self,
+        _peer_id: &PeerId,
+        _timeout: Duration,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn peer_addresses(&self) -> crate::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    async fn subscribe(&self, _topic: DefraTopic) -> crate::Result<bool> {
+        Ok(true)
+    }
+
+    async fn unsubscribe(&self, _topic: DefraTopic) -> crate::Result<bool> {
+        Ok(true)
+    }
+
+    async fn publish(
+        &self,
+        _topic: DefraTopic,
+        _msg: crate::message::PushLogBroadcast,
+    ) -> crate::Result<MessageId> {
+        Ok(MessageId::new("noop".to_string()))
+    }
+
+    async fn topic_peers(&self, _topic: DefraTopic) -> crate::Result<Vec<PeerId>> {
+        Ok(Vec::new())
+    }
+
+    async fn send_pushlog_response(
+        &self,
+        _token: Self::ResponseToken,
+        _reply: crate::message::PushLogReply,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn send_two_stream_request(
+        &self,
+        _peer_id: &PeerId,
+        _req: PushLogRequest,
+    ) -> crate::Result<crate::message::PushLogReply> {
+        Ok(crate::message::PushLogReply::success("noop"))
+    }
+
+    async fn send_two_stream_response(
+        &self,
+        _peer_id: &PeerId,
+        _reply: crate::message::PushLogReply,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn send_doc_sync_request(
+        &self,
+        _peer_id: &PeerId,
+        _req: DocSyncRequest,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn send_doc_sync_response(
+        &self,
+        _peer_id: &PeerId,
+        _reply: crate::message::DocSyncReply,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn send_branchable_sync_request(
+        &self,
+        _peer_id: &PeerId,
+        _req: BranchableSyncRequest,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn send_branchable_sync_response(
+        &self,
+        _peer_id: &PeerId,
+        _reply: crate::message::BranchableSyncReply,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn send_car_request(&self, _peer_id: &PeerId, _root_cid: Cid) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn send_car_response(&self, _peer_id: &PeerId, _car_data: Vec<u8>) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn send_car_response_token(
+        &self,
+        _token: Self::ResponseToken,
+        _car_data: Vec<u8>,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn send_doc_sync_response_token(
+        &self,
+        _token: Self::ResponseToken,
+        _reply: crate::message::DocSyncReply,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn send_branchable_sync_response_token(
+        &self,
+        _token: Self::ResponseToken,
+        _reply: crate::message::BranchableSyncReply,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn send_se_artifacts(
+        &self,
+        _peer_id: &PeerId,
+        _req: crate::message::PushSEArtifactsRequest,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn sync_blocks(
+        &self,
+        _root: Cid,
+        _providers: Vec<PeerId>,
+        _missing: Vec<Cid>,
+    ) -> crate::Result<QueryId> {
+        Ok(QueryId(1))
+    }
+
+    async fn cancel_sync(&self, _query_id: QueryId) -> crate::Result<bool> {
+        Ok(true)
+    }
+
+    async fn create_replicator(
+        &self,
+        _peer_id: &PeerId,
+        _collections: Vec<String>,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn delete_replicator(&self, _peer_id: &PeerId) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn list_replicators(&self) -> crate::Result<Vec<ReplicatorInfo>> {
+        Ok(Vec::new())
+    }
+
+    async fn get_replicator(&self, _peer_id: &PeerId) -> crate::Result<Option<ReplicatorInfo>> {
+        Ok(None)
+    }
+
+    async fn remove_replicator_collections(
+        &self,
+        _peer_id: &PeerId,
+        _collections: Vec<String>,
+    ) -> crate::Result<bool> {
+        Ok(false)
+    }
+
+    async fn shutdown(&self) -> crate::Result<()> {
+        Ok(())
+    }
+}
+
+fn doc_sync_event(peer_id: PeerId) -> TransportEvent<()> {
     TransportEvent::DocSyncRequest {
         peer_id,
         request: DocSyncRequest {
@@ -85,7 +314,7 @@ fn doc_sync_event(peer_id: PeerId) -> TransportEvent {
     }
 }
 
-fn branchable_sync_event(peer_id: PeerId, collection_id: &str) -> TransportEvent {
+fn branchable_sync_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
     TransportEvent::BranchableSyncRequest {
         peer_id,
         request: BranchableSyncRequest {
@@ -116,11 +345,11 @@ fn pushlog_request(collection_id: &str) -> PushLogRequest {
     )
 }
 
-fn pushlog_event(peer_id: PeerId, collection_id: &str) -> TransportEvent {
+fn pushlog_event(peer_id: PeerId, collection_id: &str) -> TransportEvent<()> {
     TransportEvent::PushLogRequest {
         peer_id,
         request: pushlog_request(collection_id),
-        token: ResponseToken::new(()),
+        token: (),
     }
 }
 
@@ -128,7 +357,7 @@ fn two_stream_event(
     peer_id: PeerId,
     collection_id: &str,
     is_explicit_replicator: bool,
-) -> TransportEvent {
+) -> TransportEvent<()> {
     TransportEvent::TwoStreamRequest {
         peer_id,
         request: pushlog_request(collection_id),

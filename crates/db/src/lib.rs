@@ -110,6 +110,7 @@ pub use block_builder::build_block_from_document;
 pub use block_builder::{build_blocks_from_document, BlockResult};
 #[cfg(feature = "p2p")]
 pub use broadcast_mutator::BroadcastMutator;
+#[allow(deprecated)]
 pub use collection::{collection_short_id, Collection};
 pub use collection_acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
@@ -159,6 +160,7 @@ pub use view_ops::RefreshViewsOptions;
 
 // NAC exports
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
 pub use nac::create_persistent_nac_manager;
 pub use nac::{create_memory_nac_manager, NacConfig, NacInfo, NacManager, NacManagerApi};
 

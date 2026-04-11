@@ -21,6 +21,7 @@ mod type_join;
 pub mod view;
 pub mod view_cache;
 
+use crate::mapper::Filter;
 pub use aggregate::{
     AverageNode, AvgSourceMeta, CountNode, CountSourceMeta, MaxNode, MaxSourceMeta, MinNode,
     MinSourceMeta, SumNode, SumSourceMeta,
@@ -53,59 +54,6 @@ pub use view::ViewNode;
 /// Strip `_docID` conditions from filter for explain output.
 /// Go handles docIDs as prefix scans and strips them from filter display.
 /// This handles `_docID` at any nesting level within `_and`/`_or` arrays.
-pub(crate) fn strip_docid_from_conditions(
-    conditions: &serde_json::Map<String, serde_json::Value>,
-) -> serde_json::Value {
-    strip_docid_value(&serde_json::json!(conditions))
-}
-
-fn strip_docid_value(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut result = serde_json::Map::new();
-            for (key, val) in map {
-                if key == "_docID" {
-                    continue;
-                }
-                if key == "_and" || key == "_or" {
-                    if let serde_json::Value::Array(arr) = val {
-                        let filtered: Vec<serde_json::Value> = arr
-                            .iter()
-                            .map(strip_docid_value)
-                            .filter(|item| {
-                                !item.is_null()
-                                    && !item.as_object().map(|o| o.is_empty()).unwrap_or(false)
-                            })
-                            .collect();
-                        match filtered.len() {
-                            0 => {} // Drop empty logical operator
-                            1 => {
-                                // Unwrap single-element _and/_or
-                                if let Some(serde_json::Value::Object(inner)) =
-                                    filtered.into_iter().next()
-                                {
-                                    for (k, v) in inner {
-                                        result.insert(k, v);
-                                    }
-                                }
-                            }
-                            _ => {
-                                result.insert(key.clone(), serde_json::Value::Array(filtered));
-                            }
-                        }
-                    } else {
-                        result.insert(key.clone(), val.clone());
-                    }
-                } else {
-                    result.insert(key.clone(), val.clone());
-                }
-            }
-            if result.is_empty() {
-                serde_json::Value::Null
-            } else {
-                serde_json::Value::Object(result)
-            }
-        }
-        _ => value.clone(),
-    }
+pub(crate) fn strip_docid_from_filter(filter: &Filter) -> serde_json::Value {
+    filter.to_explain_json_without_docid()
 }

@@ -313,7 +313,7 @@ impl<S: Store> DB<S> {
         let basic_txn = BasicTxn::new(&*self.store, id, readonly)
             .await
             .map_err(Error::Storage)?;
-        Ok(DbTxn::new(basic_txn, self.store.clone()))
+        Ok(DbTxn::new(basic_txn))
     }
 
     /// Execute a function within a transaction.

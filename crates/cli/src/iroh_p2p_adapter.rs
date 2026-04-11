@@ -48,22 +48,6 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
         }
     }
 
-    pub fn with_full_context_arc(
-        transport: IrohTransport,
-        coordinator: Arc<IrohSyncCoordinator<B>>,
-        doc_pusher: Arc<dyn TransportDocPusher>,
-        event_bus: Arc<dyn events::Bus>,
-        version_syncer: Option<Arc<dyn TransportVersionSyncer>>,
-    ) -> Arc<dyn P2POperations> {
-        Arc::new(Self::with_full_context(
-            transport,
-            coordinator,
-            doc_pusher,
-            event_bus,
-            version_syncer,
-        ))
-    }
-
     pub fn set_initial_tracked_documents(&self, docs: HashSet<String>) {
         if let Ok(mut tracked) = self.tracked_documents.write() {
             *tracked = docs;
