@@ -15,7 +15,7 @@ use storage::keys::headstore::{HeadstoreColKey, HeadstoreDocKey, HeadstorePriori
 
 use p2p::sync::DocumentHeadProvider;
 
-use crate::collection::collection_short_id;
+use crate::collection::require_persisted_collection_short_id;
 use crate::database::DB;
 
 /// Database-backed document head provider.
@@ -196,12 +196,18 @@ impl<S: Store + 'static> DocumentHeadProvider for DbHeadProvider<S> {
             p2p::error::Error::HeadProvider(format!("failed to create transaction: {}", e))
         })?;
 
+        let systemstore = txn.systemstore().map_err(|e| {
+            p2p::error::Error::HeadProvider(format!("failed to get systemstore: {}", e))
+        })?;
         let headstore = txn.headstore().map_err(|e| {
             p2p::error::Error::HeadProvider(format!("failed to get headstore: {}", e))
         })?;
 
-        // Derive short ID from collection_id string and query prefix /c/{short_id}/
-        let short_id = collection_short_id(collection_id);
+        let short_id = require_persisted_collection_short_id(&systemstore, collection_id)
+            .await
+            .map_err(|e| {
+                p2p::error::Error::HeadProvider(format!("failed to load short id: {}", e))
+            })?;
         let prefix = HeadstoreColKey::collection_prefix(short_id);
         let opts = IterOptions::new().with_prefix(prefix);
 

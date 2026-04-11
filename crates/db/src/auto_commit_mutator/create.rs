@@ -50,7 +50,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             })?;
 
             // Create an IndexManager for unique constraint enforcement
-            let short_id = collection_short_id(collection.collection_id());
+            let short_id = collection.resolved_root_id();
             let index_manager = IndexManager::from_collection(short_id, collection.schema())
                 .map_err(|e| {
                     query::error::QueryError::execution(format!(
@@ -137,7 +137,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             // For branchable collections, create a collection-level block
                             let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
                             if collection.schema().is_branchable {
-                                let short_id = collection_short_id(collection.collection_id());
+                                let short_id = collection.resolved_root_id();
                                 match write_collection_block(
                                     &blockstore,
                                     &headstore,

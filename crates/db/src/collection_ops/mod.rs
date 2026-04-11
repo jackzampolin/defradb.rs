@@ -12,7 +12,7 @@ mod lookup;
 mod resolve;
 mod version;
 
-use crate::collection::Collection;
+use crate::collection::{populate_collection_root_id, Collection};
 use crate::collection_name::CollectionName;
 use crate::collection_snapshot::CollectionSnapshot;
 use crate::error::{Error, Result};
@@ -21,8 +21,7 @@ use datastore::NamespaceView;
 use schema::CollectionVersion;
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::systemstore::{
-    CollectionID, CollectionIDSequenceKey, CollectionKey, CollectionNameKey, CollectionVersionKey,
-    IndexIDSequenceKey,
+    CollectionKey, CollectionNameKey, CollectionVersionKey, IndexIDSequenceKey,
 };
 use tracing::instrument;
 
@@ -162,22 +161,7 @@ impl<S: Store> crate::database::DB<S> {
                         ))
                     })?;
 
-                // If the collection doesn't have a root_id yet (existing data from before root_id
-                // was added), look it up from the short ID mapping
-                if schema.root_id == 0 {
-                    let short_id_key = CollectionID::new(&schema.collection_id);
-                    if let Some(short_id_bytes) = systemstore
-                        .get(&short_id_key.bytes())
-                        .await
-                        .map_err(Error::Storage)?
-                    {
-                        if let Ok(short_id_str) = String::from_utf8(short_id_bytes.to_vec()) {
-                            if let Ok(short_id) = short_id_str.parse::<u32>() {
-                                schema.root_id = short_id;
-                            }
-                        }
-                    }
-                }
+                populate_collection_root_id(&systemstore, &mut schema).await?;
 
                 // Store in map with collection name for relation finalization later
                 schemas.insert(name.clone(), schema);

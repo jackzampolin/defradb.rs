@@ -78,7 +78,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             .await
             .map_err(MergeError::Database)?;
 
-        let short_id = collection_short_id(collection.collection_id());
+        let short_id = collection.resolved_root_id();
         if let Ok(index_manager) = IndexManager::from_collection(short_id, collection.schema()) {
             let index_result = match &old_doc {
                 Some(old_doc) => {
@@ -147,7 +147,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
     ) -> std::result::Result<(), MergeError> {
         if let Ok(doc_id) = DocID::from_string(context.doc_id_str) {
             if let Ok(Some(old_doc)) = collection.get_with_datastore(datastore, &doc_id).await {
-                let short_id = collection_short_id(collection.collection_id());
+                let short_id = collection.resolved_root_id();
                 if let Ok(index_manager) =
                     IndexManager::from_collection(short_id, collection.schema())
                 {
