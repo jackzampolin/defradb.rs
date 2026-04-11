@@ -10,7 +10,6 @@
 mod build;
 mod collection;
 mod compute;
-mod read;
 #[cfg(test)]
 mod tests;
 mod write;
@@ -20,7 +19,6 @@ pub use build::build_block_from_document;
 pub use build::build_blocks_from_document;
 pub use collection::write_collection_block;
 pub use compute::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
-pub use read::read_latest_composite_block;
 pub use write::{write_delete_block, write_document_blocks};
 
 use std::collections::HashMap;
@@ -39,7 +37,7 @@ use document::{Document, NormalValue};
 use storage::corekv::Key;
 use storage::keys::headstore::{HeadstoreColKey, HeadstoreDocKey, HeadstorePriorityKey};
 
-pub(super) fn encrypt_delta(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
+pub(crate) fn encrypt_delta(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
     let (ciphertext, _nonce) = crypto::encryption::aes::encrypt_aes(plaintext, key, &[], true)
         .map_err(|e| format!("encryption failed: {}", e))?;
     Ok(ciphertext)
@@ -49,7 +47,7 @@ pub(super) fn encrypt_delta(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>,
 ///
 /// Pure function: returns `(sig_cid, sig_cbor_bytes)` for the caller to store.
 /// Returns `None` for field blocks with priority > 1 (not signed per Go behavior).
-pub(super) fn compute_signature(
+pub(crate) fn compute_signature(
     block: &Block,
     signer: &SigningConfig,
 ) -> Result<Option<(Cid, Vec<u8>)>, String> {
@@ -125,7 +123,7 @@ pub(super) fn compute_signature(
 /// Delegates to `compute_signature()` for the pure computation, then writes
 /// the signature block to blockstore. The caller must then set
 /// `block.signature = Some(sig_cid)` and re-serialize.
-pub(super) async fn sign_block(
+pub(crate) async fn sign_block(
     block: &Block,
     signer: &SigningConfig,
     blockstore: &NamespaceView,
@@ -156,7 +154,7 @@ pub struct BlockResult {
 }
 
 /// Encode a NormalValue as CBOR bytes.
-pub(super) fn encode_value_as_cbor(value: &NormalValue) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_value_as_cbor(value: &NormalValue) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes)
         .map_err(|e| format!("Failed to encode value as CBOR: {}", e))?;
@@ -164,7 +162,7 @@ pub(super) fn encode_value_as_cbor(value: &NormalValue) -> Result<Vec<u8>, Strin
 }
 
 /// Encode a priority as a varint (matching Go's binary.PutUvarint).
-pub(super) fn encode_priority_varint(priority: u64) -> Vec<u8> {
+pub(crate) fn encode_priority_varint(priority: u64) -> Vec<u8> {
     let mut buf = Vec::with_capacity(10); // Max varint64 is 10 bytes
     let mut n = priority;
     while n >= 0x80 {
@@ -176,7 +174,7 @@ pub(super) fn encode_priority_varint(priority: u64) -> Vec<u8> {
 }
 
 /// Decode a varint to priority (matching Go's binary.Uvarint).
-pub(super) fn decode_priority_varint(buf: &[u8]) -> u64 {
+pub fn decode_priority_varint(buf: &[u8]) -> u64 {
     let mut n: u64 = 0;
     let mut shift: u32 = 0;
     for &byte in buf {
@@ -192,17 +190,17 @@ pub(super) fn decode_priority_varint(buf: &[u8]) -> u64 {
     n
 }
 
-pub(super) fn priority_index_key(doc_id: &str, priority: u64, cid: Cid) -> Vec<u8> {
+pub(crate) fn priority_index_key(doc_id: &str, priority: u64, cid: Cid) -> Vec<u8> {
     HeadstorePriorityKey::new(doc_id, priority, cid).bytes()
 }
 
 /// A single head entry for a document field.
 #[derive(Clone)]
-pub(super) struct FieldHeadEntry {
+pub struct FieldHeadEntry {
     /// The CID of the head
-    pub(super) cid: Cid,
+    pub cid: Cid,
     /// The full key (for deletion when replacing)
-    pub(super) key: Vec<u8>,
+    pub key: Vec<u8>,
 }
 
 /// Get all existing heads for a specific field of a document.
@@ -210,7 +208,7 @@ pub(super) struct FieldHeadEntry {
 /// During concurrent P2P updates, a field can have multiple heads (branches).
 /// Returns all current head CIDs for the field, sorted by CID string
 /// representation to match Go's deterministic head ordering.
-pub(super) async fn get_all_field_heads(
+pub async fn get_all_field_heads(
     headstore: &NamespaceView,
     doc_id: &str,
     field_id: &str,
@@ -253,7 +251,7 @@ pub(super) async fn get_all_field_heads(
 ///
 /// Replaces multiple overlapping headstore scans with a single prefix scan
 /// of `/d/{doc_id}/`.
-pub(super) struct DocHeadsSnapshot {
+pub struct DocHeadsSnapshot {
     max_priority: u64,
     entries_by_field: HashMap<String, Vec<FieldHeadEntry>>,
 }

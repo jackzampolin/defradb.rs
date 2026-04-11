@@ -28,7 +28,8 @@ use storage::corekv::Store;
 use self::batch::BroadcastBatchMutator;
 use self::broadcast::{broadcast_with_retry_with_creator, log_broadcast_failure};
 use crate::auto_commit_mutator::AutoCommitMutator;
-use crate::block_builder::{build_blocks_from_document, read_latest_composite_block, BlockResult};
+use crate::block_builder::{build_blocks_from_document, BlockResult};
+use crate::block_reader::read_latest_composite_block;
 use crate::database::DB;
 
 /// Document mutator that broadcasts changes to P2P network.

@@ -15,6 +15,7 @@ members = [
     "crates/cli",
     "crates/datastore",
     "crates/db",
+    "crates/db-blocks",
     "crates/keyring",
     "crates/identity",
     "crates/zanzibar",

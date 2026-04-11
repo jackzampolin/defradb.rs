@@ -47,7 +47,10 @@ pub(crate) mod acp_merge_handler;
 pub(crate) mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
 pub mod backup;
-pub(crate) mod block_builder;
+// Block builder extracted to standalone db-blocks crate for parallel compilation.
+// Re-export as module alias so internal `use crate::block_builder::` imports still work.
+pub(crate) use db_blocks as block_builder;
+pub(crate) mod block_reader;
 pub mod block_verify;
 #[cfg(feature = "p2p")]
 pub(crate) mod broadcast_mutator;

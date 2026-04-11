@@ -3530,6 +3530,7 @@ dependencies = [
  "crdt",
  "crypto",
  "datastore",
+ "db-blocks",
  "defra-core",
  "document",
  "events",
@@ -3557,6 +3558,30 @@ dependencies = [
  "tokio",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "db-blocks"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "blockstore",
+ "bytes",
+ "ciborium",
+ "cid 0.10.1",
+ "crypto",
+ "datastore",
+ "defra-core",
+ "document",
+ "ed25519-dalek 2.2.0",
+ "hex",
+ "multihash 0.18.1",
+ "rand 0.8.5",
+ "serde",
+ "sha2 0.10.9",
+ "storage",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
