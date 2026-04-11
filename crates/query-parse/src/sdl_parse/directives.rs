@@ -3,7 +3,7 @@
 //! Contains known directive definitions and helper functions for extracting
 //! arguments from GraphQL directives.
 
-use crate::error::QueryError;
+use query_types::error::QueryError;
 use graphql_parser::schema::Directive;
 use schema::CType;
 
@@ -167,7 +167,6 @@ pub struct IndexConfig {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-#[non_exhaustive]
 pub enum IndexDirection {
     #[default]
     Asc,

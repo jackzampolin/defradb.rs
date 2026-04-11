@@ -1,11 +1,10 @@
 //! Dynamic GraphQL schema generation from CollectionVersion
 
-use crate::error::{QueryError, Result};
+use query_types::error::{QueryError, Result};
 use schema::{CollectionVersion, FieldKind, ScalarKind};
 
 /// GraphQL type representation
 #[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
 pub enum GqlType {
     /// Non-null type
     NonNull(Box<GqlType>),

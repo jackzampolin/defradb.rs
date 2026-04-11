@@ -11,7 +11,7 @@
 
 use cid::Cid;
 
-use crate::error::{QueryError, Result};
+use query_types::error::{QueryError, Result};
 use schema::{
     CType, CollectionVersion, FieldDescription, FieldKind, IndexDescription,
     IndexedFieldDescription, VectorEmbeddingDescription,

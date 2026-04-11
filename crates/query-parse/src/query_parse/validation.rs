@@ -4,9 +4,9 @@
 //! actually exist in the database, catching typos at parse time rather
 //! than during execution.
 
-use crate::error::{QueryError, Result};
-use crate::fetcher::CollectionProvider;
-use crate::mapper::{Mutation, Select};
+use query_types::error::{QueryError, Result};
+use query_types::collection_provider::CollectionProvider;
+use query_types::mapper::{Mutation, Select};
 use crate::query_parse::ParsedOperation;
 
 /// Validate that all collections referenced in a parsed operation exist.
@@ -74,10 +74,10 @@ async fn validate_mutation_collection(
     if provider.get_collection(name).await?.is_none() {
         let suggestion = suggest_collection(name, provider).await;
         let field_name = match mutation.mutation_type {
-            crate::mapper::MutationType::Create => format!("add_{}", name),
-            crate::mapper::MutationType::Update => format!("update_{}", name),
-            crate::mapper::MutationType::Delete => format!("delete_{}", name),
-            crate::mapper::MutationType::Upsert => format!("upsert_{}", name),
+            query_types::mapper::MutationType::Create => format!("add_{}", name),
+            query_types::mapper::MutationType::Update => format!("update_{}", name),
+            query_types::mapper::MutationType::Delete => format!("delete_{}", name),
+            query_types::mapper::MutationType::Upsert => format!("upsert_{}", name),
         };
         let mut msg = format!(
             "Cannot query field \"{}\" on type \"Mutation\".",
@@ -137,8 +137,8 @@ fn edit_distance(a: &str, b: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::DocumentMapping;
-    use crate::fetcher::StaticCollectionProvider;
+    use query_types::document::DocumentMapping;
+    use query_types::collection_provider::StaticCollectionProvider;
     use schema::CollectionVersion;
 
     fn make_provider(names: &[&str]) -> StaticCollectionProvider {
@@ -202,7 +202,7 @@ mod tests {
     async fn test_invalid_mutation_collection() {
         let provider = make_provider(&["User"]);
         let mutation = Mutation {
-            mutation_type: crate::mapper::MutationType::Create,
+            mutation_type: query_types::mapper::MutationType::Create,
             collection_name: "Usr".to_string(),
             alias: None,
             create_input: vec![],

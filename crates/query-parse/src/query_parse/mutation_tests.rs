@@ -1,5 +1,5 @@
 use super::*;
-use crate::mapper::MutationType;
+use query_types::mapper::MutationType;
 
 #[test]
 fn test_parse_create_mutation() {

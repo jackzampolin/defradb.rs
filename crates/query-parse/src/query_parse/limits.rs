@@ -1,7 +1,7 @@
 //! Query structure limits to prevent denial-of-service via deeply nested or wide queries.
 
-use crate::error::{QueryError, Result};
-use crate::mapper::{Requestable, Select};
+use query_types::error::{QueryError, Result};
+use query_types::mapper::{Requestable, Select};
 
 /// Maximum nesting depth for GraphQL selections.
 ///

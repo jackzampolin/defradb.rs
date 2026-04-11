@@ -8,8 +8,8 @@ use graphql_parser::query::Value;
 use serde_json::{Map, Value as JsonValue};
 use std::collections::HashMap;
 
-use crate::error::{QueryError, Result};
-use crate::mapper::Filter;
+use query_types::error::{QueryError, Result};
+use query_types::mapper::Filter;
 
 use super::values::graphql_value_to_json;
 

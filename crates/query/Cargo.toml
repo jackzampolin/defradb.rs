@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 # Internal crates
 query-types = { path = "../query-types" }
+query-parse = { path = "../query-parse" }
 defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 storage = { path = "../storage" }

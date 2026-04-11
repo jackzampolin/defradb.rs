@@ -7,7 +7,6 @@ use schema::CollectionVersion;
 
 /// Warnings generated during SDL parsing
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum ParseWarning {
     /// Unknown directive encountered (forward compatibility)
     UnknownDirective {
@@ -118,7 +117,6 @@ pub fn format_location(type_name: &str, field_name: Option<&str>) -> String {
 
 /// Location where a directive was found
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum DirectiveLocation {
     Type,
     Field,
