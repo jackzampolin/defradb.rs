@@ -10,7 +10,6 @@ use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
-use zeroize::Zeroizing;
 
 use defra_core::Result;
 
@@ -19,29 +18,6 @@ use crate::error::{
     crypto_error, failed_to_parse_ephemeral_public_key, verification_with_hmac_failed,
 };
 use crate::types::{AES_KEY_SIZE, HMAC_KEY_SIZE, HMAC_SIZE, X25519_PUBLIC_KEY_SIZE};
-
-type DerivedKeys = (Zeroizing<[u8; AES_KEY_SIZE]>, Zeroizing<[u8; HMAC_SIZE]>);
-
-fn derive_ecies_keys(shared_secret: &[u8]) -> Result<DerivedKeys> {
-    let hkdf = Hkdf::<Sha256>::new(None, shared_secret);
-
-    let mut keys = Zeroizing::new([0u8; AES_KEY_SIZE + HMAC_SIZE]);
-    hkdf.expand(&[], &mut *keys)
-        .map_err(|e| crypto_error(format!("HKDF expansion failed: {}", e)))?;
-
-    let aes_key = Zeroizing::new(
-        keys[..AES_KEY_SIZE]
-            .try_into()
-            .map_err(|_| crypto_error("failed to derive AES key from HKDF output"))?,
-    );
-    let hmac_key = Zeroizing::new(
-        keys[AES_KEY_SIZE..]
-            .try_into()
-            .map_err(|_| crypto_error("failed to derive HMAC key from HKDF output"))?,
-    );
-
-    Ok((aes_key, hmac_key))
-}
 
 /// Options for ECIES encryption/decryption
 #[derive(Default)]
