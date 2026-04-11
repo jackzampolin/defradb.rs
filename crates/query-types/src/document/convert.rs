@@ -3,9 +3,9 @@
 use document::Document;
 use serde_json::Value as JsonValue;
 
+use crate::doc::{Doc, DocStatus};
 use crate::error::Result;
 use crate::json_convert::normal_value_to_json;
-use crate::doc::{Doc, DocStatus};
 
 use super::DocumentMapping;
 

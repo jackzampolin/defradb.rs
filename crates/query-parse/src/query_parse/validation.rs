@@ -4,10 +4,10 @@
 //! actually exist in the database, catching typos at parse time rather
 //! than during execution.
 
-use query_types::error::{QueryError, Result};
-use query_types::collection_provider::CollectionProvider;
-use query_types::mapper::{Mutation, Select};
 use crate::query_parse::ParsedOperation;
+use query_types::collection_provider::CollectionProvider;
+use query_types::error::{QueryError, Result};
+use query_types::mapper::{Mutation, Select};
 
 /// Validate that all collections referenced in a parsed operation exist.
 ///
@@ -137,8 +137,8 @@ fn edit_distance(a: &str, b: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use query_types::document::DocumentMapping;
     use query_types::collection_provider::StaticCollectionProvider;
+    use query_types::document::DocumentMapping;
     use schema::CollectionVersion;
 
     fn make_provider(names: &[&str]) -> StaticCollectionProvider {

@@ -14,7 +14,9 @@ use serde_json::Value as JsonValue;
 use std::collections::{HashMap, HashSet};
 
 use query_types::error::{QueryError, Result};
-use query_types::mapper::{parse_mutation_name, FullTextSearch, Mutation, MutationType, Similarity};
+use query_types::mapper::{
+    parse_mutation_name, FullTextSearch, Mutation, MutationType, Similarity,
+};
 
 use super::filters::parse_filter_value;
 use super::parser::{parse_selection_set, FragmentMap};

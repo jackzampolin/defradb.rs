@@ -12,7 +12,9 @@ use tracing::instrument;
 
 use query_types::document::DocumentMapping;
 use query_types::error::{QueryError, Result};
-use query_types::mapper::{AggregateType, Field as SelectField, Limit, Mutation, Requestable, Select};
+use query_types::mapper::{
+    AggregateType, Field as SelectField, Limit, Mutation, Requestable, Select,
+};
 
 use super::aggregates::{parse_aggregate_field, parse_group_by_value, parse_top_level_aggregate};
 use super::explain::{
