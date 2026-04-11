@@ -38,7 +38,7 @@ hex.workspace = true
 tokio = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
-wasmtime = { version = "41", optional = true }
+wasmtime = { version = "43.0.1", optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
