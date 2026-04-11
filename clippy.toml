@@ -1,0 +1,3 @@
+# Pin Clippy's current default complexity thresholds so they do not drift with toolchain updates.
+cognitive-complexity-threshold = 25
+type-complexity-threshold = 250

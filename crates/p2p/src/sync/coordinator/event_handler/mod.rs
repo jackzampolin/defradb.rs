@@ -21,7 +21,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Handle an event from the transport layer.
     ///
     /// This should be called from the event loop that processes TransportEvents.
-    pub async fn handle_transport_event(&self, event: TransportEvent) -> Result<()> {
+    pub async fn handle_transport_event(
+        &self,
+        event: TransportEvent<T::ResponseToken>,
+    ) -> Result<()> {
         match event {
             TransportEvent::PeerConnected(peer_id) => {
                 tracing::debug!(peer_id = %peer_id, "Peer connected");
@@ -229,7 +232,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     .await?;
             }
             other => {
-                tracing::trace!(event = ?other, "Ignoring non-sync transport event");
+                let _ = other;
+                tracing::trace!("Ignoring non-sync transport event");
             }
         }
         Ok(())

@@ -336,9 +336,7 @@ impl PlanNode for SelectNode {
         // Use explain_filter as fallback when no real filter is set (for relation filter display).
         let display_filter = self.filter.as_ref().or(self.explain_filter.as_ref());
         if let Some(filter) = display_filter {
-            let conditions = filter.conditions();
-            let stripped = super::strip_docid_from_conditions(conditions);
-            obj.insert("filter".to_string(), stripped);
+            obj.insert("filter".to_string(), super::strip_docid_from_filter(filter));
         } else {
             obj.insert("filter".to_string(), serde_json::Value::Null);
         }
@@ -427,5 +425,96 @@ impl PlanNode for SelectNode {
         }
 
         serde_json::Value::Object(obj)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use serde_json::json;
+
+    use super::SelectNode;
+    use crate::document::DocumentMapping;
+    use crate::error::Result;
+    use crate::mapper::Filter;
+    use crate::planner::{Doc, PlanNode};
+
+    struct MockScanNode {
+        mapping: DocumentMapping,
+        current: Doc,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl PlanNode for MockScanNode {
+        async fn init(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn start(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn next(&mut self) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn value(&self) -> &Doc {
+            &self.current
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn source(&self) -> Option<&dyn PlanNode> {
+            None
+        }
+
+        fn document_map(&self) -> &DocumentMapping {
+            &self.mapping
+        }
+
+        fn kind(&self) -> &'static str {
+            "scanNode"
+        }
+    }
+
+    fn make_mapping() -> DocumentMapping {
+        let mut mapping = DocumentMapping::new();
+        mapping.add(0, "_docID");
+        mapping.add(1, "name");
+        mapping
+    }
+
+    #[test]
+    fn explain_preserves_select_node_shape_while_stripping_docid_filter() {
+        let filter = Filter::from_conditions(serde_json::Map::from_iter([
+            ("_docID".to_string(), json!({"_eq": "doc-1"})),
+            ("name".to_string(), json!({"_eq": "Alice"})),
+        ]));
+
+        let source: Box<dyn PlanNode> = Box::new(MockScanNode {
+            mapping: make_mapping(),
+            current: Doc::default(),
+        });
+
+        let explain = SelectNode::new(source, make_mapping())
+            .with_filter(filter)
+            .with_doc_ids(vec!["doc-1".to_string()])
+            .explain();
+
+        assert_eq!(
+            explain,
+            json!({
+                "selectNode": {
+                    "docID": ["doc-1"],
+                    "filter": {
+                        "name": {"_eq": "Alice"}
+                    },
+                    "scanNode": {}
+                }
+            })
+        );
     }
 }

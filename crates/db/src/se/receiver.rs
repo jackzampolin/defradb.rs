@@ -158,7 +158,9 @@ mod tests {
                 .collect(),
         };
 
-        serde_cbor::to_vec(&req).unwrap()
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&req, &mut bytes).unwrap();
+        bytes
     }
 
     #[test]

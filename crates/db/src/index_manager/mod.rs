@@ -63,6 +63,15 @@ fn is_valid_index_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Generate the internal map key used for full-text indexes.
+///
+/// This key is intentionally invalid for public index creation APIs because
+/// full-text indexes are synthesized from `@fulltext` schema directives and do
+/// not share the same namespace as user-defined secondary indexes.
+pub(crate) fn fulltext_index_name(field_name: &str) -> String {
+    format!("__fulltext__:{field_name}")
+}
+
 /// Manages indexes for a collection.
 ///
 /// Provides operations for creating, dropping, and maintaining secondary indexes.
@@ -106,7 +115,7 @@ impl IndexManager {
         // with regular indexes (which use the IndexIDSequenceKey mechanism).
         // The high-bit (0x8000_0000) separates the namespace from regular index IDs.
         for ft_desc in &schema.fulltext_indexes {
-            let idx_name = format!("{}_fulltext", ft_desc.field_name);
+            let idx_name = fulltext_index_name(&ft_desc.field_name);
             let idx_id = {
                 // FNV-1a: stable across Rust versions unlike DefaultHasher
                 let mut h: u32 = 2166136261;

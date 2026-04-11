@@ -23,6 +23,7 @@ storage = { path = "../storage" }
 query = { path = "../query" }
 events = { path = "../events" }
 acp = { path = "../acp" }
+sourcehub = { path = "../sourcehub" }
 identity = { path = "../identity" }
 defra-core = { path = "../defra-core" }
 schema = { path = "../schema" }

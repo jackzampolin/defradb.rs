@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use iroh::{Endpoint, EndpointId, SecretKey};
+use iroh::{Endpoint, EndpointId};
 use iroh_gossip::net::Gossip;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -44,7 +44,7 @@ pub async fn spawn_endpoint(
     config: IrohEndpointConfig,
 ) -> crate::error::Result<(
     mpsc::Sender<IrohCommand>,
-    mpsc::Receiver<TransportEvent>,
+    mpsc::Receiver<TransportEvent<iroh::endpoint::SendStream>>,
     JoinHandle<()>,
 )> {
     let mut alpns: Vec<Vec<u8>> = protocols::ALL_ALPNS.iter().map(|a| a.to_vec()).collect();
@@ -65,7 +65,7 @@ pub async fn spawn_endpoint(
     let gossip = Gossip::builder().spawn(endpoint.clone());
 
     let (command_tx, command_rx) = mpsc::channel::<IrohCommand>(256);
-    let (event_tx, event_rx) = mpsc::channel::<TransportEvent>(256);
+    let (event_tx, event_rx) = mpsc::channel::<TransportEvent<iroh::endpoint::SendStream>>(256);
 
     let task = tokio::spawn(run_event_loop(endpoint, gossip, command_rx, event_tx));
 
@@ -77,7 +77,7 @@ async fn run_event_loop(
     endpoint: Endpoint,
     gossip: Gossip,
     mut command_rx: mpsc::Receiver<IrohCommand>,
-    event_tx: mpsc::Sender<TransportEvent>,
+    event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) {
     let peer_map = Arc::new(parking_lot::Mutex::new(PeerMap::new()));
     let mut subscriptions: HashMap<String, TopicSubscription> = HashMap::new();

@@ -137,7 +137,7 @@ impl ReplicationLoop {
     /// (e.g., publishing events to an event bus).
     pub async fn run_parallel<B, T, H, F>(
         coordinator: Arc<SyncCoordinator<B, T>>,
-        mut events: mpsc::Receiver<SyncEvent>,
+        events: mpsc::Receiver<SyncEvent>,
         handler: Arc<H>,
         config: ReplicationConfig,
         on_result: F,
@@ -153,6 +153,31 @@ impl ReplicationLoop {
         );
 
         let semaphore = Arc::new(Semaphore::new(config.max_workers));
+        Self::run_parallel_with_semaphore(
+            coordinator,
+            events,
+            handler,
+            config,
+            on_result,
+            semaphore,
+        )
+        .await;
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) async fn run_parallel_with_semaphore<B, T, H, F>(
+        coordinator: Arc<SyncCoordinator<B, T>>,
+        mut events: mpsc::Receiver<SyncEvent>,
+        handler: Arc<H>,
+        config: ReplicationConfig,
+        on_result: F,
+        semaphore: Arc<Semaphore>,
+    ) where
+        B: Blockstore + 'static,
+        T: P2PTransport,
+        H: MergeHandler + 'static,
+        F: Fn(ReplicationResult) + Send + Sync + 'static,
+    {
         let on_result = Arc::new(on_result);
         let config = Arc::new(config);
 
@@ -165,7 +190,13 @@ impl ReplicationLoop {
                 }
             };
 
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let permit = match semaphore.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    tracing::info!("Worker semaphore closed, stopping parallel replication loop");
+                    break;
+                }
+            };
             let coord = coordinator.clone();
             let h = handler.clone();
             let c = config.clone();

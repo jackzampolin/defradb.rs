@@ -11,6 +11,13 @@ use defra_core::Result;
 
 use crate::types::AES_NONCE_SIZE;
 
+#[cfg(any(test, debug_assertions))]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
+static USE_DETERMINISTIC_NONCE: AtomicBool = AtomicBool::new(false);
+
 /// Generate a cryptographically secure random nonce for AES-GCM
 ///
 /// # Returns
@@ -22,8 +29,8 @@ use crate::types::AES_NONCE_SIZE;
 /// assert_eq!(nonce.len(), 12);
 /// ```
 pub fn generate_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
-    // In test mode, use deterministic nonce for reproducibility
-    if USE_DETERMINISTIC_NONCE.load(std::sync::atomic::Ordering::Acquire) {
+    #[cfg(any(test, debug_assertions))]
+    if USE_DETERMINISTIC_NONCE.load(Ordering::Acquire) {
         return generate_deterministic_nonce();
     }
 
@@ -46,6 +53,7 @@ fn generate_random_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
 ///
 /// Uses the same deterministic value as the Go implementation:
 /// "deterministic nonce for testing" (first 12 bytes)
+#[cfg(any(test, debug_assertions))]
 #[doc(hidden)]
 pub fn generate_deterministic_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
     // Match Go's generateTestNonce(): []byte("deterministic nonce for testing")[:12]
@@ -55,10 +63,18 @@ pub fn generate_deterministic_nonce() -> Result<[u8; AES_NONCE_SIZE]> {
     Ok(nonce)
 }
 
-/// Control whether to use deterministic nonces in tests.
+/// Control whether to use deterministic nonces in test/debug builds.
 ///
 /// **WARNING: This should NEVER be set to true in production.**
 /// Only use for testing with reproducible nonces.
+#[cfg(any(test, debug_assertions))]
 #[doc(hidden)]
-pub static USE_DETERMINISTIC_NONCE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+pub fn set_deterministic_nonce(enabled: bool) {
+    USE_DETERMINISTIC_NONCE.store(enabled, Ordering::Release);
+}
+
+#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
+pub fn deterministic_nonce_enabled() -> bool {
+    USE_DETERMINISTIC_NONCE.load(Ordering::Acquire)
+}
