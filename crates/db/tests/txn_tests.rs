@@ -255,12 +255,8 @@ async fn test_db_txn_id_increments() {
 async fn test_persisted_collection_root_id_allocation_conflicts_instead_of_duplicating() {
     let store = Arc::new(MemoryStore::new());
 
-    let txn1 = DbTxn::<MemoryStore>::new(
-        BasicTxn::new(&*store, 1, false).await.unwrap(),
-    );
-    let txn2 = DbTxn::<MemoryStore>::new(
-        BasicTxn::new(&*store, 2, false).await.unwrap(),
-    );
+    let txn1 = DbTxn::<MemoryStore>::new(BasicTxn::new(&*store, 1, false).await.unwrap());
+    let txn2 = DbTxn::<MemoryStore>::new(BasicTxn::new(&*store, 2, false).await.unwrap());
 
     let short_id_1 = {
         let systemstore1 = txn1.systemstore().unwrap();
@@ -292,9 +288,7 @@ async fn test_persisted_collection_root_id_allocation_conflicts_instead_of_dupli
         "expected write-write conflict, got: {err}"
     );
 
-    let retry_txn = DbTxn::<MemoryStore>::new(
-        BasicTxn::new(&*store, 3, false).await.unwrap(),
-    );
+    let retry_txn = DbTxn::<MemoryStore>::new(BasicTxn::new(&*store, 3, false).await.unwrap());
     let retried_short_id = {
         let retry_systemstore = retry_txn.systemstore().unwrap();
         ensure_persisted_collection_short_id(&retry_systemstore, "collection-b")
@@ -304,9 +298,7 @@ async fn test_persisted_collection_root_id_allocation_conflicts_instead_of_dupli
     assert_eq!(retried_short_id, 2);
     retry_txn.commit().await.unwrap();
 
-    let read_txn = DbTxn::<MemoryStore>::new(
-        BasicTxn::new(&*store, 4, true).await.unwrap(),
-    );
+    let read_txn = DbTxn::<MemoryStore>::new(BasicTxn::new(&*store, 4, true).await.unwrap());
     let (collection_a_short_id, collection_b_short_id, sequence_value) = {
         let read_systemstore = read_txn.systemstore().unwrap();
         let sequence_key = CollectionIDSequenceKey;
