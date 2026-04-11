@@ -84,7 +84,8 @@ pub(crate) mod lensed_fetcher;
 #[cfg(feature = "p2p")]
 pub(crate) mod merge_handler;
 pub(crate) mod migration;
-pub(crate) mod nac;
+// NAC extracted to standalone db-nac crate.
+pub(crate) use db_nac as nac;
 pub(crate) mod patch;
 #[cfg(feature = "p2p")]
 pub(crate) mod peer_identity;

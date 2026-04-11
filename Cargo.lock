@@ -3531,6 +3531,7 @@ dependencies = [
  "crypto",
  "datastore",
  "db-blocks",
+ "db-nac",
  "defra-core",
  "document",
  "events",
@@ -3580,6 +3581,21 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
  "storage",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "db-nac"
+version = "0.5.0"
+dependencies = [
+ "acp",
+ "async-trait",
+ "defra-core",
+ "identity",
+ "serde",
+ "storage",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
