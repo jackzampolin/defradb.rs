@@ -105,6 +105,8 @@ version = "0.9"
 optional = true
 
 [features]
+default = ["rocksdb", "redb"]
+redb = ["storage/redb"]
 fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]
 vendored-openssl = ["dep:openssl-sys"]

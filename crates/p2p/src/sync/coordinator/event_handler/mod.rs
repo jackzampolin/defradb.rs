@@ -13,7 +13,7 @@ use super::SyncCoordinator;
 use crate::error::{Error, Result};
 use crate::message::{BranchableSyncReply, DocSyncReply, PushLogReply};
 use crate::signing::sign_with_transport;
-use crate::transport::{P2PTransport, PeerId, ResponseToken, TransportEvent};
+use crate::transport::{P2PTransport, PeerId, TransportEvent};
 
 const RATE_LIMITED_MSG: &str = "rate limited: too many requests, retry later";
 
@@ -54,7 +54,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         &self,
         peer_id: &PeerId,
         message_id: &str,
-        token: ResponseToken,
+        token: T::ResponseToken,
     ) -> Error {
         tracing::debug!(
             peer_id = %peer_id,
@@ -73,7 +73,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         &self,
         peer_id: &PeerId,
         message_id: &str,
-        token: Option<ResponseToken>,
+        token: Option<T::ResponseToken>,
     ) -> Error {
         tracing::debug!(
             peer_id = %peer_id,
@@ -89,7 +89,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         &self,
         peer_id: &PeerId,
         message_id: &str,
-        token: Option<ResponseToken>,
+        token: Option<T::ResponseToken>,
     ) -> Error {
         tracing::debug!(
             peer_id = %peer_id,
@@ -117,7 +117,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         peer_id: &PeerId,
         message_id: &str,
         collection_id: &str,
-        token: Option<ResponseToken>,
+        token: Option<T::ResponseToken>,
     ) -> Error {
         tracing::debug!(
             peer_id = %peer_id,
@@ -143,7 +143,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     async fn reject_rate_limited_car_fetch(
         &self,
         peer_id: &PeerId,
-        token: Option<ResponseToken>,
+        token: Option<T::ResponseToken>,
     ) -> Error {
         tracing::debug!(
             peer_id = %peer_id,

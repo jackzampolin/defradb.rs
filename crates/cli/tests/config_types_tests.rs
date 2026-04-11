@@ -125,7 +125,11 @@ fn test_datastore_type_from_str_invalid() {
 
 #[test]
 fn test_datastore_type_display_roundtrip() {
-    for store in [DatastoreType::Redb, DatastoreType::Memory] {
+    for store in [
+        DatastoreType::RocksDb,
+        DatastoreType::Redb,
+        DatastoreType::Memory,
+    ] {
         let display = store.to_string();
         let parsed: DatastoreType = display.parse().unwrap();
         assert_eq!(store, parsed);

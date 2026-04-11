@@ -16,48 +16,48 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # redb (default storage backend)
-          - variant: redb
+          # rocksdb (default storage backend)
+          - variant: rocksdb
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["self-hosted", "Linux", "X64"]'
             features: ""
-          - variant: redb
+          - variant: rocksdb
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
             features: ""
-          - variant: redb
+          - variant: rocksdb
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: "--features vendored-openssl"
-          - variant: redb
+          - variant: rocksdb
             target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
             features: ""
-          # rocksdb
-          - variant: rocksdb
+          # redb
+          - variant: redb
             target: x86_64-unknown-linux-gnu
             platform: linux_amd64
             runner: '["self-hosted", "Linux", "X64"]'
-            features: "--features rocksdb"
-          - variant: rocksdb
+            features: "--features redb"
+          - variant: redb
             target: aarch64-unknown-linux-gnu
             platform: linux_arm64
             runner: '["self-hosted", "Linux", "ARM64"]'
-            features: "--features rocksdb"
-          - variant: rocksdb
+            features: "--features redb"
+          - variant: redb
             target: x86_64-apple-darwin
             platform: darwin_amd64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--features rocksdb,vendored-openssl"
-          - variant: rocksdb
+            features: "--features redb,vendored-openssl"
+          - variant: redb
             target: aarch64-apple-darwin
             platform: darwin_arm64
             runner: '["self-hosted", "macOS", "ARM64", "studio"]'
-            features: "--features rocksdb"
+            features: "--features redb"
     steps:
       - uses: actions/checkout@v4
 
@@ -124,7 +124,7 @@ jobs:
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME}"
-          if [ "${{ matrix.variant }}" = "redb" ]; then
+          if [ "${{ matrix.variant }}" = "rocksdb" ]; then
             ARCHIVE="defra_${TAG}_${{ matrix.platform }}.tar.gz"
           else
             ARCHIVE="defra-${{ matrix.variant }}_${TAG}_${{ matrix.platform }}.tar.gz"
@@ -351,12 +351,12 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: defra-redb-linux_amd64
+          name: defra-rocksdb-linux_amd64
           path: docker-context/linux/amd64
 
       - uses: actions/download-artifact@v4
         with:
-          name: defra-redb-linux_arm64
+          name: defra-rocksdb-linux_arm64
           path: docker-context/linux/arm64
 
       - name: Extract binaries
