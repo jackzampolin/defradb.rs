@@ -4,6 +4,8 @@ mod audit;
 mod basic;
 #[path = "acp/custom_policy.rs"]
 mod custom_policy;
+#[path = "acp/link_collection.rs"]
+mod link_collection;
 #[path = "acp/multi_identity.rs"]
 mod multi_identity;
 #[path = "acp/multi_role.rs"]
