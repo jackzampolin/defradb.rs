@@ -16,6 +16,8 @@ mod negative_p2p;
 mod node_access;
 #[path = "acp/p2p.rs"]
 mod p2p;
+#[path = "acp/policy_validation.rs"]
+mod policy_validation;
 #[path = "acp/revoke_lifecycle.rs"]
 mod revoke_lifecycle;
 #[path = "acp/transaction_rollback.rs"]
