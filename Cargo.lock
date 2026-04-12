@@ -9798,11 +9798,47 @@ dependencies = [
  "identity",
  "lens",
  "proptest",
+ "query-parse",
+ "query-types",
  "regex",
  "schema",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "storage",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "query-parse"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "cid 0.10.1",
+ "graphql-parser",
+ "query-types",
+ "regex",
+ "schema",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "query-types"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "defra-core",
+ "document",
+ "schema",
+ "serde",
+ "serde_json",
  "storage",
  "thiserror 1.0.69",
  "tokio",

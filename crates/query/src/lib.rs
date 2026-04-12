@@ -13,26 +13,32 @@
 //!
 //! # Main Components
 //!
-//! - `document`: Document mapping and field positioning
-//! - `mapper`: Query types (Select, Filter, Order, Aggregate)
+//! - `document`: Document mapping and field positioning (in query-types crate)
+//! - `mapper`: Query types (Select, Filter, Order, Aggregate) (in query-types crate)
 //! - `planner`: Plan node trait and execution info
 //! - `plan`: Concrete plan node implementations
 
-pub mod document;
-pub mod error;
+// Types extracted to query-types crate.
+pub use query_types::document;
+pub use query_types::error;
+pub use query_types::json_convert;
+pub use query_types::mapper;
+
+// Parsing extracted to query-parse crate.
+// Re-export as module aliases so `use crate::query_parse::` etc. still work.
+extern crate query_parse as query_parse_ext;
+pub use query_parse_ext::query_parse;
+pub use query_parse_ext::schema_gen;
+pub use query_parse_ext::sdl_parse;
+pub use query_parse_ext::select_convert;
+
 pub mod executor;
 pub mod fetcher;
-mod json_convert;
-pub mod mapper;
 pub mod mutator;
 pub mod plan;
 pub mod planner;
-pub mod query_parse;
 pub mod rest;
 pub mod runner;
-pub mod schema_gen;
-pub mod sdl_parse;
-pub mod select_convert;
 pub mod subscription;
 #[cfg(test)]
 pub mod test_utils;

@@ -8,6 +8,8 @@ members = [
     "crates/embedded",
     "crates/schema",
     "crates/query",
+    "crates/query-types",
+    "crates/query-parse",
     "crates/document",
     "crates/p2p",
     "crates/crypto",
