@@ -5,7 +5,7 @@ use p2p::sync::{BroadcastResult, SyncCoordinator};
 use p2p::transport::P2PTransport;
 use query::mutator::BroadcastStatus;
 
-use crate::block_builder::BlockResult;
+use db_blocks::BlockResult;
 
 pub(crate) const BROADCAST_MAX_RETRIES: u32 = 10;
 

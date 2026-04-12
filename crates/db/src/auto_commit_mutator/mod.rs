@@ -5,7 +5,7 @@
 //! without explicit transaction management while still providing proper
 //! transactional semantics per operation.
 
-mod batch;
+pub mod batch;
 mod create;
 mod create_many;
 mod delete;
@@ -30,7 +30,7 @@ use crate::lensed_fetcher::LensedDocFetcher;
 use defra_core::encryption::{get_doc_encryption, get_encryption_config, store_doc_encryption};
 use defra_core::signing::get_signing_config;
 
-pub(crate) use batch::BatchMutator;
+pub use batch::BatchMutator;
 
 /// Document mutator that auto-commits transactions for each operation.
 ///
@@ -54,7 +54,7 @@ impl<S: Store> AutoCommitMutator<S> {
         Self { db }
     }
 
-    pub(crate) async fn new_batch_components(
+    pub async fn new_batch_components(
         &self,
     ) -> query::error::Result<(Arc<BatchMutator<S>>, Arc<LensedDocFetcher<S>>)> {
         let txn = self.db.new_txn(false).await.map_err(|e| {

@@ -82,7 +82,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         collections: &[String],
         se_key: Option<&[u8]>,
     ) -> Result<(), String> {
-        db::push_existing_docs_via_transport(
+        db_merge::push_existing_docs_via_transport(
             &self.transport,
             &self.db,
             self.document_acp.get().map(|acp| acp.as_ref()),
@@ -99,7 +99,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         doc_id: &str,
         collection_id: &str,
     ) -> Result<(), String> {
-        db::retry_doc_via_transport(
+        db_merge::retry_doc_via_transport(
             &self.transport,
             &self.db,
             self.document_acp.get().map(|acp| acp.as_ref()),

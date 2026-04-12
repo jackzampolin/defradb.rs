@@ -1,6 +1,6 @@
 //! Node Access Control (NAC) state management.
 //!
-//! This module provides the NAC manager that wraps the `NodeACP` from the `acp` crate
+//! This crate provides the NAC manager that wraps the `NodeACP` from the `acp` crate
 //! and adds config-aware behavior for the database layer.
 //!
 //! # NAC Lifecycle
@@ -9,20 +9,15 @@
 //! 2. Admin enables NAC with `--node-acp-enable` flag
 //! 3. Owner identity is bootstrapped from keyring
 //! 4. NAC enforces permissions for node operations
-//!
-//! # Configuration
-//!
-//! NAC is controlled by:
-//! - `acp.node_enable` config option (default: false)
-//! - Owner identity from the node's keyring
 
+pub mod error;
 pub mod factory;
 #[cfg(test)]
 mod tests;
 mod trait_impl;
 
+pub use error::{Error, Result};
 pub use factory::create_memory_nac_manager;
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
 pub use factory::create_persistent_nac_manager;
 
@@ -32,8 +27,6 @@ use acp::nac::{NacStatus, NodeACP, NodePermission};
 use acp::ZanzibarStore;
 use async_trait::async_trait;
 use identity::Did;
-
-use crate::error::{Error, Result};
 
 /// NAC configuration options.
 #[derive(Debug, Clone, Default)]

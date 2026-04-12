@@ -1,4 +1,9 @@
-use super::*;
+//! Block reading utilities that depend on the DB type.
+//!
+//! These functions are kept in the `db` crate (not `db-blocks`) because they
+//! need access to `DB` and `DbTxn` which would create a circular dependency.
+
+use db_blocks::{get_all_field_heads, BlockResult};
 
 /// Read the latest composite block for a document from the committed store.
 ///

@@ -4,37 +4,46 @@ use std::sync::Arc;
 use acp::DocumentACP;
 use bytes::Bytes;
 use p2p::message::PushLogRequest;
+use p2p::transport::PeerId;
+use p2p::P2PTransport;
 use storage::corekv::{IterOptions, Reader, Store};
 
-use crate::database::DB;
 use crate::push_docs_common::{
     load_push_dag_blocks, resolve_push_creator, MAX_CONCURRENT_REPLAY_TASKS,
 };
+use db::database::DB;
 
-/// Push existing documents to a replicator peer.
+/// Push existing documents to a replicator peer via a generic transport.
 ///
-/// Matches Go's `pushHeadsForAllDocs`: for each collection, iterate all docs,
-/// get composite heads from headstore, load blocks, send PushLog to peer.
-/// If an SE encryption key is provided, also generates and pushes SE artifacts
-/// for collections with encrypted indexes. The identity pubkey is threaded
-/// through SE artifact generation to ensure per-identity tag isolation.
-pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
-    handle: &p2p::P2PHostHandle,
+/// Transport-agnostic equivalent of `push_existing_docs`. Uses `P2PTransport`
+/// methods instead of `P2PHostHandle`.
+pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTransport>(
+    transport: &T,
     db: &DB<S>,
     document_acp: Option<&dyn DocumentACP>,
-    peer_id: libp2p::PeerId,
+    peer_id: &PeerId,
     collections: &[String],
     se_encryption_key: Option<&[u8]>,
-    se_identity_pubkey: Option<&[u8]>,
 ) -> Result<(), String> {
-    // Wait for the connection to be fully established (dial is non-blocking).
-    // After a node restart, re-establishing connectivity can take longer than
-    // the initial connection, so we allow up to 15 seconds.
     let conn_timeout = std::time::Duration::from_secs(15);
     let conn_start = std::time::Instant::now();
+    let mut logged_conn_error = false;
     loop {
-        let peers = handle.connected_peers().await.unwrap_or_default();
-        if peers.contains(&peer_id) {
+        let peers = match transport.connected_peers().await {
+            Ok(peers) => peers,
+            Err(e) => {
+                if !logged_conn_error {
+                    tracing::warn!(
+                        peer_id = %peer_id,
+                        error = %e,
+                        "connected_peers check failed during replay wait"
+                    );
+                    logged_conn_error = true;
+                }
+                Vec::new()
+            }
+        };
+        if peers.iter().any(|p| p == peer_id) {
             break;
         }
         if conn_start.elapsed() > conn_timeout {
@@ -43,11 +52,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    let local_peer_id = handle
-        .local_peer_id()
-        .await
-        .map_err(|e| format!("failed to get local peer ID: {}", e))?;
-    let local_peer_id_str = local_peer_id.to_string();
+    let local_peer_id = transport.local_peer_id().to_string();
 
     let txn = db
         .new_txn(true)
@@ -64,7 +69,6 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
         .datastore()
         .map_err(|e| format!("failed to get datastore: {}", e))?;
 
-    // Collect JoinHandles so we can await all pushes before signaling completion.
     let mut push_handles = Vec::new();
     let replay_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REPLAY_TASKS));
 
@@ -77,9 +81,6 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
             None => continue,
         };
 
-        // Iterate datastore keys-only to get doc IDs.
-        // Key format: /d/{collection_id}/{doc_id}
-        // Sub-keys like /d/{collection_id}/{doc_id}/v are filtered out.
         let col_prefix = format!("/d/{}/", collection.collection_id()).into_bytes();
         let opts = IterOptions::new()
             .with_prefix(col_prefix)
@@ -97,7 +98,6 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
         {
             let key_str = String::from_utf8_lossy(&pair.key);
             let parts: Vec<&str> = key_str.split('/').collect();
-            // Exact doc key: ["", "d", collection_id, doc_id] = 4 parts
             if parts.len() == 4 {
                 doc_ids.push(parts[3].to_string());
             }
@@ -107,13 +107,9 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
             .await
             .map_err(|e| format!("datastore close error: {}", e))?;
 
-        // For each document, send field blocks before composite heads.
-        // Go needs linked field (LWW) blocks in its blockstore before it
-        // processes the composite block, otherwise it tries Bitswap which
-        // doesn't work reliably cross-platform.
         for doc_id in &doc_ids {
             let creator =
-                resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id_str).await;
+                resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id).await;
             let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
             let opts = IterOptions::new().with_prefix(prefix);
             let mut iter = headstore
@@ -121,7 +117,6 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                 .await
                 .map_err(|e| format!("failed to iterate headstore: {}", e))?;
 
-            // Collect phase: pre-load all DAG blocks before spawning tasks.
             let mut doc_blocks = Vec::new();
 
             while let Some(pair) = iter
@@ -129,7 +124,6 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                 .await
                 .map_err(|e| format!("headstore iteration error: {}", e))?
             {
-                // Parse CID from key: /d/{doc_id}/C/{cid}
                 let key_str = String::from_utf8_lossy(&pair.key);
                 let parts: Vec<&str> = key_str.split('/').collect();
                 if parts.len() < 5 {
@@ -154,8 +148,6 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                 .await
                 .map_err(|e| format!("headstore close error: {}", e))?;
 
-            // Send phase: build signed requests in DAG dependency order,
-            // then spawn a task to send them sequentially so ordering is preserved.
             let mut requests = Vec::new();
             for (block_cid, block_data) in doc_blocks {
                 let mut request = PushLogRequest::new(
@@ -165,7 +157,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                     creator.clone(),
                     Bytes::from(block_data),
                 );
-                if let Err(e) = p2p::signing::sign_message(handle.keypair(), &mut request) {
+                if let Err(e) = p2p::signing::sign_with_transport(transport, &mut request) {
                     tracing::warn!(error = %e, "Failed to sign PushLog request");
                     continue;
                 }
@@ -173,7 +165,8 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
             }
 
             if !requests.is_empty() {
-                let push_h = handle.clone();
+                let t = transport.clone();
+                let pid = peer_id.clone();
                 let permit = replay_semaphore
                     .clone()
                     .acquire_owned()
@@ -183,10 +176,10 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                     let _permit = permit;
                     for req in requests {
                         let cid = req.cid.clone();
-                        match push_h.send_two_stream_request(peer_id, req).await {
+                        match t.send_two_stream_request(&pid, req).await {
                             Ok(reply) if reply.err_message.is_some() => {
                                 tracing::warn!(
-                                    peer_id = %peer_id,
+                                    peer_id = %pid,
                                     cid_len = cid.len(),
                                     error = %reply.err_message.as_deref().unwrap_or("unknown pushlog error"),
                                     "Existing document replay PushLog was rejected"
@@ -195,7 +188,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                             Ok(_) => {}
                             Err(e) => {
                                 tracing::warn!(
-                                    peer_id = %peer_id,
+                                    peer_id = %pid,
                                     cid_len = cid.len(),
                                     error = %e,
                                     "Existing document replay PushLog failed"
@@ -208,23 +201,16 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
         }
     }
 
-    // Await all push tasks so ReplicatorCompleted isn't emitted prematurely.
-    // The Go test framework copies expected heads on ReplicatorCompleted, then
-    // waits for merge events -- if pushes haven't landed yet, we get timeouts.
     tracing::debug!(task_count = push_handles.len(), "awaiting push tasks");
     for jh in push_handles {
-        let _ = jh.await;
+        if let Err(e) = jh.await {
+            tracing::error!(error = %e, "Replay push task panicked or was cancelled");
+        }
     }
     tracing::debug!("all push tasks completed");
 
-    // Generate and push SE artifacts for collections with encrypted indexes.
     if let Some(se_key) = se_encryption_key {
-        let coordinator = match se_identity_pubkey {
-            Some(pubkey) => {
-                crate::se::SECoordinator::with_key_and_identity(se_key.to_vec(), pubkey.to_vec())
-            }
-            None => crate::se::SECoordinator::with_key(se_key.to_vec()),
-        };
+        let coordinator = crate::se::SECoordinator::with_key(se_key.to_vec());
 
         for col_name in collections {
             let collection = match db.get_collection(col_name) {
@@ -239,7 +225,6 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
 
             tracing::debug!(collection = %col_name, index_count = encrypted_indexes.len(), "generating SE artifacts");
 
-            // Iterate datastore to get doc IDs (same pattern as block push above)
             let col_prefix = format!("/d/{}/", collection.collection_id()).into_bytes();
             let opts = IterOptions::new()
                 .with_prefix(col_prefix)
@@ -266,10 +251,8 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                 .await
                 .map_err(|e| format!("SE: datastore close error: {}", e))?;
 
-            // For each document, load field values and generate artifacts.
             let mut all_artifacts = Vec::new();
             for doc_id in &se_doc_ids {
-                // Read document CBOR from datastore: /d/{collection_id}/{doc_id}
                 let doc_key = format!("/d/{}/{}", collection.collection_id(), doc_id).into_bytes();
                 let doc_data = match datastore.get(&doc_key).await {
                     Ok(Some(data)) => data,
@@ -284,7 +267,6 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                     }
                 };
 
-                // Extract field values as HashMap<String, NormalValue>
                 let field_values: std::collections::HashMap<String, document::NormalValue> = doc
                     .values()
                     .iter()
@@ -321,7 +303,7 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
                     all_artifacts,
                 );
 
-                if let Err(e) = handle.send_se_artifacts(peer_id, se_request).await {
+                if let Err(e) = transport.send_se_artifacts(peer_id, se_request).await {
                     tracing::warn!(
                         peer_id = %peer_id,
                         collection = %col_name,
@@ -336,29 +318,24 @@ pub async fn push_existing_docs<S: storage::corekv::Store + 'static>(
     Ok(())
 }
 
-/// Retry pushing a single document's composite heads to a replicator peer.
+/// Retry pushing a single document's composite heads to a replicator peer
+/// via a generic transport.
 ///
-/// Reads composite head CIDs from the headstore, loads block data
-/// (field blocks + composite block) from the blockstore, and sends
-/// signed PushLogRequests to the target peer.
-pub async fn retry_doc<S: Store + 'static>(
-    handle: &p2p::P2PHostHandle,
+/// Transport-agnostic equivalent of `retry_doc`.
+pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
+    transport: &T,
     db: &DB<S>,
     document_acp: Option<&dyn DocumentACP>,
-    peer_id: libp2p::PeerId,
+    peer_id: &PeerId,
     doc_id: &str,
     collection_id: &str,
 ) -> Result<(), String> {
-    let local_peer_id = handle
-        .local_peer_id()
-        .await
-        .map_err(|e| format!("failed to get local peer ID: {}", e))?;
-    let local_peer_id_str = local_peer_id.to_string();
+    let local_peer_id = transport.local_peer_id().to_string();
     let collection = db
         .find_collection_by_id(collection_id)
         .map_err(|e| format!("failed to get collection: {}", e))?
         .ok_or_else(|| format!("collection '{}' not found", collection_id))?;
-    let creator = resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id_str).await;
+    let creator = resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id).await;
 
     let headstore = storage::stores::Headstore::new(db.store().clone());
     let head_txn = headstore
@@ -410,12 +387,12 @@ pub async fn retry_doc<S: Store + 'static>(
                 Bytes::from(block_data),
             );
 
-            if p2p::signing::sign_message(handle.keypair(), &mut request).is_err() {
+            if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
                 any_failed = true;
                 continue;
             }
 
-            match handle.send_two_stream_request(peer_id, request).await {
+            match transport.send_two_stream_request(peer_id, request).await {
                 Ok(reply) if reply.err_message.is_some() => any_failed = true,
                 Ok(_) => {}
                 Err(_) => any_failed = true,

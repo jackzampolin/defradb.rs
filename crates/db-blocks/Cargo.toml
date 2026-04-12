@@ -1,0 +1,46 @@
+[package]
+name = "db-blocks"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "IPLD block builder for DefraDB document mutations"
+
+[dependencies]
+# Serialization
+serde.workspace = true
+ciborium = "0.2"
+
+# Bytes
+bytes.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# IPLD
+cid.workspace = true
+multihash.workspace = true
+
+# Hashing
+sha2.workspace = true
+
+# Random (for nonce generation in write path)
+rand = "0.8"
+
+# Async
+async-trait.workspace = true
+
+# Internal crates
+storage = { path = "../storage" }
+blockstore = { path = "../blockstore" }
+datastore = { path = "../datastore" }
+document = { path = "../document" }
+crypto = { path = "../crypto" }
+defra-core = { path = "../defra-core" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+hex.workspace = true
+ed25519-dalek.workspace = true

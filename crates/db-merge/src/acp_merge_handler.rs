@@ -10,7 +10,7 @@ use schema::CollectionVersion;
 use storage::corekv::Store;
 
 use crate::merge_handler::hook::{CompositeMergeHook, CompositePostCommitAction};
-use crate::{DbMergeHandler, MergeError};
+use crate::merge_handler::{DbMergeHandler, MergeError};
 
 pub type AcpMergeError = MergeError;
 

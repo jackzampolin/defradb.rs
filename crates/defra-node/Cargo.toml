@@ -20,6 +20,7 @@ rocksdb = ["storage/rocksdb"]
 
 [dependencies]
 db = { path = "../db" }
+db-merge = { path = "../db-merge" }
 storage = { path = "../storage" }
 query = { path = "../query" }
 events = { path = "../events" }

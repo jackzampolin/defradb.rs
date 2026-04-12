@@ -98,7 +98,7 @@ where
     let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
         Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
     let head_provider: Arc<dyn DocumentHeadProvider> =
-        Arc::new(db::DbHeadProvider::new(database.clone()));
+        Arc::new(db_merge::DbHeadProvider::new(database.clone()));
     let (mut coordinator, sync_events_rx) = p2p::sync::SyncCoordinator::with_head_provider(
         p2p::Libp2pTransport::new(handle.clone()),
         blockstore.clone(),
@@ -114,11 +114,11 @@ where
     let (failure_tx, failure_rx) = tokio::sync::mpsc::channel::<PushFailure>(1024);
     coordinator.set_failure_channel(failure_tx);
     let coordinator = Arc::new(coordinator);
-    let merge_handler_inner = Arc::new(db::DbMergeHandler::new(
+    let merge_handler_inner = Arc::new(db_merge::DbMergeHandler::new(
         database.clone(),
         blockstore.clone(),
     ));
-    let merge_handler = Arc::new(db::AcpMergeHandler::new(merge_handler_inner.clone()));
+    let merge_handler = Arc::new(db_merge::AcpMergeHandler::new(merge_handler_inner.clone()));
 
     match coordinator.load_p2p_collections().await {
         Ok(count) if count > 0 => tracing::debug!(count, "loaded persisted P2P collections"),
@@ -159,7 +159,10 @@ where
         version_syncer,
     );
     adapter.set_initial_tracked_documents(restored_doc_ids);
-    let broadcast_mutator = Arc::new(db::BroadcastMutator::new(database.clone(), coordinator));
+    let broadcast_mutator = Arc::new(db_merge::BroadcastMutator::new(
+        database.clone(),
+        coordinator,
+    ));
     let broadcast_mutator_for_acp = broadcast_mutator.clone();
     let system = Arc::new(ManagedP2PSystem::new(
         TransportKind::Libp2p,
@@ -223,7 +226,7 @@ where
     let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
         Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
     let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
-        Arc::new(db::DbHeadProvider::new(database.clone()));
+        Arc::new(db_merge::DbHeadProvider::new(database.clone()));
     let (mut coordinator, sync_events_rx) = p2p::sync::SyncCoordinator::with_head_provider(
         transport.clone(),
         blockstore.clone(),
@@ -239,11 +242,11 @@ where
     let (failure_tx, failure_rx) = tokio::sync::mpsc::channel::<PushFailure>(1024);
     coordinator.set_failure_channel(failure_tx);
     let coordinator = Arc::new(coordinator);
-    let merge_handler_inner = Arc::new(db::DbMergeHandler::new(
+    let merge_handler_inner = Arc::new(db_merge::DbMergeHandler::new(
         database.clone(),
         blockstore.clone(),
     ));
-    let merge_handler = Arc::new(db::AcpMergeHandler::new(merge_handler_inner.clone()));
+    let merge_handler = Arc::new(db_merge::AcpMergeHandler::new(merge_handler_inner.clone()));
 
     match coordinator.load_p2p_collections().await {
         Ok(count) if count > 0 => tracing::debug!(count, "loaded persisted P2P collections"),
@@ -288,7 +291,10 @@ where
         version_syncer,
     );
     adapter.set_initial_tracked_documents(restored_doc_ids);
-    let broadcast_mutator = Arc::new(db::BroadcastMutator::new(database.clone(), coordinator));
+    let broadcast_mutator = Arc::new(db_merge::BroadcastMutator::new(
+        database.clone(),
+        coordinator,
+    ));
     let broadcast_mutator_for_acp = broadcast_mutator.clone();
     let system = Arc::new(ManagedP2PSystem::new(
         TransportKind::Iroh,

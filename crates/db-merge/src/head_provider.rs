@@ -15,8 +15,8 @@ use storage::keys::headstore::{HeadstoreColKey, HeadstoreDocKey, HeadstorePriori
 
 use p2p::sync::DocumentHeadProvider;
 
-use crate::collection::require_persisted_collection_short_id;
-use crate::database::DB;
+use db::collection::require_persisted_collection_short_id;
+use db::database::DB;
 
 /// Database-backed document head provider.
 ///
@@ -244,8 +244,8 @@ impl<S: Store + 'static> DocumentHeadProvider for DbHeadProvider<S> {
 mod tests {
     use std::sync::Arc;
 
-    use crate::AutoCommitMutator;
-    use crate::DB;
+    use db::AutoCommitMutator;
+    use db::DB;
     use defra_core::{block::generate_cid_from_bytes, Block, CompositeDeltaPayload, CrdtDelta};
     use document::{DocID, Document};
     use query::mutator::DocMutator;

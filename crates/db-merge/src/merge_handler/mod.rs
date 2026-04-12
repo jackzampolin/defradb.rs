@@ -45,9 +45,9 @@ use storage::corekv::{Key, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
 use zeroize::Zeroizing;
 
-use crate::collection::Collection;
-use crate::database::DB;
-use crate::index_manager::IndexManager;
+use db::collection::Collection;
+use db::database::DB;
+use db::index_manager::IndexManager;
 use hook::CompositeMergeHook;
 
 /// Maximum DAG recursion depth for merge operations.
@@ -571,7 +571,7 @@ mod tests {
         doc.set("name", NormalValue::String(name.to_string()));
         doc.set("age", NormalValue::Int(age));
 
-        let result = crate::block_builder::build_blocks_from_document(&doc, "v1", blockstore)
+        let result = db_blocks::build_blocks_from_document(&doc, "v1", blockstore)
             .await
             .unwrap();
 

@@ -27,9 +27,10 @@ use storage::corekv::Store;
 
 use self::batch::BroadcastBatchMutator;
 use self::broadcast::{broadcast_with_retry_with_creator, log_broadcast_failure};
-use crate::auto_commit_mutator::AutoCommitMutator;
-use crate::block_builder::{build_blocks_from_document, read_latest_composite_block, BlockResult};
-use crate::database::DB;
+use db::auto_commit_mutator::AutoCommitMutator;
+use db::block_reader::read_latest_composite_block;
+use db::database::DB;
+use db_blocks::{build_blocks_from_document, BlockResult};
 
 /// Document mutator that broadcasts changes to P2P network.
 ///
@@ -72,7 +73,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, 
 
     async fn register_created_doc_with_acp_if_needed(
         &self,
-        collection: &crate::Collection,
+        collection: &db::Collection,
         doc_id: &str,
         creator_did: Option<&str>,
     ) -> query::error::Result<()> {
