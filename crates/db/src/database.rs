@@ -414,6 +414,18 @@ impl<S: Store> DB<S> {
         self.options.node_identity.is_some()
     }
 
+    /// Returns the node identity's DID, if configured and derivable.
+    ///
+    /// Used by ACP checks to apply the node-identity full-access shortcut.
+    /// Returns `None` if the node identity is not configured or its public
+    /// key cannot be converted into a DID.
+    pub fn node_did(&self) -> Option<identity::Did> {
+        self.options
+            .node_identity
+            .as_ref()
+            .and_then(|id| id.did().ok())
+    }
+
     /// Create the appropriate lens transform store for the current platform.
     #[cfg(feature = "native")]
     fn create_lens_store() -> Result<Arc<dyn TransformStore>> {

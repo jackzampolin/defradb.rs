@@ -56,6 +56,7 @@ async fn test_no_policy_allows_all() {
         DocumentPermission::Read,
         &collection,
         "doc1",
+        None,
     )
     .await
     .unwrap();
@@ -123,6 +124,7 @@ async fn test_owner_has_update_permission() {
         DocumentPermission::Update,
         &collection,
         "doc1",
+        None,
     )
     .await
     .unwrap();
@@ -149,6 +151,7 @@ async fn test_non_owner_denied_update_permission() {
         DocumentPermission::Update,
         &collection,
         "doc1",
+        None,
     )
     .await
     .unwrap();
@@ -162,7 +165,7 @@ async fn test_acp_context() {
     let collection = collection_with_policy();
     let owner = test_did();
 
-    let ctx = AcpContext::new(acp, Identity::Authenticated(owner));
+    let ctx = AcpContext::new(acp, Identity::Authenticated(owner), None);
 
     // Register document using context
     ctx.register_doc(&collection, "doc1").await.unwrap();
@@ -347,6 +350,7 @@ async fn test_policy_change_mid_transaction_permission_check() {
         DocumentPermission::Read,
         &collection_v1,
         "doc1",
+        None,
     )
     .await
     .unwrap();
@@ -359,6 +363,7 @@ async fn test_policy_change_mid_transaction_permission_check() {
         DocumentPermission::Read,
         &collection_v1,
         "doc1",
+        None,
     )
     .await
     .unwrap();
@@ -377,6 +382,7 @@ async fn test_policy_change_mid_transaction_permission_check() {
         DocumentPermission::Read,
         &collection_v2,
         "doc1",
+        None,
     )
     .await
     .unwrap();
@@ -405,6 +411,7 @@ async fn test_policy_removal_mid_transaction_makes_docs_public() {
         DocumentPermission::Update,
         &collection_with_pol,
         "doc1",
+        None,
     )
     .await
     .unwrap();
@@ -420,6 +427,7 @@ async fn test_policy_removal_mid_transaction_makes_docs_public() {
         DocumentPermission::Update,
         &collection_no_pol,
         "doc1",
+        None,
     )
     .await
     .unwrap();
@@ -433,8 +441,271 @@ async fn test_policy_removal_mid_transaction_makes_docs_public() {
         DocumentPermission::Update,
         &collection_no_pol,
         "doc1",
+        None,
     )
     .await
     .unwrap();
     assert!(allowed);
+}
+
+// =========================================================================
+// Bypass tests for #738 (DAC bypass thread-local) and #739 (node identity)
+// =========================================================================
+
+#[tokio::test]
+async fn test_node_identity_bypass_grants_full_access() {
+    // A request from the node identity should be granted full access to a
+    // protected document owned by a different identity.
+    // Matches Go's `internal/db/collection_acp.go:60-62`.
+    let acp = LocalDocumentACP::new(Arc::new(MemoryAcpStore::new()));
+    let collection = collection_with_policy();
+    let owner = test_did();
+    let node_identity = test_did2();
+
+    // Register the document with `owner` as the owner.
+    register_doc_if_needed(&acp, Some(&owner), &collection, "doc1")
+        .await
+        .unwrap();
+
+    // The node identity is a different DID — it has no document-level grants.
+    // Without the bypass, this would be denied.
+    let allowed = check_doc_permission(
+        &acp,
+        &Identity::Authenticated(node_identity.clone()),
+        DocumentPermission::Read,
+        &collection,
+        "doc1",
+        Some(&node_identity),
+    )
+    .await
+    .unwrap();
+    assert!(allowed, "node identity must be granted full access");
+
+    // Same for Update.
+    let allowed = check_doc_permission(
+        &acp,
+        &Identity::Authenticated(node_identity.clone()),
+        DocumentPermission::Update,
+        &collection,
+        "doc1",
+        Some(&node_identity),
+    )
+    .await
+    .unwrap();
+    assert!(allowed, "node identity must be granted Update access");
+
+    // Same for Delete.
+    let allowed = check_doc_permission(
+        &acp,
+        &Identity::Authenticated(node_identity.clone()),
+        DocumentPermission::Delete,
+        &collection,
+        "doc1",
+        Some(&node_identity),
+    )
+    .await
+    .unwrap();
+    assert!(allowed, "node identity must be granted Delete access");
+}
+
+#[tokio::test]
+async fn test_non_node_identity_still_denied() {
+    // Sanity check: with a configured node_identity, a different identity
+    // must still be subject to the normal DAC checks.
+    let acp = LocalDocumentACP::new(Arc::new(MemoryAcpStore::new()));
+    let collection = collection_with_policy();
+    let owner = test_did();
+    let node_identity = test_did2();
+    let stranger = Did::new("did:key:z6MkpZqHJYYwK7gP9eVUuLAMz3jJW4Wc8nN6F2VQ8RJ7Wn1V").unwrap();
+
+    register_doc_if_needed(&acp, Some(&owner), &collection, "doc1")
+        .await
+        .unwrap();
+
+    let allowed = check_doc_permission(
+        &acp,
+        &Identity::Authenticated(stranger),
+        DocumentPermission::Read,
+        &collection,
+        "doc1",
+        Some(&node_identity),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !allowed,
+        "stranger must still be denied even with node_identity configured"
+    );
+}
+
+#[tokio::test]
+async fn test_node_identity_none_falls_through() {
+    // When node_identity is None, the bypass shortcut is skipped and DAC
+    // applies normally.
+    let acp = LocalDocumentACP::new(Arc::new(MemoryAcpStore::new()));
+    let collection = collection_with_policy();
+    let owner = test_did();
+    let stranger = test_did2();
+
+    register_doc_if_needed(&acp, Some(&owner), &collection, "doc1")
+        .await
+        .unwrap();
+
+    let allowed = check_doc_permission(
+        &acp,
+        &Identity::Authenticated(stranger),
+        DocumentPermission::Read,
+        &collection,
+        "doc1",
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !allowed,
+        "stranger must be denied when no node_identity is set"
+    );
+}
+
+#[tokio::test]
+async fn test_dac_bypass_thread_local_grants_full_access() {
+    // The thread-local `dac_bypass` flag (set by HTTP/FFI entry points after
+    // resolving NAC `bypass-dac` permission via `should_bypass_dac`) must
+    // grant access on the mutation path too.
+    // This covers #738 — the previous gap was that the mutation path
+    // (`check_doc_permission`) ignored this flag.
+    let acp = LocalDocumentACP::new(Arc::new(MemoryAcpStore::new()));
+    let collection = collection_with_policy();
+    let owner = test_did();
+    let admin = test_did2();
+
+    register_doc_if_needed(&acp, Some(&owner), &collection, "doc1")
+        .await
+        .unwrap();
+
+    // Without the flag, admin is denied.
+    defra_core::dac_bypass::set_dac_bypass(false);
+    let allowed = check_doc_permission(
+        &acp,
+        &Identity::Authenticated(admin.clone()),
+        DocumentPermission::Update,
+        &collection,
+        "doc1",
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!allowed, "admin without bypass flag must be denied");
+
+    // With the flag set, admin is granted access regardless of DAC.
+    defra_core::dac_bypass::set_dac_bypass(true);
+    let allowed = check_doc_permission(
+        &acp,
+        &Identity::Authenticated(admin.clone()),
+        DocumentPermission::Update,
+        &collection,
+        "doc1",
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(allowed, "admin with dac_bypass flag must be granted access");
+
+    // Reset the thread-local so it doesn't leak into other tests.
+    defra_core::dac_bypass::set_dac_bypass(false);
+}
+
+// =========================================================================
+// Parity test for #740: "writer" must NOT be a recognized relation
+// =========================================================================
+
+#[tokio::test]
+async fn test_writer_relation_is_not_recognized() {
+    // Go DefraDB uses only owner/reader/updater/deleter relations.
+    // A "writer" relation (which used to be checked in local.rs) must not
+    // grant Update or Read access.
+    use acp::{AcpStore, RelationTuple, UPDATER_RELATION};
+
+    let store = Arc::new(MemoryAcpStore::new());
+    let acp = LocalDocumentACP::new(store.clone());
+    let collection = collection_with_policy();
+    let owner = test_did();
+    let granted_user = test_did2();
+
+    register_doc_if_needed(&acp, Some(&owner), &collection, "doc1")
+        .await
+        .unwrap();
+
+    // Manually insert a "writer" relation tuple via put_tuple.
+    let policy = collection.policy.as_ref().unwrap();
+    let ns_collection = format!("{}:{}", policy.id, policy.resource_name);
+    let tuple = RelationTuple::try_new(granted_user.clone(), "writer", &ns_collection, "doc1")
+        .expect("relation tuple");
+    store.put_tuple(&tuple).await.unwrap();
+
+    // The "writer" relation must NOT grant Update access (Go has no such relation).
+    let allowed = check_doc_permission(
+        &acp,
+        &Identity::Authenticated(granted_user.clone()),
+        DocumentPermission::Update,
+        &collection,
+        "doc1",
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !allowed,
+        "\"writer\" relation must not grant Update — Go DefraDB uses \"updater\""
+    );
+
+    // And it must NOT grant Read either.
+    let allowed = check_doc_permission(
+        &acp,
+        &Identity::Authenticated(granted_user.clone()),
+        DocumentPermission::Read,
+        &collection,
+        "doc1",
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!allowed, "\"writer\" relation must not grant Read");
+
+    // Now grant the canonical "updater" relation and verify Read+Update work.
+    let tuple = RelationTuple::try_new(
+        granted_user.clone(),
+        UPDATER_RELATION,
+        &ns_collection,
+        "doc1",
+    )
+    .expect("relation tuple");
+    store.put_tuple(&tuple).await.unwrap();
+
+    let allowed = check_doc_permission(
+        &acp,
+        &Identity::Authenticated(granted_user.clone()),
+        DocumentPermission::Update,
+        &collection,
+        "doc1",
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(allowed, "canonical 'updater' relation must grant Update");
+
+    let allowed = check_doc_permission(
+        &acp,
+        &Identity::Authenticated(granted_user),
+        DocumentPermission::Read,
+        &collection,
+        "doc1",
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        allowed,
+        "canonical 'updater' relation must imply Read (matches Go's ImplyDocumentReadPerm)"
+    );
 }
