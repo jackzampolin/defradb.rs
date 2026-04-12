@@ -141,21 +141,34 @@ jobs:
           echo "$CACHE_DIR" >> "$GITHUB_PATH"
           "$CACHE_DIR/defradb" version --format json
 
+      # `basic` is serialized because its tests start rust nodes and the
+      # harness port allocator (`defra-harness::ports`) has a TOCTOU race
+      # between dropping the port guard listener and the child process
+      # binding. Under high parallelism the race triggers EADDRINUSE.
+      # Track the underlying harness fix in the backbone repo; this flag
+      # is the tactical mitigation.
+      - name: Run rust integration tests (serialized — port race)
+        if: matrix.suite == 'rust'
+        run: >-
+          cargo test -p integration-test
+          --test basic
+          -- --test-threads=1 --skip ::go_
+
       - name: Run rust integration tests
         if: matrix.suite == 'rust'
         run: >-
           cargo test -p integration-test
-          --test basic --test query --test acp --test nac
+          --test query --test acp --test nac
           --test encryption --test identity
           --test backup --test fts
-          -- ::rust_
+          -- --skip ::go_
 
       - name: Run rust P2P integration tests
         if: matrix.suite == 'rust'
         run: >-
           cargo test -p integration-test
           --test p2p
-          -- --test-threads=1 ::rust_
+          -- --test-threads=1 --skip ::go_
 
       - name: Run go-compat integration tests
         if: matrix.suite == 'go-compat'
