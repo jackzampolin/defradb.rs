@@ -8,9 +8,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use super::proof::MerkleProof;
 use super::proof_node::ProofNode;
 
-/// Maximum nodes to visit during BFS traversal to prevent DoS via large DAGs
-const MAX_TRAVERSAL_NODES: usize = 10_000;
-
 /// Blockstore trait for proof extraction
 ///
 /// This trait abstracts block retrieval to allow proof extraction from
@@ -74,16 +71,10 @@ pub async fn extract_proof<B: ProofBlockstore>(
     visited.insert(leaf_cid);
     queue.push_back(leaf_cid);
 
-    // BFS traversal following heads references
+    // BFS traversal following heads references.
+    // DoS protection: bounded by the size of the blockstore (caller's responsibility),
+    // not by a hardcoded limit here. Go has no equivalent cap on chain depth.
     while let Some(current_cid) = queue.pop_front() {
-        // Check traversal limit to prevent DoS via large DAGs
-        if visited.len() > MAX_TRAVERSAL_NODES {
-            return Err(Error::BlockError(format!(
-                "BFS traversal exceeded maximum nodes ({})",
-                MAX_TRAVERSAL_NODES
-            )));
-        }
-
         // Get the current block data
         let block_data = if let Some(data) = block_cache.get(&current_cid) {
             data.clone()
