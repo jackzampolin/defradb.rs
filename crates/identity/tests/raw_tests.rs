@@ -167,7 +167,7 @@ fn test_sign_with_secp256r1() {
 #[test]
 fn test_priv_key_trait_method() {
     let key = generate_ed25519().unwrap();
-    let expected_bytes = key.raw();
+    let expected_bytes = key.raw_owned();
     let identity = RawIdentity::from_private_key(key).unwrap();
 
     let priv_key = identity.priv_key();

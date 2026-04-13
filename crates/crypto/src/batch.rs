@@ -142,8 +142,8 @@ mod tests {
         let public_key = private_key.public_key();
         SigningConfig {
             key_type: "ed25519".to_string(),
-            private_key_bytes: private_key.raw(),
-            public_key_bytes: public_key.raw(),
+            private_key_bytes: private_key.raw_owned(),
+            public_key_bytes: public_key.raw_owned(),
             public_key_hex: public_key.to_hex_string(),
             remote_signer: None,
             signing_authorization: None,
@@ -155,8 +155,8 @@ mod tests {
         let public_key = private_key.public_key();
         SigningConfig {
             key_type: "secp256k1".to_string(),
-            private_key_bytes: private_key.raw(),
-            public_key_bytes: public_key.raw(),
+            private_key_bytes: private_key.raw_owned(),
+            public_key_bytes: public_key.raw_owned(),
             public_key_hex: public_key.to_hex_string(),
             remote_signer: None,
             signing_authorization: None,

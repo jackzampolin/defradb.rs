@@ -24,6 +24,16 @@ fn test_generate_ed25519() {
 }
 
 #[test]
+fn test_private_key_raw_returns_stable_borrow() {
+    let key = generate_ed25519().unwrap();
+    let first = key.raw();
+    let second = key.raw();
+
+    assert!(std::ptr::eq(first.as_ptr(), second.as_ptr()));
+    assert_eq!(first, second);
+}
+
+#[test]
 fn test_generate_key_secp256k1() {
     let key = generate_key(KeyType::Secp256k1).unwrap();
     assert_eq!(key.key_type(), KeyType::Secp256k1);
@@ -105,6 +115,15 @@ fn test_public_key_from_string() {
 
     let parsed = public_key_from_string(KeyType::Ed25519, &hex_str).unwrap();
     assert_eq!(parsed.raw(), public_key.raw());
+}
+
+#[test]
+fn test_private_key_public_key_returns_cached_reference() {
+    let private_key = generate_secp256k1().unwrap();
+    let first = private_key.public_key() as *const dyn crypto::PublicKey;
+    let second = private_key.public_key() as *const dyn crypto::PublicKey;
+
+    assert_eq!(first, second);
 }
 
 #[test]

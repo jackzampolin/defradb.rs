@@ -240,7 +240,7 @@ async fn test_signed_proof_ed25519() {
     let signed = SignedMerkleProof::sign(proof, &private_key as &dyn PrivateKey).unwrap();
 
     // Verify with explicit public key
-    assert!(signed.verify(public_key.as_ref()).unwrap());
+    assert!(signed.verify(public_key).unwrap());
 
     // Verify with embedded key
     assert!(signed.verify_with_embedded_key().unwrap());
@@ -259,7 +259,7 @@ async fn test_signed_proof_secp256k1() {
     let signed = SignedMerkleProof::sign(proof, &private_key as &dyn PrivateKey).unwrap();
 
     // Verify with explicit public key
-    assert!(signed.verify(public_key.as_ref()).unwrap());
+    assert!(signed.verify(public_key).unwrap());
 
     // Verify with embedded key
     assert!(signed.verify_with_embedded_key().unwrap());
@@ -280,15 +280,17 @@ async fn test_signed_proof_wrong_key_fails() {
 
     let signed = SignedMerkleProof::sign(proof, &private_key1 as &dyn PrivateKey).unwrap();
 
-    let result = signed.verify(wrong_public_key.as_ref());
+    let result = signed.verify(wrong_public_key);
     assert!(
         result.is_err(),
         "wrong key should return Err, not Ok(false)"
     );
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("identity does not match"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("identity does not match")
+    );
 }
 
 #[tokio::test]
@@ -407,7 +409,7 @@ async fn test_key_type_mismatch_returns_error() {
     // Try to verify with secp256k1 key - should return error, not false
     let secp_key = generate_secp256k1().unwrap();
     let secp_public = secp_key.public_key();
-    let result = signed.verify(secp_public.as_ref());
+    let result = signed.verify(secp_public);
 
     assert!(result.is_err(), "Key type mismatch should return error");
     let err_msg = result.unwrap_err().to_string();

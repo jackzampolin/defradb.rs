@@ -53,8 +53,8 @@ impl Key for BlsPublicKey {
         self.raw_bytes == other.raw()
     }
 
-    fn raw(&self) -> Vec<u8> {
-        self.raw_bytes.clone()
+    fn raw(&self) -> &[u8] {
+        &self.raw_bytes
     }
 
     fn key_type(&self) -> KeyType {
