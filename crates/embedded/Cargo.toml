@@ -46,3 +46,6 @@ iroh = ["p2p/iroh-transport"]
 [dev-dependencies]
 tempfile = "3.17"
 tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

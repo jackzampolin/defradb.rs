@@ -39,3 +39,6 @@ criterion.workspace = true
 [[bench]]
 name = "block"
 harness = false
+
+[lints]
+workspace = true

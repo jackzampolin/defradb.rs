@@ -57,3 +57,6 @@ bs58.workspace = true
 
 # ACP light client (proof-validated cache)
 acp-light-client = { git = "https://github.com/sourcenetwork/backbone.git", branch = "main" }
+
+[lints]
+workspace = true

@@ -44,3 +44,6 @@ defra-core = { path = "../defra-core" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 hex.workspace = true
 ed25519-dalek.workspace = true
+
+[lints]
+workspace = true

@@ -45,6 +45,22 @@ rust-version = "1.82"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/sourcenetwork/defradb.rs"
 
+# Workspace-wide clippy lint config. Each crate inherits these via
+# `[lints] workspace = true` in its own Cargo.toml.
+#
+# `await_holding_lock` and `await_holding_refcell_ref` catch the
+# concrete bug pattern where a sync mutex (or RefCell) guard is held
+# across an `.await` point. This blocks the tokio worker thread for the
+# entire duration of the future and can deadlock a multi-threaded
+# runtime. The audit in #673 confirmed no current site triggers this,
+# but the lint enforces the discipline going forward so future
+# contributors can't accidentally introduce it. Use `tokio::sync::Mutex`
+# (or restructure to drop the guard before awaiting) in any flagged
+# site.
+[workspace.lints.clippy]
+await_holding_lock = "warn"
+await_holding_refcell_ref = "warn"
+
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }

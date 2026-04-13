@@ -37,3 +37,6 @@ thiserror = { workspace = true }
 
 # Async streams
 futures = { workspace = true }
+
+[lints]
+workspace = true

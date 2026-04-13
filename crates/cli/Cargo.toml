@@ -117,3 +117,6 @@ profiling = ["dep:tracing-chrome"]
 [dev-dependencies]
 tempfile = "3.17"
 portpicker = "0.1"
+
+[lints]
+workspace = true
