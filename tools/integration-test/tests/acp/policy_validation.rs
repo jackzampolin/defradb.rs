@@ -115,12 +115,12 @@ for_each_runtime!(acp_add_policy_empty_data_errors, acp_add_policy_empty_data_er
 // Empty resources (port of with_empty_resource_test.go and with_no_resources_test.go)
 // =========================================================================
 
-async fn acp_add_policy_no_resources_behavior(cluster: TestCluster) {
-    // DIVERGENCE NOTE: Go DefraDB rejects a policy with no resources block.
-    // Rust DefraDB currently accepts it as a no-op (zero resources). This
-    // test documents the current Rust behavior and serves as a regression
-    // guard. When the divergence is resolved (by either making Rust reject
-    // or Go accept), the assertion below should be updated.
+async fn acp_add_policy_no_resources_accepted(cluster: TestCluster) {
+    // Both Rust and Go accept a policy with no `resources:` block as a
+    // zero-resources no-op. This test locks in that shared behavior so
+    // neither side can regress into rejecting it without a deliberate
+    // review. Verified on Go via `go_*` variant of this test with
+    // defradb binary commit d5a5a879 (2026-04-10).
     let node = cluster.client(0);
     let alice = generate_identity(node.binary_path()).expect("alice identity");
 
@@ -129,17 +129,14 @@ name: test
 description: a policy with no resources
 "#;
     let result = node.acp_policy_add(policy, &alice.private_key_hex);
-    // Rust currently accepts. If this starts failing, the divergence has
-    // been fixed and the test should be updated to assert the error.
     assert!(
         result.is_ok(),
-        "Rust currently accepts no-resources policy. \
-         If this fails, the divergence with Go was fixed — update the assertion: {:?}",
+        "no-resources policy must be accepted (shared Rust/Go behavior); got: {:?}",
         result.err()
     );
 }
 
-for_each_runtime!(acp_add_policy_no_resources_behavior, acp_add_policy_no_resources_behavior, .with_acp_local());
+for_each_runtime!(acp_add_policy_no_resources_accepted, acp_add_policy_no_resources_accepted, .with_acp_local());
 
 // =========================================================================
 // Empty relations (port of with_empty_relations_test.go)
