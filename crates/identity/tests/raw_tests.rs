@@ -30,7 +30,7 @@ fn test_from_bytes_ed25519() {
     let key = generate_ed25519().unwrap();
     let bytes = key.raw();
 
-    let identity = RawIdentity::from_bytes(KeyType::Ed25519, &bytes).unwrap();
+    let identity = RawIdentity::from_bytes(KeyType::Ed25519, bytes).unwrap();
     assert_eq!(identity.key_type(), KeyType::Ed25519);
 }
 
@@ -39,7 +39,7 @@ fn test_from_bytes_secp256k1() {
     let key = generate_secp256k1().unwrap();
     let bytes = key.raw();
 
-    let identity = RawIdentity::from_bytes(KeyType::Secp256k1, &bytes).unwrap();
+    let identity = RawIdentity::from_bytes(KeyType::Secp256k1, bytes).unwrap();
     assert_eq!(identity.key_type(), KeyType::Secp256k1);
 }
 
@@ -72,7 +72,7 @@ fn test_from_secp256r1() {
 fn test_from_bytes_secp256r1() {
     let key = crypto::generate_secp256r1().unwrap();
     let key_bytes = key.raw();
-    let identity = RawIdentity::from_bytes(KeyType::Secp256r1, &key_bytes).unwrap();
+    let identity = RawIdentity::from_bytes(KeyType::Secp256r1, key_bytes).unwrap();
     assert_eq!(identity.key_type(), KeyType::Secp256r1);
 }
 
@@ -196,7 +196,7 @@ fn test_from_identity_key_type_ed25519() {
     let key = generate_ed25519().unwrap();
     let bytes = key.raw();
 
-    let identity = RawIdentity::from_identity_key_type(IdentityKeyType::Ed25519, &bytes).unwrap();
+    let identity = RawIdentity::from_identity_key_type(IdentityKeyType::Ed25519, bytes).unwrap();
     assert_eq!(identity.identity_key_type(), IdentityKeyType::Ed25519);
     assert_eq!(identity.key_type(), KeyType::Ed25519);
 }
@@ -206,7 +206,7 @@ fn test_from_identity_key_type_secp256k1() {
     let key = generate_secp256k1().unwrap();
     let bytes = key.raw();
 
-    let identity = RawIdentity::from_identity_key_type(IdentityKeyType::Secp256k1, &bytes).unwrap();
+    let identity = RawIdentity::from_identity_key_type(IdentityKeyType::Secp256k1, bytes).unwrap();
     assert_eq!(identity.identity_key_type(), IdentityKeyType::Secp256k1);
     assert_eq!(identity.key_type(), KeyType::Secp256k1);
 }

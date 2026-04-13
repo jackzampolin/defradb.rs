@@ -20,6 +20,7 @@ pub struct RawIdentity {
 }
 
 /// Internal enum to hold different key types without dynamic dispatch.
+#[allow(clippy::large_enum_variant)]
 enum IdentityInner {
     Ed25519 {
         private_key: Ed25519PrivateKey,
@@ -77,19 +78,19 @@ impl RawIdentity {
         match private_key.key_type() {
             KeyType::Ed25519 => {
                 let raw_bytes = private_key.raw();
-                let ed25519_key = Ed25519PrivateKey::from_bytes(&raw_bytes)
+                let ed25519_key = Ed25519PrivateKey::from_bytes(raw_bytes)
                     .map_err(|e| Error::InvalidKeyBytes(KeyType::Ed25519, e.to_string()))?;
                 Self::from_ed25519(ed25519_key)
             }
             KeyType::Secp256k1 => {
                 let raw_bytes = private_key.raw();
-                let secp256k1_key = Secp256k1PrivateKey::from_bytes(&raw_bytes)
+                let secp256k1_key = Secp256k1PrivateKey::from_bytes(raw_bytes)
                     .map_err(|e| Error::InvalidKeyBytes(KeyType::Secp256k1, e.to_string()))?;
                 Self::from_secp256k1(secp256k1_key)
             }
             KeyType::Secp256r1 => {
                 let raw_bytes = private_key.raw();
-                let secp256r1_key = Secp256r1PrivateKey::from_bytes(&raw_bytes)
+                let secp256r1_key = Secp256r1PrivateKey::from_bytes(raw_bytes)
                     .map_err(|e| Error::InvalidKeyBytes(KeyType::Secp256r1, e.to_string()))?;
                 Self::from_secp256r1(secp256r1_key)
             }
