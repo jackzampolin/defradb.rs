@@ -6,11 +6,10 @@
 use cid::Cid;
 use serde::{Deserialize, Serialize};
 
-use defra_core::batch_signing::compute_merkle_root;
-use defra_core::signing::SigningConfig;
-
 use crate::keys::{PrivateKey, PublicKey};
 use crate::{Ed25519PrivateKey, Ed25519PublicKey, Secp256k1PrivateKey, Secp256k1PublicKey};
+use defra_core::batch_signing::compute_merkle_root;
+use defra_core::signing::SigningConfig;
 
 /// Errors that can occur during batch signing.
 #[derive(Debug, thiserror::Error)]
@@ -131,10 +130,11 @@ mod tests {
     use super::*;
     use crate::keys::Key;
     use cid::multihash::{Code, MultihashDigest};
+    use defra_core::DAG_CBOR_CODEC;
 
     fn make_cid(data: &[u8]) -> Cid {
         let hash = Code::Sha2_256.digest(data);
-        Cid::new_v1(0x71, hash)
+        Cid::new_v1(*DAG_CBOR_CODEC, hash)
     }
 
     fn test_ed25519_config() -> SigningConfig {

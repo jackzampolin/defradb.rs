@@ -3,16 +3,15 @@
 use std::collections::HashMap;
 
 use cid::Cid;
+use defra_core::SHA2_256_CODE;
+use multicodec::Codec;
 use multihash::MultihashGeneric;
 use schema::{CType, CollectionVersion};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// SHA2-256 multihash code
-const SHA2_256_CODE: u64 = 0x12;
-
 /// Raw codec for CID
-const RAW_CODEC: u64 = 0x55;
+static RAW_CODEC: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| Codec::Bin.code() as u64);
 
 use crate::encoding::{
     canonical_cbor_key_order, cbor_to_normal_value, json_to_normal_value, normal_value_to_cbor,
@@ -471,11 +470,11 @@ impl Document {
         let hash_bytes = hasher.finalize();
 
         // Create multihash
-        let mh: MultihashGeneric<64> = MultihashGeneric::wrap(SHA2_256_CODE, &hash_bytes)
+        let mh: MultihashGeneric<64> = MultihashGeneric::wrap(*SHA2_256_CODE, &hash_bytes)
             .map_err(|e| Error::CborEncode(format!("Failed to create multihash: {}", e)))?;
 
         // Create CID from the hash
-        let cid = Cid::new_v1(RAW_CODEC, mh);
+        let cid = Cid::new_v1(*RAW_CODEC, mh);
 
         Ok(DocID::new_v0(cid))
     }

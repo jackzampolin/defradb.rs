@@ -119,11 +119,12 @@ pub fn get_batch_session_key() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DAG_CBOR_CODEC;
     use cid::multihash::{Code, MultihashDigest};
 
     fn make_cid(data: &[u8]) -> Cid {
         let hash = Code::Sha2_256.digest(data);
-        Cid::new_v1(0x71, hash) // dag-cbor codec
+        Cid::new_v1(*DAG_CBOR_CODEC, hash)
     }
 
     #[test]

@@ -186,11 +186,11 @@ fn generate_cid_from_bytes(cbor_bytes: &[u8]) -> crate::Result<Cid> {
     let hash_bytes = hasher.finalize();
 
     // Create multihash (CID crate uses MultihashGeneric<64>)
-    let mh: MultihashGeneric<64> = MultihashGeneric::wrap(SHA2_256_CODE, &hash_bytes)
+    let mh: MultihashGeneric<64> = MultihashGeneric::wrap(*SHA2_256_CODE, &hash_bytes)
         .map_err(|e| crate::SchemaError::CidGeneration(e.to_string()))?;
 
     // Create CIDv1 with DAG-CBOR codec
-    Ok(Cid::new_v1(DAG_CBOR_CODEC, mh))
+    Ok(Cid::new_v1(*DAG_CBOR_CODEC, mh))
 }
 
 /// Generate a field definition block with CID and bytes for storage.

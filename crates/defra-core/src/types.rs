@@ -1,7 +1,7 @@
 //! Core type definitions for DefraDB
 
 use crate::doc_id::validate_doc_id_str;
-use crate::{Error, Result};
+use crate::{Error, Result, SHA2_256_CODE};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
@@ -175,8 +175,7 @@ impl CID {
 
         // Validate hash function (only support SHA-256 for now)
         let hash = c.hash();
-        if hash.code() != 0x12 {
-            // 0x12 = SHA-256
+        if hash.code() != *SHA2_256_CODE {
             return Err(Error::InvalidCID(format!(
                 "unsupported hash function: {}",
                 hash.code()
@@ -197,7 +196,7 @@ impl CID {
 
         // Validate hash function
         let hash = c.hash();
-        if hash.code() != 0x12 {
+        if hash.code() != *SHA2_256_CODE {
             return Err(Error::InvalidCID(format!(
                 "unsupported hash function: {}",
                 hash.code()

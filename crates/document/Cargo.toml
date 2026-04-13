@@ -22,6 +22,7 @@ ciborium = "0.2"
 # IPLD
 cid = { workspace = true }
 multihash = { workspace = true }
+multicodec = { workspace = true }
 sha2 = { workspace = true }
 
 # UUID for DocID
