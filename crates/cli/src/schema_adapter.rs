@@ -55,12 +55,22 @@ impl<S: Store + 'static> SchemaAdapter<S> {
 
     /// Create an Arc-wrapped adapter for PG wire protocol schema operations.
     ///
-    /// Note: the PG path currently does not thread ACP context through, so
-    /// schema-time DRI validation (#746) is skipped for PG users. When the
-    /// PG server gains access to `AppState.acp`, add a `_with_acp` variant
-    /// and call `new_with_acp` here too.
+    /// Use `new_pg_arc_with_acp` instead when the caller has an
+    /// `AcpOperations` handle — that variant enables schema-time DRI
+    /// validation (#746). This bare constructor exists for tests and
+    /// for embedded PG callers that don't have ACP configured.
     pub fn new_pg_arc(database: Arc<db::DB<S>>) -> Arc<dyn pg_compat::SchemaManager> {
         Arc::new(Self::new(database))
+    }
+
+    /// Create an Arc-wrapped PG schema manager with ACP wired in for
+    /// schema-time DRI validation (#746). Use this when the PG server
+    /// has access to an `AcpOperations` handle.
+    pub fn new_pg_arc_with_acp(
+        database: Arc<db::DB<S>>,
+        acp: Arc<dyn AcpOperations>,
+    ) -> Arc<dyn pg_compat::SchemaManager> {
+        Arc::new(Self::new_with_acp(database, acp))
     }
 
     async fn add_schema_inner(&self, sdl: &str) -> Result<Vec<CollectionVersion>, String> {
