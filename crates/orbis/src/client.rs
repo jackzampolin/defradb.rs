@@ -8,8 +8,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crypto::PublicKey;
 use defra_core::signing::SigningAuthorization;
 use serde::Serialize;
+use thiserror::Error;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tracing::info;
@@ -18,6 +20,49 @@ use defra_core::signing::RemoteSigner;
 
 use crate::proto::utility_service_client::UtilityServiceClient;
 use crate::proto::{DerivePublicKeyRequest, SignRequest};
+
+#[derive(Debug, Error)]
+pub enum OrbisClientError {
+    #[error("invalid Orbis endpoint: {0}")]
+    InvalidEndpoint(String),
+
+    #[error("failed to connect to Orbis at {endpoint}: {source}")]
+    Connect {
+        endpoint: String,
+        #[source]
+        source: tonic::transport::Error,
+    },
+
+    #[error("DerivePublicKey failed: {0}")]
+    DerivePublicKey(#[source] tonic::Status),
+
+    #[error("DerivePublicKey returned empty public key")]
+    EmptyPublicKey,
+
+    #[error("DerivePublicKey returned invalid BLS public key: {0}")]
+    InvalidPublicKey(String),
+
+    #[error("failed to derive BLS DID: {0}")]
+    DeriveDid(String),
+
+    #[error("failed to create Orbis runtime: {0}")]
+    RuntimeBuild(std::io::Error),
+
+    #[error("failed to create JWT for Orbis auth: {0}")]
+    CreateBearerToken(identity::Error),
+
+    #[error("JWT is not valid UTF-8: {0}")]
+    InvalidBearerTokenUtf8(std::string::FromUtf8Error),
+
+    #[error("Orbis Sign RPC failed: {0}")]
+    Sign(#[source] tonic::Status),
+
+    #[error("Orbis Sign returned empty signature")]
+    EmptySignature,
+
+    #[error("Orbis sign_sync worker thread panicked")]
+    WorkerThreadPanicked,
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct UtilitySignClaims {
@@ -71,14 +116,17 @@ impl OrbisClient {
         ring_id: String,
         derivation: String,
         service_identity: Arc<identity::RawIdentity>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, OrbisClientError> {
         let derivation_bytes = derivation.into_bytes();
 
         let channel = Channel::from_shared(endpoint.clone())
-            .map_err(|e| format!("invalid Orbis endpoint: {}", e))?
+            .map_err(|e| OrbisClientError::InvalidEndpoint(e.to_string()))?
             .connect()
             .await
-            .map_err(|e| format!("failed to connect to Orbis at {}: {}", endpoint, e))?;
+            .map_err(|source| OrbisClientError::Connect {
+                endpoint: endpoint.clone(),
+                source,
+            })?;
 
         let mut client = UtilityServiceClient::new(channel);
 
@@ -88,17 +136,20 @@ impl OrbisClient {
                 derivation: derivation_bytes.clone(),
             })
             .await
-            .map_err(|e| format!("DerivePublicKey failed: {}", e))?;
+            .map_err(OrbisClientError::DerivePublicKey)?;
 
         let public_key_bytes = resp.into_inner().public_key;
         if public_key_bytes.is_empty() {
-            return Err("DerivePublicKey returned empty public key".into());
+            return Err(OrbisClientError::EmptyPublicKey);
         }
 
+        let public_key = crypto::BlsPublicKey::from_bytes(&public_key_bytes)
+            .map_err(|e| OrbisClientError::InvalidPublicKey(e.to_string()))?;
         let public_key_hex = hex::encode(&public_key_bytes);
 
-        let signer_did = crypto::did::create_did_key(crypto::KeyType::Bls12381, &public_key_bytes)
-            .map_err(|e| format!("failed to derive BLS DID: {}", e))?;
+        let signer_did = public_key
+            .did()
+            .map_err(|e| OrbisClientError::DeriveDid(e.to_string()))?;
 
         info!(
             ring_id = %ring_id,
@@ -109,7 +160,7 @@ impl OrbisClient {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| format!("failed to create Orbis runtime: {}", e))?;
+            .map_err(OrbisClientError::RuntimeBuild)?;
 
         Ok(Self {
             endpoint,
@@ -198,7 +249,7 @@ impl OrbisClient {
         &self,
         message: Vec<u8>,
         authorization: Option<&SigningAuthorization>,
-    ) -> Result<String, String> {
+    ) -> Result<String, OrbisClientError> {
         let (policy_id, resource, object_id, permission, decision_id) = match authorization {
             Some(SigningAuthorization::Policy {
                 policy_id,
@@ -257,9 +308,9 @@ impl OrbisClient {
                 decision_id,
             },
         )
-        .map_err(|e| format!("failed to create JWT for Orbis auth: {}", e))?;
+        .map_err(OrbisClientError::CreateBearerToken)?;
 
-        String::from_utf8(token_bytes).map_err(|e| format!("JWT is not valid UTF-8: {}", e))
+        String::from_utf8(token_bytes).map_err(OrbisClientError::InvalidBearerTokenUtf8)
     }
 
     /// Sign data via the Orbis ring (async).
@@ -267,13 +318,16 @@ impl OrbisClient {
         &self,
         data: &[u8],
         authorization: Option<SigningAuthorization>,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, OrbisClientError> {
         let connect_start = Instant::now();
         let channel = Channel::from_shared(self.endpoint.clone())
-            .map_err(|e| format!("invalid Orbis endpoint: {}", e))?
+            .map_err(|e| OrbisClientError::InvalidEndpoint(e.to_string()))?
             .connect()
             .await
-            .map_err(|e| format!("failed to connect to Orbis: {}", e))?;
+            .map_err(|source| OrbisClientError::Connect {
+                endpoint: self.endpoint.clone(),
+                source,
+            })?;
         info!(
             ring_id = %self.ring_id,
             elapsed = ?connect_start.elapsed(),
@@ -331,7 +385,7 @@ impl OrbisClient {
         let resp = client
             .sign(self.build_sign_request(data, authorization.as_ref()))
             .await
-            .map_err(|e| format!("Orbis Sign RPC failed: {}", e))?;
+            .map_err(OrbisClientError::Sign)?;
         info!(
             ring_id = %self.ring_id,
             elapsed = ?sign_rpc_start.elapsed(),
@@ -340,7 +394,7 @@ impl OrbisClient {
 
         let signature = resp.into_inner().signature;
         if signature.is_empty() {
-            return Err("Orbis Sign returned empty signature".into());
+            return Err(OrbisClientError::EmptySignature);
         }
 
         Ok(signature)
@@ -364,10 +418,13 @@ impl RemoteSigner for OrbisClient {
                 scope
                     .spawn(|| self.runtime.block_on(self.sign_async(data, authorization)))
                     .join()
-                    .map_err(|_| "Orbis sign_sync worker thread panicked".to_string())?
+                    .map_err(|_| OrbisClientError::WorkerThreadPanicked)?
             })
+            .map_err(|e| e.to_string())
         } else {
-            self.runtime.block_on(self.sign_async(data, authorization))
+            self.runtime
+                .block_on(self.sign_async(data, authorization))
+                .map_err(|e| e.to_string())
         }
     }
 }
@@ -377,6 +434,13 @@ mod tests {
     use super::*;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use identity::Identity;
+    use tokio::sync::oneshot;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::transport::Server;
+    use tonic::{Request, Response, Status};
+
+    use crate::proto::utility_service_server::{UtilityService, UtilityServiceServer};
+    use crate::proto::{DerivePublicKeyResponse, SignResponse};
 
     fn make_test_client() -> OrbisClient {
         let private_key = crypto::generate_secp256k1().expect("should generate secp256k1 key");
@@ -465,5 +529,184 @@ mod tests {
         assert_eq!(request.object_id, "transcript");
         assert_eq!(request.permission, "writer");
         assert!(request.decision_id.is_empty());
+    }
+
+    #[derive(Clone)]
+    struct MockUtilityService {
+        derive_public_key_response: DerivePublicKeyResponse,
+        sign_response: SignResponse,
+    }
+
+    #[tonic::async_trait]
+    impl UtilityService for MockUtilityService {
+        async fn derive_public_key(
+            &self,
+            _request: Request<DerivePublicKeyRequest>,
+        ) -> Result<Response<DerivePublicKeyResponse>, Status> {
+            Ok(Response::new(self.derive_public_key_response.clone()))
+        }
+
+        async fn sign(
+            &self,
+            _request: Request<SignRequest>,
+        ) -> Result<Response<SignResponse>, Status> {
+            Ok(Response::new(self.sign_response.clone()))
+        }
+    }
+
+    struct TestServer {
+        endpoint: String,
+        shutdown: Option<oneshot::Sender<()>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl TestServer {
+        async fn start(service: MockUtilityService) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let addr = listener.local_addr().expect("local addr");
+            listener
+                .set_nonblocking(true)
+                .expect("set nonblocking test server");
+            let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+            let incoming = TcpListenerStream::new(listener);
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+            let task = tokio::spawn(async move {
+                let shutdown = async {
+                    let _ = shutdown_rx.await;
+                };
+
+                Server::builder()
+                    .add_service(UtilityServiceServer::new(service))
+                    .serve_with_incoming_shutdown(incoming, shutdown)
+                    .await
+                    .expect("test server should run");
+            });
+
+            Self {
+                endpoint: format!("http://{}", addr),
+                shutdown: Some(shutdown_tx),
+                task,
+            }
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            self.task.abort();
+        }
+    }
+
+    fn make_test_service_identity() -> Arc<identity::RawIdentity> {
+        let private_key = crypto::generate_secp256k1().expect("should generate secp256k1 key");
+        Arc::new(identity::RawIdentity::from_secp256k1(private_key).expect("identity"))
+    }
+
+    fn valid_bls_public_key_bytes() -> Vec<u8> {
+        let ikm = [7u8; 32];
+        blst::min_pk::SecretKey::key_gen(&ikm, &[])
+            .expect("deterministic BLS secret key")
+            .sk_to_pk()
+            .compress()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn new_returns_error_for_empty_public_key_response() {
+        let server = TestServer::start(MockUtilityService {
+            derive_public_key_response: DerivePublicKeyResponse {
+                public_key: Vec::new(),
+                algorithm: 0,
+            },
+            sign_response: SignResponse {
+                signature: vec![1],
+                algorithm: 0,
+                public_key: vec![],
+                metadata: Default::default(),
+            },
+        })
+        .await;
+
+        let result = OrbisClient::new(
+            server.endpoint.clone(),
+            "ring-123".to_string(),
+            "platform".to_string(),
+            make_test_service_identity(),
+        )
+        .await;
+
+        match result {
+            Ok(_) => panic!("empty public key should fail"),
+            Err(err) => assert!(matches!(err, OrbisClientError::EmptyPublicKey)),
+        }
+    }
+
+    #[tokio::test]
+    async fn new_returns_error_for_invalid_public_key_response() {
+        let server = TestServer::start(MockUtilityService {
+            derive_public_key_response: DerivePublicKeyResponse {
+                public_key: vec![1, 2, 3],
+                algorithm: 0,
+            },
+            sign_response: SignResponse {
+                signature: vec![1],
+                algorithm: 0,
+                public_key: vec![],
+                metadata: Default::default(),
+            },
+        })
+        .await;
+
+        let result = OrbisClient::new(
+            server.endpoint.clone(),
+            "ring-123".to_string(),
+            "platform".to_string(),
+            make_test_service_identity(),
+        )
+        .await;
+
+        match result {
+            Ok(_) => panic!("invalid public key bytes should fail"),
+            Err(err) => assert!(matches!(err, OrbisClientError::InvalidPublicKey(_))),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sign_sync_returns_error_for_empty_signature_response() {
+        let server = TestServer::start(MockUtilityService {
+            derive_public_key_response: DerivePublicKeyResponse {
+                public_key: valid_bls_public_key_bytes(),
+                algorithm: 0,
+            },
+            sign_response: SignResponse {
+                signature: Vec::new(),
+                algorithm: 0,
+                public_key: vec![],
+                metadata: Default::default(),
+            },
+        })
+        .await;
+
+        let client = OrbisClient::new(
+            server.endpoint.clone(),
+            "ring-123".to_string(),
+            "platform".to_string(),
+            make_test_service_identity(),
+        )
+        .await
+        .expect("client should build");
+
+        let err = tokio::task::spawn_blocking(move || {
+            client
+                .sign_sync(b"hello", None)
+                .expect_err("empty signature should fail")
+        })
+        .await
+        .expect("blocking task should join");
+
+        assert!(err.contains("Orbis Sign returned empty signature"));
     }
 }
