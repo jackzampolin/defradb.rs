@@ -170,6 +170,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
         // =====================================================================
         // ACP (Document Access Control)
         // =====================================================================
+        "/api/v0/acp/status" => RoutePermission::Required(NodePermission::DacStatus),
         "/api/v0/acp/policy" => match *method {
             Method::POST => RoutePermission::Required(NodePermission::DacPolicyAdd),
             Method::GET => RoutePermission::Required(NodePermission::DacStatus),
@@ -471,6 +472,11 @@ mod tests {
                 RoutePermission::Required(NodePermission::P2pSyncDocuments),
             ),
             // ACP
+            (
+                "/api/v0/acp/status",
+                Method::GET,
+                RoutePermission::Required(NodePermission::DacStatus),
+            ),
             (
                 "/api/v0/acp/policy",
                 Method::POST,
