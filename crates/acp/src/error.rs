@@ -10,7 +10,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[non_exhaustive]
 pub enum Error {
     /// JSON serialization/deserialization errors
-    #[error("json error: {0}")]
+    #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
 
     /// Permission denied for the requested operation
@@ -194,5 +194,6 @@ mod tests {
         let err = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
         let error: Error = err.into();
         assert!(matches!(error, Error::Json(_)));
+        assert!(error.to_string().starts_with("serialization error: "));
     }
 }

@@ -12,7 +12,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[non_exhaustive]
 pub enum Error {
     /// Standard IO errors
-    #[error("io error: {0}")]
+    #[error("storage error: {0}")]
     Io(#[from] std::io::Error),
 
     /// Storage-related errors
@@ -20,15 +20,15 @@ pub enum Error {
     Storage(String),
 
     /// JSON serialization/deserialization errors
-    #[error("json error: {0}")]
+    #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
 
     /// DAG-CBOR encoding errors
-    #[error("dag-cbor encode error: {0}")]
+    #[error("serialization error: {0}")]
     DagCborEncode(#[from] serde_ipld_dagcbor::EncodeError<TryReserveError>),
 
     /// DAG-CBOR decoding errors
-    #[error("dag-cbor decode error: {0}")]
+    #[error("serialization error: {0}")]
     DagCborDecode(#[from] serde_ipld_dagcbor::DecodeError<Infallible>),
 
     /// Serialization/deserialization errors
@@ -56,7 +56,7 @@ pub enum Error {
     InvalidCID(String),
 
     /// CID parsing/decoding errors
-    #[error("cid error: {0}")]
+    #[error("invalid CID: {0}")]
     Cid(#[from] cid::Error),
 
     /// CRDT merge errors
@@ -105,6 +105,7 @@ mod tests {
         let err = std::io::Error::other("boom");
         let error: Error = err.into();
         assert!(matches!(error, Error::Io(_)));
+        assert_eq!(error.to_string(), "storage error: boom");
     }
 
     #[test]
@@ -112,5 +113,14 @@ mod tests {
         let err = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
         let error: Error = err.into();
         assert!(matches!(error, Error::Json(_)));
+        assert!(error.to_string().starts_with("serialization error: "));
+    }
+
+    #[test]
+    fn cid_errors_preserve_stable_display_message() {
+        let err = cid::Cid::try_from("not-a-cid").unwrap_err();
+        let error: Error = err.into();
+        assert!(matches!(error, Error::Cid(_)));
+        assert!(error.to_string().starts_with("invalid CID: "));
     }
 }
