@@ -170,12 +170,27 @@ jobs:
           --test p2p
           -- --test-threads=1 --skip ::go_
 
+      # go-compat runs the `go_*` half of every dual-runtime test against
+      # the upstream Go DefraDB binary. Catches cross-implementation
+      # regressions at PR time. Each binary added here was verified
+      # against defradb commit d5a5a879 (2026-04-10) before landing.
+      #
+      # The 5 `link_collection::go_acp_link_collection_*_reject` tests
+      # cover #746 (Rust schema loader silently accepts invalid DRIs).
+      # They will pass on Go but fail on the divergence-guard form
+      # currently on main. Once #756 lands, those tests are flipped to
+      # positive assertions and the skip filters below should be removed.
       - name: Run go-compat integration tests
         if: matrix.suite == 'go-compat'
         run: >-
           cargo test -p integration-test
-          --test basic --test query
+          --test basic --test query --test acp --test nac --test backup
           -- go_
+          --skip go_acp_link_collection_nonexistent_policy_reject
+          --skip go_acp_link_collection_nonexistent_resource_reject
+          --skip go_acp_link_collection_missing_read_perm_reject
+          --skip go_acp_link_collection_missing_update_perm_reject
+          --skip go_acp_link_collection_missing_delete_perm_reject
 
       - name: Run iroh integration tests
         if: matrix.suite == 'iroh'
