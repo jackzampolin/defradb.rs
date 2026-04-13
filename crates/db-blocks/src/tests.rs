@@ -116,7 +116,7 @@ async fn test_composite_block_has_field_links() {
 }
 
 #[test]
-fn test_compute_document_blocks_places_encryption_metadata_in_encstore_entries() {
+fn test_compute_document_blocks_places_encryption_metadata_in_blockstore_entries() {
     let mut doc = Document::new();
     doc.generate_and_set_doc_id().unwrap();
     doc.set("secret", NormalValue::String("classified".to_string()));
@@ -130,12 +130,8 @@ fn test_compute_document_blocks_places_encryption_metadata_in_encstore_entries()
         .expect("blocks should compute");
 
     assert!(
-        !computed.encstore_entries.is_empty(),
-        "encryption metadata should be written to encstore entries"
-    );
-    assert!(
-        computed.blockstore_entries.len() >= 2,
-        "field and composite blocks should still be stored in blockstore entries"
+        computed.blockstore_entries.len() >= 3,
+        "encryption metadata should be included in blockstore entries alongside field and composite blocks"
     );
 }
 
