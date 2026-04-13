@@ -7,7 +7,7 @@
 //! - ACP-protected docs replicate from Core to Near
 //! - Owner sees both public and protected docs on Core
 //! - Anonymous sees only public doc on Core
-//! - ACP state is node-local (not replicated)
+//! - Receiving-node visibility still respects ACP after replication
 //! - Non-owner identity visibility rules
 //!
 //! Run with:

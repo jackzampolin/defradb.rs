@@ -2,7 +2,8 @@
 //!
 //! Verifies that ACP policies work correctly with iroh P2P replication:
 //! - Both public and protected docs replicate
-//! - ACP enforcement is node-local (relationships don't replicate)
+//! - ACP-enforced visibility is preserved on the receiving node
+//! - Relationship replication is covered by the DAC-specific ACP P2P tests
 //! - Owner identity sees protected docs on originating node
 //! - Anonymous sees only public docs on originating node
 //!
