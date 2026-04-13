@@ -30,11 +30,11 @@ pub enum OrbisClientError {
     Connect {
         endpoint: String,
         #[source]
-        source: tonic::transport::Error,
+        source: Box<tonic::transport::Error>,
     },
 
     #[error("DerivePublicKey failed: {0}")]
-    DerivePublicKey(#[source] tonic::Status),
+    DerivePublicKey(#[source] Box<tonic::Status>),
 
     #[error("DerivePublicKey returned empty public key")]
     EmptyPublicKey,
@@ -55,7 +55,7 @@ pub enum OrbisClientError {
     InvalidBearerTokenUtf8(std::string::FromUtf8Error),
 
     #[error("Orbis Sign RPC failed: {0}")]
-    Sign(#[source] tonic::Status),
+    Sign(#[source] Box<tonic::Status>),
 
     #[error("Orbis Sign returned empty signature")]
     EmptySignature,
@@ -125,7 +125,7 @@ impl OrbisClient {
             .await
             .map_err(|source| OrbisClientError::Connect {
                 endpoint: endpoint.clone(),
-                source,
+                source: Box::new(source),
             })?;
 
         let mut client = UtilityServiceClient::new(channel);
@@ -136,7 +136,7 @@ impl OrbisClient {
                 derivation: derivation_bytes.clone(),
             })
             .await
-            .map_err(OrbisClientError::DerivePublicKey)?;
+            .map_err(|e| OrbisClientError::DerivePublicKey(Box::new(e)))?;
 
         let public_key_bytes = resp.into_inner().public_key;
         if public_key_bytes.is_empty() {
@@ -326,7 +326,7 @@ impl OrbisClient {
             .await
             .map_err(|source| OrbisClientError::Connect {
                 endpoint: self.endpoint.clone(),
-                source,
+                source: Box::new(source),
             })?;
         info!(
             ring_id = %self.ring_id,
@@ -385,7 +385,7 @@ impl OrbisClient {
         let resp = client
             .sign(self.build_sign_request(data, authorization.as_ref()))
             .await
-            .map_err(OrbisClientError::Sign)?;
+            .map_err(|e| OrbisClientError::Sign(Box::new(e)))?;
         info!(
             ring_id = %self.ring_id,
             elapsed = ?sign_rpc_start.elapsed(),
