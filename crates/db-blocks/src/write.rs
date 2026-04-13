@@ -7,7 +7,7 @@ use super::*;
 /// 2. Composite block to blockstore
 /// 3. Head CIDs to headstore (for _commits queries)
 ///
-/// This matches Go DefraDB's ProcessBlock → updateHeads flow.
+/// This matches Go DefraDB's ProcessBlock -> updateHeads flow.
 ///
 /// # Arguments
 ///
@@ -40,8 +40,6 @@ pub async fn write_document_blocks(
     let mut field_links: Vec<DAGLink> = Vec::new();
     let mut field_cids: Vec<Cid> = Vec::new();
 
-    // For creates (modified_fields=None), priority is always 1 and no heads exist.
-    // For updates, load all heads in a single scan to avoid M+2 overlapping scans.
     let is_create = modified_fields.is_none();
     let snapshot = if is_create {
         None
@@ -58,23 +56,16 @@ pub async fn write_document_blocks(
             + 1
     };
 
-    // Create LWW blocks for each field
-    // For updates with modified_fields, only create blocks for changed fields.
-    // For unchanged fields, use their existing head CID in the composite links.
     for (field_name, field_value) in doc.values() {
-        // Skip _docID (stored as the block key, not a CRDT field).
-        // Other _-prefixed fields like _ownerID (foreign keys) DO get blocks.
         if field_name == "_docID" {
             continue;
         }
 
-        // Check if this field should have a new block created
         let should_create_block = match modified_fields {
-            None => true, // Create operation: all fields get new blocks
-            Some(fields) => fields.contains(field_name), // Update: only modified fields
+            None => true,
+            Some(fields) => fields.contains(field_name),
         };
 
-        // For creates, no heads exist yet. For updates, use the pre-loaded snapshot.
         let field_head_entries = if is_create {
             Vec::new()
         } else {
@@ -85,21 +76,16 @@ pub async fn write_document_blocks(
         };
 
         if should_create_block {
-            // Create new block for this field (LWW or Counter depending on CRDT type)
             let heads: Vec<Cid> = field_head_entries.iter().map(|h| h.cid).collect();
 
-            // For counter fields during updates, use the raw increment delta
-            // (not the accumulated value) to match Go behavior.
             let cbor_value = if let Some(delta) = doc.get_counter_delta(field_name) {
                 delta
             } else {
                 field_value.value()
             };
 
-            // Encode the field value as CBOR
             let value_bytes = encode_value_as_cbor(cbor_value)?;
 
-            // Encrypt delta and create Encryption metadata block if configured
             let (value_bytes, encryption_cid) = if let Some(enc) = encryption_config {
                 if enc.should_encrypt_field(field_name) {
                     let key = defra_core::encryption::generate_encryption_key();
@@ -111,7 +97,6 @@ pub async fn write_document_blocks(
                         "Encrypted field delta"
                     );
 
-                    // Create Encryption metadata block (matches Go's block/encryption.go)
                     let is_field_level = enc.encrypt_fields.iter().any(|f| f == field_name);
                     let enc_block = Encryption {
                         doc_id: doc_id_bytes.clone(),
@@ -140,10 +125,6 @@ pub async fn write_document_blocks(
                 (value_bytes, None)
             };
 
-            // Check if this field is a Counter type.
-            // For documents loaded from storage, the CRDT type may default to LWW
-            // since storage doesn't preserve schema annotations. Fall back to checking
-            // whether a counter delta was set (only counter fields get counter deltas).
             let is_counter = doc
                 .fields()
                 .get(field_name)
@@ -151,17 +132,12 @@ pub async fn write_document_blocks(
                 .unwrap_or(false)
                 || doc.get_counter_delta(field_name).is_some();
 
-            // For Counter fields, use nonce=0 for initial creation (heads empty),
-            // random nonce for updates (heads non-empty) - matches Go behavior
             let nonce: i64 = if is_counter && !heads.is_empty() {
-                // Update operation: use random nonce
                 rand::random()
             } else {
-                // Initial creation: use deterministic nonce=0
                 0
             };
 
-            // Create the appropriate delta based on CRDT type
             let delta = if is_counter {
                 CrdtDelta::Counter(CounterDeltaPayload {
                     doc_id: doc_id_bytes.clone(),
@@ -181,14 +157,9 @@ pub async fn write_document_blocks(
                 })
             };
 
-            // Create the field block with heads linking to previous version
-            // Include encryption CID if this field was encrypted
             let mut field_block =
                 Block::new_with_options(delta, heads.clone(), vec![], encryption_cid, None);
 
-            // Sign the block if a signer is available.
-            // Go's signBlock: sign the block bytes (without signature), store
-            // the Signature as a separate block, then set block.signature = sig_cid.
             if let Some(signer) = signing_config {
                 tracing::debug!(field = %field_name, priority, "Signing field block");
                 match sign_block(&field_block, signer, blockstore).await {
@@ -208,14 +179,12 @@ pub async fn write_document_blocks(
                 tracing::debug!(field = %field_name, "No signing config for field");
             }
 
-            // Serialize and generate CID (includes signature CID if signed)
             let field_block_bytes = field_block
                 .to_dag_cbor()
                 .map_err(|e| format!("Failed to encode field block: {}", e))?;
             let field_cid = generate_cid_from_bytes(&field_block_bytes)
                 .map_err(|e| format!("Failed to generate field CID: {}", e))?;
 
-            // Debug: verify roundtrip of signature through serialization
             tracing::debug!(
                 field = %field_name,
                 cid = %field_cid,
@@ -230,13 +199,11 @@ pub async fn write_document_blocks(
                 }
             }
 
-            // Store the field block in blockstore
             blockstore
                 .set(&field_cid.to_bytes(), &field_block_bytes)
                 .await
                 .map_err(|e| format!("Failed to store field block: {}", e))?;
 
-            // Delete all old head entries (replace all branches with single new head)
             for old_head in &field_head_entries {
                 headstore
                     .delete(&old_head.key)
@@ -244,7 +211,6 @@ pub async fn write_document_blocks(
                     .map_err(|e| format!("Failed to delete old field head: {}", e))?;
             }
 
-            // Write new head CID to headstore: /d/{doc_id}/{field_name}/{cid} → priority
             let head_key = HeadstoreDocKey::new(&doc_id_str, field_name, field_cid);
             let priority_bytes = encode_priority_varint(priority);
             headstore
@@ -264,15 +230,11 @@ pub async fn write_document_blocks(
                 "Stored field block and head"
             );
 
-            // Add link to composite - only new blocks get linked
             field_links.push(DAGLink::new(field_name.clone(), field_cid));
             field_cids.push(field_cid);
         }
-        // Note: Unchanged fields are NOT added to composite links.
-        // Go only includes newly created field blocks in the composite's links array.
     }
 
-    // For creates, no composite heads exist yet. For updates, use the snapshot.
     let (composite_head_entries, composite_heads) = if is_create {
         (Vec::new(), Vec::new())
     } else {
@@ -284,19 +246,13 @@ pub async fn write_document_blocks(
         (entries, heads)
     };
 
-    // Create the Composite delta payload
     let composite_payload = CompositeDeltaPayload {
         doc_id: doc_id_bytes,
         schema_version_id: schema_version_id.to_string(),
         priority,
-        status: 1, // Active document
+        status: 1,
     };
 
-    // For doc-level encryption, the composite block also carries an encryption
-    // CID link (even though its data is not encrypted). Go's AddDelta always calls
-    // determineBlockEncryption, which returns an encryption block for doc-level
-    // encryption regardless of delta type. encryptBlock() then skips actual
-    // encryption for composites but the Encryption link is still set on the block.
     let composite_encryption_cid = if let Some(enc) = encryption_config {
         if enc.encrypt_doc {
             let key = defra_core::encryption::generate_encryption_key();
@@ -322,7 +278,6 @@ pub async fn write_document_blocks(
         None
     };
 
-    // Create the composite block with heads linking to previous version
     let mut composite_block = Block::new_with_options(
         CrdtDelta::Composite(composite_payload),
         composite_heads,
@@ -331,27 +286,23 @@ pub async fn write_document_blocks(
         None,
     );
 
-    // Sign the composite block if a signer is available
     if let Some(signer) = signing_config {
         if let Some(sig_cid) = sign_block(&composite_block, signer, blockstore).await? {
             composite_block.signature = Some(sig_cid);
         }
     }
 
-    // Serialize the composite block (includes signature CID if signed)
     let composite_bytes = composite_block
         .to_dag_cbor()
         .map_err(|e| format!("Failed to encode composite block: {}", e))?;
     let composite_cid = generate_cid_from_bytes(&composite_bytes)
         .map_err(|e| format!("Failed to generate composite CID: {}", e))?;
 
-    // Store the composite block in blockstore
     blockstore
         .set(&composite_cid.to_bytes(), &composite_bytes)
         .await
         .map_err(|e| format!("Failed to store composite block: {}", e))?;
 
-    // Delete all old composite head entries (replace all branches with single new head)
     for old_head in &composite_head_entries {
         headstore
             .delete(&old_head.key)
@@ -359,7 +310,6 @@ pub async fn write_document_blocks(
             .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
     }
 
-    // Write new composite head to headstore: /d/{doc_id}/C/{cid} → priority
     let composite_head_key = HeadstoreDocKey::new(&doc_id_str, "C", composite_cid);
     let priority_bytes = encode_priority_varint(priority);
     headstore
@@ -382,7 +332,6 @@ pub async fn write_document_blocks(
         "Built composite block with field links and wrote heads"
     );
 
-    // Collect CIDs for batch signing if a session is active.
     if let Some(session_key) = defra_core::batch_signing::get_batch_session_key() {
         if priority == 1 {
             for fc in &field_cids {
@@ -401,10 +350,6 @@ pub async fn write_document_blocks(
 }
 
 /// Write a delete block (composite with status=2) to blockstore and heads to headstore.
-///
-/// Delete operations in Go DefraDB create a composite block with status=2 (deleted),
-/// no field-level blocks, and heads pointing to the previous composite head.
-/// This matches Go's `crdt.DocComposite.DeleteDelta()` → `coreblock.AddDelta()` flow.
 pub async fn write_delete_block(
     blockstore: &NamespaceView,
     headstore: &NamespaceView,
@@ -413,50 +358,42 @@ pub async fn write_delete_block(
     signing_config: Option<&SigningConfig>,
 ) -> Result<BlockResult, String> {
     let doc_id_bytes = doc_id.as_bytes().to_vec();
-
-    // Load all heads in a single scan (replaces separate priority + composite scans).
     let snapshot = DocHeadsSnapshot::load(headstore, doc_id).await?;
     let priority: u64 = snapshot.max_priority() + 1;
 
     let composite_head_entries = snapshot.field_heads("C");
     let composite_heads: Vec<Cid> = composite_head_entries.iter().map(|h| h.cid).collect();
 
-    // Create the Composite delta payload with status=2 (deleted)
     let composite_payload = CompositeDeltaPayload {
         doc_id: doc_id_bytes,
         schema_version_id: schema_version_id.to_string(),
         priority,
-        status: 2, // Deleted document
+        status: 2,
     };
 
-    // Create the composite block with no field links (deletes have no field blocks)
     let mut composite_block = Block::new(
         CrdtDelta::Composite(composite_payload),
         composite_heads,
-        vec![], // No field links for delete
+        vec![],
     );
 
-    // Sign the delete composite block if a signer is available
     if let Some(signer) = signing_config {
         if let Some(sig_cid) = sign_block(&composite_block, signer, blockstore).await? {
             composite_block.signature = Some(sig_cid);
         }
     }
 
-    // Serialize the composite block
     let composite_bytes = composite_block
         .to_dag_cbor()
         .map_err(|e| format!("Failed to encode delete composite block: {}", e))?;
     let composite_cid = generate_cid_from_bytes(&composite_bytes)
         .map_err(|e| format!("Failed to generate delete composite CID: {}", e))?;
 
-    // Store the composite block in blockstore
     blockstore
         .set(&composite_cid.to_bytes(), &composite_bytes)
         .await
         .map_err(|e| format!("Failed to store delete composite block: {}", e))?;
 
-    // Delete all old composite head entries (replace all branches with single new head)
     for old_head in &composite_head_entries {
         headstore
             .delete(&old_head.key)
@@ -464,7 +401,6 @@ pub async fn write_delete_block(
             .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
     }
 
-    // Write new composite head to headstore: /d/{doc_id}/C/{cid} → priority
     let composite_head_key = HeadstoreDocKey::new(doc_id, "C", composite_cid);
     let priority_bytes = encode_priority_varint(priority);
     headstore
@@ -483,7 +419,6 @@ pub async fn write_delete_block(
         "Built delete composite block (status=2)"
     );
 
-    // Collect composite CID for batch signing if a session is active.
     if let Some(session_key) = defra_core::batch_signing::get_batch_session_key() {
         defra_core::batch_signing::batch_collect_cid(&session_key, composite_cid);
     }

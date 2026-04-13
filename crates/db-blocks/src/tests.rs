@@ -1,6 +1,7 @@
 use super::*;
 use blockstore::{Blockstore, DefraBlockstore};
 use crypto::keys::PublicKey;
+use defra_core::encryption::EncryptionConfig;
 use defra_core::SignatureType;
 use std::sync::{Arc, Mutex};
 use storage::backends::MemoryStore;
@@ -112,6 +113,26 @@ async fn test_composite_block_has_field_links() {
     for field_cid in &result.field_cids {
         assert!(link_cids.contains(field_cid));
     }
+}
+
+#[test]
+fn test_compute_document_blocks_places_encryption_metadata_in_blockstore_entries() {
+    let mut doc = Document::new();
+    doc.generate_and_set_doc_id().unwrap();
+    doc.set("secret", NormalValue::String("classified".to_string()));
+
+    let enc = EncryptionConfig {
+        encrypt_doc: false,
+        encrypt_fields: vec!["secret".to_string()],
+    };
+
+    let computed = compute_document_blocks(&doc, "schema-v1", Some(&enc), None)
+        .expect("blocks should compute");
+
+    assert!(
+        computed.blockstore_entries.len() >= 3,
+        "encryption metadata should be included in blockstore entries alongside field and composite blocks"
+    );
 }
 
 struct TestRemoteSecp256r1Signer {

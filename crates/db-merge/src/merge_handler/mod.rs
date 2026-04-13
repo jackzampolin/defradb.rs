@@ -138,7 +138,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
     /// Decrypt block delta data using the encryption metadata block.
     ///
-    /// If `encryption_cid` is Some, loads the Encryption block from blockstore,
+    /// If `encryption_cid` is Some, loads the Encryption block from encstore,
+    /// falling back to the P2P blockstore when the metadata arrived via replay,
     /// extracts the AES key, and decrypts the data. Returns data unchanged if
     /// no encryption CID is present.
     pub(crate) async fn decrypt_block_data(
@@ -151,15 +152,28 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             None => return Ok(data.to_vec()),
         };
 
-        // Load the Encryption block from blockstore
-        let enc_data = self
+        let enc_txn = self.db.new_txn(true).await.map_err(MergeError::Database)?;
+        let encstore = enc_txn.encstore().map_err(MergeError::Database)?;
+        let enc_cid_bytes = enc_cid.to_bytes();
+        let enc_data = if let Some(enc_data) = encstore
+            .get(&enc_cid_bytes)
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))?
+        {
+            enc_data
+        } else if let Some(enc_data) = self
             .blockstore
             .get(enc_cid)
             .await
             .map_err(|e| MergeError::Storage(e.to_string()))?
-            .ok_or_else(|| {
-                MergeError::Storage(format!("Encryption block {} not found", enc_cid))
-            })?;
+        {
+            enc_data.to_vec()
+        } else {
+            return Err(MergeError::Storage(format!(
+                "Encryption block {} not found",
+                enc_cid
+            )));
+        };
 
         let enc_block = Encryption::from_dag_cbor(&enc_data).map_err(|e| {
             MergeError::BlockDecode(format!("Failed to decode encryption block: {}", e))

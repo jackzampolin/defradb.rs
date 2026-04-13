@@ -102,7 +102,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             e
                         ))
                     })?;
-
                     // Use version_id for collectionVersionID (matches Go's VersionID())
                     let schema_version_id = collection.version_id();
 

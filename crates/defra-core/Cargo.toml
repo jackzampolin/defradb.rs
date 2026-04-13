@@ -26,9 +26,7 @@ libipld.workspace = true
 
 # Cryptography (for CID generation)
 sha2.workspace = true
-
-# Random number generation (per-write encryption keys)
-rand = "0.8"
+rand.workspace = true
 
 # Async
 async-trait.workspace = true

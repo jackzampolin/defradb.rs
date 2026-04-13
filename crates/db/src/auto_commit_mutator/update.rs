@@ -108,7 +108,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
                     // Use version_id for collectionVersionID (matches Go's VersionID())
                     let schema_version_id = collection.version_id();
-
                     // Get encryption config: first try thread-local (explicit in mutation),
                     // then fall back to per-document stored config (from create with encryption).
                     // This matches Go's behavior where encryption propagates through the DAG.

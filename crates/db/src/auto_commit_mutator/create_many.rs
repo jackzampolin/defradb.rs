@@ -179,7 +179,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             e
                         ))
                     })?;
-
                     match insert_computed_blocks(&blockstore, &headstore, &computed).await {
                         Ok(()) => {
                             if let Some(ref config) = enc_config {
