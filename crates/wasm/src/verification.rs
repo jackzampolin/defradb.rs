@@ -18,7 +18,18 @@ use crate::error::{Result, WasmError};
 /// - `root_cid`: The CID of the root block
 /// - `path`: Array of proof nodes
 ///
-/// Returns true if the proof is valid.
+/// # Behavior
+///
+/// - **Returns `true`** if the proof verifies successfully.
+/// - **Throws** (resolves to `Err` in Rust → exception in JS) for any
+///   verification failure: structural input errors (empty path, anchor
+///   mismatch), cryptographic failures (content hash mismatch, broken
+///   chain link), and decode errors.
+///
+/// **This function never returns `false`.** Verification failures are
+/// always surfaced as exceptions so JS callers cannot accidentally
+/// bypass them by using truthiness checks on a `false` result. See
+/// issue #733 for the rationale.
 #[wasm_bindgen]
 pub fn verify_merkle_proof(proof_json: &str) -> std::result::Result<bool, JsValue> {
     verify_merkle_proof_impl(proof_json).map_err(|e| e.into())
@@ -35,6 +46,9 @@ fn verify_merkle_proof_impl(proof_json: &str) -> Result<bool> {
 /// Verify a Merkle proof from DAG-CBOR bytes.
 ///
 /// This is the native format for proofs transmitted over the wire.
+///
+/// Behavior is identical to [`verify_merkle_proof`] — returns `true` on
+/// success and throws on any failure (#733). Never returns `false`.
 #[wasm_bindgen]
 pub fn verify_merkle_proof_cbor(proof_bytes: &[u8]) -> std::result::Result<bool, JsValue> {
     verify_merkle_proof_cbor_impl(proof_bytes).map_err(|e| e.into())
@@ -47,7 +61,10 @@ fn verify_merkle_proof_cbor_impl(proof_bytes: &[u8]) -> Result<bool> {
 
 /// Verify a signed Merkle proof using the embedded public key.
 ///
-/// Returns true if both the signature and proof are valid.
+/// Returns `true` if both the signature and proof verify successfully.
+/// Throws on any failure (signature verification failure, hash mismatch,
+/// broken chain, structural input error). Never returns `false` — see
+/// issue #733 for rationale.
 #[wasm_bindgen]
 pub fn verify_signed_proof(proof_bytes: &[u8]) -> std::result::Result<bool, JsValue> {
     verify_signed_proof_impl(proof_bytes).map_err(|e| e.into())
