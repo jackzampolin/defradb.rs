@@ -4,6 +4,8 @@ mod audit;
 mod basic;
 #[path = "acp/custom_policy.rs"]
 mod custom_policy;
+#[path = "acp/events_sse.rs"]
+mod events_sse;
 #[path = "acp/index.rs"]
 mod index;
 #[path = "acp/link_collection.rs"]

@@ -49,6 +49,7 @@ pub fn route_permission(path: &str, method: &Method) -> RoutePermission {
             Method::POST => RoutePermission::Dynamic,
             _ => RoutePermission::Required(NodePermission::DocumentRead),
         },
+        "/api/v0/events" => RoutePermission::Dynamic,
         "/api/v0/schema" => match *method {
             Method::GET => RoutePermission::Required(NodePermission::CollectionGet),
             Method::POST => RoutePermission::Required(NodePermission::CollectionPatch),
