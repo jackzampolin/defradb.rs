@@ -25,14 +25,14 @@ struct PendingUpdateEvent {
     cid: Cid,
 }
 
-pub(crate) struct BatchMutator<S: Store> {
+pub struct BatchMutator<S: Store> {
     db: Arc<DB<S>>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
     pending_events: TokioMutex<Vec<PendingUpdateEvent>>,
 }
 
 impl<S: Store> BatchMutator<S> {
-    pub(crate) fn new(db: Arc<DB<S>>, txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
+    pub fn new(db: Arc<DB<S>>, txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
         Self {
             db,
             txn,

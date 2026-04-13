@@ -125,9 +125,19 @@ pub(crate) fn resolve_signing_config(
 
 /// Resolve whether DAC bypass should be enabled for this request.
 ///
-/// - If NAC is not configured or not enabled, no bypass.
-/// - If identity has `DacBypass` permission, enable bypass.
+/// - If the request identity equals the configured node identity, bypass.
+///   (Matches Go's `internal/db/collection_acp.go:60-62` — the process owner
+///   gets full access to all documents regardless of DAC.)
+/// - If NAC is configured and the identity has `DacBypass` permission, bypass.
+/// - Otherwise, no bypass.
 pub(crate) async fn resolve_dac_bypass(state: &AppState, identity: &ExtractIdentity) -> bool {
+    // Node-identity full-access shortcut.
+    if let (Some(node_did), Some(req_did)) = (&state.node_identity_did, identity.did()) {
+        if node_did.as_str() == req_did.as_str() {
+            return true;
+        }
+    }
+
     let Some(nac) = &state.nac else {
         return false;
     };

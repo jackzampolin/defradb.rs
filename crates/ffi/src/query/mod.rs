@@ -41,22 +41,20 @@ pub(crate) fn nac_permission_for_query(query_str: &str) -> NodePermission {
     }
 }
 
-/// Check if the identity has DAC bypass permission (NAC admin/owner).
+/// Check if the identity has DAC bypass permission (NAC admin/owner) or
+/// is the node identity itself.
 ///
-/// Sets the thread-local `dac_bypass` flag to `true` if the identity has
-/// the `DacBypass` node permission (meaning they can read all documents
-/// regardless of DAC policies).
+/// Sets the thread-local `dac_bypass` flag to `true` if either:
+///
+/// - The request identity equals the configured node identity (matches Go's
+///   `internal/db/collection_acp.go:60-62` — process owner gets full access).
+/// - The identity has the `DacBypass` NAC permission.
 pub(crate) fn check_and_set_dac_bypass(
     rt: &tokio::runtime::Runtime,
     node_ptr: usize,
     identity_did: *const c_char,
 ) {
     defra_core::dac_bypass::set_dac_bypass(false);
-
-    let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
-        Some(m) => m,
-        None => return,
-    };
 
     // SAFETY: `identity_did` is either null or a valid C string from the FFI caller.
     let identity_str = unsafe { c_str_to_string(identity_did) };
@@ -66,6 +64,22 @@ pub(crate) fn check_and_set_dac_bypass(
             Err(_) => return,
         },
         _ => None,
+    };
+
+    // Node-identity full-access shortcut.
+    let node_did = NODES
+        .get(node_ptr, |state| state.node_identity_did.clone())
+        .flatten();
+    if let (Some(node), Some(req)) = (&node_did, &did) {
+        if node.as_str() == req.as_str() {
+            defra_core::dac_bypass::set_dac_bypass(true);
+            return;
+        }
+    }
+
+    let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
+        Some(m) => m,
+        None => return,
     };
 
     let status = rt.block_on(nac_manager.status());

@@ -5,9 +5,6 @@
 
 use async_trait::async_trait;
 use document::Document;
-use schema::CollectionVersion;
-use std::collections::HashMap;
-use std::sync::Arc;
 use storage::corekv::MaybeSendSync;
 
 use crate::error::Result;
@@ -332,51 +329,5 @@ pub struct CommitsQueryOptions {
 /// Provides collection schemas on-demand.
 ///
 /// This trait abstracts collection resolution, allowing the QueryRunner to
-/// resolve collections from the database at query time instead of using a
-/// static cache. This eliminates synchronization issues when schemas are
-/// added or modified.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait CollectionProvider: MaybeSendSync {
-    /// Get a collection schema by name.
-    async fn get_collection(&self, name: &str) -> Result<Option<Arc<CollectionVersion>>>;
-
-    /// List all collection names.
-    async fn list_collections(&self) -> Result<Vec<String>>;
-}
-
-/// Static collection provider for tests and backward compatibility.
-///
-/// This provider holds a static HashMap of collections, set at construction
-/// time. Use this for tests or when collections won't change during runtime.
-pub struct StaticCollectionProvider {
-    collections: HashMap<String, Arc<CollectionVersion>>,
-}
-
-impl StaticCollectionProvider {
-    /// Create a new static collection provider from a list of collection schemas.
-    pub fn new(collections: Vec<CollectionVersion>) -> Self {
-        let map = collections
-            .into_iter()
-            .map(|c| (c.name.clone(), Arc::new(c)))
-            .collect();
-        Self { collections: map }
-    }
-
-    /// Create a new static collection provider from an existing HashMap.
-    pub fn from_map(collections: HashMap<String, Arc<CollectionVersion>>) -> Self {
-        Self { collections }
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl CollectionProvider for StaticCollectionProvider {
-    async fn get_collection(&self, name: &str) -> Result<Option<Arc<CollectionVersion>>> {
-        Ok(self.collections.get(name).cloned())
-    }
-
-    async fn list_collections(&self) -> Result<Vec<String>> {
-        Ok(self.collections.keys().cloned().collect())
-    }
-}
+// CollectionProvider and StaticCollectionProvider extracted to query-types crate.
+pub use query_types::collection_provider::{CollectionProvider, StaticCollectionProvider};

@@ -10,14 +10,14 @@ use crate::{P2PError, P2PResult, VersionSyncer};
 /// Database-backed version syncer that fetches schema blocks via Bitswap.
 pub struct DbVersionSyncer<S: storage::corekv::Store, B: Blockstore> {
     blockstore: Arc<B>,
-    merge_handler: Arc<db::DbMergeHandler<S, B>>,
+    merge_handler: Arc<db_merge::DbMergeHandler<S, B>>,
     db: Arc<db::DB<S>>,
 }
 
 impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static> DbVersionSyncer<S, B> {
     pub fn new(
         blockstore: Arc<B>,
-        merge_handler: Arc<db::DbMergeHandler<S, B>>,
+        merge_handler: Arc<db_merge::DbMergeHandler<S, B>>,
         db: Arc<db::DB<S>>,
     ) -> Self {
         Self {
@@ -29,7 +29,7 @@ impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static> DbVersionSync
 
     pub fn new_arc(
         blockstore: Arc<B>,
-        merge_handler: Arc<db::DbMergeHandler<S, B>>,
+        merge_handler: Arc<db_merge::DbMergeHandler<S, B>>,
         db: Arc<db::DB<S>>,
     ) -> Arc<dyn VersionSyncer> {
         Arc::new(Self::new(blockstore, merge_handler, db))
