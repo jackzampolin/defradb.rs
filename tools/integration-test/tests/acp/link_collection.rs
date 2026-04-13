@@ -25,15 +25,15 @@
 //! matching with multiple alternatives and always include `"bad_input"` as a
 //! generic fallback — matching the Phase 3a `policy_validation.rs` style.
 //!
-//! ## Known divergence: DRI existence + DPI rule checks not enforced
+//! ## DRI existence + DPI rule checks
 //!
-//! Five of the rejection tests below currently assert the **Rust** behavior
-//! rather than the Go behavior, with `DIVERGENCE:` comments. Rust's schema
-//! loader does not verify that the referenced policy/resource exists or
-//! enforce the DPI rule that requires `read`/`update`/`delete` permissions
-//! on the linked resource. Tracked in issue #746. These tests are
-//! regression guards — when #746 is fixed, each flagged assertion must be
-//! flipped back to expect an error.
+//! Rust now enforces the same DRI → DPI chain Go does at schema-add time
+//! (#746 fixed). When a `@policy(id:, resource:)` directive references:
+//! - a policy that doesn't exist → `"policyID specified does not exist with acp"`
+//! - a resource name not on the policy → `"resource does not exist on the specified policy"`
+//! - a resource missing `read`/`update`/`delete` permission → `"resource is missing required permission on policy"`
+//! Error strings are Go-compatible so mixed Rust/Go deployments produce
+//! identical user-facing output.
 
 use integration_test::{for_each_runtime, generate_identity, TestCluster};
 
@@ -503,14 +503,10 @@ for_each_runtime!(
 
 // Port of reject_missing_dri_test.go (both cases).
 //
-// DIVERGENCE (#746): Go DefraDB rejects at schema-add time with
-// "policyID specified does not exist with acp". Rust's
-// `parse_policy_directive` validates arg types and emptiness but never
-// consults ACP to verify the policy exists, so Rust accepts the schema
-// and registers the type. The DRI existence check is missing at the
-// schema-build path ([crates/query/src/sdl_parse/builder.rs:784]).
-// Regression guard — flip the asserts back to expect an error once #746
-// is fixed.
+// Before #746 was fixed Rust silently accepted a schema with a
+// nonexistent policy id. After the fix, Rust rejects with the same
+// Go-compatible error string as Go does: "policyID specified does not
+// exist with acp".
 async fn acp_link_collection_nonexistent_policy_reject(cluster: TestCluster) {
     let node = cluster.client(0);
     let alice = generate_identity(node.binary_path()).expect("alice identity");
@@ -522,14 +518,14 @@ async fn acp_link_collection_nonexistent_policy_reject(cluster: TestCluster) {
         r#"type UsersA @policy(id: "{}", resource: "users") {{ name: String age: Int }}"#,
         nonexistent_policy_id
     );
-    let result = try_add_schema(&node, &sdl, &alice.private_key_hex);
+    let err = try_add_schema(&node, &sdl, &alice.private_key_hex)
+        .expect("schema with nonexistent policy id must be rejected");
     assert!(
-        result.is_none(),
-        "Rust currently silently accepts a schema referencing a nonexistent \
-         policy id — Go rejects it. If this fails, the divergence has been \
-         fixed and the test must assert the error instead. Actual: {:?}",
-        result
+        err.to_lowercase().contains("does not exist with acp"),
+        "expected Go-compatible nonexistent-policy error, got: {}",
+        err
     );
+    assert!(!type_exists(&node, "UsersA"));
 
     // Case 2: a different policy exists but the referenced one does not.
     let _ = add_users_policy(&node, users_policy(), &alice.private_key_hex);
@@ -537,13 +533,15 @@ async fn acp_link_collection_nonexistent_policy_reject(cluster: TestCluster) {
         r#"type UsersB @policy(id: "{}", resource: "users") {{ name: String age: Int }}"#,
         nonexistent_policy_id
     );
-    let result = try_add_schema(&node, &sdl_b, &alice.private_key_hex);
-    assert!(
-        result.is_none(),
-        "Rust currently silently accepts (with unrelated policy present). \
-         If this fails, the divergence has been fixed. Actual: {:?}",
-        result
+    let err = try_add_schema(&node, &sdl_b, &alice.private_key_hex).expect(
+        "schema with nonexistent policy id must still be rejected (unrelated policy present)",
     );
+    assert!(
+        err.to_lowercase().contains("does not exist with acp"),
+        "expected Go-compatible nonexistent-policy error (with unrelated policy present), got: {}",
+        err
+    );
+    assert!(!type_exists(&node, "UsersB"));
 }
 
 for_each_runtime!(
@@ -554,10 +552,8 @@ for_each_runtime!(
 
 // Port of reject_missing_resource_on_dri_test.go.
 //
-// DIVERGENCE (#746): Go rejects with "resource does not exist on the
-// specified policy". Rust accepts — same root cause as
-// `acp_link_collection_nonexistent_policy_reject`: no DRI validation at
-// schema-build time. Regression guard.
+// After #746 fix: Rust rejects with "resource does not exist on the
+// specified policy" — Go-compatible error string.
 async fn acp_link_collection_nonexistent_resource_reject(cluster: TestCluster) {
     let node = cluster.client(0);
     let alice = generate_identity(node.binary_path()).expect("alice identity");
@@ -567,14 +563,15 @@ async fn acp_link_collection_nonexistent_resource_reject(cluster: TestCluster) {
         r#"type Users @policy(id: "{}", resource: "doesNotExist") {{ name: String age: Int }}"#,
         policy_id
     );
-    let result = try_add_schema(&node, &sdl, &alice.private_key_hex);
+    let err = try_add_schema(&node, &sdl, &alice.private_key_hex)
+        .expect("schema with nonexistent resource must be rejected");
     assert!(
-        result.is_none(),
-        "Rust currently silently accepts a schema with a nonexistent \
-         resource name on a valid policy — Go rejects it. If this fails, \
-         the divergence has been fixed. Actual: {:?}",
-        result
+        err.to_lowercase()
+            .contains("resource does not exist on the specified policy"),
+        "expected Go-compatible nonexistent-resource error, got: {}",
+        err
     );
+    assert!(!type_exists(&node, "Users"));
 }
 
 for_each_runtime!(
@@ -589,38 +586,42 @@ for_each_runtime!(
 
 // Port of reject_invalid_owner_read_perm_on_dri_test.go.
 //
-// DIVERGENCE (#746): Go enforces the DPI rule that a resource bound via
-// `@policy` must define the `read`, `update`, and `delete` permissions
-// and rejects with "resource is missing required permission on policy".
-// Rust enforces neither at policy-add time nor at schema-link time.
-// Regression guard for the current silent-accept behavior.
+// After #746 fix: Rust rejects with "resource is missing required
+// permission on policy. ... Permission: read". The DPI rule requires
+// documents to declare read/update/delete on the linked resource.
 async fn acp_link_collection_missing_read_perm_reject(cluster: TestCluster) {
     let node = cluster.client(0);
     let alice = generate_identity(node.binary_path()).expect("alice identity");
 
     let policy_result = node.acp_policy_add(users_policy_missing_read(), &alice.private_key_hex);
+    // The policy itself doesn't enforce DPI rules at add time — the
+    // check happens at schema-link time. If the store pre-validates the
+    // policy and rejects here, also accept that (Go parity).
     let policy_id = match policy_result {
-        Ok(v) => extract_policy_id(&v),
-        Err(_) => {
-            // Policy add failed = DPI enforced at policy-add time. Rust fixed.
+        Ok(v) => extract_policy_id(&v).expect("policy id"),
+        Err(e) => {
+            let el = format!("{:#}", e).to_lowercase();
+            assert!(
+                el.contains("read") || el.contains("permission") || el.contains("required"),
+                "policy-add-time DPI rejection must mention read/permission, got: {}",
+                e
+            );
             return;
         }
-    };
-    let Some(policy_id) = policy_id else {
-        return;
     };
     let sdl = format!(
         r#"type Users @policy(id: "{}", resource: "users") {{ name: String age: Int }}"#,
         policy_id
     );
-    let result = try_add_schema(&node, &sdl, &alice.private_key_hex);
+    let err = try_add_schema(&node, &sdl, &alice.private_key_hex)
+        .expect("schema with missing-read DRI must be rejected");
+    let el = err.to_lowercase();
     assert!(
-        result.is_none(),
-        "Rust currently silently accepts a schema whose DRI is missing \
-         the `read` permission — Go rejects it. If this fails, the \
-         divergence has been fixed. Actual: {:?}",
-        result
+        el.contains("missing required permission") && el.contains("read"),
+        "expected Go-compatible missing-read-perm error, got: {}",
+        err
     );
+    assert!(!type_exists(&node, "Users"));
 }
 
 for_each_runtime!(
@@ -630,31 +631,37 @@ for_each_runtime!(
 );
 
 // Port of reject_invalid_owner_update_perm_on_dri_test.go.
-// See `acp_link_collection_missing_read_perm_reject` for the divergence note.
+// After #746 fix: Rust rejects with the Go-compatible error string.
 async fn acp_link_collection_missing_update_perm_reject(cluster: TestCluster) {
     let node = cluster.client(0);
     let alice = generate_identity(node.binary_path()).expect("alice identity");
 
     let policy_result = node.acp_policy_add(users_policy_missing_update(), &alice.private_key_hex);
     let policy_id = match policy_result {
-        Ok(v) => extract_policy_id(&v),
-        Err(_) => return,
-    };
-    let Some(policy_id) = policy_id else {
-        return;
+        Ok(v) => extract_policy_id(&v).expect("policy id"),
+        Err(e) => {
+            let el = format!("{:#}", e).to_lowercase();
+            assert!(
+                el.contains("update") || el.contains("permission") || el.contains("required"),
+                "policy-add-time DPI rejection must mention update/permission, got: {}",
+                e
+            );
+            return;
+        }
     };
     let sdl = format!(
         r#"type Users @policy(id: "{}", resource: "users") {{ name: String age: Int }}"#,
         policy_id
     );
-    let result = try_add_schema(&node, &sdl, &alice.private_key_hex);
+    let err = try_add_schema(&node, &sdl, &alice.private_key_hex)
+        .expect("schema with missing-update DRI must be rejected");
+    let el = err.to_lowercase();
     assert!(
-        result.is_none(),
-        "Rust currently silently accepts a schema whose DRI is missing \
-         the `update` permission — Go rejects it. If this fails, the \
-         divergence has been fixed. Actual: {:?}",
-        result
+        el.contains("missing required permission") && el.contains("update"),
+        "expected Go-compatible missing-update-perm error, got: {}",
+        err
     );
+    assert!(!type_exists(&node, "Users"));
 }
 
 for_each_runtime!(
@@ -664,31 +671,37 @@ for_each_runtime!(
 );
 
 // Port of reject_invalid_owner_delete_perm_on_dri_test.go.
-// See `acp_link_collection_missing_read_perm_reject` for the divergence note.
+// After #746 fix: Rust rejects with the Go-compatible error string.
 async fn acp_link_collection_missing_delete_perm_reject(cluster: TestCluster) {
     let node = cluster.client(0);
     let alice = generate_identity(node.binary_path()).expect("alice identity");
 
     let policy_result = node.acp_policy_add(users_policy_missing_delete(), &alice.private_key_hex);
     let policy_id = match policy_result {
-        Ok(v) => extract_policy_id(&v),
-        Err(_) => return,
-    };
-    let Some(policy_id) = policy_id else {
-        return;
+        Ok(v) => extract_policy_id(&v).expect("policy id"),
+        Err(e) => {
+            let el = format!("{:#}", e).to_lowercase();
+            assert!(
+                el.contains("delete") || el.contains("permission") || el.contains("required"),
+                "policy-add-time DPI rejection must mention delete/permission, got: {}",
+                e
+            );
+            return;
+        }
     };
     let sdl = format!(
         r#"type Users @policy(id: "{}", resource: "users") {{ name: String age: Int }}"#,
         policy_id
     );
-    let result = try_add_schema(&node, &sdl, &alice.private_key_hex);
+    let err = try_add_schema(&node, &sdl, &alice.private_key_hex)
+        .expect("schema with missing-delete DRI must be rejected");
+    let el = err.to_lowercase();
     assert!(
-        result.is_none(),
-        "Rust currently silently accepts a schema whose DRI is missing \
-         the `delete` permission — Go rejects it. If this fails, the \
-         divergence has been fixed. Actual: {:?}",
-        result
+        el.contains("missing required permission") && el.contains("delete"),
+        "expected Go-compatible missing-delete-perm error, got: {}",
+        err
     );
+    assert!(!type_exists(&node, "Users"));
 }
 
 for_each_runtime!(

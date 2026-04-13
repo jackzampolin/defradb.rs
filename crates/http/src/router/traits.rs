@@ -186,6 +186,30 @@ pub trait AcpOperations: Send + Sync {
     /// or `Err(message)` on internal errors.
     async fn get_policy(&self, id: &str) -> Result<Option<PolicyInfo>, String>;
 
+    /// Validate a collection's `@policy(id:..., resource:...)` directive
+    /// against the ACP store. Called at schema-add time.
+    ///
+    /// Matches Go's `acp.ValidateResourceInterface` in `acp/validation.go`:
+    /// 1. The policy with `policy_id` must exist
+    /// 2. The resource with `resource_name` must exist on that policy
+    /// 3. The resource must declare the DPI-required `read`, `update`,
+    ///    and `delete` permissions (Go's `RequiredResourcePermissionsForDocument`)
+    ///
+    /// Error messages must match Go's format so the behavior is indistinguishable
+    /// from the caller's perspective.
+    ///
+    /// The default impl returns `Ok(())` (permissive) so backends that don't
+    /// query a policy store — test mocks, SourceHub light-client placeholders —
+    /// don't break. Production impls (`AcpAdapter`, `SourceHubAcpAdapter`)
+    /// override with real validation.
+    async fn validate_resource_interface(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Get ACP light client status when this ACP backend exposes one.
     async fn get_light_client_status(&self) -> Result<AcpLightClientStatus, String> {
         Err("ACP light client status is not available for this ACP backend".to_string())
