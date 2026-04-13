@@ -21,9 +21,7 @@ use crate::dac::DocumentACP;
 use crate::error::{Error, Result};
 use crate::identity::Identity;
 use crate::permission::DocumentPermission;
-use crate::relation::{
-    RelationTuple, DELETER_RELATION, OWNER_RELATION, READER_RELATION, UPDATER_RELATION,
-};
+use crate::relation::{RelationTuple, OWNER_RELATION};
 use crate::store::AcpStore;
 
 // Relation validation is done at the FFI/caller layer against the policy definition.
@@ -73,6 +71,35 @@ impl LocalDocumentACP {
         // Check wildcard relationship (target="*" means all actors)
         let wildcard_tuple = RelationTuple::new(Did::wildcard(), relation, collection_id, doc_id);
         self.store.has_tuple(&wildcard_tuple).await
+    }
+
+    /// Check whether `subject` has any relation that grants `permission`.
+    ///
+    /// For a `Read` permission, this fans out to check all relations in
+    /// `DocumentPermission::implies_read_permissions()` (reader, updater,
+    /// deleter) — matches Go's `ImplyDocumentReadPerm` semantics. For
+    /// `Update` / `Delete`, checks only the single corresponding relation.
+    async fn check_any_implies_read_relation(
+        &self,
+        subject: &Did,
+        collection_id: &str,
+        doc_id: &str,
+        permission: DocumentPermission,
+    ) -> Result<bool> {
+        if permission == DocumentPermission::Read {
+            for perm in DocumentPermission::implies_read_permissions() {
+                if self
+                    .has_relation(subject, collection_id, doc_id, perm.relation_name())
+                    .await?
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        } else {
+            self.has_relation(subject, collection_id, doc_id, permission.relation_name())
+                .await
+        }
     }
 }
 
@@ -171,30 +198,10 @@ impl DocumentACP for LocalDocumentACP {
             Identity::Authenticated(did) => did,
             Identity::Anonymous => {
                 // Check if wildcard grants exist for the requested permission.
-                // Go DefraDB defines four document relations: owner, reader, updater, deleter.
                 let wildcard = Did::wildcard();
-                let granted = match permission {
-                    DocumentPermission::Read => {
-                        // Any write permission implies read (matches Go's
-                        // ImplyDocumentReadPerm in acp/types/types.go).
-                        self.has_relation(&wildcard, &ns_collection, doc_id, READER_RELATION)
-                            .await?
-                            || self
-                                .has_relation(&wildcard, &ns_collection, doc_id, UPDATER_RELATION)
-                                .await?
-                            || self
-                                .has_relation(&wildcard, &ns_collection, doc_id, DELETER_RELATION)
-                                .await?
-                    }
-                    DocumentPermission::Update => {
-                        self.has_relation(&wildcard, &ns_collection, doc_id, UPDATER_RELATION)
-                            .await?
-                    }
-                    DocumentPermission::Delete => {
-                        self.has_relation(&wildcard, &ns_collection, doc_id, DELETER_RELATION)
-                            .await?
-                    }
-                };
+                let granted = self
+                    .check_any_implies_read_relation(&wildcard, &ns_collection, doc_id, permission)
+                    .await?;
                 return Ok(granted);
             }
         };
@@ -205,28 +212,9 @@ impl DocumentACP for LocalDocumentACP {
         }
 
         // Check specific relations based on permission.
-        // Go DefraDB defines four document relations: owner, reader, updater, deleter.
-        // Any write permission implies read access (matches Go's ImplyDocumentReadPerm).
-        let granted = match permission {
-            DocumentPermission::Read => {
-                self.has_relation(did, &ns_collection, doc_id, READER_RELATION)
-                    .await?
-                    || self
-                        .has_relation(did, &ns_collection, doc_id, UPDATER_RELATION)
-                        .await?
-                    || self
-                        .has_relation(did, &ns_collection, doc_id, DELETER_RELATION)
-                        .await?
-            }
-            DocumentPermission::Update => {
-                self.has_relation(did, &ns_collection, doc_id, UPDATER_RELATION)
-                    .await?
-            }
-            DocumentPermission::Delete => {
-                self.has_relation(did, &ns_collection, doc_id, DELETER_RELATION)
-                    .await?
-            }
-        };
+        let granted = self
+            .check_any_implies_read_relation(did, &ns_collection, doc_id, permission)
+            .await?;
 
         if granted {
             tracing::debug!(

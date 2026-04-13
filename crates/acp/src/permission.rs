@@ -30,10 +30,42 @@ impl DocumentPermission {
         }
     }
 
-    /// Check if this permission implies read access
+    /// Returns the canonical relation name for this permission in
+    /// document ACP policies (`reader` / `updater` / `deleter`). This
+    /// is the noun form used in the `relations:` block, vs `as_str()`
+    /// which returns the verb form used in permission expressions.
+    pub fn relation_name(&self) -> &'static str {
+        match self {
+            DocumentPermission::Read => "reader",
+            DocumentPermission::Update => "updater",
+            DocumentPermission::Delete => "deleter",
+        }
+    }
+
+    /// Check if this permission implies read access.
+    ///
+    /// All three document permissions (Read, Update, Delete) imply read
+    /// access — matches Go's `ImplyDocumentReadPerm` in
+    /// `acp/types/types.go`. Use `implies_read_permissions()` to iterate
+    /// over the full set.
     pub fn implies_read(&self) -> bool {
-        // All permissions imply read
-        true
+        matches!(
+            self,
+            DocumentPermission::Read | DocumentPermission::Update | DocumentPermission::Delete
+        )
+    }
+
+    /// Returns the set of permissions that imply read access.
+    ///
+    /// Matches Go's `ImplyDocumentReadPerm = []DocumentResourcePermission{Read, Update, Delete}`
+    /// in `acp/types/types.go`. When checking read access, backends iterate
+    /// this list and grant read if the caller has any of them.
+    pub const fn implies_read_permissions() -> &'static [DocumentPermission] {
+        &[
+            DocumentPermission::Read,
+            DocumentPermission::Update,
+            DocumentPermission::Delete,
+        ]
     }
 }
 
@@ -73,6 +105,25 @@ mod tests {
         assert!(DocumentPermission::Read.implies_read());
         assert!(DocumentPermission::Update.implies_read());
         assert!(DocumentPermission::Delete.implies_read());
+    }
+
+    #[test]
+    fn test_implies_read_permissions_matches_go() {
+        let perms = DocumentPermission::implies_read_permissions();
+        assert_eq!(perms.len(), 3);
+        assert_eq!(perms[0], DocumentPermission::Read);
+        assert_eq!(perms[1], DocumentPermission::Update);
+        assert_eq!(perms[2], DocumentPermission::Delete);
+        for p in perms {
+            assert!(p.implies_read());
+        }
+    }
+
+    #[test]
+    fn test_relation_name() {
+        assert_eq!(DocumentPermission::Read.relation_name(), "reader");
+        assert_eq!(DocumentPermission::Update.relation_name(), "updater");
+        assert_eq!(DocumentPermission::Delete.relation_name(), "deleter");
     }
 
     #[test]
