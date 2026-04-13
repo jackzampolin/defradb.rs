@@ -20,6 +20,8 @@ mod node_access;
 mod p2p;
 #[path = "acp/policy_validation.rs"]
 mod policy_validation;
+#[path = "acp/relationship.rs"]
+mod relationship;
 #[path = "acp/revoke_lifecycle.rs"]
 mod revoke_lifecycle;
 #[path = "acp/transaction_rollback.rs"]
