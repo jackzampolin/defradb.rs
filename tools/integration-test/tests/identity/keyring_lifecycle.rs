@@ -121,13 +121,13 @@ fn generate_creates_both_keys(binary: &Path) {
 
 #[test]
 
-fn generate_creates_both_keys_rust() {
+fn rust_generate_creates_both_keys() {
     generate_creates_both_keys(&defra_binary());
 }
 
 #[test]
 
-fn generate_creates_both_keys_go() {
+fn go_generate_creates_both_keys() {
     let go = go_binary().expect("Go defradb not in PATH");
     generate_creates_both_keys(&go);
 }
@@ -151,13 +151,13 @@ fn generate_no_encryption(binary: &Path) {
 
 #[test]
 
-fn generate_no_encryption_rust() {
+fn rust_generate_no_encryption() {
     generate_no_encryption(&defra_binary());
 }
 
 #[test]
 
-fn generate_no_encryption_go() {
+fn go_generate_no_encryption() {
     let go = go_binary().expect("Go defradb not in PATH");
     generate_no_encryption(&go);
 }
@@ -185,13 +185,13 @@ fn generate_no_peer_key(binary: &Path) {
 
 #[test]
 
-fn generate_no_peer_key_rust() {
+fn rust_generate_no_peer_key() {
     generate_no_peer_key(&defra_binary());
 }
 
 #[test]
 
-fn generate_no_peer_key_go() {
+fn go_generate_no_peer_key() {
     let go = go_binary().expect("Go defradb not in PATH");
     generate_no_peer_key(&go);
 }
@@ -218,13 +218,13 @@ fn generate_fails_if_exists(binary: &Path) {
 
 #[test]
 
-fn generate_fails_if_exists_rust() {
+fn rust_generate_fails_if_exists() {
     generate_fails_if_exists(&defra_binary());
 }
 
 #[test]
 
-fn generate_fails_if_exists_go() {
+fn go_generate_fails_if_exists() {
     let go = go_binary().expect("Go defradb not in PATH");
     generate_fails_if_exists(&go);
 }
@@ -242,13 +242,13 @@ fn generate_force_overwrites(binary: &Path) {
 
 #[test]
 
-fn generate_force_overwrites_rust() {
+fn rust_generate_force_overwrites() {
     generate_force_overwrites(&defra_binary());
 }
 
 #[test]
 
-fn generate_force_overwrites_go() {
+fn go_generate_force_overwrites() {
     let go = go_binary().expect("Go defradb not in PATH");
     generate_force_overwrites(&go);
 }
@@ -268,13 +268,13 @@ fn generate_silent_on_success(binary: &Path) {
 
 #[test]
 
-fn generate_silent_on_success_rust() {
+fn rust_generate_silent_on_success() {
     generate_silent_on_success(&defra_binary());
 }
 
 #[test]
 
-fn generate_silent_on_success_go() {
+fn go_generate_silent_on_success() {
     let go = go_binary().expect("Go defradb not in PATH");
     generate_silent_on_success(&go);
 }
@@ -297,13 +297,13 @@ fn export_hex_format(binary: &Path) {
 
 #[test]
 
-fn export_hex_format_rust() {
+fn rust_export_hex_format() {
     export_hex_format(&defra_binary());
 }
 
 #[test]
 
-fn export_hex_format_go() {
+fn go_export_hex_format() {
     let go = go_binary().expect("Go defradb not in PATH");
     export_hex_format(&go);
 }
@@ -340,13 +340,13 @@ fn export_roundtrip(binary: &Path) {
 
 #[test]
 
-fn export_roundtrip_rust() {
+fn rust_export_roundtrip() {
     export_roundtrip(&defra_binary());
 }
 
 #[test]
 
-fn export_roundtrip_go() {
+fn go_export_roundtrip() {
     let go = go_binary().expect("Go defradb not in PATH");
     export_roundtrip(&go);
 }
@@ -367,13 +367,13 @@ fn import_positional_hex(binary: &Path) {
 
 #[test]
 
-fn import_positional_hex_rust() {
+fn rust_import_positional_hex() {
     import_positional_hex(&defra_binary());
 }
 
 #[test]
 
-fn import_positional_hex_go() {
+fn go_import_positional_hex() {
     let go = go_binary().expect("Go defradb not in PATH");
     import_positional_hex(&go);
 }
@@ -394,13 +394,13 @@ fn import_silent_on_success(binary: &Path) {
 
 #[test]
 
-fn import_silent_on_success_rust() {
+fn rust_import_silent_on_success() {
     import_silent_on_success(&defra_binary());
 }
 
 #[test]
 
-fn import_silent_on_success_go() {
+fn go_import_silent_on_success() {
     let go = go_binary().expect("Go defradb not in PATH");
     import_silent_on_success(&go);
 }
@@ -415,13 +415,13 @@ fn import_invalid_hex_fails(binary: &Path) {
 
 #[test]
 
-fn import_invalid_hex_fails_rust() {
+fn rust_import_invalid_hex_fails() {
     import_invalid_hex_fails(&defra_binary());
 }
 
 #[test]
 
-fn import_invalid_hex_fails_go() {
+fn go_import_invalid_hex_fails() {
     let go = go_binary().expect("Go defradb not in PATH");
     import_invalid_hex_fails(&go);
 }
@@ -442,13 +442,13 @@ fn list_empty(binary: &Path) {
 
 #[test]
 
-fn list_empty_rust() {
+fn rust_list_empty() {
     list_empty(&defra_binary());
 }
 
 #[test]
 
-fn list_empty_go() {
+fn go_list_empty() {
     let go = go_binary().expect("Go defradb not in PATH");
     list_empty(&go);
 }
@@ -478,13 +478,13 @@ fn list_format(binary: &Path) {
 
 #[test]
 
-fn list_format_rust() {
+fn rust_list_format() {
     list_format(&defra_binary());
 }
 
 #[test]
 
-fn list_format_go() {
+fn go_list_format() {
     let go = go_binary().expect("Go defradb not in PATH");
     list_format(&go);
 }
@@ -495,7 +495,7 @@ fn list_format_go() {
 
 #[test]
 
-fn generate_named_key_rust() {
+fn rust_generate_named_key() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
     let binary = defra_binary();
@@ -518,7 +518,7 @@ fn generate_named_key_rust() {
 
 #[test]
 
-fn generate_named_key_force_rust() {
+fn rust_generate_named_key_force() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
     let binary = defra_binary();
@@ -538,7 +538,7 @@ fn generate_named_key_force_rust() {
 
 #[test]
 
-fn import_stdin_rust() {
+fn rust_import_stdin() {
     let tmp = tempfile::tempdir().unwrap();
     let kr = tmp.path();
     let binary = defra_binary();

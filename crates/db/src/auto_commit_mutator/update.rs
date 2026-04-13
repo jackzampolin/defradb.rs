@@ -44,7 +44,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             })?;
 
             // Create an IndexManager for index maintenance
-            let short_id = collection_short_id(collection.collection_id());
+            let short_id = collection.resolved_root_id();
             let index_manager = IndexManager::from_collection(short_id, collection.schema())
                 .map_err(|e| {
                     query::error::QueryError::execution(format!(
@@ -108,13 +108,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
                     // Use version_id for collectionVersionID (matches Go's VersionID())
                     let schema_version_id = collection.version_id();
-                    let encstore = txn.encstore().map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to get encstore: {}",
-                            e
-                        ))
-                    })?;
-
                     // Get encryption config: first try thread-local (explicit in mutation),
                     // then fall back to per-document stored config (from create with encryption).
                     // This matches Go's behavior where encryption propagates through the DAG.
@@ -127,7 +120,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     // for the fields that actually changed
                     match write_document_blocks(
                         &blockstore,
-                        &encstore,
                         &headstore,
                         &doc,
                         schema_version_id,
@@ -141,7 +133,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             // For branchable collections, create a collection-level block
                             let mut col_block_data: Option<(Cid, Vec<u8>)> = None;
                             if collection.schema().is_branchable {
-                                let short_id = collection_short_id(collection.collection_id());
+                                let short_id = collection.resolved_root_id();
                                 match write_collection_block(
                                     &blockstore,
                                     &headstore,

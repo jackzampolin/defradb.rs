@@ -1,0 +1,42 @@
+[package]
+name = "query-parse"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GraphQL/SDL parsing and schema generation for DefraDB"
+
+[dependencies]
+# Serialization
+serde_json.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Content addressing (for collection version IDs)
+cid.workspace = true
+sha2.workspace = true
+
+# GraphQL
+graphql-parser.workspace = true
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Regex (SDL preprocessing)
+regex = "1"
+
+# Async
+async-trait.workspace = true
+
+# Internal crates
+query-types = { path = "../query-types" }
+schema = { path = "../schema" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

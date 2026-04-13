@@ -47,7 +47,7 @@ hex = "0.4"
 parking_lot = "0.12"
 
 [features]
-default = ["redb"]
+default = ["rocksdb"]
 redb = ["dep:redb"]
 fjall = ["dep:fjall"]
 rocksdb = ["dep:rocksdb"]
@@ -78,3 +78,6 @@ tempfile = "3.8"
 [[bench]]
 name = "transaction"
 harness = false
+
+[lints]
+workspace = true

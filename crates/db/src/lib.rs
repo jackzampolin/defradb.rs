@@ -42,15 +42,13 @@
 /// // Commit
 /// txn.commit().await?;
 /// ```
-#[cfg(feature = "p2p")]
-pub(crate) mod acp_merge_handler;
 pub(crate) mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
 pub mod backup;
-pub(crate) mod block_builder;
+// Block builder extracted to standalone db-blocks crate for parallel compilation.
+pub(crate) use db_blocks as block_builder;
+pub mod block_reader;
 pub mod block_verify;
-#[cfg(feature = "p2p")]
-pub(crate) mod broadcast_mutator;
 pub mod collection;
 pub mod collection_acp;
 pub(crate) mod collection_cache;
@@ -69,47 +67,32 @@ pub(crate) mod doc_mutator;
 pub mod downsample;
 pub(crate) mod dump;
 pub(crate) mod embedding;
-pub(crate) mod error;
-#[cfg(feature = "p2p")]
-pub(crate) mod head_provider;
+pub mod error;
 pub mod index_manager;
 pub(crate) mod json_patch;
 #[allow(dead_code)]
 pub(crate) mod lens_utils;
 pub(crate) mod lensed_auto_commit_fetcher;
 pub(crate) mod lensed_fetcher;
-#[cfg(feature = "p2p")]
-pub(crate) mod merge_handler;
 pub(crate) mod migration;
-pub(crate) mod nac;
+// NAC extracted to standalone db-nac crate.
+pub(crate) use db_nac as nac;
 pub(crate) mod patch;
-#[cfg(feature = "p2p")]
-pub(crate) mod peer_identity;
-#[cfg(feature = "p2p")]
-pub(crate) mod push_docs;
-#[cfg(feature = "p2p")]
-pub(crate) mod push_docs_common;
-#[cfg(feature = "p2p")]
-pub(crate) mod push_docs_transport;
 pub mod schema_loader;
-#[allow(dead_code)]
-pub(crate) mod se;
 pub mod txn;
 pub(crate) mod txn_context;
+pub(crate) mod txn_lens_store;
 pub(crate) mod txn_registry;
 pub(crate) mod versioned_fetcher;
 pub(crate) mod view_ops;
 
 // Re-export commonly used types
-#[cfg(feature = "p2p")]
-pub use acp_merge_handler::{AcpMergeError, AcpMergeHandler};
 pub use auto_commit_fetcher::AutoCommitFetcher;
 pub use auto_commit_mutator::AutoCommitMutator;
 #[allow(deprecated)]
 pub use block_builder::build_block_from_document;
 pub use block_builder::{build_blocks_from_document, BlockResult};
-#[cfg(feature = "p2p")]
-pub use broadcast_mutator::BroadcastMutator;
+#[allow(deprecated)]
 pub use collection::{collection_short_id, Collection};
 pub use collection_acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
@@ -132,21 +115,9 @@ pub use doc_mutator::DbDocMutator;
 pub use downsample::GcDownsampleHistoriesOptions;
 pub use embedding::embed_text;
 pub use error::{Error, Result};
-#[cfg(feature = "p2p")]
-pub use head_provider::DbHeadProvider;
 pub use index_manager::{BulkIndexResult, IndexManager};
 pub use lensed_auto_commit_fetcher::LensedAutoCommitFetcher;
 pub use lensed_fetcher::LensedDocFetcher;
-#[cfg(feature = "p2p")]
-pub use merge_handler::{DbMergeHandler, MergeError};
-#[cfg(feature = "p2p")]
-pub use peer_identity::{
-    create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
-};
-#[cfg(feature = "p2p")]
-pub use push_docs::{push_existing_docs, retry_doc};
-#[cfg(feature = "p2p")]
-pub use push_docs_transport::{push_existing_docs_via_transport, retry_doc_via_transport};
 pub use schema_loader::{
     get_collection_by_version_id, get_collection_version_ids, get_collections_by_collection_id,
     load_active_collections,
@@ -157,16 +128,13 @@ pub use txn_registry::{CleanupResult, DbTransactionRegistry};
 pub use versioned_fetcher::VersionedFetcher;
 pub use view_ops::RefreshViewsOptions;
 
+// P2P merge/sync extracted to standalone db-merge crate.
+// Consumer crates (cli, embedded, defra-node, ffi) should depend on db-merge directly.
+
 // NAC exports
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "redb"))]
 pub use nac::create_persistent_nac_manager;
 pub use nac::{create_memory_nac_manager, NacConfig, NacInfo, NacManager, NacManagerApi};
-
-// SE (Searchable Encryption) exports
-pub use se::{
-    fetch_doc_ids, generate_doc_artifacts, generate_field_artifact, store_artifacts, FieldQuery,
-    FieldValueQuery, SECoordinator,
-};
 
 // Re-export related crate types for convenience
 pub use datastore::{BasicTxn, NamespaceView};

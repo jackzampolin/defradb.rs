@@ -117,3 +117,40 @@ async fn bm25_empty_field_does_not_crash() {
         "Doc with content should score positive"
     );
 }
+
+#[tokio::test]
+async fn bm25_works_with_user_index_named_like_legacy_fulltext_key() {
+    let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
+    let client = cluster.client(0);
+    client.schema_add(SCHEMA).unwrap();
+
+    client
+        .index_create("Article", &["category"], Some("title_fulltext"), false)
+        .expect("create regular index using legacy fulltext-style name");
+
+    client
+        .query(r#"mutation { add_Article(input: {title: "Rust Search", body: "Searching rust content", category: "tech"}) { _docID } }"#)
+        .unwrap();
+    client
+        .query(r#"mutation { add_Article(input: {title: "Gardening Notes", body: "Soil and seeds", category: "home"}) { _docID } }"#)
+        .unwrap();
+
+    let data = client
+        .query(
+            r#"query { Article(order: {_alias: {BM25: DESC}}) { title BM25(query: "rust", fields: ["title"]) } }"#,
+        )
+        .unwrap();
+
+    let articles = data["Article"].as_array().unwrap();
+    assert_eq!(articles.len(), 2);
+    assert_eq!(articles[0]["title"].as_str(), Some("Rust Search"));
+    assert!(
+        articles[0]["BM25"].as_f64().unwrap_or(0.0) > 0.0,
+        "BM25 should still resolve the full-text index after creating title_fulltext"
+    );
+    assert_eq!(
+        articles[1]["BM25"].as_f64().unwrap_or(0.0),
+        0.0,
+        "Non-matching document should still receive zero score"
+    );
+}

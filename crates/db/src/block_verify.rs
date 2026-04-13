@@ -117,12 +117,14 @@ async fn verify_block_signature_with_blockstore<S: Store>(
             .get_collection_by_version_id(schema_version_id)
             .map_err(|e| format!("failed to get collection: {}", e))?
         {
+            let node_did = database.node_did();
             let has_permission = crate::check_doc_permission(
                 document_acp,
                 caller_identity,
                 acp::DocumentPermission::Read,
                 collection.schema(),
                 &doc_id,
+                node_did.as_ref(),
             )
             .await
             .map_err(|e| format!("ACP check failed: {}", e))?;

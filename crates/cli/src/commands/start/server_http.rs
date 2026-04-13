@@ -90,10 +90,6 @@ impl Node {
             }
         }
 
-        let schema_adapter = crate::schema_adapter::SchemaAdapter::new_arc(database.clone());
-        server = server.with_schema_arc(schema_adapter);
-        info!("Schema HTTP endpoint enabled");
-
         let lens_adapter = crate::lens_adapter::LensAdapter::new_arc(database.clone());
         server = server.with_lens_arc(lens_adapter);
         info!("Lens HTTP endpoint enabled");
@@ -106,27 +102,42 @@ impl Node {
             info!("NAC disabled (use --node-acp-enable to enable)");
         }
 
-        if config.acp.document_type != AcpDocumentType::None {
-            let acp_adapter = acp_setup
-                .http_adapter
-                .clone()
-                .unwrap_or_else(|| crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store.clone()));
-            server = server.with_acp_arc(acp_adapter);
-            info!(
-                "ACP policy HTTP endpoints enabled (type: {})",
-                config.acp.document_type
-            );
+        // Build the ACP adapter first (if enabled) so SchemaAdapter can use
+        // it for schema-time DRI validation (#746).
+        let acp_adapter_for_schema: Option<Arc<dyn defra_http::router::AcpOperations>> =
+            if config.acp.document_type != AcpDocumentType::None {
+                let acp_adapter = acp_setup.http_adapter.clone().unwrap_or_else(|| {
+                    crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store.clone())
+                });
+                server = server.with_acp_arc(acp_adapter.clone());
+                info!(
+                    "ACP policy HTTP endpoints enabled (type: {})",
+                    config.acp.document_type
+                );
 
-            let doc_acp_adapter = crate::doc_acp_adapter::DocumentAcpAdapter::new_arc(
+                let doc_acp_adapter = crate::doc_acp_adapter::DocumentAcpAdapter::new_arc(
+                    database.clone(),
+                    acp_setup.document_acp.clone(),
+                    zanzibar_store,
+                );
+                server = server.with_doc_acp_arc(doc_acp_adapter);
+                info!("Document ACP HTTP endpoints enabled");
+
+                Some(acp_adapter)
+            } else {
+                info!("Document ACP disabled (use --document-acp-type to enable)");
+                None
+            };
+
+        let schema_adapter = match &acp_adapter_for_schema {
+            Some(acp) => crate::schema_adapter::SchemaAdapter::new_arc_with_acp(
                 database.clone(),
-                acp_setup.document_acp.clone(),
-                zanzibar_store,
-            );
-            server = server.with_doc_acp_arc(doc_acp_adapter);
-            info!("Document ACP HTTP endpoints enabled");
-        } else {
-            info!("Document ACP disabled (use --document-acp-type to enable)");
-        }
+                acp.clone(),
+            ),
+            None => crate::schema_adapter::SchemaAdapter::new_arc(database.clone()),
+        };
+        server = server.with_schema_arc(schema_adapter);
+        info!("Schema HTTP endpoint enabled");
 
         let view_adapter = crate::view_adapter::ViewAdapter::new_arc(database.clone());
         server = server.with_view_arc(view_adapter);
@@ -184,6 +195,8 @@ impl Node {
         database: Arc<db::DB<S>>,
         config: &Config,
         query_setup: &QueryRunnerSetup<S>,
+        acp_setup: &DocumentAcpSetup,
+        zanzibar_store: Arc<dyn acp::ZanzibarStore>,
     ) -> Result<Option<pg_compat::PgServer>>
     where
         S: storage::corekv::Store + 'static,
@@ -200,7 +213,20 @@ impl Node {
                 .map_err(|e: std::net::AddrParseError| {
                     Error::InvalidApiAddress(config.api.pg_address.clone(), e.to_string())
                 })?;
-        let pg_schema_manager = crate::schema_adapter::SchemaAdapter::new_pg_arc(database);
+
+        // Wire ACP into the PG schema manager so `add_schema` validates
+        // `@policy(id:, resource:)` directives at schema-add time (#746).
+        // Mirrors the HTTP server's behavior — without this, PG users would
+        // be able to register schemas referencing nonexistent policies.
+        let pg_schema_manager = if config.acp.document_type != AcpDocumentType::None {
+            let acp_adapter = acp_setup
+                .http_adapter
+                .clone()
+                .unwrap_or_else(|| crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store));
+            crate::schema_adapter::SchemaAdapter::new_pg_arc_with_acp(database, acp_adapter)
+        } else {
+            crate::schema_adapter::SchemaAdapter::new_pg_arc(database)
+        };
 
         Ok(Some(pg_compat::PgServer::new(
             pg_addr,

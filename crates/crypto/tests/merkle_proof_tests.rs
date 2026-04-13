@@ -97,21 +97,29 @@ async fn test_two_block_chain_proof() {
 
 #[tokio::test]
 async fn test_proof_wrong_root_fails() {
+    // Wrong root CID is a structural anchor mismatch — returns Err.
     let block = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
     let cid = block.generate_cid().unwrap();
     let node = ProofNode::from_block(&block).unwrap();
 
-    // Create a different block for wrong root CID
     let other_block = Block::new(create_test_delta("doc2", "age"), vec![], vec![]);
     let wrong_root = other_block.generate_cid().unwrap();
 
     let proof = MerkleProof::new(cid, wrong_root, vec![node]);
-    assert!(!proof.verify().unwrap());
+    let result = proof.verify();
+    assert!(result.is_err(), "wrong root CID should return Err");
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("root CID does not match"));
 }
 
 #[tokio::test]
 async fn test_proof_missing_link_fails() {
-    // Create two unrelated blocks
+    // #733: a missing chain link is a cryptographic verification failure
+    // and must return Err — not Ok(false). Create two unrelated blocks;
+    // their CIDs become the anchors so the structural checks pass, but
+    // the heads chain between them is broken.
     let block1 = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
     let cid1 = block1.generate_cid().unwrap();
     let node1 = ProofNode::from_block(&block1).unwrap();
@@ -120,15 +128,27 @@ async fn test_proof_missing_link_fails() {
     let cid2 = block2.generate_cid().unwrap();
     let node2 = ProofNode::from_block(&block2).unwrap();
 
-    // Try to create proof between unrelated blocks
     let proof = MerkleProof::new(cid1, cid2, vec![node1, node2]);
-    assert!(!proof.verify().unwrap());
+    let result = proof.verify();
+    assert!(
+        result.is_err(),
+        "broken chain link must return Err, not Ok(false) — see #733"
+    );
+    let err = result.unwrap_err().to_string().to_lowercase();
+    assert!(
+        err.contains("chain") || err.contains("crypto"),
+        "expected chain-broken error, got: {}",
+        err
+    );
 }
 
 #[tokio::test]
 async fn test_empty_proof_fails() {
+    // Empty path is a structural input error — returns Err.
     let proof = MerkleProof::new(Cid::default(), Cid::default(), vec![]);
-    assert!(!proof.verify().unwrap());
+    let result = proof.verify();
+    assert!(result.is_err(), "empty proof should return Err");
+    assert!(result.unwrap_err().to_string().contains("empty"));
 }
 
 #[tokio::test]
@@ -247,6 +267,8 @@ async fn test_signed_proof_secp256k1() {
 
 #[tokio::test]
 async fn test_signed_proof_wrong_key_fails() {
+    // Identity mismatch — the caller provided a key that isn't the signer.
+    // This is a configuration error; return Err to match Go's convention.
     let private_key1 = generate_ed25519().unwrap();
     let private_key2 = generate_ed25519().unwrap();
     let wrong_public_key = private_key2.public_key();
@@ -258,12 +280,21 @@ async fn test_signed_proof_wrong_key_fails() {
 
     let signed = SignedMerkleProof::sign(proof, &private_key1 as &dyn PrivateKey).unwrap();
 
-    // Verification with wrong key should fail
-    assert!(!signed.verify(wrong_public_key.as_ref()).unwrap());
+    let result = signed.verify(wrong_public_key.as_ref());
+    assert!(
+        result.is_err(),
+        "wrong key should return Err, not Ok(false)"
+    );
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("identity does not match"));
 }
 
 #[tokio::test]
 async fn test_signed_proof_tampered_proof_fails() {
+    // Signature verification failure — the signed bytes changed, so the signature
+    // no longer matches. Cryptographic security event; return Err.
     let private_key = generate_ed25519().unwrap();
 
     let block = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
@@ -273,13 +304,19 @@ async fn test_signed_proof_tampered_proof_fails() {
 
     let mut signed = SignedMerkleProof::sign(proof, &private_key as &dyn PrivateKey).unwrap();
 
-    // Tamper with the proof
     let other_block = Block::new(create_test_delta("doc2", "other"), vec![], vec![]);
     let other_cid = other_block.generate_cid().unwrap();
     signed.proof.root_cid = other_cid;
 
-    // Verification should fail due to signature mismatch
-    assert!(!signed.verify_with_embedded_key().unwrap());
+    let result = signed.verify_with_embedded_key();
+    assert!(
+        result.is_err(),
+        "tampered proof should return Err, not Ok(false)"
+    );
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("signature verification failed"));
 }
 
 #[tokio::test]
@@ -531,6 +568,7 @@ fn test_verify_cid_unsupported_codec() {
 
 #[tokio::test]
 async fn test_signed_proof_corrupted_signature_fails() {
+    // Corrupted signature bytes — cryptographic verification failure, return Err.
     let private_key = generate_ed25519().unwrap();
 
     let block = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
@@ -540,16 +578,19 @@ async fn test_signed_proof_corrupted_signature_fails() {
 
     let mut signed = SignedMerkleProof::sign(proof, &private_key as &dyn PrivateKey).unwrap();
 
-    // Corrupt the signature value by flipping bits
     if !signed.signature.value.is_empty() {
         signed.signature.value[0] ^= 0xFF;
     }
 
-    // Verification should fail (return false, not error)
+    let result = signed.verify_with_embedded_key();
     assert!(
-        !signed.verify_with_embedded_key().unwrap(),
-        "Corrupted signature should fail verification"
+        result.is_err(),
+        "corrupted signature should return Err, not Ok(false)"
     );
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("signature verification failed"));
 }
 
 #[tokio::test]
@@ -598,20 +639,21 @@ fn test_merkle_proof_from_dag_cbor_invalid_bytes_fails() {
 
 #[test]
 fn test_proof_wrong_leaf_cid_fails() {
+    // Wrong leaf CID is a structural anchor mismatch — returns Err.
     let block = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
     let cid = block.generate_cid().unwrap();
     let node = ProofNode::from_block(&block).unwrap();
 
-    // Create a different block for wrong leaf CID
     let other_block = Block::new(create_test_delta("doc2", "age"), vec![], vec![]);
     let wrong_leaf = other_block.generate_cid().unwrap();
 
-    // Wrong leaf CID doesn't match path[0].cid
     let proof = MerkleProof::new(wrong_leaf, cid, vec![node]);
-    assert!(
-        !proof.verify().unwrap(),
-        "Proof with wrong leaf CID should fail"
-    );
+    let result = proof.verify();
+    assert!(result.is_err(), "wrong leaf CID should return Err");
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("leaf CID does not match"));
 }
 
 #[tokio::test]
@@ -680,4 +722,251 @@ fn test_merkle_proof_from_dag_cbor_wrong_schema_fails() {
         result.is_err(),
         "Wrong schema should return deserialization error"
     );
+}
+
+// =========================================================================
+// Go parity tests for verification semantics
+//
+// These tests lock in the Rust behavior to match Go's conventions:
+// - Cryptographic signature failures return Err (match Go's ErrSignatureVerification)
+// - Caller-supplied anchor mismatches return Err (configuration error)
+// - Hash/chain mismatches during verification return Err (#733)
+// - No hardcoded path length limit (Go has none)
+// =========================================================================
+
+/// Build a chain of `count` blocks where each block's heads points to the previous block.
+/// Returns (blocks, cids) in leaf-to-root order (leaf at index 0, root at last index).
+fn build_linear_chain(count: usize) -> (Vec<Block>, Vec<Cid>) {
+    assert!(count > 0, "chain must have at least one block");
+    let mut blocks = Vec::with_capacity(count);
+    let mut cids = Vec::with_capacity(count);
+
+    // Root (index count-1) is the oldest block — no heads.
+    // Each successive block (going toward the leaf at index 0) points to the previous CID
+    // via its heads field. We build from root to leaf.
+    let mut chain = Vec::with_capacity(count);
+    let root = Block::new(create_test_delta("doc-chain", "f0"), vec![], vec![]);
+    let mut prev_cid = root.generate_cid().unwrap();
+    chain.push((root, prev_cid));
+
+    for i in 1..count {
+        let field = format!("f{}", i);
+        let block = Block::new(
+            create_test_delta("doc-chain", &field),
+            vec![prev_cid],
+            vec![],
+        );
+        let cid = block.generate_cid().unwrap();
+        chain.push((block, cid));
+        prev_cid = cid;
+    }
+
+    // chain is now [root, ..., leaf]. Reverse to get [leaf, ..., root] (proof path order).
+    chain.reverse();
+    for (b, c) in chain {
+        blocks.push(b);
+        cids.push(c);
+    }
+    (blocks, cids)
+}
+
+#[tokio::test]
+async fn test_large_chain_proof_verifies_without_limit() {
+    // Regression for #732: MAX_PROOF_PATH_LENGTH used to reject proofs > 1000 nodes.
+    // Go has no such limit. A legitimate 1500-node chain must verify successfully.
+    let count = 1500;
+    let (blocks, cids) = build_linear_chain(count);
+
+    let path: Vec<ProofNode> = blocks
+        .iter()
+        .map(|b| ProofNode::from_block(b).unwrap())
+        .collect();
+
+    let leaf_cid = cids[0];
+    let root_cid = cids[count - 1];
+    let proof = MerkleProof::new(leaf_cid, root_cid, path);
+
+    assert!(
+        proof.verify().unwrap(),
+        "1500-node chain proof should verify without hitting any hardcoded limit"
+    );
+}
+
+#[tokio::test]
+async fn test_verify_err_vs_ok_false_semantics() {
+    // Parity test documenting the verification contract (#733).
+    //
+    // Every failure mode returns Err — not Ok(false). Matches Go's
+    // convention and the rest of the Rust crypto crate. Closes the
+    // silent-bypass risk where a caller writes `if result.is_ok()` or
+    // `let _ = result?; trust_proof()` and treats a verification failure
+    // as success.
+    //
+    // - Empty path, wrong leaf anchor, wrong root anchor: Err::BlockError (caller mistake)
+    // - Content hash mismatch, broken chain link: Err::Crypto (cryptographic failure)
+
+    // 1. Empty path → Err
+    let empty = MerkleProof::new(Cid::default(), Cid::default(), vec![]);
+    assert!(empty.verify().is_err());
+
+    // 2. Wrong leaf anchor → Err
+    let block_a = Block::new(create_test_delta("doc", "a"), vec![], vec![]);
+    let cid_a = block_a.generate_cid().unwrap();
+    let node_a = ProofNode::from_block(&block_a).unwrap();
+    let block_b = Block::new(create_test_delta("doc", "b"), vec![], vec![]);
+    let cid_b = block_b.generate_cid().unwrap();
+    let wrong_leaf = MerkleProof::new(cid_b, cid_a, vec![node_a.clone()]);
+    assert!(wrong_leaf.verify().is_err());
+
+    // 3. Wrong root anchor → Err
+    let wrong_root = MerkleProof::new(cid_a, cid_b, vec![node_a.clone()]);
+    assert!(wrong_root.verify().is_err());
+
+    // 4. Broken chain link → Err (cids match the path, but block_a.heads
+    //    doesn't contain cid_b). Used to be Ok(false); flipped to Err in
+    //    the #733 fix.
+    let node_b = ProofNode::from_block(&block_b).unwrap();
+    let broken = MerkleProof::new(cid_a, cid_b, vec![node_a, node_b]);
+    let result = broken.verify();
+    assert!(
+        result.is_err(),
+        "broken chain link must return Err — see #733"
+    );
+    let err = result.unwrap_err().to_string().to_lowercase();
+    assert!(
+        err.contains("chain") || err.contains("crypto"),
+        "expected chain-broken error, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_verify_hash_mismatch_returns_err() {
+    // #733: a content hash mismatch is a cryptographic verification
+    // failure and must return Err. This locks in the fix specifically
+    // for the path-4 hash-mismatch branch in proof.rs.
+    use crypto::merkle_proof::ProofNode;
+
+    let block = Block::new(create_test_delta("doc", "field"), vec![], vec![]);
+    let cid = block.generate_cid().unwrap();
+    let mut node = ProofNode::from_block(&block).unwrap();
+
+    // Tamper with the encoded bytes so the recomputed hash no longer
+    // matches the stored cid. ProofNode stores raw bytes in `data`;
+    // flipping the last byte changes the content hash without changing
+    // the cid.
+    if let Some(last) = node.data.last_mut() {
+        *last ^= 0xFF;
+    }
+
+    let proof = MerkleProof::new(cid, cid, vec![node]);
+    let result = proof.verify();
+    assert!(result.is_err(), "hash mismatch must return Err — see #733");
+    let err = result.unwrap_err().to_string().to_lowercase();
+    assert!(
+        err.contains("hash") || err.contains("content") || err.contains("crypto"),
+        "expected hash-mismatch error, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_signed_proof_signature_failure_returns_err() {
+    // Parity test: cryptographic signature verification failure must return Err,
+    // matching Go's verifySignature returning ErrSignatureVerification.
+    let private_key = generate_ed25519().unwrap();
+
+    let block = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
+    let cid = block.generate_cid().unwrap();
+    let node = ProofNode::from_block(&block).unwrap();
+    let proof = MerkleProof::new(cid, cid, vec![node]);
+
+    let mut signed = SignedMerkleProof::sign(proof, &private_key as &dyn PrivateKey).unwrap();
+
+    // Flip all bytes in the signature
+    for byte in signed.signature.value.iter_mut() {
+        *byte = !*byte;
+    }
+
+    // Direct verify() path
+    let pub_key = private_key.public_key();
+    let result_verify = signed.verify(pub_key.as_ref());
+    assert!(
+        result_verify.is_err(),
+        "verify() must return Err on signature failure, got {:?}",
+        result_verify
+    );
+
+    // verify_with_embedded_key() path
+    let result_embedded = signed.verify_with_embedded_key();
+    assert!(
+        result_embedded.is_err(),
+        "verify_with_embedded_key() must return Err on signature failure, got {:?}",
+        result_embedded
+    );
+
+    // Standalone verify_signed_proof helper path
+    let result_helper = verify_signed_proof(&signed);
+    assert!(
+        result_helper.is_err(),
+        "verify_signed_proof() must return Err on signature failure, got {:?}",
+        result_helper
+    );
+}
+
+#[tokio::test]
+async fn test_signed_proof_identity_mismatch_returns_err() {
+    // Parity test: identity mismatch is a caller error (wrong key provided),
+    // must return Err. This distinguishes "I don't have the right key" from
+    // "the signature is cryptographically invalid".
+    let signer_key = generate_ed25519().unwrap();
+    let other_key = generate_secp256k1().unwrap();
+
+    let block = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
+    let cid = block.generate_cid().unwrap();
+    let node = ProofNode::from_block(&block).unwrap();
+    let proof = MerkleProof::new(cid, cid, vec![node]);
+
+    let signed = SignedMerkleProof::sign(proof, &signer_key as &dyn PrivateKey).unwrap();
+
+    // Using a key of a different curve type — hits the key_type check first.
+    let other_pub = other_key.public_key();
+    let result_type = signed.verify(other_pub.as_ref());
+    assert!(result_type.is_err(), "key type mismatch should return Err");
+
+    // Using a different ed25519 key — hits the identity check.
+    let wrong_ed = generate_ed25519().unwrap();
+    let wrong_pub = wrong_ed.public_key();
+    let result_identity = signed.verify(wrong_pub.as_ref());
+    assert!(
+        result_identity.is_err(),
+        "identity mismatch should return Err, got {:?}",
+        result_identity
+    );
+    assert!(result_identity
+        .unwrap_err()
+        .to_string()
+        .contains("identity does not match"));
+}
+
+#[tokio::test]
+async fn test_valid_signed_proof_still_returns_ok_true() {
+    // Sanity check that the happy path still returns Ok(true) — we haven't
+    // accidentally made valid proofs fail after tightening the error semantics.
+    let private_key = generate_ed25519().unwrap();
+
+    let block0 = Block::new(create_test_delta("doc", "g"), vec![], vec![]);
+    let cid0 = block0.generate_cid().unwrap();
+    let node0 = ProofNode::from_block(&block0).unwrap();
+
+    let block1 = Block::new(create_test_delta("doc", "u1"), vec![cid0], vec![]);
+    let cid1 = block1.generate_cid().unwrap();
+    let node1 = ProofNode::from_block(&block1).unwrap();
+
+    let proof = MerkleProof::new(cid1, cid0, vec![node1, node0]);
+    let signed = SignedMerkleProof::sign(proof, &private_key as &dyn PrivateKey).unwrap();
+
+    let pub_key = private_key.public_key();
+    assert!(signed.verify(pub_key.as_ref()).unwrap());
+    assert!(signed.verify_with_embedded_key().unwrap());
 }

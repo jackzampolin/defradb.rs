@@ -2,8 +2,24 @@
 //!
 //! Provides the EncryptionConfig type and thread-local storage for passing
 //! encryption config from the query layer to the block builder layer.
+//!
+//! # Key generation model
+//!
+//! Each encrypted write generates a fresh random AES-256 key via
+//! [`generate_encryption_key`]. The key is stored alongside its ciphertext
+//! in a separate `Encryption` block (see
+//! [`crate::block_signature::Encryption`]), and the data block links to it
+//! via its `encryption: Option<Cid>` field. Decryption loads the
+//! `Encryption` block by CID and reads the key directly — no master key
+//! is needed at the receiver.
+//!
+//! This matches Go DefraDB's `internal/encryption/encryptor.go` exactly.
+//! The previous Rust implementation derived keys deterministically from
+//! `SHA-256(field_name || doc_id || master_key)`, which was both wire-
+//! incompatible with Go (different key bytes) and cryptographically
+//! weaker (one master-key compromise revealed every past, present, and
+//! future document). See #651 for the audit trail.
 
-use crate::error::{Error, Result};
 use rand::RngCore;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -63,8 +79,13 @@ impl AsRef<[u8]> for EncryptionKey {
     }
 }
 
-/// Encryption configuration for CRDT delta encryption.
-#[derive(Debug, Clone)]
+/// Encryption policy for a CRDT document mutation.
+///
+/// Carries which fields should be encrypted; does NOT carry any key
+/// material. Each encrypted write generates a fresh random key via
+/// [`generate_encryption_key`] and stores it in the per-block
+/// `Encryption` metadata.
+#[derive(Debug, Clone, Default)]
 pub struct EncryptionConfig {
     pub encrypt_doc: bool,
     pub encrypt_fields: Vec<String>,
@@ -75,42 +96,23 @@ impl EncryptionConfig {
     pub fn should_encrypt_field(&self, field_name: &str) -> bool {
         self.encrypt_doc || self.encrypt_fields.iter().any(|f| f == field_name)
     }
+}
 
-    fn effective_field_name<'a>(&self, field_name: &'a str) -> Option<&'a str> {
-        if self.encrypt_fields.iter().any(|f| f == field_name) {
-            Some(field_name)
-        } else {
-            None
-        }
-    }
-
-    /// Return the key used for the given doc/field pair, generating one if needed.
-    ///
-    /// This mirrors Go's document encryptor behavior:
-    /// - doc-level encryption reuses one key per document
-    /// - field-level encryption reuses one key per `(doc, field)` pair
-    /// - production keys are generated randomly instead of being derived
-    pub fn get_or_generate_key(&self, field_name: &str, doc_id: &str) -> Result<[u8; 32]> {
-        let field = self.effective_field_name(field_name);
-        let cache_key = (doc_id.to_string(), field.map(str::to_owned));
-
-        let mut store = doc_encryption_key_store()
-            .lock()
-            .map_err(|e| Error::Other(format!("doc encryption key store poisoned: {}", e)))?;
-
-        if store.len() >= MAX_DOC_ENCRYPTION_ENTRIES {
-            store.clear();
-        }
-
-        if let Some(existing) = store.get(&cache_key) {
-            return Ok(*existing);
-        }
-
-        let mut key = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut key);
-        store.insert(cache_key, key);
-        Ok(key)
-    }
+/// Generate a fresh 32-byte AES-256 key from the OS RNG.
+///
+/// Matches Go's `internal/encryption/encryptor.go::generateEncryptionKey`:
+/// each write gets a unique random key. The key is stored alongside the
+/// ciphertext in a separate `Encryption` block (see
+/// [`crate::block_signature::Encryption`]), and the data block points
+/// at it via the `encryption: Option<Cid>` link.
+///
+/// Uses [`rand::rngs::OsRng`] which reads from the OS-provided
+/// cryptographically secure random source (`getrandom` on Linux,
+/// `SecRandomCopyBytes` on macOS, `BCryptGenRandom` on Windows).
+pub fn generate_encryption_key() -> [u8; 32] {
+    let mut key = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut key);
+    key
 }
 
 thread_local! {
@@ -135,18 +137,8 @@ pub fn get_encryption_config() -> Option<EncryptionConfig> {
 static DOC_ENCRYPTION_STORE: std::sync::OnceLock<Mutex<HashMap<String, EncryptionConfig>>> =
     std::sync::OnceLock::new();
 
-type DocEncryptionKeyScope = (String, Option<String>);
-type DocEncryptionKeyStore = Mutex<HashMap<DocEncryptionKeyScope, [u8; 32]>>;
-
-static DOC_ENCRYPTION_KEY_STORE: std::sync::OnceLock<DocEncryptionKeyStore> =
-    std::sync::OnceLock::new();
-
 fn doc_encryption_store() -> &'static Mutex<HashMap<String, EncryptionConfig>> {
     DOC_ENCRYPTION_STORE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn doc_encryption_key_store() -> &'static DocEncryptionKeyStore {
-    DOC_ENCRYPTION_KEY_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 const MAX_DOC_ENCRYPTION_ENTRIES: usize = 10_000;
@@ -174,53 +166,17 @@ pub fn clear_doc_encryption_store() {
     if let Ok(mut store) = doc_encryption_store().lock() {
         store.clear();
     }
-    if let Ok(mut store) = doc_encryption_key_store().lock() {
-        store.clear();
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::EncryptionConfig;
+    use super::generate_encryption_key;
 
     #[test]
-    fn generated_key_is_reused_for_same_doc_and_field() {
-        super::clear_doc_encryption_store();
-        let config = EncryptionConfig {
-            encrypt_doc: true,
-            encrypt_fields: vec![],
-        };
-
-        let key_a = config
-            .get_or_generate_key("", "bae-c94acbfa-1234-5678-90ab-cdef12345678")
-            .expect("key generation should succeed");
-        let key_b = config
-            .get_or_generate_key("", "bae-c94acbfa-1234-5678-90ab-cdef12345678")
-            .expect("key generation should succeed");
-
-        assert_eq!(key_a, key_b);
-    }
-
-    #[test]
-    fn generated_keys_differ_for_distinct_field_scopes() {
-        super::clear_doc_encryption_store();
-        let config = EncryptionConfig {
-            encrypt_doc: false,
-            encrypt_fields: vec!["name".to_string(), "email".to_string()],
-        };
-
-        let name_key = config
-            .get_or_generate_key("name", "doc1")
-            .expect("key generation should succeed");
-        let email_key = config
-            .get_or_generate_key("email", "doc1")
-            .expect("key generation should succeed");
-        let doc_level_key = config
-            .get_or_generate_key("other", "doc1")
-            .expect("key generation should succeed");
-
-        assert_ne!(name_key, email_key);
-        assert_ne!(name_key, doc_level_key);
-        assert_ne!(email_key, doc_level_key);
+    fn generate_encryption_key_is_random() {
+        let k1 = generate_encryption_key();
+        let k2 = generate_encryption_key();
+        assert_ne!(k1, k2);
+        assert_eq!(k1.len(), 32);
     }
 }

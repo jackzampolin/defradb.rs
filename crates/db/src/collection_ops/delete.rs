@@ -105,7 +105,7 @@ impl<S: Store> crate::database::DB<S> {
             .ok_or_else(|| Error::CollectionNotFound(name.to_string()))?;
 
         let collection_id = collection.collection_id().to_string();
-        let short_id = crate::collection::collection_short_id(&collection_id);
+        let short_id = collection.resolved_root_id();
 
         // Phase 1: Collect all doc_ids in a read-only txn
         let doc_ids = self.collect_doc_ids(&collection_id).await?;

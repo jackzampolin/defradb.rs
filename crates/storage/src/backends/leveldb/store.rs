@@ -165,8 +165,8 @@ impl Store for LevelDbStore {
             snapshot,
             pending: Mutex::new(BTreeMap::new()),
             readonly,
-            discarded: Mutex::new(false),
-            committed: Mutex::new(false),
+            discarded: std::sync::atomic::AtomicBool::new(false),
+            committed: std::sync::atomic::AtomicBool::new(false),
             callbacks: CallbackManager::new(),
         }))
     }

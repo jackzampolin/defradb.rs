@@ -1,0 +1,70 @@
+[package]
+name = "db-merge"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "P2P merge handler, broadcast mutator, and document pushing for DefraDB"
+
+[dependencies]
+# Async
+async-trait.workspace = true
+async-lock = "3"
+futures.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+serde_cbor.workspace = true
+serde_bytes.workspace = true
+ciborium = "0.2"
+
+# Bytes
+bytes.workspace = true
+
+# Memory zeroization
+zeroize = "1"
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# IPLD
+cid.workspace = true
+
+# Synchronization
+parking_lot.workspace = true
+
+# P2P
+libp2p.workspace = true
+
+# Internal crates
+db = { path = "../db" }
+db-blocks = { path = "../db-blocks" }
+storage = { path = "../storage" }
+datastore = { path = "../datastore" }
+blockstore = { path = "../blockstore" }
+schema = { path = "../schema" }
+document = { path = "../document" }
+query = { path = "../query" }
+crypto = { path = "../crypto" }
+crdt = { path = "../crdt" }
+defra-core = { path = "../defra-core" }
+identity = { path = "../identity" }
+acp = { path = "../acp", default-features = false }
+events = { path = "../events", default-features = false }
+p2p = { path = "../p2p" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+hex.workspace = true
+blst = "0.3"
+getrandom = "0.2"
+
+[lints]
+workspace = true

@@ -5,19 +5,19 @@ use async_trait::async_trait;
 use blockstore::Blockstore;
 use p2p::P2PHostHandle;
 
-use crate::VersionSyncer;
+use crate::{P2PError, P2PResult, VersionSyncer};
 
 /// Database-backed version syncer that fetches schema blocks via Bitswap.
 pub struct DbVersionSyncer<S: storage::corekv::Store, B: Blockstore> {
     blockstore: Arc<B>,
-    merge_handler: Arc<db::DbMergeHandler<S, B>>,
+    merge_handler: Arc<db_merge::DbMergeHandler<S, B>>,
     db: Arc<db::DB<S>>,
 }
 
 impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static> DbVersionSyncer<S, B> {
     pub fn new(
         blockstore: Arc<B>,
-        merge_handler: Arc<db::DbMergeHandler<S, B>>,
+        merge_handler: Arc<db_merge::DbMergeHandler<S, B>>,
         db: Arc<db::DB<S>>,
     ) -> Self {
         Self {
@@ -29,7 +29,7 @@ impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static> DbVersionSync
 
     pub fn new_arc(
         blockstore: Arc<B>,
-        merge_handler: Arc<db::DbMergeHandler<S, B>>,
+        merge_handler: Arc<db_merge::DbMergeHandler<S, B>>,
         db: Arc<db::DB<S>>,
     ) -> Arc<dyn VersionSyncer> {
         Arc::new(Self::new(blockstore, merge_handler, db))
@@ -42,7 +42,7 @@ async fn fetch_block<B: Blockstore>(
     handle: &P2PHostHandle,
     peers: &[libp2p::PeerId],
     timeout_secs: u64,
-) -> Result<bytes::Bytes, String> {
+) -> P2PResult<bytes::Bytes> {
     if let Ok(Some(data)) = blockstore.get(&target_cid).await {
         return Ok(data);
     }
@@ -50,7 +50,7 @@ async fn fetch_block<B: Blockstore>(
     handle
         .bitswap_sync(target_cid, peers.to_vec(), vec![target_cid])
         .await
-        .map_err(|error| format!("bitswap sync for {target_cid}: {error}"))?;
+        .map_err(|error| P2PError::transport(format!("bitswap sync for {target_cid}: {error}")))?;
 
     let timeout = std::time::Duration::from_secs(timeout_secs);
     let start = std::time::Instant::now();
@@ -61,7 +61,9 @@ async fn fetch_block<B: Blockstore>(
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    Err(format!("timeout fetching block {target_cid}"))
+    Err(P2PError::transport(format!(
+        "timeout fetching block {target_cid}"
+    )))
 }
 
 async fn sync_lens<S: storage::corekv::Store + 'static, B: Blockstore>(
@@ -70,23 +72,27 @@ async fn sync_lens<S: storage::corekv::Store + 'static, B: Blockstore>(
     handle: &P2PHostHandle,
     db: &Arc<db::DB<S>>,
     connected_peers: &[libp2p::PeerId],
-) -> Result<(), String> {
+) -> P2PResult<()> {
     use defra_core::{LensConfigBlock, LensModuleBlock, LensWasmBlock};
 
     let config_data = fetch_block(*transform_cid, blockstore, handle, connected_peers, 10).await?;
     let config_block: LensConfigBlock = serde_ipld_dagcbor::from_slice(&config_data)
-        .map_err(|error| format!("decode config block: {error}"))?;
+        .map_err(|error| P2PError::internal(format!("decode config block: {error}")))?;
 
     let mut lens_modules = Vec::new();
     for module_cid in &config_block.modules {
         let module_data = fetch_block(*module_cid, blockstore, handle, connected_peers, 10).await?;
-        let module_block: LensModuleBlock = serde_ipld_dagcbor::from_slice(&module_data)
-            .map_err(|error| format!("decode module block {module_cid}: {error}"))?;
+        let module_block: LensModuleBlock =
+            serde_ipld_dagcbor::from_slice(&module_data).map_err(|error| {
+                P2PError::internal(format!("decode module block {module_cid}: {error}"))
+            })?;
 
         let lens_data =
             fetch_block(module_block.lens, blockstore, handle, connected_peers, 10).await?;
-        let wasm_block: LensWasmBlock = serde_ipld_dagcbor::from_slice(&lens_data)
-            .map_err(|error| format!("decode lens block {}: {error}", module_block.lens))?;
+        let wasm_block: LensWasmBlock =
+            serde_ipld_dagcbor::from_slice(&lens_data).map_err(|error| {
+                P2PError::internal(format!("decode lens block {}: {error}", module_block.lens))
+            })?;
 
         let wasm_bytes = match &wasm_block {
             LensWasmBlock::Direct { wasm_bytes } => wasm_bytes.clone(),
@@ -96,7 +102,9 @@ async fn sync_lens<S: storage::corekv::Store + 'static, B: Blockstore>(
                     let chunk_data =
                         fetch_block(*chunk_cid, blockstore, handle, connected_peers, 10).await?;
                     let decoded: serde_bytes::ByteBuf = serde_ipld_dagcbor::from_slice(&chunk_data)
-                        .map_err(|error| format!("decode WASM chunk {chunk_cid}: {error}"))?;
+                        .map_err(|error| {
+                            P2PError::internal(format!("decode WASM chunk {chunk_cid}: {error}"))
+                        })?;
                     all_bytes.extend_from_slice(&decoded);
                 }
                 all_bytes
@@ -133,7 +141,7 @@ async fn sync_lens<S: storage::corekv::Store + 'static, B: Blockstore>(
     db.lens_store()
         .add_with_id(transform_id, config)
         .await
-        .map_err(|error| format!("register lens: {error}"))?;
+        .map_err(|error| P2PError::internal(format!("register lens: {error}")))?;
 
     Ok(())
 }
@@ -147,12 +155,12 @@ impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static> VersionSyncer
         handle: &P2PHostHandle,
         version_ids: Vec<String>,
         connected_peers: Vec<libp2p::PeerId>,
-    ) -> Result<(), String> {
+    ) -> P2PResult<()> {
         use p2p::sync::MergeHandler;
 
         for version_id_str in &version_ids {
             let version_cid = cid::Cid::try_from(version_id_str.as_str())
-                .map_err(|error| format!("invalid cid: {error}"))?;
+                .map_err(|error| P2PError::invalid_input(format!("invalid cid: {error}")))?;
 
             if let Err(error) = handle
                 .bitswap_sync(version_cid, connected_peers.clone(), vec![version_cid])

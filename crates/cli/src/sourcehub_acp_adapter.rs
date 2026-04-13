@@ -120,6 +120,24 @@ impl AcpOperations for SourceHubAcpAdapter {
         Ok(policy.as_ref().map(policy_to_info))
     }
 
+    async fn validate_resource_interface(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+    ) -> Result<(), String> {
+        // The SourceHub adapter caches policies in its local store after a
+        // successful on-chain `add_policy`. Query the local cache — same
+        // semantics as `get_policy` above, and matches Go's pattern of
+        // validating against the most recently observed policy state.
+        let policy = self.local_store.get_policy(policy_id).await.map_err(|e| {
+            format!(
+                "policy validation failed with acp: {}. PolicyID: {}",
+                e, policy_id
+            )
+        })?;
+        acp::validate_resource_interface(policy_id, resource_name, policy.as_ref())
+    }
+
     async fn get_light_client_status(&self) -> Result<AcpLightClientStatus, String> {
         let status = self
             .sourcehub_acp

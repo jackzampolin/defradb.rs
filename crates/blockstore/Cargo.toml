@@ -44,3 +44,6 @@ sha2 = { workspace = true }
 [[bench]]
 name = "blockstore"
 harness = false
+
+[lints]
+workspace = true

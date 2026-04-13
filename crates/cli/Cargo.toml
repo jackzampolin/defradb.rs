@@ -28,6 +28,7 @@ p2p = { path = "../p2p" }
 defra-http = { path = "../http" }
 query = { path = "../query" }
 db = { path = "../db" }
+db-merge = { path = "../db-merge" }
 schema = { path = "../schema" }
 events = { path = "../events" }
 lens = { path = "../lens" }
@@ -105,6 +106,8 @@ version = "0.9"
 optional = true
 
 [features]
+default = ["rocksdb", "redb"]
+redb = ["storage/redb"]
 fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]
 vendored-openssl = ["dep:openssl-sys"]
@@ -114,3 +117,6 @@ profiling = ["dep:tracing-chrome"]
 [dev-dependencies]
 tempfile = "3.17"
 portpicker = "0.1"
+
+[lints]
+workspace = true

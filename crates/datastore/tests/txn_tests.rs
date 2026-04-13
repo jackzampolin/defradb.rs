@@ -1,6 +1,7 @@
 //! Integration tests for BasicTxn.
 
 use datastore::BasicTxn;
+use futures::FutureExt;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use storage::backends::MemoryStore;
@@ -331,4 +332,92 @@ async fn test_basic_txn_async_discard_callback() {
         .await
         .expect("Timeout waiting for async callback")
         .expect("Failed to receive from callback");
+}
+
+#[tokio::test]
+async fn test_basic_txn_success_callback_panic_propagates() {
+    let store = MemoryStore::new();
+    let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_clone = counter.clone();
+    txn.on_success(Box::new(move || {
+        counter_clone.fetch_add(1, Ordering::SeqCst);
+    }));
+    txn.on_success(Box::new(|| {
+        panic!("success callback panic");
+    }));
+    let counter_clone = counter.clone();
+    txn.on_success(Box::new(move || {
+        counter_clone.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    let panic = std::panic::AssertUnwindSafe(async move {
+        txn.commit().await.unwrap();
+    })
+    .catch_unwind()
+    .await;
+
+    assert!(panic.is_err());
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_basic_txn_async_success_callback_panic_propagates() {
+    let store = MemoryStore::new();
+    let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_clone = counter.clone();
+    txn.on_success_async(Box::new(move || {
+        Box::pin(async move {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        })
+    }));
+    txn.on_success_async(Box::new(|| {
+        Box::pin(async {
+            panic!("async success callback panic");
+        })
+    }));
+    let counter_clone = counter.clone();
+    txn.on_success_async(Box::new(move || {
+        Box::pin(async move {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        })
+    }));
+
+    let panic = std::panic::AssertUnwindSafe(async move {
+        txn.commit().await.unwrap();
+    })
+    .catch_unwind()
+    .await;
+
+    assert!(panic.is_err());
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_basic_txn_discard_callback_panic_propagates() {
+    let store = MemoryStore::new();
+    let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_clone = counter.clone();
+    txn.on_discard(Box::new(move || {
+        counter_clone.fetch_add(1, Ordering::SeqCst);
+    }));
+    txn.on_discard(Box::new(|| {
+        panic!("discard callback panic");
+    }));
+    let counter_clone = counter.clone();
+    txn.on_discard(Box::new(move || {
+        counter_clone.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        txn.discard().unwrap();
+    }));
+
+    assert!(panic.is_err());
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
 }

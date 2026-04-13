@@ -30,7 +30,7 @@ fn test_api_config_defaults() {
 #[test]
 fn test_datastore_config_defaults() {
     let config = DatastoreConfig::default();
-    assert_eq!(config.store, DatastoreType::Redb);
+    assert_eq!(config.store, DatastoreType::RocksDb);
     assert_eq!(config.path, "data");
     assert_eq!(config.max_txn_retries, 5);
     assert_eq!(config.valuelogfilesize, 1 << 30);

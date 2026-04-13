@@ -21,7 +21,7 @@ pub(super) async fn handle_incoming(
     gossip: &Gossip,
     peer_map: &Arc<parking_lot::Mutex<PeerMap>>,
     subscriptions: &HashMap<String, TopicSubscription>,
-    event_tx: &mpsc::Sender<TransportEvent>,
+    event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) {
     let remote_addr = match incoming.remote_addr() {
         iroh::endpoint::IncomingAddr::Ip(addr) => Some(addr),
@@ -89,7 +89,7 @@ async fn handle_connection_streams(
     connection: Connection,
     remote_id: EndpointId,
     alpn: Vec<u8>,
-    event_tx: mpsc::Sender<TransportEvent>,
+    event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
     peer_map: Arc<parking_lot::Mutex<PeerMap>>,
 ) {
     let peer_id = endpoint_id_to_peer_id(&remote_id);
@@ -123,7 +123,7 @@ pub(super) async fn handle_connection_streams_from_dial(
     connection: Connection,
     remote_id: EndpointId,
     alpn: Vec<u8>,
-    event_tx: mpsc::Sender<TransportEvent>,
+    event_tx: mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
     peer_map: Arc<parking_lot::Mutex<PeerMap>>,
 ) {
     handle_connection_streams(connection, remote_id, alpn, event_tx, peer_map).await;
@@ -135,18 +135,17 @@ async fn dispatch_stream(
     peer_id: &PeerId,
     send: iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
-    event_tx: &mpsc::Sender<TransportEvent>,
+    event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) -> crate::error::Result<()> {
     match alpn {
         x if x == protocols::ALPN_PUSHLOG => {
             let request: crate::message::PushLogRequest =
                 protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
-            let token = crate::transport::ResponseToken::new(send);
             if event_tx
                 .send(TransportEvent::PushLogRequest {
                     peer_id: peer_id.clone(),
                     request,
-                    token,
+                    token: send,
                 })
                 .await
                 .is_err()
@@ -157,12 +156,11 @@ async fn dispatch_stream(
         x if x == protocols::ALPN_TWOSTREAM => {
             let request: crate::message::PushLogRequest =
                 protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
-            let token = crate::transport::ResponseToken::new(send);
             if event_tx
                 .send(TransportEvent::TwoStreamRequest {
                     peer_id: peer_id.clone(),
                     request,
-                    token: Some(token),
+                    token: Some(send),
                     is_explicit_replicator: false,
                     explicit_replay_authorization: None,
                 })
@@ -175,12 +173,11 @@ async fn dispatch_stream(
         x if x == protocols::ALPN_DOCSYNC => {
             let request: crate::message::DocSyncRequest =
                 protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
-            let token = crate::transport::ResponseToken::new(send);
             if event_tx
                 .send(TransportEvent::DocSyncRequest {
                     peer_id: peer_id.clone(),
                     request,
-                    token: Some(token),
+                    token: Some(send),
                 })
                 .await
                 .is_err()
@@ -191,12 +188,11 @@ async fn dispatch_stream(
         x if x == protocols::ALPN_BRANCHABLE => {
             let request: crate::message::BranchableSyncRequest =
                 protocols::read_message(recv, protocols::MAX_MESSAGE_SIZE).await?;
-            let token = crate::transport::ResponseToken::new(send);
             if event_tx
                 .send(TransportEvent::BranchableSyncRequest {
                     peer_id: peer_id.clone(),
                     request,
-                    token: Some(token),
+                    token: Some(send),
                 })
                 .await
                 .is_err()
@@ -215,12 +211,11 @@ async fn dispatch_stream(
                 requested_count = request.wanted_cids.len(),
                 "CAR dispatch: emitting CarFetchRequest"
             );
-            let token = crate::transport::ResponseToken::new(send);
             if event_tx
                 .send(TransportEvent::CarFetchRequest {
                     peer_id: peer_id.clone(),
                     request,
-                    token: Some(token),
+                    token: Some(send),
                 })
                 .await
                 .is_err()

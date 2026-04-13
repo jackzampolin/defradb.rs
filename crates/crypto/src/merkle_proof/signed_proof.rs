@@ -75,17 +75,24 @@ impl SignedMerkleProof {
             )));
         }
 
-        // Verify the identity in the signature matches the provided key
-        // Identity is stored as hex-encoded public key string bytes
+        // Verify the identity in the signature matches the provided key.
+        // Identity is stored as hex-encoded public key string bytes.
+        // An identity mismatch means the caller provided the wrong key —
+        // this is a configuration error, not a cryptographic "no", so return Err.
         let expected_identity = public_key.to_hex_string().into_bytes();
         if self.signature.header.identity != expected_identity {
-            return Ok(false);
+            return Err(Error::Crypto(
+                "proof identity does not match expected public key".to_string(),
+            ));
         }
 
-        // Verify the signature
+        // Verify the signature. A failed signature check is a security event —
+        // return Err to match Go's verifySignature convention.
         let proof_bytes = self.proof.to_dag_cbor()?;
         if !public_key.verify(&proof_bytes, &self.signature.value)? {
-            return Ok(false);
+            return Err(Error::Crypto(
+                "proof signature verification failed".to_string(),
+            ));
         }
 
         // Verify the proof itself
@@ -98,10 +105,13 @@ impl SignedMerkleProof {
     pub fn verify_with_embedded_key(&self) -> Result<bool> {
         let public_key = extract_public_key_from_signature(&self.signature)?;
 
-        // Verify the signature
+        // Verify the signature. A failed signature check is a security event —
+        // return Err to match Go's verifySignature convention.
         let proof_bytes = self.proof.to_dag_cbor()?;
         if !public_key.verify(&proof_bytes, &self.signature.value)? {
-            return Ok(false);
+            return Err(Error::Crypto(
+                "proof signature verification failed".to_string(),
+            ));
         }
 
         // Verify the proof itself

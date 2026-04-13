@@ -17,7 +17,7 @@ async fn test_lww_higher_priority_wins() {
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -57,7 +57,7 @@ async fn test_lww_lower_priority_ignored() {
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -96,7 +96,7 @@ async fn test_lww_same_priority_lexicographic() {
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -136,7 +136,7 @@ async fn test_lww_deletion() {
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -177,7 +177,7 @@ async fn test_lww_empty_data_tie_breaking() {
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -234,7 +234,7 @@ async fn test_lww_deletion_resurrection_with_priority() {
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -368,7 +368,7 @@ async fn test_lww_wrong_delta_type() {
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -399,7 +399,7 @@ async fn test_lww_merge_result_applied() {
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -424,7 +424,7 @@ async fn test_lww_merge_result_rejected_lower_priority() {
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -468,7 +468,7 @@ async fn test_lww_merge_result_rejected_tie_break() {
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -507,7 +507,7 @@ async fn test_lww_priority_zero() {
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -548,7 +548,7 @@ async fn test_lww_priority_max() {
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -588,7 +588,7 @@ async fn test_lww_field_name_mismatch() {
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -618,7 +618,7 @@ async fn test_lww_schema_version_mismatch() {
     let lww = Lww::new("v1".to_string(), b"doc1", "name".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -676,7 +676,7 @@ async fn test_lww_large_payload() {
     let lww = Lww::new("v1".to_string(), b"doc1", "content".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };
@@ -733,7 +733,7 @@ async fn test_lww_large_payload_priority_rejected() {
     let lww = Lww::new("v1".to_string(), b"doc1", "content".to_string()).unwrap();
 
     let ctx = Context {
-        doc_id: DocId::new("doc1"),
+        doc_id: DocId::new_unchecked("doc1"),
         schema_version: "v1".to_string(),
         is_create: false,
     };

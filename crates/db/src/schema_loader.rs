@@ -82,7 +82,14 @@ pub async fn load_active_collections<S: Store>(db: &DB<S>) -> Result<Vec<Collect
 
                 // Deserialize the collection
                 match serde_json::from_slice::<CollectionVersion>(&collection_json) {
-                    Ok(collection) => collections.push(collection),
+                    Ok(mut collection) => {
+                        crate::collection::populate_collection_root_id(
+                            &systemstore,
+                            &mut collection,
+                        )
+                        .await?;
+                        collections.push(collection);
+                    }
                     Err(e) => {
                         load_error = Some(Error::Other(format!(
                             "Failed to deserialize collection {}: {}",
@@ -214,12 +221,15 @@ pub async fn get_collections_by_collection_id(
         let collection_key = CollectionKey::new(version_id);
         match systemstore.get(&collection_key.bytes()).await {
             Ok(Some(json)) => {
-                let collection: CollectionVersion = serde_json::from_slice(&json).map_err(|e| {
-                    Error::Other(format!(
-                        "Failed to deserialize collection version {}: {}",
-                        version_id, e
-                    ))
-                })?;
+                let mut collection: CollectionVersion =
+                    serde_json::from_slice(&json).map_err(|e| {
+                        Error::Other(format!(
+                            "Failed to deserialize collection version {}: {}",
+                            version_id, e
+                        ))
+                    })?;
+                crate::collection::populate_collection_root_id(systemstore, &mut collection)
+                    .await?;
 
                 // Log the version with transform information
                 tracing::debug!(
@@ -273,12 +283,13 @@ pub async fn get_collection_by_version_id(
     let collection_key = CollectionKey::new(version_id);
     match systemstore.get(&collection_key.bytes()).await {
         Ok(Some(json)) => {
-            let collection: CollectionVersion = serde_json::from_slice(&json).map_err(|e| {
+            let mut collection: CollectionVersion = serde_json::from_slice(&json).map_err(|e| {
                 Error::Other(format!(
                     "Failed to deserialize collection version {}: {}",
                     version_id, e
                 ))
             })?;
+            crate::collection::populate_collection_root_id(systemstore, &mut collection).await?;
             Ok(Some(collection))
         }
         Ok(None) => Ok(None),

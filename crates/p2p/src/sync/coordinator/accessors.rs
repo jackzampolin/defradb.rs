@@ -14,7 +14,7 @@ use crate::transport::P2PTransport;
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Get the replicator registry.
     pub fn replicators(&self) -> &Arc<ReplicatorRegistry> {
-        &self.replicators
+        &self.access.replicators
     }
 
     /// Get the blockstore reference.
@@ -24,22 +24,22 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
     /// Get the broadcaster reference.
     pub fn broadcaster(&self) -> &Broadcaster<T> {
-        &self.broadcaster
+        &self.runtime.broadcaster
     }
 
     /// Get the local peer ID.
     pub fn local_peer_id(&self) -> &str {
-        &self.local_peer_id
+        &self.access.local_peer_id
     }
 
     /// Get the peer state tracker reference.
     pub fn peer_state(&self) -> &PeerStateTracker {
-        &self.peer_state
+        &self.access.peer_state
     }
 
     /// Get the transport reference.
     pub fn transport(&self) -> &T {
-        &self.transport
+        &self.runtime.transport
     }
 
     /// Get the sync manager reference.

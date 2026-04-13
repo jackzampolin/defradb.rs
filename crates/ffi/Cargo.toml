@@ -12,7 +12,8 @@ description = "FFI bindings for DefraDB Rust implementation"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = []
+default = ["redb", "rocksdb"]
+redb = ["storage/redb"]
 fjall = ["storage/fjall"]
 rocksdb = ["storage/rocksdb"]
 iroh = ["embedded/iroh", "p2p/iroh-transport"]
@@ -51,6 +52,7 @@ hex.workspace = true
 # Internal crates
 crypto = { path = "../crypto" }
 db = { path = "../db" }
+db-merge = { path = "../db-merge" }
 defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 events = { path = "../events" }
@@ -76,3 +78,6 @@ cbindgen = "0.28"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

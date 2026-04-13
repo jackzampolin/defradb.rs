@@ -2,7 +2,7 @@
 //!
 //! Supports increment and decrement operations with nonce-based idempotent delivery.
 //! Uses commutative addition with wrapping on overflow for Int64 (matching Go DefraDB),
-//! and error on overflow for Float64. This is not a traditional PN-Counter (which uses
+//! and IEEE-754 addition for Float64. This is not a traditional PN-Counter (which uses
 //! separate per-replica counters); instead it uses a single value with nonce tracking.
 
 use crate::traits::{Context, Delta, MergeResult, ReplicatedData, ValueReader};
@@ -96,12 +96,6 @@ impl CounterDelta {
             return Err(Error::MergeError(
                 "schema_version_id cannot be empty".into(),
             ));
-        }
-        if !increment.is_finite() {
-            return Err(Error::MergeError(format!(
-                "float64 increment must be finite, got: {}",
-                increment
-            )));
         }
         Ok(Self {
             doc_id,
@@ -408,15 +402,6 @@ impl Counter {
             }
             NumericKind::Float64 => {
                 let increment = delta.decode_float64()?;
-
-                // Validate increment (reject NaN and infinities)
-                if !increment.is_finite() {
-                    return Err(Error::MergeError(format!(
-                        "invalid float64 increment: {}",
-                        increment
-                    )));
-                }
-
                 if !self.allow_decrement && increment < 0.0 {
                     return Err(Error::MergeError("decrement not allowed".into()));
                 }
@@ -426,28 +411,7 @@ impl Counter {
                 } else {
                     self.get_float64(rw).await?
                 };
-
-                // Validate current value
-                if !current.is_finite() {
-                    return Err(Error::MergeError(format!(
-                        "invalid float64 current value: {}",
-                        current
-                    )));
-                }
-
-                // Float64: Reject overflow to infinity (different from int64 saturation)
-                // Rationale: NaN/infinity breaks CRDT convergence properties
-                let result = current + increment;
-
-                // Validate result (check for overflow to infinity)
-                if !result.is_finite() {
-                    return Err(Error::MergeError(format!(
-                        "float64 overflow: {} + {} = {}",
-                        current, increment, result
-                    )));
-                }
-
-                NewValue::Float64(result)
+                NewValue::Float64(current + increment)
             }
         };
 

@@ -65,8 +65,8 @@ impl Store for MemoryStore {
             snapshot,
             pending: Mutex::new(BTreeMap::new()),
             readonly,
-            discarded: Mutex::new(false),
-            committed: Mutex::new(false),
+            discarded: AtomicBool::new(false),
+            committed: AtomicBool::new(false),
             callbacks: CallbackManager::new(),
         }))
     }

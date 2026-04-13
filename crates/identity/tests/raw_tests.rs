@@ -138,8 +138,12 @@ fn test_sign_with_secp256k1() {
     let message = b"test message";
     let signature = identity.sign(message).unwrap();
 
-    // DER signatures vary in length
-    assert!(signature.len() >= 70 && signature.len() <= 73);
+    // DER-encoded ECDSA signatures vary in length (typically 68-73 bytes)
+    assert!(
+        signature.len() >= 68 && signature.len() <= 73,
+        "unexpected DER signature length: {}",
+        signature.len()
+    );
 
     let verified = identity.pub_key().verify(message, &signature).unwrap();
     assert!(verified);

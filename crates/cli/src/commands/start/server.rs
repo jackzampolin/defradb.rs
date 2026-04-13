@@ -152,6 +152,7 @@ impl Node {
             p2p_setup.mutator.clone(),
         );
 
+        let zanzibar_store_for_pg = zanzibar_store.clone();
         let http_server = Self::build_http_server(HttpServerArgs {
             database: database.clone(),
             config,
@@ -164,7 +165,13 @@ impl Node {
             user_did: user_did.as_ref(),
             node_identity_did,
         })?;
-        let pg_server = Self::build_pg_server(database, config, &query_setup)?;
+        let pg_server = Self::build_pg_server(
+            database,
+            config,
+            &query_setup,
+            &acp_setup,
+            zanzibar_store_for_pg,
+        )?;
 
         Ok((
             p2p_setup.host_handle,

@@ -41,6 +41,8 @@ impl<S: Store> crate::database::DB<S> {
                         version_id, e
                     ))
                 })?;
+            crate::collection::populate_collection_root_id(&systemstore, &mut target_schema)
+                .await?;
 
             let name = target_schema.name.clone();
             let collection_id = target_schema.collection_id.clone();
@@ -186,7 +188,11 @@ impl<S: Store> crate::database::DB<S> {
 
             while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
                 match serde_json::from_slice::<CollectionVersion>(&pair.value) {
-                    Ok(col) => versions.push(col),
+                    Ok(mut col) => {
+                        crate::collection::populate_collection_root_id(&systemstore, &mut col)
+                            .await?;
+                        versions.push(col);
+                    }
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
@@ -238,21 +244,7 @@ impl<S: Store> crate::database::DB<S> {
                     ))
                 })?;
 
-            // Populate root_id from store (skipped during deserialization)
-            if schema.root_id == 0 {
-                let short_id_key = CollectionID::new(&schema.collection_id);
-                if let Some(short_id_bytes) = systemstore
-                    .get(&short_id_key.bytes())
-                    .await
-                    .map_err(Error::Storage)?
-                {
-                    if let Ok(short_id_str) = String::from_utf8(short_id_bytes.to_vec()) {
-                        if let Ok(short_id) = short_id_str.parse::<u32>() {
-                            schema.root_id = short_id;
-                        }
-                    }
-                }
-            }
+            crate::collection::populate_collection_root_id(&systemstore, &mut schema).await?;
 
             schema
         };

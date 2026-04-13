@@ -3,6 +3,7 @@
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 
+use super::{map_p2p_bad_request, map_p2p_internal};
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
@@ -65,7 +66,7 @@ pub async fn list_replicators(
 
     let p2p = state.require_p2p()?;
 
-    let replicators = p2p.get_replicators().await.map_err(HttpError::Internal)?;
+    let replicators = p2p.get_replicators().await.map_err(map_p2p_internal)?;
 
     let response: Vec<ReplicatorInfoResponse> = replicators
         .into_iter()
@@ -124,7 +125,7 @@ pub async fn add_replicator(
         expected_authorizer_did.as_deref(),
     )
     .await
-    .map_err(HttpError::BadRequest)?;
+    .map_err(map_p2p_bad_request)?;
 
     Ok(Json(()))
 }
@@ -162,7 +163,7 @@ pub async fn remove_replicator(
 
     p2p.remove_replicator(request.collections, addr)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(map_p2p_bad_request)?;
 
     // Go returns 200 OK with empty body
     Ok(())

@@ -13,6 +13,7 @@ acp = { path = "../acp" }
 blockstore = { path = "../blockstore" }
 crypto = { path = "../crypto" }
 db = { path = "../db" }
+db-merge = { path = "../db-merge" }
 defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 events = { path = "../events" }
@@ -33,13 +34,18 @@ serde.workspace = true
 serde_bytes.workspace = true
 serde_ipld_dagcbor.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing.workspace = true
 
 [features]
-default = []
+default = ["redb"]
+redb = ["storage/redb"]
 iroh = ["p2p/iroh-transport"]
 
 [dev-dependencies]
 tempfile = "3.17"
 tokio = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

@@ -11,6 +11,7 @@ description = "Access Control Policy for DefraDB"
 [features]
 default = ["native"]
 native = []
+redb = ["storage/redb"]
 
 [dependencies]
 defra-core = { path = "../defra-core" }
@@ -33,3 +34,6 @@ serde_yaml = "0.9"
 proptest.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+
+[lints]
+workspace = true

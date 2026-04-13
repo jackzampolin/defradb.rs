@@ -1,0 +1,38 @@
+[package]
+name = "db-nac"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Node Access Control (NAC) manager for DefraDB"
+
+[features]
+default = []
+redb = ["storage/redb", "acp/redb"]
+
+[dependencies]
+# Async
+async-trait.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Serialization
+serde.workspace = true
+
+# Internal crates
+acp = { path = "../acp", default-features = false }
+identity = { path = "../identity" }
+defra-core = { path = "../defra-core" }
+storage = { path = "../storage" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

@@ -4,6 +4,10 @@ mod audit;
 mod basic;
 #[path = "acp/custom_policy.rs"]
 mod custom_policy;
+#[path = "acp/index.rs"]
+mod index;
+#[path = "acp/link_collection.rs"]
+mod link_collection;
 #[path = "acp/multi_identity.rs"]
 mod multi_identity;
 #[path = "acp/multi_role.rs"]
@@ -16,6 +20,10 @@ mod negative_p2p;
 mod node_access;
 #[path = "acp/p2p.rs"]
 mod p2p;
+#[path = "acp/policy_validation.rs"]
+mod policy_validation;
+#[path = "acp/relationship.rs"]
+mod relationship;
 #[path = "acp/revoke_lifecycle.rs"]
 mod revoke_lifecycle;
 #[path = "acp/transaction_rollback.rs"]

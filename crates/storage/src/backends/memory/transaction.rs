@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -35,10 +36,10 @@ pub(crate) struct MemoryTxn {
     pub(crate) readonly: bool,
 
     /// Whether the transaction has been discarded
-    pub(crate) discarded: Mutex<bool>,
+    pub(crate) discarded: AtomicBool,
 
     /// Whether the transaction has been committed
-    pub(crate) committed: Mutex<bool>,
+    pub(crate) committed: AtomicBool,
 
     /// Transaction lifecycle callbacks
     pub(crate) callbacks: CallbackManager,
@@ -75,7 +76,7 @@ impl crate::corekv::private::Sealed for MemoryTxn {}
 #[async_trait]
 impl Reader for MemoryTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -87,7 +88,7 @@ impl Reader for MemoryTxn {
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -99,7 +100,7 @@ impl Reader for MemoryTxn {
     }
 
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -111,7 +112,7 @@ impl Reader for MemoryTxn {
     }
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -136,7 +137,7 @@ impl Reader for MemoryTxn {
 #[async_trait]
 impl Writer for MemoryTxn {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -155,7 +156,7 @@ impl Writer for MemoryTxn {
     }
 
     async fn delete(&mut self, key: &[u8]) -> Result<()> {
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             return Err(Error::DiscardedTxn);
         }
 
@@ -176,7 +177,7 @@ impl Writer for MemoryTxn {
 impl Txn for MemoryTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
         // Check discarded first (matches redb backend order)
-        if *self.discarded.lock() {
+        if self.discarded.load(Ordering::Acquire) {
             tracing::warn!("Attempted to commit a discarded transaction");
             CallbackManager::execute_callbacks(self.callbacks.take_error());
             CallbackManager::execute_async_callbacks(self.callbacks.take_error_async()).await;
@@ -184,7 +185,7 @@ impl Txn for MemoryTxn {
         }
 
         // Check if already committed (defensive - ownership prevents this in normal usage)
-        if *self.committed.lock() {
+        if self.committed.load(Ordering::Acquire) {
             tracing::warn!("Attempted to commit an already committed transaction");
             return Err(Error::Other("Transaction already committed".into()));
         }
@@ -205,7 +206,7 @@ impl Txn for MemoryTxn {
         }
 
         // Mark as committed
-        *self.committed.lock() = true;
+        self.committed.store(true, Ordering::Release);
 
         // Apply pending changes to store
         if !pending.is_empty() {
@@ -231,7 +232,7 @@ impl Txn for MemoryTxn {
     }
 
     fn discard(self: Box<Self>) {
-        *self.discarded.lock() = true;
+        self.discarded.store(true, Ordering::Release);
 
         // Execute sync discard callbacks
         CallbackManager::execute_callbacks(self.callbacks.take_discard());

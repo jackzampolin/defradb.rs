@@ -24,7 +24,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let collection = self.get_collection_or_err(collection_name)?;
 
-        let short_id = collection_short_id(collection.collection_id());
+        let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id().to_string();
         let sign_config = get_signing_config();
         let enc_config = get_encryption_config();
@@ -179,16 +179,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             e
                         ))
                     })?;
-                    let encstore = txn.encstore().map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to get encstore: {}",
-                            e
-                        ))
-                    })?;
-
-                    match insert_computed_blocks(&blockstore, &encstore, &headstore, &computed)
-                        .await
-                    {
+                    match insert_computed_blocks(&blockstore, &headstore, &computed).await {
                         Ok(()) => {
                             if let Some(ref config) = enc_config {
                                 store_doc_encryption(&doc_id.to_string(), config.clone());

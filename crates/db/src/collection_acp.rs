@@ -33,22 +33,45 @@ use schema::CollectionVersion;
 
 /// Check if identity has permission for a document operation.
 ///
-/// Returns true if:
+/// Returns true if any of the following holds:
 /// 1. Collection has no policy (ACP not enforced)
-/// 2. Document is unregistered (public)
-/// 3. Identity has the required permission
+/// 2. The thread-local DAC bypass flag is set (NAC admin with `bypass-dac`,
+///    resolved at the HTTP/FFI entry point via `should_bypass_dac()`)
+/// 3. The request identity equals the configured `node_identity` (the
+///    process owner gets full access — matches Go DefraDB's
+///    `internal/db/collection_acp.go:60-62`)
+/// 4. Document is unregistered (public) — handled inside the backend
+/// 5. Identity has the required relation/permission — handled by the backend
 pub async fn check_doc_permission(
     acp: &dyn DocumentACP,
     identity: &Identity,
     permission: DocumentPermission,
     collection: &CollectionVersion,
     doc_id: &str,
+    node_identity: Option<&Did>,
 ) -> acp::Result<bool> {
     // If collection has no policy, ACP is not enforced
     let policy = match &collection.policy {
         Some(p) => p,
         None => return Ok(true),
     };
+
+    // DAC bypass via thread-local flag (set by HTTP/FFI entry points after
+    // resolving NAC `bypass-dac` permission via `acp::nac::should_bypass_dac`).
+    // Mirrors how the query path honors the bypass via `permission_filter`.
+    if defra_core::dac_bypass::get_dac_bypass() {
+        return Ok(true);
+    }
+
+    // Node-identity full-access shortcut (matches Go's
+    // `internal/db/collection_acp.go:60-62`). The process owner is granted
+    // full access to all documents regardless of DAC, which is required for
+    // background tasks, backup, GC, and admin operations.
+    if let (Some(node_did), Identity::Authenticated(req_did)) = (node_identity, identity) {
+        if node_did == req_did {
+            return Ok(true);
+        }
+    }
 
     acp.check_doc_access(
         identity,
@@ -114,27 +137,40 @@ pub async fn unregister_doc_if_needed(
 
 /// ACP context for mutation operations.
 ///
-/// This wraps the DocumentACP and identity for convenient access
-/// during collection mutations.
+/// This wraps the DocumentACP, request identity, and the node identity for
+/// convenient access during collection mutations. The node identity is used
+/// for the full-access shortcut (matches Go DefraDB's behavior — the process
+/// owner gets full access to all documents).
 #[derive(Clone)]
 pub struct AcpContext {
     /// Document ACP for permission checks
     pub acp: Arc<dyn DocumentACP>,
     /// Identity making the request
     pub identity: Identity,
+    /// Node identity (process owner) — granted full access if equal to `identity`
+    pub node_identity: Option<Did>,
 }
 
 impl AcpContext {
     /// Create a new ACP context.
-    pub fn new(acp: Arc<dyn DocumentACP>, identity: Identity) -> Self {
-        Self { acp, identity }
+    pub fn new(acp: Arc<dyn DocumentACP>, identity: Identity, node_identity: Option<Did>) -> Self {
+        Self {
+            acp,
+            identity,
+            node_identity,
+        }
     }
 
     /// Create from an optional DID for backward compatibility.
-    pub fn from_optional_did(acp: Arc<dyn DocumentACP>, did: Option<Did>) -> Self {
+    pub fn from_optional_did(
+        acp: Arc<dyn DocumentACP>,
+        did: Option<Did>,
+        node_identity: Option<Did>,
+    ) -> Self {
         Self {
             acp,
             identity: Identity::from(did),
+            node_identity,
         }
     }
 
@@ -151,6 +187,7 @@ impl AcpContext {
             permission,
             collection,
             doc_id,
+            self.node_identity.as_ref(),
         )
         .await
     }

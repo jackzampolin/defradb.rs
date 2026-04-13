@@ -2,6 +2,7 @@
 
 use axum::{extract::State, Json};
 
+use super::{map_p2p_bad_request, map_p2p_internal};
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
@@ -23,7 +24,7 @@ pub async fn list_documents(
 
     let p2p = state.require_p2p()?;
 
-    let docs = p2p.get_documents().await.map_err(HttpError::Internal)?;
+    let docs = p2p.get_documents().await.map_err(map_p2p_internal)?;
 
     // Convert to flat array of document IDs (Go-compatible format)
     let doc_ids: Vec<String> = docs.into_iter().map(|d| d.doc_id).collect();
@@ -68,9 +69,7 @@ pub async fn add_documents(
         })
         .collect();
 
-    p2p.add_documents(docs)
-        .await
-        .map_err(HttpError::BadRequest)?;
+    p2p.add_documents(docs).await.map_err(map_p2p_bad_request)?;
 
     // Go returns 200 OK with empty body
     Ok(())
@@ -114,7 +113,7 @@ pub async fn remove_documents(
 
     p2p.remove_documents(docs)
         .await
-        .map_err(HttpError::BadRequest)?;
+        .map_err(map_p2p_bad_request)?;
 
     // Go returns 200 OK with empty body
     Ok(())
@@ -138,7 +137,7 @@ pub async fn sync_documents(
 
     p2p.sync_documents(&body.collection_name, body.doc_ids)
         .await
-        .map_err(HttpError::Internal)?;
+        .map_err(map_p2p_internal)?;
 
     Ok(Json(()))
 }

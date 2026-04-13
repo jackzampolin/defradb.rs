@@ -12,6 +12,7 @@ description = "Runtime document types for DefraDB"
 # Internal dependencies
 schema = { path = "../schema" }
 crypto = { path = "../crypto" }
+defra-core = { path = "../defra-core" }
 
 # Serialization
 serde = { workspace = true }
@@ -40,3 +41,6 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = "1.4"
+
+[lints]
+workspace = true

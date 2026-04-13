@@ -23,4 +23,5 @@ pub use index_selection::{
     can_use_index, extract_field_conditions, filter_to_index_scan, select_best_index,
     ConditionValue, FieldCondition, IndexScanParams, IndexScanType, ScanValueFilter,
 };
-pub use traits::{Doc, DocFields, DocStatus, ExecInfo, PlanNode};
+pub use query_types::doc::{Doc, DocFields, DocStatus};
+pub use traits::{ExecInfo, PlanNode};

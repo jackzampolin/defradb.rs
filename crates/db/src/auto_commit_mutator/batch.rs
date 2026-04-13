@@ -12,7 +12,6 @@ use storage::corekv::Store;
 use tracing::warn;
 
 use crate::block_builder::{write_collection_block, write_delete_block, write_document_blocks};
-use crate::collection::collection_short_id;
 use crate::collection_loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
 use crate::txn::DbTxn;
@@ -26,42 +25,19 @@ struct PendingUpdateEvent {
     cid: Cid,
 }
 
-pub(crate) struct BatchMutator<S: Store> {
+pub struct BatchMutator<S: Store> {
     db: Arc<DB<S>>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
     pending_events: TokioMutex<Vec<PendingUpdateEvent>>,
 }
 
 impl<S: Store> BatchMutator<S> {
-    pub(crate) fn new(db: Arc<DB<S>>, txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
+    pub fn new(db: Arc<DB<S>>, txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
         Self {
             db,
             txn,
             pending_events: TokioMutex::new(Vec::new()),
         }
-    }
-
-    async fn stores(
-        &self,
-    ) -> query::error::Result<(
-        datastore::NamespaceView,
-        datastore::NamespaceView,
-        datastore::NamespaceView,
-    )> {
-        let txn = self.txn.lock().await;
-        let txn = txn.as_ref().ok_or_else(|| {
-            query::error::QueryError::execution("mutation batch transaction is no longer active")
-        })?;
-        let blockstore = txn.blockstore().map_err(|e| {
-            query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
-        })?;
-        let encstore = txn.encstore().map_err(|e| {
-            query::error::QueryError::execution(format!("failed to get encstore: {}", e))
-        })?;
-        let headstore = txn.headstore().map_err(|e| {
-            query::error::QueryError::execution(format!("failed to get headstore: {}", e))
-        })?;
-        Ok((blockstore, encstore, headstore))
     }
 
     async fn block_and_head_stores(
@@ -212,17 +188,16 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 }
             })?;
 
-        let short_id = collection_short_id(collection.collection_id());
+        let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
         let enc_config = get_encryption_config();
         let sign_config = get_signing_config();
 
         let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
-            let (blockstore, encstore, headstore) = self.stores().await?;
+            let (blockstore, headstore) = self.block_and_head_stores().await?;
 
             match write_document_blocks(
                 &blockstore,
-                &encstore,
                 &headstore,
                 &doc,
                 schema_version_id,
@@ -354,18 +329,17 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 }
             })?;
 
-        let short_id = collection_short_id(collection.collection_id());
+        let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
         let enc_config = get_encryption_config()
             .or_else(|| doc.id().and_then(|id| get_doc_encryption(&id.to_string())));
         let sign_config = get_signing_config();
 
         let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
-            let (blockstore, encstore, headstore) = self.stores().await?;
+            let (blockstore, headstore) = self.block_and_head_stores().await?;
 
             match write_document_blocks(
                 &blockstore,
-                &encstore,
                 &headstore,
                 &doc,
                 schema_version_id,
@@ -455,7 +429,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(format!("delete error: {}", e)))?;
 
-        let short_id = collection_short_id(collection.collection_id());
+        let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
         let sign_config = get_signing_config();
 

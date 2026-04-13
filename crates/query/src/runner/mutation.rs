@@ -16,6 +16,42 @@ use crate::txn::TransactionRegistry;
 
 use super::{DocFetcher, QueryRunner};
 
+/// RAII guard that clears the `encryption_config` thread-local on Drop.
+///
+/// `mutation.rs` sets the thread-local during execution. Without this
+/// guard, an early-return via `?` (or a panic unwind) leaves stale
+/// state on the blocking-pool worker thread, which the next
+/// `spawn_blocking` closure inherits — silent encryption-key confusion
+/// across requests. See #757.
+///
+/// Always clears to None on Drop, regardless of entry state. The
+/// function "owns" the mutation context for the duration of the call
+/// and leaves the worker thread in a clean state on exit (happy path,
+/// early-return via `?`, or panic unwind). This also self-heals against
+/// any previous task that may have leaked state.
+struct EncryptionConfigGuard;
+
+impl Drop for EncryptionConfigGuard {
+    fn drop(&mut self) {
+        defra_core::encryption::set_encryption_config(None);
+    }
+}
+
+/// RAII guard that clears the `broadcast_creator_did` thread-local on Drop.
+///
+/// Critical for P2P identity correctness — without this, a panicking
+/// mutation can leave the previous caller's DID on the blocking-pool
+/// worker, and the next anonymous mutation would silently broadcast
+/// with someone else's identity (registered as that identity on the
+/// receiving peer via `acp_merge_handler`). See #757.
+struct BroadcastCreatorDidGuard;
+
+impl Drop for BroadcastCreatorDidGuard {
+    fn drop(&mut self) {
+        defra_core::signing::set_broadcast_creator_did(None);
+    }
+}
+
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Execute a GraphQL mutation and return JSON results.
     ///
@@ -352,6 +388,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
+        // Bind a RAII guard so the thread-local is cleared on every exit
+        // path (including `?`, panic unwind, and the happy path). See #757.
+        let _encryption_config_guard = EncryptionConfigGuard;
+
         // Set encryption config for this mutation (thread-local, read by AutoCommitMutator)
         if mutation.encrypt_doc || !mutation.encrypt_fields.is_empty() {
             defra_core::encryption::set_encryption_config(Some(
@@ -363,6 +403,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         } else {
             defra_core::encryption::set_encryption_config(None);
         }
+
+        // Bind a RAII guard for broadcast_creator_did. Critical for P2P
+        // identity correctness — without this, a panicking mutation can
+        // leave the previous caller's DID on the blocking-pool worker,
+        // and the next anonymous mutation would silently broadcast with
+        // someone else's identity. See #757.
+        let _broadcast_creator_did_guard = BroadcastCreatorDidGuard;
 
         // Set broadcast identity for P2P: PushLog Creator field will carry this
         // DID instead of the node PeerId, enabling ACP owner registration on the
@@ -604,8 +651,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         plan.close().await.map_err(&map_doc_not_found)?;
 
-        // Clear encryption config after plan execution
-        defra_core::encryption::set_encryption_config(None);
+        // Note: encryption_config and broadcast_creator_did are cleared
+        // automatically by the RAII guards declared above when this
+        // function returns. The bearer token store stays alive — the
+        // ACP registration block below needs it for hub.rs auth.
 
         let plan_execution_elapsed = plan_execution_start.elapsed();
         for doc_id in &result_doc_ids {
@@ -615,10 +664,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 "Mutation plan execution completed"
             );
         }
-
-        // Clear broadcast identity after plan execution (but keep request bearer
-        // token alive -- ACP registration below needs it for hub.rs auth).
-        defra_core::signing::set_broadcast_creator_did(None);
 
         // For CREATE/UPSERT operations with caller_identity: register created docs with ACP
         if matches!(
@@ -954,6 +999,115 @@ mod tests {
         ) -> Result<Option<Document>> {
             Ok(None)
         }
+    }
+
+    // =========================================================================
+    // RAII guard tests for #757
+    //
+    // These tests verify that the EncryptionConfigGuard and
+    // BroadcastCreatorDidGuard always clear their respective thread-locals
+    // on Drop, regardless of how the owning function exits. They are NOT
+    // #[tokio::test] because the entire point is to exercise thread-local
+    // semantics on a single thread synchronously.
+    // =========================================================================
+
+    fn make_test_encryption_config() -> defra_core::encryption::EncryptionConfig {
+        defra_core::encryption::EncryptionConfig {
+            encrypt_doc: true,
+            encrypt_fields: vec![],
+            encryption_key: vec![0xAB; 32],
+        }
+    }
+
+    #[test]
+    fn encryption_config_guard_clears_on_normal_drop() {
+        // Pre-condition: ensure clean state
+        defra_core::encryption::set_encryption_config(None);
+
+        // Set state and bind guard
+        defra_core::encryption::set_encryption_config(Some(make_test_encryption_config()));
+        assert!(defra_core::encryption::get_encryption_config().is_some());
+
+        {
+            let _guard = EncryptionConfigGuard;
+            // Inside the guard scope the state is still set.
+            assert!(defra_core::encryption::get_encryption_config().is_some());
+            // Guard drops at end of scope.
+        }
+
+        // After guard drop the thread-local is cleared.
+        assert!(defra_core::encryption::get_encryption_config().is_none());
+    }
+
+    #[test]
+    fn encryption_config_guard_clears_on_panic_unwind() {
+        defra_core::encryption::set_encryption_config(None);
+        defra_core::encryption::set_encryption_config(Some(make_test_encryption_config()));
+
+        // Drive the guard's drop via a panic in a catch_unwind boundary,
+        // simulating an early-return from a panicking mutation.
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = EncryptionConfigGuard;
+            panic!("simulated mutation panic");
+        });
+
+        // Even after a panic unwind, the guard cleared the thread-local.
+        assert!(defra_core::encryption::get_encryption_config().is_none());
+    }
+
+    #[test]
+    fn encryption_config_guard_self_heals_from_leaked_state() {
+        // Simulate a previous task that leaked stale state on this thread.
+        defra_core::encryption::set_encryption_config(Some(make_test_encryption_config()));
+        assert!(defra_core::encryption::get_encryption_config().is_some());
+
+        // Even if the guard is bound without us setting fresh state, on
+        // Drop it clears the thread-local — self-healing.
+        {
+            let _guard = EncryptionConfigGuard;
+        }
+
+        assert!(defra_core::encryption::get_encryption_config().is_none());
+    }
+
+    #[test]
+    fn broadcast_creator_did_guard_clears_on_normal_drop() {
+        defra_core::signing::set_broadcast_creator_did(None);
+        defra_core::signing::set_broadcast_creator_did(Some("did:key:test".to_string()));
+        assert!(defra_core::signing::get_broadcast_creator_did().is_some());
+
+        {
+            let _guard = BroadcastCreatorDidGuard;
+            assert!(defra_core::signing::get_broadcast_creator_did().is_some());
+        }
+
+        assert!(defra_core::signing::get_broadcast_creator_did().is_none());
+    }
+
+    #[test]
+    fn broadcast_creator_did_guard_clears_on_panic_unwind() {
+        defra_core::signing::set_broadcast_creator_did(None);
+        defra_core::signing::set_broadcast_creator_did(Some("did:key:alice".to_string()));
+
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = BroadcastCreatorDidGuard;
+            panic!("simulated mutation panic");
+        });
+
+        // Critical: a panicking mutation must NOT leave Alice's DID on
+        // this thread for the next anonymous mutation to broadcast as.
+        assert!(defra_core::signing::get_broadcast_creator_did().is_none());
+    }
+
+    #[test]
+    fn broadcast_creator_did_guard_self_heals_from_leaked_state() {
+        defra_core::signing::set_broadcast_creator_did(Some("did:key:leaked".to_string()));
+
+        {
+            let _guard = BroadcastCreatorDidGuard;
+        }
+
+        assert!(defra_core::signing::get_broadcast_creator_did().is_none());
     }
 
     #[tokio::test]

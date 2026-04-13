@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use db::collection::collection_short_id;
 use db::IndexManager;
 use defra_http::router::{IndexFieldInfo, IndexInfo, IndexOperations};
 use schema::IndexedFieldDescription;
@@ -41,11 +40,7 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
             .map_err(|e| format!("{}", e))?;
 
         let schema = col.schema().clone();
-        let short_id = if schema.root_id > 0 {
-            schema.root_id
-        } else {
-            collection_short_id(col.collection_id())
-        };
+        let short_id = schema.resolved_root_id();
 
         let mut index_manager =
             IndexManager::from_collection(short_id, &schema).map_err(|e| format!("{}", e))?;
@@ -177,11 +172,7 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
             .map_err(|e| format!("{}", e))?;
 
         let schema = col.schema().clone();
-        let short_id = if schema.root_id > 0 {
-            schema.root_id
-        } else {
-            collection_short_id(col.collection_id())
-        };
+        let short_id = schema.resolved_root_id();
 
         let mut index_manager =
             IndexManager::from_collection(short_id, &schema).map_err(|e| format!("{}", e))?;

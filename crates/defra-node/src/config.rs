@@ -1,5 +1,23 @@
 //! Configuration types for the embedded DefraDB node.
 
+/// Document ACP configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DocumentAcpConfig {
+    #[default]
+    Local,
+    SourceHub(SourceHubConfig),
+}
+
+/// SourceHub document ACP configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceHubConfig {
+    pub grpc_address: String,
+    pub comet_rpc_address: String,
+    pub chain_id: String,
+    pub signer_key: Vec<u8>,
+}
+
 /// Configuration for the optional HTTP GraphQL server.
 #[cfg(feature = "http")]
 pub struct HttpConfig {

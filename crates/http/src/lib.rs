@@ -86,8 +86,8 @@ pub use router::{
     create_router, create_router_with_rest, create_router_with_state, AcpLightClientStatus,
     AcpOperations, AppState, AppStateBuilder, BackupOperations, BlockOperations,
     DocumentAcpOperations, IndexFieldInfo, IndexInfo, IndexOperations, NacStatus, NacStatusInfo,
-    NodeAcpOperations, NodePermission, P2POperations, PolicyInfo, ReplicatorInfo,
-    TransactionOperations, ViewOperations,
+    NodeAcpOperations, NodePermission, P2PError, P2POperations, P2PResult, PolicyInfo,
+    ReplicatorInfo, TransactionOperations, ViewOperations,
 };
 pub use server::{Server, ServerConfig};
 

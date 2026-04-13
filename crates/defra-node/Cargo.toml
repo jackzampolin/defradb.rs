@@ -12,17 +12,20 @@ required-features = ["rocksdb"]
 test = false
 
 [features]
-default = []
+default = ["redb"]
 http = ["dep:defra-http", "dep:axum"]
 p2p = ["dep:p2p", "dep:blockstore"]
+redb = ["storage/redb"]
 rocksdb = ["storage/rocksdb"]
 
 [dependencies]
 db = { path = "../db" }
+db-merge = { path = "../db-merge" }
 storage = { path = "../storage" }
 query = { path = "../query" }
 events = { path = "../events" }
 acp = { path = "../acp" }
+sourcehub = { path = "../sourcehub" }
 identity = { path = "../identity" }
 defra-core = { path = "../defra-core" }
 schema = { path = "../schema" }
@@ -45,3 +48,6 @@ blockstore = { path = "../blockstore", optional = true }
 
 [dev-dependencies]
 axum.workspace = true
+
+[lints]
+workspace = true

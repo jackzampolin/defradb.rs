@@ -71,7 +71,7 @@ pub type FfiDatabase = db::DB<FfiStore>;
 pub type FfiBlockstore = DefraBlockstore<FfiStore>;
 
 /// Type alias for the merge handler used in FFI.
-pub type FfiMergeHandler = db::DbMergeHandler<FfiStore, FfiBlockstore>;
+pub type FfiMergeHandler = db_merge::DbMergeHandler<FfiStore, FfiBlockstore>;
 
 /// Type alias for node handles (opaque to FFI callers).
 pub type NodeHandle = usize;

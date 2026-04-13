@@ -381,6 +381,27 @@ fn test_dag_link_ordering() {
 }
 
 #[test]
+fn test_block_new_sorts_links_by_cid_string() {
+    let link_a = DAGLink::new("z-name", test_cid());
+    let link_b = DAGLink::new("a-name", test_cid2());
+
+    let block = Block::new(test_lww_delta(), vec![], vec![link_a, link_b]);
+    let links = block.links.unwrap();
+
+    assert_eq!(links[0].link, test_cid2());
+    assert_eq!(links[1].link, test_cid());
+}
+
+#[test]
+fn test_dag_link_equality_ignores_sort_cache_state() {
+    let link = DAGLink::new("field", test_cid());
+    let mut sorted = [link.clone()];
+    sorted.sort();
+
+    assert_eq!(sorted[0], link);
+}
+
+#[test]
 fn test_encryption_roundtrip() {
     let enc = Encryption::new(b"doc1".to_vec(), b"key123".to_vec());
 
