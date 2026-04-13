@@ -99,7 +99,7 @@ impl GenerateArgs {
                     Error::Keyring(format!("failed to generate Ed25519 key: {}", e))
                 })?;
                 keyring
-                    .set("peer-key", &private_key.raw())
+                    .set("peer-key", private_key.raw())
                     .map_err(|e| Error::Keyring(e.to_string()))?;
             }
 
