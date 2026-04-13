@@ -116,9 +116,10 @@ async fn test_proof_wrong_root_fails() {
 
 #[tokio::test]
 async fn test_proof_missing_link_fails() {
-    // Missing chain link is a legitimate cryptographic "no" — returns Ok(false).
-    // Create two unrelated blocks; their CIDs become the anchors so the structural
-    // checks pass, but the heads chain between them is broken.
+    // #733: a missing chain link is a cryptographic verification failure
+    // and must return Err — not Ok(false). Create two unrelated blocks;
+    // their CIDs become the anchors so the structural checks pass, but
+    // the heads chain between them is broken.
     let block1 = Block::new(create_test_delta("doc1", "name"), vec![], vec![]);
     let cid1 = block1.generate_cid().unwrap();
     let node1 = ProofNode::from_block(&block1).unwrap();
@@ -128,9 +129,16 @@ async fn test_proof_missing_link_fails() {
     let node2 = ProofNode::from_block(&block2).unwrap();
 
     let proof = MerkleProof::new(cid1, cid2, vec![node1, node2]);
+    let result = proof.verify();
     assert!(
-        !proof.verify().unwrap(),
-        "broken chain link should return Ok(false)"
+        result.is_err(),
+        "broken chain link must return Err, not Ok(false) — see #733"
+    );
+    let err = result.unwrap_err().to_string().to_lowercase();
+    assert!(
+        err.contains("chain") || err.contains("crypto"),
+        "expected chain-broken error, got: {}",
+        err
     );
 }
 
@@ -722,7 +730,7 @@ fn test_merkle_proof_from_dag_cbor_wrong_schema_fails() {
 // These tests lock in the Rust behavior to match Go's conventions:
 // - Cryptographic signature failures return Err (match Go's ErrSignatureVerification)
 // - Caller-supplied anchor mismatches return Err (configuration error)
-// - Hash/chain mismatches during verification return Ok(false) (legitimate "no")
+// - Hash/chain mismatches during verification return Err (#733)
 // - No hardcoded path length limit (Go has none)
 // =========================================================================
 
@@ -786,10 +794,16 @@ async fn test_large_chain_proof_verifies_without_limit() {
 
 #[tokio::test]
 async fn test_verify_err_vs_ok_false_semantics() {
-    // Parity test documenting the Err vs Ok(false) contract:
+    // Parity test documenting the verification contract (#733).
     //
-    // - Empty path, wrong leaf anchor, wrong root anchor: Err (caller mistake)
-    // - Content hash mismatch, broken chain link: Ok(false) (cryptographic "no")
+    // Every failure mode returns Err — not Ok(false). Matches Go's
+    // convention and the rest of the Rust crypto crate. Closes the
+    // silent-bypass risk where a caller writes `if result.is_ok()` or
+    // `let _ = result?; trust_proof()` and treats a verification failure
+    // as success.
+    //
+    // - Empty path, wrong leaf anchor, wrong root anchor: Err::BlockError (caller mistake)
+    // - Content hash mismatch, broken chain link: Err::Crypto (cryptographic failure)
 
     // 1. Empty path → Err
     let empty = MerkleProof::new(Cid::default(), Cid::default(), vec![]);
@@ -808,12 +822,52 @@ async fn test_verify_err_vs_ok_false_semantics() {
     let wrong_root = MerkleProof::new(cid_a, cid_b, vec![node_a.clone()]);
     assert!(wrong_root.verify().is_err());
 
-    // 4. Broken chain link → Ok(false) (cids match the path, but block_a.heads doesn't contain cid_b)
+    // 4. Broken chain link → Err (cids match the path, but block_a.heads
+    //    doesn't contain cid_b). Used to be Ok(false); flipped to Err in
+    //    the #733 fix.
     let node_b = ProofNode::from_block(&block_b).unwrap();
     let broken = MerkleProof::new(cid_a, cid_b, vec![node_a, node_b]);
     let result = broken.verify();
-    assert!(result.is_ok(), "broken chain link should be Ok, not Err");
-    assert!(!result.unwrap(), "broken chain link should return false");
+    assert!(
+        result.is_err(),
+        "broken chain link must return Err — see #733"
+    );
+    let err = result.unwrap_err().to_string().to_lowercase();
+    assert!(
+        err.contains("chain") || err.contains("crypto"),
+        "expected chain-broken error, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_verify_hash_mismatch_returns_err() {
+    // #733: a content hash mismatch is a cryptographic verification
+    // failure and must return Err. This locks in the fix specifically
+    // for the path-4 hash-mismatch branch in proof.rs.
+    use crypto::merkle_proof::ProofNode;
+
+    let block = Block::new(create_test_delta("doc", "field"), vec![], vec![]);
+    let cid = block.generate_cid().unwrap();
+    let mut node = ProofNode::from_block(&block).unwrap();
+
+    // Tamper with the encoded bytes so the recomputed hash no longer
+    // matches the stored cid. ProofNode stores raw bytes in `data`;
+    // flipping the last byte changes the content hash without changing
+    // the cid.
+    if let Some(last) = node.data.last_mut() {
+        *last ^= 0xFF;
+    }
+
+    let proof = MerkleProof::new(cid, cid, vec![node]);
+    let result = proof.verify();
+    assert!(result.is_err(), "hash mismatch must return Err — see #733");
+    let err = result.unwrap_err().to_string().to_lowercase();
+    assert!(
+        err.contains("hash") || err.contains("content") || err.contains("crypto"),
+        "expected hash-mismatch error, got: {}",
+        err
+    );
 }
 
 #[tokio::test]
