@@ -79,6 +79,7 @@ impl<S: Store> BatchMutator<S> {
 
     fn emit_update_event(&self, event: PendingUpdateEvent) {
         if let Some(bus) = self.db.event_bus() {
+            let subject_doc_id = event.doc_id.clone();
             let update = Update::new(
                 event.doc_id,
                 event.cid,
@@ -90,8 +91,9 @@ impl<S: Store> BatchMutator<S> {
             bus.publish(Message::update(update));
 
             if event.branchable {
-                let collection_update = Update::new(
+                let collection_update = Update::new_with_subject_doc_id(
                     String::new(),
+                    subject_doc_id,
                     event.cid,
                     event.collection_id,
                     vec![],

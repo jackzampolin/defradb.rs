@@ -185,6 +185,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                         .to_string();
                                     bus.publish(Message::merge_complete(MergeCompleteData {
                                         doc_id: doc_id_str,
+                                        subject_doc_id: None,
                                         cid: *link_cid,
                                         collection_id: col_id,
                                         by_peer: metadata.sender_peer.unwrap_or("").to_string(),
@@ -204,6 +205,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                                         .to_string();
                                     bus.publish(Message::merge_complete(MergeCompleteData {
                                         doc_id: doc_id_str,
+                                        subject_doc_id: None,
                                         cid: *link_cid,
                                         collection_id: col_id,
                                         by_peer: metadata.sender_peer.unwrap_or("").to_string(),
@@ -455,6 +457,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             pe.push(PendingMergeEvent {
                                 message: Message::merge_complete(MergeCompleteData {
                                     doc_id: doc_id_str,
+                                    subject_doc_id: None,
                                     cid: *link_cid,
                                     collection_id: col_id,
                                     by_peer: metadata.sender_peer.unwrap_or("").to_string(),
@@ -474,6 +477,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             pe.push(PendingMergeEvent {
                                 message: Message::merge_complete(MergeCompleteData {
                                     doc_id: doc_id_str,
+                                    subject_doc_id: None,
                                     cid: *link_cid,
                                     collection_id: col_id,
                                     by_peer: metadata.sender_peer.unwrap_or("").to_string(),

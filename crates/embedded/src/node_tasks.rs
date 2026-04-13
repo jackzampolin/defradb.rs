@@ -146,6 +146,7 @@ where
                 } => {
                     event_bus.publish(events::Message::merge_complete(events::MergeCompleteData {
                         doc_id: doc_id.clone(),
+                        subject_doc_id: None,
                         cid: *cid,
                         collection_id: collection_id.clone(),
                         by_peer: local_peer.clone(),
@@ -178,6 +179,7 @@ where
                         event_bus.publish(events::Message::merge_complete(
                             events::MergeCompleteData {
                                 doc_id: doc_id.clone(),
+                                subject_doc_id: None,
                                 cid: *cid,
                                 collection_id: collection_id.clone(),
                                 by_peer: local_peer.clone(),

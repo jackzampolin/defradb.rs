@@ -262,6 +262,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     if let Some(bus) = self.db.event_bus() {
                         let merge_complete = MergeCompleteData {
                             doc_id: doc_id_str.clone(),
+                            subject_doc_id: None,
                             cid: *cid,
                             collection_id: metadata
                                 .collection_id
@@ -327,6 +328,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     if !from_collection {
                         let merge_complete = MergeCompleteData {
                             doc_id: doc_id_str.clone(),
+                            subject_doc_id: None,
                             cid: *cid,
                             collection_id: metadata
                                 .collection_id
@@ -340,6 +342,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     if state.is_branchable {
                         let merge_complete = MergeCompleteData {
                             doc_id: String::new(),
+                            subject_doc_id: Some(doc_id_str.clone()),
                             cid: *cid,
                             collection_id: metadata
                                 .collection_id
@@ -548,6 +551,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 if outcome.is_terminal_skip() && !from_collection {
                     let merge_complete = MergeCompleteData {
                         doc_id: doc_id_str.clone(),
+                        subject_doc_id: None,
                         cid: *cid,
                         collection_id: metadata
                             .collection_id
@@ -617,6 +621,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     if !from_collection {
                         let merge_complete = MergeCompleteData {
                             doc_id: doc_id_str.clone(),
+                            subject_doc_id: None,
                             cid: *cid,
                             collection_id: metadata
                                 .collection_id
@@ -632,6 +637,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     if state.is_branchable {
                         let merge_complete = MergeCompleteData {
                             doc_id: String::new(),
+                            subject_doc_id: Some(doc_id_str.clone()),
                             cid: *cid,
                             collection_id: metadata
                                 .collection_id
