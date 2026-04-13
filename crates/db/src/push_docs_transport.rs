@@ -65,6 +65,9 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
     let blockstore_view = txn
         .blockstore()
         .map_err(|e| format!("failed to get blockstore: {}", e))?;
+    let encstore_view = txn
+        .encstore()
+        .map_err(|e| format!("failed to get encstore: {}", e))?;
     let datastore = txn
         .datastore()
         .map_err(|e| format!("failed to get datastore: {}", e))?;
@@ -140,8 +143,10 @@ pub async fn push_existing_docs_via_transport<S: Store + 'static, T: P2PTranspor
                     _ => continue,
                 };
 
-                doc_blocks
-                    .extend(load_push_dag_blocks(&blockstore_view, head_cid, block_data).await);
+                doc_blocks.extend(
+                    load_push_dag_blocks(&blockstore_view, &encstore_view, head_cid, block_data)
+                        .await,
+                );
             }
 
             iter.close()
@@ -348,6 +353,15 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
         .new_txn(true)
         .await
         .map_err(|e| format!("blockstore txn: {}", e))?;
+    let encstore_view = storage::stores::Blockstore::new_with_namespace(
+        db.store().clone(),
+        true,
+        storage::namespace::Namespace::Encstore,
+    );
+    let enc_txn = encstore_view
+        .new_txn(true)
+        .await
+        .map_err(|e| format!("encstore txn: {}", e))?;
 
     let prefix = storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_id, "C");
     let opts = IterOptions::new().with_prefix(prefix);
@@ -377,7 +391,8 @@ pub async fn retry_doc_via_transport<S: Store + 'static, T: P2PTransport>(
             _ => continue,
         };
 
-        for (block_cid, block_data) in load_push_dag_blocks(&*block_txn, head_cid, block_data).await
+        for (block_cid, block_data) in
+            load_push_dag_blocks(&*block_txn, &*enc_txn, head_cid, block_data).await
         {
             let mut request = PushLogRequest::new(
                 doc_id.to_string(),

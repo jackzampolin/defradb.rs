@@ -124,7 +124,6 @@ fn test_compute_document_blocks_places_encryption_metadata_in_encstore_entries()
     let enc = EncryptionConfig {
         encrypt_doc: false,
         encrypt_fields: vec!["secret".to_string()],
-        encryption_key: Vec::new(),
     };
 
     let computed = compute_document_blocks(&doc, "schema-v1", Some(&enc), None)

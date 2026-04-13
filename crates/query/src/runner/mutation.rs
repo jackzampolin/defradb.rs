@@ -358,7 +358,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 defra_core::encryption::EncryptionConfig {
                     encrypt_doc: mutation.encrypt_doc,
                     encrypt_fields: mutation.encrypt_fields.clone(),
-                    encryption_key: self.encryption_key.clone().unwrap_or_default(),
                 },
             ));
         } else {

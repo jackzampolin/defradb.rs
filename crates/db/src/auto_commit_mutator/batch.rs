@@ -41,34 +41,43 @@ impl<S: Store> BatchMutator<S> {
         }
     }
 
-    async fn blockstore(&self) -> query::error::Result<datastore::NamespaceView> {
+    async fn stores(
+        &self,
+    ) -> query::error::Result<(
+        datastore::NamespaceView,
+        datastore::NamespaceView,
+        datastore::NamespaceView,
+    )> {
         let txn = self.txn.lock().await;
         let txn = txn.as_ref().ok_or_else(|| {
             query::error::QueryError::execution("mutation batch transaction is no longer active")
         })?;
-        txn.blockstore().map_err(|e| {
+        let blockstore = txn.blockstore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
-        })
-    }
-
-    async fn headstore(&self) -> query::error::Result<datastore::NamespaceView> {
-        let txn = self.txn.lock().await;
-        let txn = txn.as_ref().ok_or_else(|| {
-            query::error::QueryError::execution("mutation batch transaction is no longer active")
         })?;
-        txn.headstore().map_err(|e| {
-            query::error::QueryError::execution(format!("failed to get headstore: {}", e))
-        })
-    }
-
-    async fn encstore(&self) -> query::error::Result<datastore::NamespaceView> {
-        let txn = self.txn.lock().await;
-        let txn = txn.as_ref().ok_or_else(|| {
-            query::error::QueryError::execution("mutation batch transaction is no longer active")
-        })?;
-        txn.encstore().map_err(|e| {
+        let encstore = txn.encstore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get encstore: {}", e))
-        })
+        })?;
+        let headstore = txn.headstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get headstore: {}", e))
+        })?;
+        Ok((blockstore, encstore, headstore))
+    }
+
+    async fn block_and_head_stores(
+        &self,
+    ) -> query::error::Result<(datastore::NamespaceView, datastore::NamespaceView)> {
+        let txn = self.txn.lock().await;
+        let txn = txn.as_ref().ok_or_else(|| {
+            query::error::QueryError::execution("mutation batch transaction is no longer active")
+        })?;
+        let blockstore = txn.blockstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
+        })?;
+        let headstore = txn.headstore().map_err(|e| {
+            query::error::QueryError::execution(format!("failed to get headstore: {}", e))
+        })?;
+        Ok((blockstore, headstore))
     }
 
     async fn take_txn(&self) -> query::error::Result<DbTxn<S>> {
@@ -209,9 +218,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let sign_config = get_signing_config();
 
         let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
-            let blockstore = self.blockstore().await?;
-            let encstore = self.encstore().await?;
-            let headstore = self.headstore().await?;
+            let (blockstore, encstore, headstore) = self.stores().await?;
 
             match write_document_blocks(
                 &blockstore,
@@ -354,9 +361,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let sign_config = get_signing_config();
 
         let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
-            let blockstore = self.blockstore().await?;
-            let encstore = self.encstore().await?;
-            let headstore = self.headstore().await?;
+            let (blockstore, encstore, headstore) = self.stores().await?;
 
             match write_document_blocks(
                 &blockstore,
@@ -455,8 +460,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let sign_config = get_signing_config();
 
         let commit_result: Option<(Cid, Vec<u8>)> = {
-            let blockstore = self.blockstore().await?;
-            let headstore = self.headstore().await?;
+            let (blockstore, headstore) = self.block_and_head_stores().await?;
 
             match write_delete_block(
                 &blockstore,

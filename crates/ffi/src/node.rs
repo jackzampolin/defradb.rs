@@ -209,7 +209,6 @@ fn resolve_embedded_config(
         transport: embedded::TransportConfig::None,
         signing,
         document_acp,
-        encryption_key: Some(b"examplekey1234567890examplekey12".to_vec()),
         max_concurrent_dag_fetches: if options.max_concurrent_dag_fetches > 0 {
             Some(options.max_concurrent_dag_fetches)
         } else {

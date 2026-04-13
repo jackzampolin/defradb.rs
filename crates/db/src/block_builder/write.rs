@@ -104,7 +104,9 @@ pub async fn write_document_blocks(
             // Encrypt delta and create Encryption metadata block if configured
             let (value_bytes, encryption_cid) = if let Some(enc) = encryption_config {
                 if enc.should_encrypt_field(field_name) {
-                    let key = enc.get_or_generate_key(field_name, &doc_id_str);
+                    let key = enc
+                        .get_or_generate_key(field_name, &doc_id_str)
+                        .map_err(|e| format!("Failed to get encryption key: {}", e))?;
                     let encrypted = encrypt_delta(&value_bytes, &key)?;
 
                     tracing::debug!(
@@ -301,7 +303,9 @@ pub async fn write_document_blocks(
     // encryption for composites but the Encryption link is still set on the block.
     let composite_encryption_cid = if let Some(enc) = encryption_config {
         if enc.encrypt_doc {
-            let key = enc.get_or_generate_key("", &doc_id_str); // doc-level: empty field name
+            let key = enc
+                .get_or_generate_key("", &doc_id_str)
+                .map_err(|e| format!("Failed to get composite encryption key: {}", e))?;
             let enc_block = Encryption {
                 doc_id: doc_id_str.as_bytes().to_vec(),
                 field_name: None,

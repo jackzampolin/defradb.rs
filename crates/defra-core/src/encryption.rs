@@ -3,6 +3,7 @@
 //! Provides the EncryptionConfig type and thread-local storage for passing
 //! encryption config from the query layer to the block builder layer.
 
+use crate::error::{Error, Result};
 use rand::RngCore;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -67,7 +68,6 @@ impl AsRef<[u8]> for EncryptionKey {
 pub struct EncryptionConfig {
     pub encrypt_doc: bool,
     pub encrypt_fields: Vec<String>,
-    pub encryption_key: Vec<u8>,
 }
 
 impl EncryptionConfig {
@@ -76,9 +76,9 @@ impl EncryptionConfig {
         self.encrypt_doc || self.encrypt_fields.iter().any(|f| f == field_name)
     }
 
-    fn effective_field_name(&self, field_name: &str) -> Option<String> {
+    fn effective_field_name<'a>(&self, field_name: &'a str) -> Option<&'a str> {
         if self.encrypt_fields.iter().any(|f| f == field_name) {
-            Some(field_name.to_string())
+            Some(field_name)
         } else {
             None
         }
@@ -90,26 +90,26 @@ impl EncryptionConfig {
     /// - doc-level encryption reuses one key per document
     /// - field-level encryption reuses one key per `(doc, field)` pair
     /// - production keys are generated randomly instead of being derived
-    pub fn get_or_generate_key(&self, field_name: &str, doc_id: &str) -> [u8; 32] {
+    pub fn get_or_generate_key(&self, field_name: &str, doc_id: &str) -> Result<[u8; 32]> {
         let field = self.effective_field_name(field_name);
-        let cache_key = (doc_id.to_string(), field);
+        let cache_key = (doc_id.to_string(), field.map(str::to_owned));
 
         let mut store = doc_encryption_key_store()
             .lock()
-            .expect("doc encryption key store poisoned");
+            .map_err(|e| Error::Other(format!("doc encryption key store poisoned: {}", e)))?;
 
         if store.len() >= MAX_DOC_ENCRYPTION_ENTRIES {
             store.clear();
         }
 
         if let Some(existing) = store.get(&cache_key) {
-            return *existing;
+            return Ok(*existing);
         }
 
         let mut key = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut key);
         store.insert(cache_key, key);
-        key
+        Ok(key)
     }
 }
 
@@ -189,11 +189,14 @@ mod tests {
         let config = EncryptionConfig {
             encrypt_doc: true,
             encrypt_fields: vec![],
-            encryption_key: Vec::new(),
         };
 
-        let key_a = config.get_or_generate_key("", "bae-c94acbfa-1234-5678-90ab-cdef12345678");
-        let key_b = config.get_or_generate_key("", "bae-c94acbfa-1234-5678-90ab-cdef12345678");
+        let key_a = config
+            .get_or_generate_key("", "bae-c94acbfa-1234-5678-90ab-cdef12345678")
+            .expect("key generation should succeed");
+        let key_b = config
+            .get_or_generate_key("", "bae-c94acbfa-1234-5678-90ab-cdef12345678")
+            .expect("key generation should succeed");
 
         assert_eq!(key_a, key_b);
     }
@@ -204,12 +207,17 @@ mod tests {
         let config = EncryptionConfig {
             encrypt_doc: false,
             encrypt_fields: vec!["name".to_string(), "email".to_string()],
-            encryption_key: Vec::new(),
         };
 
-        let name_key = config.get_or_generate_key("name", "doc1");
-        let email_key = config.get_or_generate_key("email", "doc1");
-        let doc_level_key = config.get_or_generate_key("other", "doc1");
+        let name_key = config
+            .get_or_generate_key("name", "doc1")
+            .expect("key generation should succeed");
+        let email_key = config
+            .get_or_generate_key("email", "doc1")
+            .expect("key generation should succeed");
+        let doc_level_key = config
+            .get_or_generate_key("other", "doc1")
+            .expect("key generation should succeed");
 
         assert_ne!(name_key, email_key);
         assert_ne!(name_key, doc_level_key);
