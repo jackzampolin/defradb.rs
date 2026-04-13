@@ -78,6 +78,10 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, studio]
     strategy:
       fail-fast: false
+      # The harness still allocates localhost ports via a release-then-spawn
+      # sequence, so matrix fan-out multiplies bind races on the same studio
+      # host. Keep integration suites single-file until the allocator is fixed.
+      max-parallel: 1
       matrix:
         include:
           - suite: rust
@@ -154,14 +158,14 @@ jobs:
           --test basic
           -- --test-threads=1 --skip ::go_
 
-      - name: Run rust integration tests
+      - name: Run rust integration tests (serialized — port race)
         if: matrix.suite == 'rust'
         run: >-
           cargo test -p integration-test
           --test query --test acp --test nac
           --test encryption --test identity
           --test backup --test fts
-          -- --skip ::go_
+          -- --test-threads=1 --skip ::go_
 
       - name: Run rust P2P integration tests
         if: matrix.suite == 'rust'
@@ -185,7 +189,7 @@ jobs:
         run: >-
           cargo test -p integration-test
           --test basic --test query --test acp --test nac --test backup
-          -- go_
+          -- --test-threads=1 go_
           --skip go_acp_link_collection_nonexistent_policy_reject
           --skip go_acp_link_collection_nonexistent_resource_reject
           --skip go_acp_link_collection_missing_read_perm_reject
@@ -197,7 +201,7 @@ jobs:
         run: >-
           cargo test -p integration-test
           --test p2p_iroh
-          -- connection::
+          -- --test-threads=1 connection::
 
       - name: Cleanup
         if: always()
