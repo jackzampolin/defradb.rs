@@ -77,6 +77,7 @@ fn create_test_coordinator(
             collection_store: Arc::new(NoOpCollectionStorage),
             head_provider: Arc::new(NoOpHeadProvider),
         },
+        document_acp: std::sync::OnceLock::new(),
     };
 
     (coordinator, events)

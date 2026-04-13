@@ -471,6 +471,7 @@ mod tests {
             sender_peer: None,
             is_explicit_replicator: false,
             explicit_replay_authorization: None,
+            acp_actor_relationships: None,
         })
         .await
         .unwrap();
@@ -577,6 +578,7 @@ mod tests {
             &config,
             cid,
             BlockMetadata::normal("doc1", "col1", "peer1", Some("sender1"), true),
+            None,
         )
         .await;
 
@@ -599,6 +601,7 @@ mod tests {
             &config,
             cid,
             BlockMetadata::normal("doc1", "col1", "peer1", Some("sender1"), true),
+            None,
         )
         .await;
 
@@ -684,6 +687,7 @@ mod tests {
             sender_peer: None,
             is_explicit_replicator: false,
             explicit_replay_authorization: None,
+            acp_actor_relationships: None,
         })
         .await
         .unwrap();

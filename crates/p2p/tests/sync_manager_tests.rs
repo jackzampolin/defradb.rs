@@ -38,6 +38,7 @@ fn create_test_broadcast(cid: &Cid) -> PushLogBroadcast {
         "collection1".to_string(),
         "creator1".to_string(),
         Bytes::from(BLOCK_DATA.to_vec()),
+        None,
     )
 }
 
@@ -213,6 +214,7 @@ async fn test_process_pushlog_invalid_cid_returns_error() {
         "collection1".to_string(),
         "creator1".to_string(),
         Bytes::from(b"block data".to_vec()),
+        None,
     );
 
     // Processing should fail with InvalidCid error
@@ -240,6 +242,7 @@ async fn test_process_pushlog_cid_mismatch_returns_error() {
         "collection1".to_string(),
         "creator1".to_string(),
         Bytes::from(b"tampered content".to_vec()),
+        None,
     );
 
     let result = manager.process_pushlog(&msg, None, false, None).await;
@@ -425,6 +428,7 @@ async fn test_pending_dag_completes_when_missing_block_arrives_via_pushlog() {
         "collection1".to_string(),
         "creator1".to_string(),
         Bytes::from(composite_block),
+        None,
     );
 
     manager
@@ -453,6 +457,7 @@ async fn test_pending_dag_completes_when_missing_block_arrives_via_pushlog() {
         "collection1".to_string(),
         "creator1".to_string(),
         Bytes::from(field_block),
+        None,
     );
 
     manager
