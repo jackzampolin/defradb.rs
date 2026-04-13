@@ -2,8 +2,8 @@
 
 use super::parse::*;
 use super::types::*;
-use crate::block_ops::decode_priority_varint;
 use crate::error::{Error, Result};
+use db_blocks::decode_priority_varint;
 use chrono::Utc;
 use document::{DocID, Document, NormalValue};
 use query::fetcher::CommitsQueryOptions;

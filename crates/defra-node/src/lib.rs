@@ -687,25 +687,28 @@ impl NodeBuilder {
         .map_err(|e| anyhow::anyhow!("SyncCoordinator creation failed: {}", e))?;
 
         // Failure channel (required by replication loop)
-        let (failure_tx, failure_rx) = tokio::sync::mpsc::channel::<p2p::sync::PushFailure>(1024);
-        coordinator.set_failure_channel(failure_tx);
+        let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         spawn_failure_recorder(store.clone(), failure_rx);
 
         let coordinator = Arc::new(coordinator);
 
         if config.load_persisted_collections {
-            coordinator.load_p2p_collections().await.ok();
+            db_merge::load_persisted_collections(&coordinator)
+                .await
+                .ok();
         } else {
             tracing::info!("skipping persisted P2P collection subscriptions");
         }
 
         // 8. Merge handler
-        let merge_handler_inner = Arc::new(db_merge::DbMergeHandler::new(
+        let replication = db_merge::create_replication_stack(
             database.clone(),
             sync_blockstore,
-        ));
-        let merge_handler = Arc::new(db_merge::AcpMergeHandler::new(merge_handler_inner));
-        let merge_handler_for_acp = merge_handler.clone();
+            coordinator.clone(),
+        );
+        let merge_handler_for_loop = replication.merge_handler.clone();
+        let broadcast_mutator = replication.broadcast_mutator.clone();
+        let merge_handler_for_acp = replication.merge_handler.clone();
 
         // 9. Replication loop (transport-generic)
         let coord_for_repl = coordinator.clone();
@@ -713,7 +716,7 @@ impl NodeBuilder {
             p2p::sync::ReplicationLoop::run(
                 coord_for_repl,
                 sync_events,
-                merge_handler,
+                merge_handler_for_loop,
                 p2p::sync::ReplicationConfig::default(),
             )
             .await;
@@ -730,10 +733,6 @@ impl NodeBuilder {
         let collection_lookup: Arc<dyn CollectionLookup> = database.clone();
 
         // 12. BroadcastMutator (replaces AutoCommitMutator)
-        let broadcast_mutator = Arc::new(db_merge::BroadcastMutator::new(
-            database.clone(),
-            coordinator.clone(),
-        ));
         let broadcast_mutator_for_acp = broadcast_mutator.clone();
         let mutator: Arc<dyn query::DocMutator> = broadcast_mutator;
 
