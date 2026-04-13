@@ -51,21 +51,23 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution(format!("failed to create txn: {}", e))
         })?;
 
-        // Get the datastore
-        let datastore = txn.datastore().map_err(|e| {
-            query::error::QueryError::execution(format!(
-                "failed to get datastore for collection '{}': {}",
-                collection_name, e
-            ))
-        })?;
+        // Scope the datastore so the read-only transaction can be cleanly discarded.
+        let result = {
+            let datastore = txn.datastore().map_err(|e| {
+                query::error::QueryError::execution(format!(
+                    "failed to get datastore for collection '{}': {}",
+                    collection_name, e
+                ))
+            })?;
 
-        // Execute the fetch
-        let result = collection
-            .get_with_datastore(&datastore, doc_id)
-            .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!("get_for_update error: {}", e))
-            });
+            // Execute the fetch
+            collection
+                .get_with_datastore(&datastore, doc_id)
+                .await
+                .map_err(|e| {
+                    query::error::QueryError::execution(format!("get_for_update error: {}", e))
+                })
+        };
 
         // Discard the read-only transaction
         if let Err(e) = txn.discard() {
