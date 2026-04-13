@@ -195,6 +195,8 @@ impl Node {
         database: Arc<db::DB<S>>,
         config: &Config,
         query_setup: &QueryRunnerSetup<S>,
+        acp_setup: &DocumentAcpSetup,
+        zanzibar_store: Arc<dyn acp::ZanzibarStore>,
     ) -> Result<Option<pg_compat::PgServer>>
     where
         S: storage::corekv::Store + 'static,
@@ -211,7 +213,20 @@ impl Node {
                 .map_err(|e: std::net::AddrParseError| {
                     Error::InvalidApiAddress(config.api.pg_address.clone(), e.to_string())
                 })?;
-        let pg_schema_manager = crate::schema_adapter::SchemaAdapter::new_pg_arc(database);
+
+        // Wire ACP into the PG schema manager so `add_schema` validates
+        // `@policy(id:, resource:)` directives at schema-add time (#746).
+        // Mirrors the HTTP server's behavior — without this, PG users would
+        // be able to register schemas referencing nonexistent policies.
+        let pg_schema_manager = if config.acp.document_type != AcpDocumentType::None {
+            let acp_adapter = acp_setup
+                .http_adapter
+                .clone()
+                .unwrap_or_else(|| crate::acp_adapter::AcpAdapter::new_arc(zanzibar_store));
+            crate::schema_adapter::SchemaAdapter::new_pg_arc_with_acp(database, acp_adapter)
+        } else {
+            crate::schema_adapter::SchemaAdapter::new_pg_arc(database)
+        };
 
         Ok(Some(pg_compat::PgServer::new(
             pg_addr,
