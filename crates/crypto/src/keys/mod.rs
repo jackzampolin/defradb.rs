@@ -31,7 +31,10 @@ pub trait Key: defra_core::thread_bounds::MaybeSendSync {
 
 /// Public key operations
 pub trait PublicKey: Key {
-    /// Verify a signature over data using this public key
+    /// Verify a signature over data using this public key.
+    ///
+    /// Returns `Ok(true)` on success and `Err` for malformed signatures or
+    /// cryptographic verification failures.
     fn verify(&self, data: &[u8], signature: &[u8]) -> defra_core::Result<bool>;
 
     /// Generate a DID key representation of this public key

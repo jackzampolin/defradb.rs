@@ -63,16 +63,10 @@ fn verify_signature(
     signing_input: &str,
     signature: &[u8],
 ) -> Result<()> {
-    let verified = public_key
+    public_key
         .verify(signing_input.as_bytes(), signature)
-        .map_err(|e| Error::TokenDecoding(format!("verification error: {}", e)))?;
-
-    if !verified {
-        return Err(Error::TokenDecoding(
-            "signature verification failed".to_string(),
-        ));
-    }
-    Ok(())
+        .map(|_| ())
+        .map_err(|e| Error::TokenDecoding(format!("verification error: {}", e)))
 }
 
 pub(crate) fn decode_ed25519(token: &str) -> Result<IdentityClaims> {
