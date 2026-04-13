@@ -285,12 +285,10 @@ async fn test_signed_proof_wrong_key_fails() {
         result.is_err(),
         "wrong key should return Err, not Ok(false)"
     );
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("identity does not match")
-    );
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("identity does not match"));
 }
 
 #[tokio::test]
