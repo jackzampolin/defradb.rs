@@ -2,6 +2,9 @@
 //!
 //! Computes a Merkle root from collected CIDs, signs the root with the
 //! node's private key, and provides verification of batch signatures.
+//!
+//! This module is intentionally kept as a live compatibility surface for the
+//! Rust HTTP and FFI batch-signing endpoints used by the indexer flow.
 
 use cid::Cid;
 use serde::{Deserialize, Serialize};
