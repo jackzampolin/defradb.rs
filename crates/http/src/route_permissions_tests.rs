@@ -156,6 +156,17 @@ mod tests {
     }
 
     #[test]
+    fn acp_status_route_uses_dac_status_permission() {
+        // Regression test for #758: the route was missing from the
+        // permission table and falling through to DocumentRead, which
+        // over-restricted callers that only had DacStatus.
+        assert_eq!(
+            route_permission("/api/v0/acp/status", &Method::GET),
+            RoutePermission::Required(NodePermission::DacStatus)
+        );
+    }
+
+    #[test]
     fn unknown_route_gets_safe_default() {
         assert_eq!(
             route_permission("/api/v0/unknown", &Method::GET),
@@ -346,6 +357,11 @@ mod tests {
                 RoutePermission::Required(NodePermission::P2pSyncDocuments),
             ),
             // ACP
+            (
+                "/api/v0/acp/status",
+                Method::GET,
+                RoutePermission::Required(NodePermission::DacStatus),
+            ),
             (
                 "/api/v0/acp/policy",
                 Method::POST,
