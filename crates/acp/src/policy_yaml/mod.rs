@@ -142,15 +142,19 @@ pub fn build_policy(parsed: &ParsedPolicy, counter: u64) -> crate::error::Result
         }
 
         for perm in &res.permissions {
-            if !perm.expr.is_empty() {
+            let expression = if perm.expr.is_empty() {
+                // A permission with no explicit expression is still valid and
+                // defaults to owner-only access in Go.
+                RelationExpression::computed_userset("owner")
+            } else {
                 let user_expr = RelationExpression::parse(&perm.expr)?;
                 // DPI: every permission must include 'owner' in its expression
-                let expression = RelationExpression::Union(vec![
+                RelationExpression::Union(vec![
                     RelationExpression::computed_userset("owner"),
                     user_expr,
-                ]);
-                relations.push(Relation::computed(&perm.name, expression));
-            }
+                ])
+            };
+            relations.push(Relation::computed(&perm.name, expression));
         }
 
         resources.push(Resource {

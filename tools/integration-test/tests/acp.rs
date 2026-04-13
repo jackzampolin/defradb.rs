@@ -22,8 +22,14 @@ mod negative_p2p;
 mod node_access;
 #[path = "acp/p2p.rs"]
 mod p2p;
+#[path = "acp/p2p_lifecycle.rs"]
+mod p2p_lifecycle;
 #[path = "acp/policy_validation.rs"]
 mod policy_validation;
+#[path = "acp/register_ops.rs"]
+mod register_ops;
+#[path = "acp/relation_queries.rs"]
+mod relation_queries;
 #[path = "acp/relationship.rs"]
 mod relationship;
 #[path = "acp/revoke_lifecycle.rs"]

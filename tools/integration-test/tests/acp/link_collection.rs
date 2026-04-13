@@ -98,6 +98,138 @@ resources:
 "#
 }
 
+/// Policy with an admin relation that manages reader.
+fn users_policy_with_managed_relation() -> &'static str {
+    r#"
+description: a policy
+name: test
+resources:
+  - name: users
+    permissions:
+      - name: delete
+      - name: read
+        expr: reader
+      - name: update
+    relations:
+      - name: admin
+        manages:
+          - reader
+        types:
+          - actor
+      - name: reader
+        types:
+          - actor
+"#
+}
+
+/// Policy with multiple resources where only `users` is linked by the schema.
+fn users_policy_with_multiple_resources() -> &'static str {
+    r#"
+description: a policy
+name: test
+resources:
+  - name: books
+    permissions:
+      - name: delete
+      - name: read
+      - name: update
+  - name: users
+    permissions:
+      - name: delete
+      - name: read
+        expr: reader
+      - name: update
+    relations:
+      - name: reader
+        types:
+          - actor
+"#
+}
+
+/// Policy with one invalid and one valid resource; the valid one should still link.
+fn users_policy_with_partial_dri() -> &'static str {
+    r#"
+name: test
+description: A Partially DRI Compliant Policy
+resources:
+  - name: usersInvalid
+    permissions:
+      - name: delete
+        expr: reader
+      - name: update
+        expr: reader
+    relations:
+      - name: reader
+        types:
+          - actor
+  - name: usersValid
+    permissions:
+      - name: delete
+      - name: read
+        expr: reader
+      - name: update
+    relations:
+      - name: reader
+        types:
+          - actor
+"#
+}
+
+/// Policy where owner authority is omitted from the DRI permissions.
+fn users_policy_with_owner_bad_on_update() -> &'static str {
+    r#"
+description: a policy
+name: test
+resources:
+  - name: users
+    permissions:
+      - name: delete
+      - name: read
+      - name: update
+        expr: ownerBad
+    relations:
+      - name: ownerBad
+        types:
+          - actor
+"#
+}
+
+fn users_policy_with_owner_bad_on_read() -> &'static str {
+    r#"
+description: a policy
+name: test
+resources:
+  - name: users
+    permissions:
+      - name: delete
+      - name: read
+        expr: ownerBad
+      - name: update
+    relations:
+      - name: ownerBad
+        types:
+          - actor
+"#
+}
+
+fn users_policy_with_owner_bad_on_delete() -> &'static str {
+    r#"
+description: a policy
+name: test
+resources:
+  - name: users
+    permissions:
+      - name: delete
+        expr: ownerBad
+      - name: read
+      - name: update
+    relations:
+      - name: ownerBad
+        types:
+          - actor
+"#
+}
+
 /// Policy missing the `read` permission entirely — DPI violation.
 fn users_policy_missing_read() -> &'static str {
     r#"
@@ -263,6 +395,212 @@ async fn acp_link_collection_extra_permissions_accept(cluster: TestCluster) {
 for_each_runtime!(
     acp_link_collection_extra_permissions_accept,
     acp_link_collection_extra_permissions_accept,
+    .with_acp_local()
+);
+
+// Port of accept_managed_relation_on_dri_test.go
+async fn acp_link_collection_managed_relation_accept(cluster: TestCluster) {
+    let node = cluster.client(0);
+    let alice = generate_identity(node.binary_path()).expect("alice identity");
+
+    let policy_id = add_users_policy(
+        &node,
+        users_policy_with_managed_relation(),
+        &alice.private_key_hex,
+    );
+
+    let sdl = format!(
+        r#"type Users @policy(id: "{}", resource: "users") {{ name: String  age: Int }}"#,
+        policy_id
+    );
+    node.schema_add_with_identity(&sdl, &alice.private_key_hex)
+        .expect("managed relation on the DRI must still be accepted");
+
+    assert!(
+        type_exists(&node, "Users"),
+        "Users type must be registered when the DRI includes a managed relation"
+    );
+}
+
+for_each_runtime!(
+    acp_link_collection_managed_relation_accept,
+    acp_link_collection_managed_relation_accept,
+    .with_acp_local()
+);
+
+// Port of accept_mixed_resources_on_partial_dri_test.go
+async fn acp_link_collection_partial_dri_valid_resource_accept(cluster: TestCluster) {
+    let node = cluster.client(0);
+    let alice = generate_identity(node.binary_path()).expect("alice identity");
+
+    let policy_id = add_users_policy(
+        &node,
+        users_policy_with_partial_dri(),
+        &alice.private_key_hex,
+    );
+
+    let sdl = format!(
+        r#"type Users @policy(id: "{}", resource: "usersValid") {{ name: String  age: Int }}"#,
+        policy_id
+    );
+    node.schema_add_with_identity(&sdl, &alice.private_key_hex)
+        .expect("valid resource on a partially DRI-compliant policy must be accepted");
+
+    assert!(
+        type_exists(&node, "Users"),
+        "Users type must be registered when linking to the valid resource on a mixed policy"
+    );
+}
+
+for_each_runtime!(
+    acp_link_collection_partial_dri_valid_resource_accept,
+    acp_link_collection_partial_dri_valid_resource_accept,
+    .with_acp_local()
+);
+
+// Port of accept_multi_resources_on_dri_test.go (first case)
+async fn acp_link_collection_multiple_resources_accept(cluster: TestCluster) {
+    let node = cluster.client(0);
+    let alice = generate_identity(node.binary_path()).expect("alice identity");
+
+    let policy_id = add_users_policy(
+        &node,
+        users_policy_with_multiple_resources(),
+        &alice.private_key_hex,
+    );
+
+    let sdl = format!(
+        r#"type Users @policy(id: "{}", resource: "users") {{ name: String  age: Int }}"#,
+        policy_id
+    );
+    node.schema_add_with_identity(&sdl, &alice.private_key_hex)
+        .expect("users resource on a multi-resource policy must be accepted");
+
+    assert!(
+        type_exists(&node, "Users"),
+        "Users type must be registered when linking to one resource on a multi-resource policy"
+    );
+}
+
+for_each_runtime!(
+    acp_link_collection_multiple_resources_accept,
+    acp_link_collection_multiple_resources_accept,
+    .with_acp_local()
+);
+
+// Port of accept_multi_resources_on_dri_test.go (both resources used)
+async fn acp_link_collection_multiple_resources_both_used_accept(cluster: TestCluster) {
+    let node = cluster.client(0);
+    let alice = generate_identity(node.binary_path()).expect("alice identity");
+
+    let policy_id = add_users_policy(
+        &node,
+        users_policy_with_multiple_resources(),
+        &alice.private_key_hex,
+    );
+
+    let users_sdl = format!(
+        r#"type Users @policy(id: "{}", resource: "users") {{ name: String  age: Int }}"#,
+        policy_id
+    );
+    node.schema_add_with_identity(&users_sdl, &alice.private_key_hex)
+        .expect("Users schema should be accepted");
+
+    let books_sdl = format!(
+        r#"type Books @policy(id: "{}", resource: "books") {{ name: String }}"#,
+        policy_id
+    );
+    node.schema_add_with_identity(&books_sdl, &alice.private_key_hex)
+        .expect("Books schema should also be accepted with the same multi-resource policy");
+
+    assert!(type_exists(&node, "Users"));
+    assert!(type_exists(&node, "Books"));
+}
+
+for_each_runtime!(
+    acp_link_collection_multiple_resources_both_used_accept,
+    acp_link_collection_multiple_resources_both_used_accept,
+    .with_acp_local()
+);
+
+// Port of accept_permission_with_omitted_owner_authority_test.go (update case)
+async fn acp_link_collection_owner_bad_update_accept(cluster: TestCluster) {
+    let node = cluster.client(0);
+    let alice = generate_identity(node.binary_path()).expect("alice identity");
+
+    let policy_id = add_users_policy(
+        &node,
+        users_policy_with_owner_bad_on_update(),
+        &alice.private_key_hex,
+    );
+
+    let sdl = format!(
+        r#"type Users @policy(id: "{}", resource: "users") {{ name: String  age: Int }}"#,
+        policy_id
+    );
+    node.schema_add_with_identity(&sdl, &alice.private_key_hex)
+        .expect("ownerBad update expression on the DRI must still be accepted");
+
+    assert!(type_exists(&node, "Users"));
+}
+
+for_each_runtime!(
+    acp_link_collection_owner_bad_update_accept,
+    acp_link_collection_owner_bad_update_accept,
+    .with_acp_local()
+);
+
+// Port of accept_permission_with_omitted_owner_authority_test.go (read case)
+async fn acp_link_collection_owner_bad_read_accept(cluster: TestCluster) {
+    let node = cluster.client(0);
+    let alice = generate_identity(node.binary_path()).expect("alice identity");
+
+    let policy_id = add_users_policy(
+        &node,
+        users_policy_with_owner_bad_on_read(),
+        &alice.private_key_hex,
+    );
+
+    let sdl = format!(
+        r#"type Users @policy(id: "{}", resource: "users") {{ name: String  age: Int }}"#,
+        policy_id
+    );
+    node.schema_add_with_identity(&sdl, &alice.private_key_hex)
+        .expect("ownerBad read expression on the DRI must still be accepted");
+
+    assert!(type_exists(&node, "Users"));
+}
+
+for_each_runtime!(
+    acp_link_collection_owner_bad_read_accept,
+    acp_link_collection_owner_bad_read_accept,
+    .with_acp_local()
+);
+
+// Port of accept_permission_with_omitted_owner_authority_test.go (delete case)
+async fn acp_link_collection_owner_bad_delete_accept(cluster: TestCluster) {
+    let node = cluster.client(0);
+    let alice = generate_identity(node.binary_path()).expect("alice identity");
+
+    let policy_id = add_users_policy(
+        &node,
+        users_policy_with_owner_bad_on_delete(),
+        &alice.private_key_hex,
+    );
+
+    let sdl = format!(
+        r#"type Users @policy(id: "{}", resource: "users") {{ name: String  age: Int }}"#,
+        policy_id
+    );
+    node.schema_add_with_identity(&sdl, &alice.private_key_hex)
+        .expect("ownerBad delete expression on the DRI must still be accepted");
+
+    assert!(type_exists(&node, "Users"));
+}
+
+for_each_runtime!(
+    acp_link_collection_owner_bad_delete_accept,
+    acp_link_collection_owner_bad_delete_accept,
     .with_acp_local()
 );
 

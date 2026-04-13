@@ -95,10 +95,6 @@ async fn setup_sourcehub_cluster() -> (TestCluster, String, String) {
         .expect("add policy on node0");
     let policy_id = extract_policy_id(&policy_result);
 
-    // Cache policy on node1 for local ACP evaluation
-    let _ = node1.acp_policy_add(USER_ACP_POLICY, &owner_key);
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
     // Deploy schema on both nodes
     let schema = users_schema_with_policy(&policy_id);
     node0
@@ -164,6 +160,11 @@ async fn subscribe_add_get_permissioned_local() {
         Ok(policy_output) => {
             let policy_id = extract_policy_id(&policy_output);
             let schema = ACP_SCHEMA.replace("%POLICY_ID%", &policy_id);
+            let node1 = cluster.client(1);
+
+            node1
+                .acp_policy_add(ACP_POLICY, id_key)
+                .expect("add ACP policy on node1");
 
             for i in 0..2 {
                 cluster
@@ -173,7 +174,6 @@ async fn subscribe_add_get_permissioned_local() {
             }
 
             let addr1 = extract_p2p_addr(&cluster, 1);
-            let node1 = cluster.client(1);
 
             node0.p2p_connect(&[&addr1]).expect("connect");
             node0.p2p_collection_add(&["Users"]).expect("col node0");

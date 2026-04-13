@@ -56,6 +56,31 @@ impl SourceHubDocumentACP {
         self.provider.create_policy(policy_yaml).await
     }
 
+    pub async fn get_policy(
+        &self,
+        policy_id: &str,
+    ) -> std::result::Result<Option<acp::Policy>, ProviderError> {
+        let Some(info) = self.provider.query_policy(policy_id).await? else {
+            return Ok(None);
+        };
+
+        let Some(raw_policy) = info.raw_policy else {
+            return Err(ProviderError::Query(format!(
+                "policy '{}' is not available from the configured provider",
+                policy_id
+            )));
+        };
+
+        acp::policy_yaml::check_duplicate_yaml_keys(&raw_policy)
+            .map_err(|e| ProviderError::Query(format!("policy parse: {}", e)))?;
+        let parsed = acp::policy_yaml::parse_policy_yaml(&raw_policy)
+            .map_err(|e| ProviderError::Query(format!("policy parse: {}", e)))?;
+        let mut policy = acp::policy_yaml::build_policy(&parsed, 1)
+            .map_err(|e| ProviderError::Query(format!("policy parse: {}", e)))?;
+        policy.id = info.id;
+        Ok(Some(policy))
+    }
+
     async fn create_bearer_token(&self, did: &str) -> std::result::Result<String, acp::Error> {
         self.provider
             .create_bearer_token(did)
