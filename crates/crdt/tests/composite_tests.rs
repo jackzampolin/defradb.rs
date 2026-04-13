@@ -8,6 +8,7 @@
 
 use crdt::composite::{CompositeDAG, CompositeDelta, FieldDelta};
 use crdt::counter::NumericKind;
+use crdt::counter::DEFAULT_NONCE_RETENTION_LIMIT;
 use crdt::traits::{Context, ReplicatedData};
 use defra_core::types::DocId;
 use std::collections::HashMap;
@@ -138,6 +139,79 @@ async fn test_composite_field_type_mismatch_counter_to_lww() {
         .unwrap_err()
         .to_string()
         .contains("field type mismatch"));
+}
+
+#[tokio::test]
+async fn test_composite_counter_nonce_gc_window_boundary() {
+    let store = MemoryStore::new();
+    let mut composite = CompositeDAG::new(DocId::new_unchecked("doc1"), "v1".to_string());
+    composite.register_counter_field("count".to_string(), true, NumericKind::Int64);
+
+    let ctx = Context {
+        doc_id: DocId::new_unchecked("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let retained = FieldDelta::Counter {
+        priority: 1,
+        nonce: 1,
+        data: 1i64.to_be_bytes().to_vec(),
+    };
+
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    let mut first = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), 1).unwrap();
+    first.add_field_delta("count", retained.clone()).unwrap();
+    composite.merge(&mut *txn, &ctx, &first).await.unwrap();
+
+    for nonce in 2..=DEFAULT_NONCE_RETENTION_LIMIT {
+        let mut delta = CompositeDelta::new(b"doc1".to_vec(), "v1".to_string(), nonce).unwrap();
+        delta
+            .add_field_delta(
+                "count",
+                FieldDelta::Counter {
+                    priority: nonce,
+                    nonce: nonce as i64,
+                    data: 1i64.to_be_bytes().to_vec(),
+                },
+            )
+            .unwrap();
+        composite.merge(&mut *txn, &ctx, &delta).await.unwrap();
+    }
+
+    let replay_within_window = composite.merge(&mut *txn, &ctx, &first).await.unwrap();
+    assert!(matches!(
+        replay_within_window,
+        crdt::MergeResult::RejectedTieBreak
+    ));
+    let count_bytes = txn.get(b"/data/v1/doc1/count").await.unwrap().unwrap();
+    let count = i64::from_be_bytes(count_bytes.try_into().unwrap());
+    assert_eq!(count, DEFAULT_NONCE_RETENTION_LIMIT as i64);
+
+    let mut evicting = CompositeDelta::new(
+        b"doc1".to_vec(),
+        "v1".to_string(),
+        DEFAULT_NONCE_RETENTION_LIMIT + 1,
+    )
+    .unwrap();
+    evicting
+        .add_field_delta(
+            "count",
+            FieldDelta::Counter {
+                priority: DEFAULT_NONCE_RETENTION_LIMIT + 1,
+                nonce: (DEFAULT_NONCE_RETENTION_LIMIT + 1) as i64,
+                data: 1i64.to_be_bytes().to_vec(),
+            },
+        )
+        .unwrap();
+    composite.merge(&mut *txn, &ctx, &evicting).await.unwrap();
+
+    let replay_after_eviction = composite.merge(&mut *txn, &ctx, &first).await.unwrap();
+    assert!(matches!(replay_after_eviction, crdt::MergeResult::Applied));
+    let count_bytes = txn.get(b"/data/v1/doc1/count").await.unwrap().unwrap();
+    let count = i64::from_be_bytes(count_bytes.try_into().unwrap());
+    assert_eq!(count, DEFAULT_NONCE_RETENTION_LIMIT as i64 + 2);
 }
 
 #[tokio::test]

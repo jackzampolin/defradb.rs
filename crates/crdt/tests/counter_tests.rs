@@ -7,6 +7,7 @@
 //! - Float64 support
 //! - Validation and error cases
 
+use crdt::counter::DEFAULT_NONCE_RETENTION_LIMIT;
 use crdt::traits::{Context, MergeResult, ReplicatedData, ValueReader};
 use crdt::{Counter, CounterDelta, LwwDelta, NumericKind};
 use defra_core::types::DocId;
@@ -104,6 +105,87 @@ async fn test_counter_idempotency() {
     assert_eq!(value, 5);
 
     txn.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_counter_nonce_gc_window_boundary() {
+    let store = MemoryStore::new();
+    let counter = Counter::new(
+        "v1".to_string(),
+        b"doc1",
+        "count".to_string(),
+        true,
+        NumericKind::Int64,
+    )
+    .unwrap();
+
+    let ctx = Context {
+        doc_id: DocId::new_unchecked("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    let retained_delta = CounterDelta::new_int64(
+        b"doc1".to_vec(),
+        "count".to_string(),
+        1,
+        1,
+        "v1".to_string(),
+        1,
+    )
+    .unwrap();
+    counter
+        .merge(&mut *txn, &ctx, &retained_delta)
+        .await
+        .unwrap();
+
+    for nonce in 2..=DEFAULT_NONCE_RETENTION_LIMIT {
+        let delta = CounterDelta::new_int64(
+            b"doc1".to_vec(),
+            "count".to_string(),
+            nonce,
+            nonce as i64,
+            "v1".to_string(),
+            1,
+        )
+        .unwrap();
+        counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+    }
+
+    let replay_within_window = counter
+        .merge(&mut *txn, &ctx, &retained_delta)
+        .await
+        .unwrap();
+    assert!(matches!(
+        replay_within_window,
+        MergeResult::SkippedAlreadyApplied { nonce: 1 }
+    ));
+
+    let evicting_delta = CounterDelta::new_int64(
+        b"doc1".to_vec(),
+        "count".to_string(),
+        DEFAULT_NONCE_RETENTION_LIMIT + 1,
+        (DEFAULT_NONCE_RETENTION_LIMIT + 1) as i64,
+        "v1".to_string(),
+        1,
+    )
+    .unwrap();
+    counter
+        .merge(&mut *txn, &ctx, &evicting_delta)
+        .await
+        .unwrap();
+
+    let replay_after_eviction = counter
+        .merge(&mut *txn, &ctx, &retained_delta)
+        .await
+        .unwrap();
+    assert!(matches!(replay_after_eviction, MergeResult::Applied));
+
+    let value_bytes = counter.value(&*txn).await.unwrap();
+    let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
+    assert_eq!(value, DEFAULT_NONCE_RETENTION_LIMIT as i64 + 2);
 }
 
 #[tokio::test]
