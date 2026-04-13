@@ -36,6 +36,7 @@ mod persistent;
 pub mod policy_yaml;
 mod relation;
 mod store;
+mod validation;
 pub mod zanzibar;
 
 pub use auth_error::normalize_auth_error;
@@ -49,6 +50,7 @@ pub use relation::{
     RelationTuple, DELETER_RELATION, OWNER_RELATION, READER_RELATION, UPDATER_RELATION,
 };
 pub use store::AcpStore;
+pub use validation::{validate_resource_interface, REQUIRED_DOCUMENT_PERMISSIONS};
 
 // Re-export key zanzibar engine types from the standalone zanzibar crate
 pub use zanzibar::PersistentZanzibarStore;

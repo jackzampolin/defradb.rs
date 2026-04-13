@@ -87,4 +87,18 @@ impl AcpOperations for AcpAdapter {
 
         Ok(policy.as_ref().map(policy_to_info))
     }
+
+    async fn validate_resource_interface(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+    ) -> Result<(), String> {
+        let policy = self.store.get_policy(policy_id).await.map_err(|e| {
+            format!(
+                "policy validation failed with acp: {}. PolicyID: {}",
+                e, policy_id
+            )
+        })?;
+        acp::validate_resource_interface(policy_id, resource_name, policy.as_ref())
+    }
 }
