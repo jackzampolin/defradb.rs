@@ -1015,7 +1015,6 @@ mod tests {
         defra_core::encryption::EncryptionConfig {
             encrypt_doc: true,
             encrypt_fields: vec![],
-            encryption_key: vec![0xAB; 32],
         }
     }
 
