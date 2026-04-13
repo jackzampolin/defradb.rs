@@ -27,7 +27,8 @@ impl<S: Store> CommitsFetcher<S> {
                 Error::Serialization("cid either does not exist or belong to document".to_string())
             })?;
 
-        let block = Block::from_dag_cbor(&data)?;
+        let block = Block::from_dag_cbor(&data)
+            .map_err(|e| Error::Serialization(format!("Failed to decode block: {}", e)))?;
         tracing::debug!(
             cid = %cid,
             data_len = data.len(),
@@ -52,7 +53,8 @@ impl<S: Store> CommitsFetcher<S> {
             .map_err(Error::Storage)?
             .ok_or_else(|| Error::Serialization("signature block not found".to_string()))?;
 
-        Ok(Signature::from_dag_cbor(&data)?)
+        Signature::from_dag_cbor(&data)
+            .map_err(|e| Error::Serialization(format!("Failed to decode signature block: {}", e)))
     }
 
     /// Convert a block to a commit document.

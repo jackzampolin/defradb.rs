@@ -184,11 +184,9 @@ mod tests {
         );
 
         assert!(matches!(error, Error::CollectionSchemaJson { .. }));
-        assert!(
-            error
-                .to_string()
-                .starts_with("failed to deserialize schema for collection 'users': ")
-        );
+        assert!(error
+            .to_string()
+            .starts_with("failed to deserialize schema for collection 'users': "));
     }
 
     #[test]
@@ -197,11 +195,9 @@ mod tests {
         let error = Error::lens_config_json("failed to serialize lens config", source);
 
         assert!(matches!(error, Error::LensConfigJson { .. }));
-        assert!(
-            error
-                .to_string()
-                .starts_with("failed to serialize lens config: ")
-        );
+        assert!(error
+            .to_string()
+            .starts_with("failed to serialize lens config: "));
     }
 
     #[test]
@@ -210,8 +206,6 @@ mod tests {
         let error = Error::text_decode("invalid version encoding", source);
 
         assert!(matches!(error, Error::TextDecode { .. }));
-        assert!(error
-            .to_string()
-            .starts_with("invalid version encoding: "));
+        assert!(error.to_string().starts_with("invalid version encoding: "));
     }
 }
