@@ -36,6 +36,36 @@ impl SourceHubAcpAdapter {
     ) -> Arc<dyn AcpOperations> {
         Arc::new(Self::new(sourcehub_acp, local_store))
     }
+
+    async fn get_or_cache_policy(&self, policy_id: &str) -> Result<Option<Policy>, String> {
+        if let Some(policy) = self
+            .local_store
+            .get_policy(policy_id)
+            .await
+            .map_err(|e| format!("failed to get policy from local cache: {}", e))?
+        {
+            return Ok(Some(policy));
+        }
+
+        let Some(policy) = self
+            .sourcehub_acp
+            .get_policy(policy_id)
+            .await
+            .map_err(|e| format!("failed to query SourceHub policy: {}", e))?
+        else {
+            return Ok(None);
+        };
+
+        let options = StorePolicyOptions::new()
+            .with_validation()
+            .with_dpi_enforcement();
+        self.local_store
+            .store_policy_with_options(&policy, &options)
+            .await
+            .map_err(|e| format!("failed to cache SourceHub policy: {}", e))?;
+
+        Ok(Some(policy))
+    }
 }
 
 fn policy_to_info(policy: &Policy) -> PolicyInfo {
@@ -125,11 +155,7 @@ impl AcpOperations for SourceHubAcpAdapter {
         policy_id: &str,
         resource_name: &str,
     ) -> Result<(), String> {
-        // The SourceHub adapter caches policies in its local store after a
-        // successful on-chain `add_policy`. Query the local cache — same
-        // semantics as `get_policy` above, and matches Go's pattern of
-        // validating against the most recently observed policy state.
-        let policy = self.local_store.get_policy(policy_id).await.map_err(|e| {
+        let policy = self.get_or_cache_policy(policy_id).await.map_err(|e| {
             format!(
                 "policy validation failed with acp: {}. PolicyID: {}",
                 e, policy_id

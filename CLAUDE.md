@@ -145,7 +145,8 @@ Rust node via CLI + HTTP API. Each area is a `[[test]]` binary with submodules:
 |------|--------|---------|
 | Basic | `--test basic` | smoke, document_lifecycle, transactions, collection_management, multi_collection, truncate_parallel |
 | Query | `--test query` | view, lens, lens_persistence, sdl_generate, index_management, explain_nested, subscription_docid, stubs |
-| ACP | `--test acp` | basic, multi_identity, multi_role, revoke_lifecycle, node_access, p2p, negative, negative_p2p, xarchive_access_matrix, stubs |
+| ACP | `--test acp` | audit, basic, custom_policy, index, link_collection, multi_identity, multi_role, negative, negative_p2p, node_access, p2p, p2p_lifecycle, policy_validation, register_ops, relation_queries, relationship, revoke_lifecycle, transaction_rollback, xarchive_access_matrix |
+| P2P Iroh ACP | `--test p2p_iroh` | acp, dac, nac, trust_boundary |
 | NAC | `--test nac` | document_acp, operations, core_operations, p2p_management, relation_admin, cross_compartment_isolation, policy_evolution |
 | P2P | `--test p2p` | document, sync, management, trust_boundary, replication, replication_advanced, stubs |
 | FTS | `--test fts` | basic, edge_cases, lifecycle, scoring |

@@ -273,6 +273,7 @@ impl SourceHubProvider for CosmosProvider {
             return Ok(Some(ProviderPolicyInfo {
                 id: cached.id,
                 name: cached.name,
+                raw_policy: None,
             }));
         }
 
@@ -288,6 +289,7 @@ impl SourceHubProvider for CosmosProvider {
         Ok(result.map(|p| ProviderPolicyInfo {
             id: p.id,
             name: p.name,
+            raw_policy: p.raw_policy,
         }))
     }
 

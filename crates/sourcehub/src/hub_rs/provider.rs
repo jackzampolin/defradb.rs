@@ -418,6 +418,7 @@ impl SourceHubProvider for HubRsProvider {
             Ok(Some(ProviderPolicyInfo {
                 id: policy_id.to_string(),
                 name: policy_id.to_string(),
+                raw_policy: None,
             }))
         } else {
             Ok(None)

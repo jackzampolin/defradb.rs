@@ -50,15 +50,15 @@ impl SourceHubClient {
             return Err(ClientError::QueryFailed(text));
         }
         let body: serde_json::Value = resp.json().await?;
-        // Extract policy ID from response
-        let record = &body["record"];
-        let policy = &record["policy"];
+        let record = body.get("record").unwrap_or(&body);
+        let policy = record.get("policy").unwrap_or(&body["policy"]);
         if policy.is_null() {
             return Ok(None);
         }
         Ok(Some(PolicyInfo {
             id: policy_id.to_string(),
             name: policy["name"].as_str().unwrap_or("").to_string(),
+            raw_policy: record["raw_policy"].as_str().map(ToOwned::to_owned),
         }))
     }
 
@@ -285,6 +285,7 @@ impl SourceHubClient {
 pub(crate) struct PolicyInfo {
     pub id: String,
     pub name: String,
+    pub raw_policy: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
