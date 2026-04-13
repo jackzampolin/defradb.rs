@@ -95,6 +95,10 @@ impl<S: Store + 'static> DbTransactionContext<S> {
     pub(crate) fn fetcher_shared_txn(&self) -> Arc<async_lock::Mutex<Option<DbTxn<S>>>> {
         self.fetcher.shared_txn()
     }
+
+    pub(crate) fn lens_store(&self) -> Arc<dyn lens::TransformStore> {
+        self.fetcher.lens_store()
+    }
 }
 
 impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {

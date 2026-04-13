@@ -81,6 +81,7 @@ pub(crate) mod patch;
 pub mod schema_loader;
 pub mod txn;
 pub(crate) mod txn_context;
+pub(crate) mod txn_lens_store;
 pub(crate) mod txn_registry;
 pub(crate) mod versioned_fetcher;
 pub(crate) mod view_ops;

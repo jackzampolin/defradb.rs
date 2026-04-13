@@ -82,6 +82,10 @@ impl<S: Store> LensedDocFetcher<S> {
     pub(crate) fn shared_txn(&self) -> Arc<TokioMutex<Option<DbTxn<S>>>> {
         self.txn.clone()
     }
+
+    pub(crate) fn lens_store(&self) -> Arc<dyn TransformStore> {
+        self.lens_store.clone()
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

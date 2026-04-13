@@ -12,6 +12,11 @@ use crate::error::{Error, Result};
 use crate::txn::DbTxn;
 use crate::DB;
 
+pub(crate) struct SetMigrationInTxnOutcome {
+    pub(crate) transform_id: TransformId,
+    pub(crate) updated_destination: schema::CollectionVersion,
+}
+
 impl<S: Store> DB<S> {
     /// Set a migration between two schema versions.
     ///
@@ -245,6 +250,21 @@ impl<S: Store> DB<S> {
         txn: &DbTxn<S>,
         config: LensConfig,
     ) -> Result<TransformId> {
+        self.set_migration_in_txn_with_store(txn, self.lens_store.clone(), config)
+            .await
+            .map(|outcome| outcome.transform_id)
+    }
+
+    #[instrument(skip(self, txn, lens_store, config), fields(
+        source = %config.source_schema_version_id,
+        dest = %config.destination_schema_version_id
+    ))]
+    pub(crate) async fn set_migration_in_txn_with_store(
+        &self,
+        txn: &DbTxn<S>,
+        lens_store: std::sync::Arc<dyn lens::TransformStore>,
+        config: LensConfig,
+    ) -> Result<SetMigrationInTxnOutcome> {
         let dest_version_id = config.destination_schema_version_id.clone();
         let source_version_id = config.source_schema_version_id.clone();
         let config_for_persistence = config.clone();
@@ -350,11 +370,7 @@ impl<S: Store> DB<S> {
             }
         }
 
-        let transform_id = self
-            .lens_store
-            .add(config)
-            .await
-            .map_err(|e| Error::Lens(e.to_string()))?;
+        let transform_id = lens_store.add(config).await.map_err(Error::from)?;
 
         dst_col.previous_version = Some(CollectionSource {
             source_collection_id: source_col.version_id.clone(),
@@ -369,7 +385,6 @@ impl<S: Store> DB<S> {
             "set_migration_in_txn: storing destination version with transform"
         );
 
-        let collection_name = dst_col.name.clone();
         let dst_key = CollectionKey::new(&dest_version_id);
         let dst_data = serde_json::to_vec(&dst_col).map_err(|e| {
             Error::Serialization(format!(
@@ -412,21 +427,9 @@ impl<S: Store> DB<S> {
                 .map_err(Error::Storage)?;
         }
 
-        if !collection_name.is_empty() {
-            let mut cache = self.collections.write().map_err(|e| {
-                tracing::error!(error = ?e, "Collection cache lock poisoned during set_migration_in_txn");
-                Error::LockPoisoned(
-                    "collection cache lock poisoned during set_migration_in_txn".into(),
-                )
-            })?;
-
-            if let Some(cached) = cache.get(&collection_name) {
-                if cached.schema().version_id == dest_version_id {
-                    cache.insert(collection_name.clone(), Collection::new(dst_col));
-                }
-            }
-        }
-
-        Ok(transform_id)
+        Ok(SetMigrationInTxnOutcome {
+            transform_id,
+            updated_destination: dst_col,
+        })
     }
 }

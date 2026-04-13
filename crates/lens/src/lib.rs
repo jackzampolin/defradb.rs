@@ -19,6 +19,8 @@ pub use doc::{LensDoc, DELETED_FIELD, DOC_ID_FIELD};
 pub use error::{Error, Result};
 pub use history::{build_targeted_history, CollectionHistoryLink, TargetedHistoryLink};
 pub use pipeline::{Lens, LensInput};
-pub use store::{MemoryTransformStore, TransformId, TransformStore};
+pub use store::{
+    LensDocResultStream, LensDocStream, MemoryTransformStore, TransformId, TransformStore,
+};
 #[cfg(feature = "wasmtime-runtime")]
 pub use wasm::{WasmSandboxConfig, WasmTransformStore};
