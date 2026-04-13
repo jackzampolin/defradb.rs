@@ -120,11 +120,6 @@ impl NodeBuilder {
         self
     }
 
-    pub fn with_encryption_key(mut self, key: Vec<u8>) -> Self {
-        self.config.encryption_key = Some(key);
-        self
-    }
-
     pub async fn build(mut self) -> Result<EmbeddedNode<EmbeddedStore>> {
         let (store, persistence) = if let Some(path) = self.data_path.take() {
             if let Some(parent) = path.parent() {
@@ -302,7 +297,7 @@ where
         db::DbCollectionProvider::new_arc(database.clone());
     let txn_registry = Arc::new(db::DbTransactionRegistry::new(database.clone()));
 
-    let mut query_runner = query::QueryRunner::with_arc_registry_and_provider(
+    let query_runner = query::QueryRunner::with_arc_registry_and_provider(
         fetcher,
         collection_provider,
         txn_registry.clone(),
@@ -315,10 +310,6 @@ where
     )
     .with_acp(document_acp.clone())
     .with_lens_store(database.lens_store().clone());
-
-    if let Some(key) = config.encryption_key {
-        query_runner = query_runner.with_encryption_key(key);
-    }
 
     let query_runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
 

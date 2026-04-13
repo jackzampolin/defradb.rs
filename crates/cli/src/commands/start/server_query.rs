@@ -47,8 +47,6 @@ impl Node {
         .with_query_timeout(config.api.query_timeout);
 
         if !config.datastore.no_encryption {
-            let encryption_key = b"examplekey1234567890examplekey12".to_vec();
-            query_runner = query_runner.with_encryption_key(encryption_key);
             info!("CRDT delta encryption enabled");
         }
 

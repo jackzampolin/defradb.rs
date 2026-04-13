@@ -3699,6 +3699,7 @@ dependencies = [
  "libipld",
  "multibase",
  "multihash 0.18.1",
+ "rand 0.8.5",
  "serde",
  "serde_bytes",
  "serde_ipld_dagcbor",

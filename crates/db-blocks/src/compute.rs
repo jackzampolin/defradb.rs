@@ -56,7 +56,7 @@ pub fn compute_document_blocks(
         // Encrypt delta and create Encryption metadata block if configured
         let (value_bytes, encryption_cid) = if let Some(enc) = encryption_config {
             if enc.should_encrypt_field(field_name) {
-                let key = enc.derive_key(field_name, &doc_id_str);
+                let key = defra_core::encryption::generate_encryption_key();
                 let encrypted = encrypt_delta(&value_bytes, &key)?;
 
                 let is_field_level = enc.encrypt_fields.iter().any(|f| f == field_name);
@@ -144,7 +144,7 @@ pub fn compute_document_blocks(
     // Composite encryption CID for doc-level encryption
     let composite_encryption_cid = if let Some(enc) = encryption_config {
         if enc.encrypt_doc {
-            let key = enc.derive_key("", &doc_id_str);
+            let key = defra_core::encryption::generate_encryption_key();
             let enc_block = Encryption {
                 doc_id: doc_id_str.as_bytes().to_vec(),
                 field_name: None,

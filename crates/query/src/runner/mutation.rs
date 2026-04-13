@@ -354,15 +354,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Set encryption config for this mutation (thread-local, read by AutoCommitMutator)
         if mutation.encrypt_doc || !mutation.encrypt_fields.is_empty() {
-            if let Some(ref key) = self.encryption_key {
-                defra_core::encryption::set_encryption_config(Some(
-                    defra_core::encryption::EncryptionConfig {
-                        encrypt_doc: mutation.encrypt_doc,
-                        encrypt_fields: mutation.encrypt_fields.clone(),
-                        encryption_key: key.clone(),
-                    },
-                ));
-            }
+            defra_core::encryption::set_encryption_config(Some(
+                defra_core::encryption::EncryptionConfig {
+                    encrypt_doc: mutation.encrypt_doc,
+                    encrypt_fields: mutation.encrypt_fields.clone(),
+                },
+            ));
         } else {
             defra_core::encryption::set_encryption_config(None);
         }
