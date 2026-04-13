@@ -2,8 +2,25 @@
 //!
 //! Provides the EncryptionConfig type and thread-local storage for passing
 //! encryption config from the query layer to the block builder layer.
+//!
+//! # Key generation model
+//!
+//! Each encrypted write generates a fresh random AES-256 key via
+//! [`generate_encryption_key`]. The key is stored alongside its ciphertext
+//! in a separate `Encryption` block (see
+//! [`crate::block_signature::Encryption`]), and the data block links to it
+//! via its `encryption: Option<Cid>` field. Decryption loads the
+//! `Encryption` block by CID and reads the key directly — no master key
+//! is needed at the receiver.
+//!
+//! This matches Go DefraDB's `internal/encryption/encryptor.go` exactly.
+//! The previous Rust implementation derived keys deterministically from
+//! `SHA-256(field_name || doc_id || master_key)`, which was both wire-
+//! incompatible with Go (different key bytes) and cryptographically
+//! weaker (one master-key compromise revealed every past, present, and
+//! future document). See #651 for the audit trail.
 
-use sha2::{Digest, Sha256};
+use rand::RngCore;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -62,12 +79,16 @@ impl AsRef<[u8]> for EncryptionKey {
     }
 }
 
-/// Encryption configuration for CRDT delta encryption.
-#[derive(Debug, Clone)]
+/// Encryption policy for a CRDT document mutation.
+///
+/// Carries which fields should be encrypted; does NOT carry any key
+/// material. Each encrypted write generates a fresh random key via
+/// [`generate_encryption_key`] and stores it in the per-block
+/// `Encryption` metadata.
+#[derive(Debug, Clone, Default)]
 pub struct EncryptionConfig {
     pub encrypt_doc: bool,
     pub encrypt_fields: Vec<String>,
-    pub encryption_key: Vec<u8>,
 }
 
 impl EncryptionConfig {
@@ -75,27 +96,23 @@ impl EncryptionConfig {
     pub fn should_encrypt_field(&self, field_name: &str) -> bool {
         self.encrypt_doc || self.encrypt_fields.iter().any(|f| f == field_name)
     }
+}
 
-    /// Derive the encryption key for a specific field and document.
-    ///
-    /// Key derivation: `SHA-256(fieldName + docID + masterKey)`
-    /// - Doc-level: fieldName = "" (empty string)
-    /// - Field-level: fieldName = specific field name
-    ///
-    /// Uses SHA-256 to ensure all input material (including the master key)
-    /// contributes to the derived key regardless of field name or doc ID length.
-    pub fn derive_key(&self, field_name: &str, doc_id: &str) -> [u8; 32] {
-        let field = if self.encrypt_fields.iter().any(|f| f == field_name) {
-            field_name
-        } else {
-            "" // doc-level
-        };
-        let mut hasher = Sha256::new();
-        hasher.update(field.as_bytes());
-        hasher.update(doc_id.as_bytes());
-        hasher.update(&self.encryption_key);
-        hasher.finalize().into()
-    }
+/// Generate a fresh 32-byte AES-256 key from the OS RNG.
+///
+/// Matches Go's `internal/encryption/encryptor.go::generateEncryptionKey`:
+/// each write gets a unique random key. The key is stored alongside the
+/// ciphertext in a separate `Encryption` block (see
+/// [`crate::block_signature::Encryption`]), and the data block points
+/// at it via the `encryption: Option<Cid>` link.
+///
+/// Uses [`rand::rngs::OsRng`] which reads from the OS-provided
+/// cryptographically secure random source (`getrandom` on Linux,
+/// `SecRandomCopyBytes` on macOS, `BCryptGenRandom` on Windows).
+pub fn generate_encryption_key() -> [u8; 32] {
+    let mut key = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut key);
+    key
 }
 
 thread_local! {
@@ -153,25 +170,13 @@ pub fn clear_doc_encryption_store() {
 
 #[cfg(test)]
 mod tests {
-    use super::EncryptionConfig;
+    use super::generate_encryption_key;
 
     #[test]
-    fn derive_key_mixes_in_master_key_for_long_doc_ids() {
-        let doc_id = "bae-c94acbfa-1234-5678-90ab-cdef12345678";
-        let config_a = EncryptionConfig {
-            encrypt_doc: true,
-            encrypt_fields: vec![],
-            encryption_key: b"first-master-key-material-123456".to_vec(),
-        };
-        let config_b = EncryptionConfig {
-            encrypt_doc: true,
-            encrypt_fields: vec![],
-            encryption_key: b"second-master-key-material654321".to_vec(),
-        };
-
-        assert_ne!(
-            config_a.derive_key("", doc_id),
-            config_b.derive_key("", doc_id)
-        );
+    fn generate_encryption_key_is_random() {
+        let k1 = generate_encryption_key();
+        let k2 = generate_encryption_key();
+        assert_ne!(k1, k2);
+        assert_eq!(k1.len(), 32);
     }
 }
