@@ -700,9 +700,11 @@ impl NodeBuilder {
         }
 
         // 8. Merge handler
-        let merge_handler_inner =
-            Arc::new(db::DbMergeHandler::new(database.clone(), sync_blockstore));
-        let merge_handler = Arc::new(db::AcpMergeHandler::new(merge_handler_inner));
+        let merge_handler_inner = Arc::new(db_merge::DbMergeHandler::new(
+            database.clone(),
+            sync_blockstore,
+        ));
+        let merge_handler = Arc::new(db_merge::AcpMergeHandler::new(merge_handler_inner));
         let merge_handler_for_acp = merge_handler.clone();
 
         // 9. Replication loop (transport-generic)
@@ -728,7 +730,7 @@ impl NodeBuilder {
         let collection_lookup: Arc<dyn CollectionLookup> = database.clone();
 
         // 12. BroadcastMutator (replaces AutoCommitMutator)
-        let broadcast_mutator = Arc::new(db::BroadcastMutator::new(
+        let broadcast_mutator = Arc::new(db_merge::BroadcastMutator::new(
             database.clone(),
             coordinator.clone(),
         ));
@@ -872,7 +874,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
 
                 let mut all_succeeded = true;
                 for (doc_id, collection_id) in &docs {
-                    match db::retry_doc_via_transport(
+                    match db_merge::retry_doc_via_transport(
                         &transport,
                         database.as_ref(),
                         None,

@@ -28,6 +28,7 @@ p2p = { path = "../p2p" }
 defra-http = { path = "../http" }
 query = { path = "../query" }
 db = { path = "../db" }
+db-merge = { path = "../db-merge" }
 schema = { path = "../schema" }
 events = { path = "../events" }
 lens = { path = "../lens" }

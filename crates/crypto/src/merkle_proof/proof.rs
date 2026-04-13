@@ -6,9 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use super::proof_node::ProofNode;
 
-/// Maximum allowed proof path length to prevent DoS via large proofs
-const MAX_PROOF_PATH_LENGTH: usize = 1000;
-
 /// Merkle proof demonstrating a path from leaf to root
 ///
 /// The proof contains an ordered sequence of blocks from the leaf (index 0)
@@ -41,48 +38,50 @@ impl MerkleProof {
     /// Verify this proof is valid
     ///
     /// Checks:
-    /// 1. Path length is within limits
-    /// 2. Path is non-empty
-    /// 3. First node CID matches leaf_cid
-    /// 4. Last node CID matches root_cid
-    /// 5. Each node's CID matches its content hash
-    /// 6. Each node's heads contains the next node's CID (child -> parent chain)
+    /// 1. Path is non-empty (Err)
+    /// 2. First node CID matches leaf_cid (Err — wrong input)
+    /// 3. Last node CID matches root_cid (Err — wrong input)
+    /// 4. Each node's CID matches its content hash (Ok(false) — cryptographic failure)
+    /// 5. Each node's heads contains the next node's CID (Ok(false) — broken chain)
     ///
-    /// The chain structure is: leaf (newest) -> ... -> root (oldest)
+    /// The chain structure is: leaf (newest) -> ... -> root (oldest).
     /// Each node points to its parent(s) via the `heads` field.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)` — proof verifies
+    /// - `Ok(false)` — proof is structurally valid but cryptographically incorrect
+    ///   (content hash mismatch, broken chain link)
+    /// - `Err(_)` — caller supplied structurally invalid input (empty path, anchor mismatch)
     pub fn verify(&self) -> Result<bool> {
-        // Check path length to prevent DoS
-        if self.path.len() > MAX_PROOF_PATH_LENGTH {
-            return Err(Error::BlockError(format!(
-                "Proof path exceeds maximum length: {} > {}",
-                self.path.len(),
-                MAX_PROOF_PATH_LENGTH
-            )));
-        }
-
+        // Anchor/structural failures are caller errors — return Err so they can't be
+        // silently ignored. Match Go's convention where "nothing to verify" is an error.
         if self.path.is_empty() {
-            return Ok(false);
+            return Err(Error::BlockError("proof path is empty".to_string()));
         }
 
-        // Verify leaf CID matches
         if self.path[0].cid != self.leaf_cid {
-            return Ok(false);
+            return Err(Error::BlockError(
+                "proof leaf CID does not match first path node".to_string(),
+            ));
         }
 
-        // Verify root CID matches
         if self.path[self.path.len() - 1].cid != self.root_cid {
-            return Ok(false);
+            return Err(Error::BlockError(
+                "proof root CID does not match last path node".to_string(),
+            ));
         }
 
-        // Verify each node's CID matches its content
+        // Verify each node's CID matches its content.
+        // A hash mismatch is a legitimate cryptographic "no" — return Ok(false).
         for node in &self.path {
             if !node.verify_cid()? {
                 return Ok(false);
             }
         }
 
-        // Verify chain integrity: each node's heads should contain the next node's CID
-        // This is because in a child -> parent chain, child.heads points to parent
+        // Verify chain integrity: each node's heads should contain the next node's CID.
+        // A broken chain link is a legitimate cryptographic "no" — return Ok(false).
         for i in 0..self.path.len() - 1 {
             let current_block = self.path[i].decode_block()?;
             let next_cid = &self.path[i + 1].cid;

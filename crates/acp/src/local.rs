@@ -170,15 +170,15 @@ impl DocumentACP for LocalDocumentACP {
         let did = match identity {
             Identity::Authenticated(did) => did,
             Identity::Anonymous => {
-                // Check if wildcard grants exist for the requested permission
+                // Check if wildcard grants exist for the requested permission.
+                // Go DefraDB defines four document relations: owner, reader, updater, deleter.
                 let wildcard = Did::wildcard();
                 let granted = match permission {
                     DocumentPermission::Read => {
+                        // Any write permission implies read (matches Go's
+                        // ImplyDocumentReadPerm in acp/types/types.go).
                         self.has_relation(&wildcard, &ns_collection, doc_id, READER_RELATION)
                             .await?
-                            || self
-                                .has_relation(&wildcard, &ns_collection, doc_id, "writer")
-                                .await?
                             || self
                                 .has_relation(&wildcard, &ns_collection, doc_id, UPDATER_RELATION)
                                 .await?
@@ -189,9 +189,6 @@ impl DocumentACP for LocalDocumentACP {
                     DocumentPermission::Update => {
                         self.has_relation(&wildcard, &ns_collection, doc_id, UPDATER_RELATION)
                             .await?
-                            || self
-                                .has_relation(&wildcard, &ns_collection, doc_id, "writer")
-                                .await?
                     }
                     DocumentPermission::Delete => {
                         self.has_relation(&wildcard, &ns_collection, doc_id, DELETER_RELATION)
@@ -208,16 +205,12 @@ impl DocumentACP for LocalDocumentACP {
         }
 
         // Check specific relations based on permission.
-        // Go DefraDB: any write permission implies read access.
-        // Relations checked: reader, writer, updater, deleter, admin.
+        // Go DefraDB defines four document relations: owner, reader, updater, deleter.
+        // Any write permission implies read access (matches Go's ImplyDocumentReadPerm).
         let granted = match permission {
             DocumentPermission::Read => {
-                // Any relation that could imply read access (matches Go behavior)
                 self.has_relation(did, &ns_collection, doc_id, READER_RELATION)
                     .await?
-                    || self
-                        .has_relation(did, &ns_collection, doc_id, "writer")
-                        .await?
                     || self
                         .has_relation(did, &ns_collection, doc_id, UPDATER_RELATION)
                         .await?
@@ -228,9 +221,6 @@ impl DocumentACP for LocalDocumentACP {
             DocumentPermission::Update => {
                 self.has_relation(did, &ns_collection, doc_id, UPDATER_RELATION)
                     .await?
-                    || self
-                        .has_relation(did, &ns_collection, doc_id, "writer")
-                        .await?
             }
             DocumentPermission::Delete => {
                 self.has_relation(did, &ns_collection, doc_id, DELETER_RELATION)

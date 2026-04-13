@@ -2,6 +2,8 @@
 mod core_operations;
 #[path = "nac/cross_compartment_isolation.rs"]
 mod cross_compartment_isolation;
+#[path = "nac/dac_access_matrix.rs"]
+mod dac_access_matrix;
 #[path = "nac/document_acp.rs"]
 mod document_acp;
 #[path = "nac/operations.rs"]

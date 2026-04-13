@@ -13,6 +13,7 @@ acp = { path = "../acp" }
 blockstore = { path = "../blockstore" }
 crypto = { path = "../crypto" }
 db = { path = "../db" }
+db-merge = { path = "../db-merge" }
 defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 events = { path = "../events" }
