@@ -136,7 +136,7 @@ impl Key for Ed25519PrivateKey {
         if self_raw.len() != other_raw.len() {
             return false;
         }
-        self_raw.ct_eq(&other_raw).into()
+        self_raw.ct_eq(other_raw).into()
     }
 
     fn raw(&self) -> &[u8] {
@@ -224,7 +224,7 @@ impl Key for Ed25519PublicKey {
         if self_raw.len() != other_raw.len() {
             return false;
         }
-        self_raw.ct_eq(&other_raw).into()
+        self_raw.ct_eq(other_raw).into()
     }
 
     fn raw(&self) -> &[u8] {
@@ -274,7 +274,7 @@ impl PublicKey for Ed25519PublicKey {
     }
 
     fn did(&self) -> Result<String> {
-        crate::did::create_did_key(KeyType::Ed25519, &self.raw())
+        crate::did::create_did_key(KeyType::Ed25519, self.raw())
     }
 }
 

@@ -75,7 +75,7 @@ fn test_private_key_from_bytes_secp256k1() {
     let original = generate_secp256k1().unwrap();
     let bytes = original.raw();
 
-    let parsed = private_key_from_bytes(KeyType::Secp256k1, &bytes).unwrap();
+    let parsed = private_key_from_bytes(KeyType::Secp256k1, bytes).unwrap();
     assert_eq!(parsed.raw(), bytes);
 }
 
@@ -84,7 +84,7 @@ fn test_private_key_from_bytes_ed25519() {
     let original = generate_ed25519().unwrap();
     let bytes = original.raw();
 
-    let parsed = private_key_from_bytes(KeyType::Ed25519, &bytes).unwrap();
+    let parsed = private_key_from_bytes(KeyType::Ed25519, bytes).unwrap();
     assert_eq!(parsed.raw(), bytes);
 }
 
@@ -103,7 +103,7 @@ fn test_public_key_from_bytes() {
     let public_key = private_key.public_key();
     let bytes = public_key.raw();
 
-    let parsed = public_key_from_bytes(KeyType::Secp256k1, &bytes).unwrap();
+    let parsed = public_key_from_bytes(KeyType::Secp256k1, bytes).unwrap();
     assert_eq!(parsed.raw(), bytes);
 }
 
@@ -216,7 +216,7 @@ fn test_private_key_from_bytes_valid_secp256k1() {
     let original = generate_secp256k1().unwrap();
     let key_bytes = original.raw();
 
-    let parsed = private_key_from_bytes(KeyType::Secp256k1, &key_bytes).unwrap();
+    let parsed = private_key_from_bytes(KeyType::Secp256k1, key_bytes).unwrap();
 
     assert_eq!(
         parsed.key_type(),
@@ -240,7 +240,7 @@ fn test_private_key_from_bytes_valid_ed25519() {
     let original = generate_ed25519().unwrap();
     let key_bytes = original.raw();
 
-    let parsed = private_key_from_bytes(KeyType::Ed25519, &key_bytes).unwrap();
+    let parsed = private_key_from_bytes(KeyType::Ed25519, key_bytes).unwrap();
 
     assert_eq!(parsed.key_type(), KeyType::Ed25519, "Key type should match");
     assert_eq!(parsed.raw(), key_bytes, "Raw bytes should match");
@@ -281,7 +281,7 @@ fn test_private_key_from_bytes_invalid_ed25519_length() {
 fn test_private_key_from_bytes_secp256r1() {
     let generated = generate_key(KeyType::Secp256r1).unwrap();
     let key_bytes = generated.raw();
-    let key = private_key_from_bytes(KeyType::Secp256r1, &key_bytes).unwrap();
+    let key = private_key_from_bytes(KeyType::Secp256r1, key_bytes).unwrap();
     assert_eq!(key.key_type(), KeyType::Secp256r1);
     assert_eq!(key.raw(), key_bytes);
 }
@@ -318,7 +318,7 @@ fn test_public_key_from_bytes_valid_secp256k1() {
     let public_key = private_key.public_key();
     let key_bytes = public_key.raw();
 
-    let parsed = public_key_from_bytes(KeyType::Secp256k1, &key_bytes).unwrap();
+    let parsed = public_key_from_bytes(KeyType::Secp256k1, key_bytes).unwrap();
 
     assert_eq!(
         parsed.key_type(),
@@ -334,7 +334,7 @@ fn test_public_key_from_bytes_valid_ed25519() {
     let public_key = private_key.public_key();
     let key_bytes = public_key.raw();
 
-    let parsed = public_key_from_bytes(KeyType::Ed25519, &key_bytes).unwrap();
+    let parsed = public_key_from_bytes(KeyType::Ed25519, key_bytes).unwrap();
 
     assert_eq!(parsed.key_type(), KeyType::Ed25519, "Key type should match");
     assert_eq!(parsed.raw(), key_bytes, "Raw bytes should match");

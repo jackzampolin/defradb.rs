@@ -90,7 +90,7 @@ impl Key for Secp256r1PrivateKey {
         if self_raw.len() != other_raw.len() {
             return false;
         }
-        self_raw.ct_eq(&other_raw).into()
+        self_raw.ct_eq(other_raw).into()
     }
 
     fn raw(&self) -> &[u8] {
@@ -184,7 +184,7 @@ impl Key for Secp256r1PublicKey {
         if self_raw.len() != other_raw.len() {
             return false;
         }
-        self_raw.ct_eq(&other_raw).into()
+        self_raw.ct_eq(other_raw).into()
     }
 
     fn raw(&self) -> &[u8] {

@@ -890,7 +890,7 @@ async fn test_signed_proof_signature_failure_returns_err() {
 
     // Direct verify() path
     let pub_key = private_key.public_key();
-    let result_verify = signed.verify(pub_key.as_ref());
+    let result_verify = signed.verify(pub_key);
     assert!(
         result_verify.is_err(),
         "verify() must return Err on signature failure, got {:?}",
@@ -931,13 +931,13 @@ async fn test_signed_proof_identity_mismatch_returns_err() {
 
     // Using a key of a different curve type — hits the key_type check first.
     let other_pub = other_key.public_key();
-    let result_type = signed.verify(other_pub.as_ref());
+    let result_type = signed.verify(other_pub);
     assert!(result_type.is_err(), "key type mismatch should return Err");
 
     // Using a different ed25519 key — hits the identity check.
     let wrong_ed = generate_ed25519().unwrap();
     let wrong_pub = wrong_ed.public_key();
-    let result_identity = signed.verify(wrong_pub.as_ref());
+    let result_identity = signed.verify(wrong_pub);
     assert!(
         result_identity.is_err(),
         "identity mismatch should return Err, got {:?}",
@@ -967,6 +967,6 @@ async fn test_valid_signed_proof_still_returns_ok_true() {
     let signed = SignedMerkleProof::sign(proof, &private_key as &dyn PrivateKey).unwrap();
 
     let pub_key = private_key.public_key();
-    assert!(signed.verify(pub_key.as_ref()).unwrap());
+    assert!(signed.verify(pub_key).unwrap());
     assert!(signed.verify_with_embedded_key().unwrap());
 }
