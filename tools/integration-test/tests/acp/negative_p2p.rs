@@ -114,6 +114,22 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
     )
     .await;
 
+    let node1_ref = &node1;
+    let bob_key = bob.private_key_hex.clone();
+    poll_until(
+        || {
+            node1_ref
+                .query_with_identity("query { User { _docID name } }", &bob_key)
+                .ok()
+                .and_then(|v| v["User"].as_array().map(|a| a.len() == 1))
+                .unwrap_or(false)
+        },
+        Duration::from_secs(15),
+        Duration::from_millis(200),
+        "Bob did not gain access on node1 after the replicated reader grant",
+    )
+    .await;
+
     // Bob queries node1. His reader grant from node0 should now replicate.
     let bob_node1 = node1
         .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
@@ -123,6 +139,26 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
         bob_node1_count, 1,
         "Bob must see the replicated document on node1 after the reader grant replicates"
     );
+
+    poll_until(
+        || {
+            node1_ref
+                .query_with_identity(
+                    &format!(
+                        r#"query {{ _commits(docID: "{}") {{ cid height }} }}"#,
+                        doc_id
+                    ),
+                    &bob_key,
+                )
+                .ok()
+                .and_then(|v| v["_commits"].as_array().map(|a| !a.is_empty()))
+                .unwrap_or(false)
+        },
+        Duration::from_secs(15),
+        Duration::from_millis(200),
+        "Bob did not gain _commits visibility on node1 after the replicated reader grant",
+    )
+    .await;
 
     let bob_commits_node1 = node1
         .query_with_identity(
