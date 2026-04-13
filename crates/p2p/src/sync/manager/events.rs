@@ -2,6 +2,8 @@
 
 use cid::Cid;
 
+use acp::ReplicatedDocActorRelationships;
+
 use crate::ExplicitReplayAuthorization;
 
 /// Events emitted by the SyncManager for higher layers to process.
@@ -29,6 +31,8 @@ pub enum SyncEvent {
         is_explicit_replicator: bool,
         /// Capability-based explicit replay authorization carried by two-stream pushes.
         explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+        /// Optional local-ACP actor relationship snapshot for the document.
+        acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
     },
 
     /// A block was already merged (received duplicate).
@@ -36,6 +40,7 @@ pub enum SyncEvent {
         cid: Cid,
         doc_id: String,
         collection_id: String,
+        acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
     },
 
     /// Failed to process a sync request.
@@ -65,6 +70,8 @@ pub enum SyncEvent {
         is_explicit_replicator: bool,
         /// Capability-based explicit replay authorization carried by two-stream pushes.
         explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+        /// Optional local-ACP actor relationship snapshot for the document.
+        acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
     },
 
     /// DAG is ready for merge after Bitswap fetch completed.
@@ -86,5 +93,7 @@ pub enum SyncEvent {
         is_explicit_replicator: bool,
         /// Capability-based explicit replay authorization carried by two-stream pushes.
         explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+        /// Optional local-ACP actor relationship snapshot for the document.
+        acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
     },
 }

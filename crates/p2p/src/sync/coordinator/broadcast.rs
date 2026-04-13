@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use acp::ReplicatedDocActorRelationships;
 use blockstore::Blockstore;
 use bytes::Bytes;
 use cid::Cid;
@@ -48,8 +49,15 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         doc_id: &str,
         collection_id: &str,
     ) -> Result<BroadcastResult> {
-        self.broadcast_local_update_with_creator(cid, block, doc_id, collection_id, None)
-            .await
+        self.broadcast_local_update_with_creator_and_relationships(
+            cid,
+            block,
+            doc_id,
+            collection_id,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Broadcast a local update with an optional creator override.
@@ -65,9 +73,36 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         collection_id: &str,
         creator_override: Option<&str>,
     ) -> Result<BroadcastResult> {
+        self.broadcast_local_update_with_creator_and_relationships(
+            cid,
+            block,
+            doc_id,
+            collection_id,
+            creator_override,
+            None,
+        )
+        .await
+    }
+
+    /// Broadcast a local update with optional creator and ACP relationship snapshot.
+    pub async fn broadcast_local_update_with_creator_and_relationships(
+        &self,
+        cid: &Cid,
+        block: &[u8],
+        doc_id: &str,
+        collection_id: &str,
+        creator_override: Option<&str>,
+        acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
+    ) -> Result<BroadcastResult> {
         let creator = creator_override.unwrap_or(&self.access.local_peer_id);
-        let broadcast =
-            Broadcaster::<T>::create_broadcast(cid, block, doc_id, collection_id, creator);
+        let broadcast = Broadcaster::<T>::create_broadcast(
+            cid,
+            block,
+            doc_id,
+            collection_id,
+            creator,
+            acp_actor_relationships,
+        );
         self.runtime.broadcaster.broadcast_update(&broadcast).await
     }
 

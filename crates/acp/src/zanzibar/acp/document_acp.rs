@@ -7,7 +7,7 @@ use zanzibar::store::ZanzibarStore;
 use zanzibar::types::{Relationship, Subject};
 
 use super::{ZanzibarDocumentACP, OWNER_RELATION};
-use crate::dac::DocumentACP;
+use crate::dac::{DocumentACP, ReplicatedActorRelationship};
 use crate::error::{Error, Result};
 use crate::identity::Identity;
 use crate::permission::DocumentPermission;
@@ -302,6 +302,102 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         }
 
         Ok(deleted)
+    }
+
+    async fn export_actor_relationships(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<Vec<ReplicatedActorRelationship>> {
+        self.ensure_policy(policy_id, resource_name).await?;
+
+        let Some(policy) = self.store.get_policy(policy_id).await? else {
+            return Ok(Vec::new());
+        };
+        let Some(resource) = policy.get_resource(resource_name) else {
+            return Ok(Vec::new());
+        };
+
+        let mut relationships = Vec::new();
+        for relation in &resource.relations {
+            if relation.name == OWNER_RELATION {
+                continue;
+            }
+
+            let subjects = self
+                .store
+                .get_relation_subjects(policy_id, resource_name, doc_id, &relation.name)
+                .await?;
+
+            for subject in subjects {
+                let actor = match subject {
+                    Subject::Entity(did) => did.to_string(),
+                    Subject::Wildcard => "*".to_string(),
+                    _ => continue,
+                };
+                relationships.push(ReplicatedActorRelationship {
+                    relation: relation.name.clone(),
+                    actor,
+                });
+            }
+        }
+
+        Ok(relationships)
+    }
+
+    async fn replace_actor_relationships(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+        relationships: &[ReplicatedActorRelationship],
+    ) -> Result<()> {
+        self.ensure_policy(policy_id, resource_name).await?;
+
+        let Some(policy) = self.store.get_policy(policy_id).await? else {
+            return Ok(());
+        };
+        let Some(resource) = policy.get_resource(resource_name) else {
+            return Ok(());
+        };
+
+        for relation in &resource.relations {
+            if relation.name == OWNER_RELATION {
+                continue;
+            }
+
+            let subjects = self
+                .store
+                .get_relation_subjects(policy_id, resource_name, doc_id, &relation.name)
+                .await?;
+
+            for subject in subjects {
+                if !matches!(subject, Subject::Entity(_) | Subject::Wildcard) {
+                    continue;
+                }
+                let rel = Relationship::new(resource_name, doc_id, &relation.name, subject);
+                let _ = self.store.delete_relationship(policy_id, &rel).await?;
+            }
+        }
+
+        for relationship in relationships {
+            let subject = if relationship.actor == "*" {
+                Subject::Wildcard
+            } else {
+                Subject::Entity(Did::new(&relationship.actor).map_err(|error| {
+                    Error::Storage(format!(
+                        "invalid replicated actor DID '{}': {}",
+                        relationship.actor, error
+                    ))
+                })?)
+            };
+
+            let rel = Relationship::new(resource_name, doc_id, &relationship.relation, subject);
+            self.store.store_relationship(policy_id, &rel).await?;
+        }
+
+        Ok(())
     }
 
     async fn unregister_doc_object(

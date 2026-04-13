@@ -159,6 +159,7 @@ where
         version_syncer,
     );
     adapter.set_initial_tracked_documents(restored_doc_ids);
+    let coordinator_for_acp = coordinator.clone();
     let broadcast_mutator = Arc::new(db_merge::BroadcastMutator::new(
         database.clone(),
         coordinator,
@@ -183,6 +184,7 @@ where
         mutator: broadcast_mutator,
         merge_handler,
         wire_document_acp: Some(Box::new(move |acp| {
+            coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());
             broadcast_mutator_for_acp.set_document_acp(acp);
         })),
@@ -291,6 +293,7 @@ where
         version_syncer,
     );
     adapter.set_initial_tracked_documents(restored_doc_ids);
+    let coordinator_for_acp = coordinator.clone();
     let broadcast_mutator = Arc::new(db_merge::BroadcastMutator::new(
         database.clone(),
         coordinator,
@@ -316,6 +319,7 @@ where
         mutator: broadcast_mutator,
         merge_handler,
         wire_document_acp: Some(Box::new(move |acp| {
+            coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());
             broadcast_mutator_for_acp.set_document_acp(acp);
         })),

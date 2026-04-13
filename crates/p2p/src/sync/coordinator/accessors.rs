@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use acp::{DocumentACP, ReplicatedDocActorRelationships};
 use blockstore::Blockstore;
 
 use super::SyncCoordinator;
@@ -45,5 +46,36 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Get the sync manager reference.
     pub fn manager(&self) -> &SyncManager<B> {
         &self.manager
+    }
+
+    /// Wire document ACP into the coordinator for local ACP relationship replay.
+    pub fn set_document_acp(&self, acp: Arc<dyn DocumentACP>) {
+        let _ = self.document_acp.set(acp);
+    }
+
+    pub(crate) async fn apply_replicated_actor_relationships(
+        &self,
+        doc_id: &str,
+        snapshot: Option<&ReplicatedDocActorRelationships>,
+    ) -> crate::Result<()> {
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+        let Some(acp) = self.document_acp.get() else {
+            return Ok(());
+        };
+
+        acp.replace_actor_relationships(
+            &snapshot.policy_id,
+            &snapshot.resource_name,
+            doc_id,
+            &snapshot.relationships,
+        )
+        .await
+        .map_err(|error| {
+            crate::Error::Behaviour(format!(
+                "failed to apply replicated ACP relationships: {error}"
+            ))
+        })
     }
 }

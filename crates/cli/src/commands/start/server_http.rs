@@ -81,8 +81,8 @@ impl Node {
             server = server.with_node_identity_did(did);
         }
 
-        if let Some(adapter) = p2p_adapter {
-            server = server.with_p2p_arc(adapter);
+        if let Some(adapter) = &p2p_adapter {
+            server = server.with_p2p_arc(adapter.clone());
             if config.net.transport == TransportType::Iroh {
                 info!("P2P HTTP endpoints enabled (iroh)");
             } else {
@@ -119,6 +119,7 @@ impl Node {
                     database.clone(),
                     acp_setup.document_acp.clone(),
                     zanzibar_store,
+                    p2p_adapter.clone(),
                 );
                 server = server.with_doc_acp_arc(doc_acp_adapter);
                 info!("Document ACP HTTP endpoints enabled");

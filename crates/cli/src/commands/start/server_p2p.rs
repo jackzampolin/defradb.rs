@@ -113,6 +113,7 @@ impl Node {
         let (failure_tx, failure_rx) = tokio::sync::mpsc::channel::<p2p::sync::PushFailure>(1024);
         coordinator.set_failure_channel(failure_tx);
         let coordinator = Arc::new(coordinator);
+        let coordinator_for_acp = coordinator.clone();
 
         match coordinator.load_p2p_collections().await {
             Ok(count) => {
@@ -383,6 +384,7 @@ impl Node {
             mutator: Arc::new(db_merge::BroadcastMutator::new(database, coordinator)),
             http_adapter: Some(Arc::new(adapter)),
             wire_merge_acp: Some(Box::new(move |acp| {
+                coordinator_for_acp.set_document_acp(acp.clone());
                 merge_handler_for_acp.set_document_acp(acp);
             })),
             wire_doc_pusher_acp: Some(Box::new(move |acp| {
@@ -444,6 +446,7 @@ impl Node {
         let (failure_tx, failure_rx) = tokio::sync::mpsc::channel::<p2p::sync::PushFailure>(1024);
         coordinator.set_failure_channel(failure_tx);
         let coordinator = Arc::new(coordinator);
+        let coordinator_for_acp = coordinator.clone();
 
         match coordinator.load_p2p_collections().await {
             Ok(count) => {
@@ -684,6 +687,7 @@ impl Node {
             mutator: Arc::new(db_merge::BroadcastMutator::new(database, coordinator)),
             http_adapter: Some(Arc::new(adapter)),
             wire_merge_acp: Some(Box::new(move |acp| {
+                coordinator_for_acp.set_document_acp(acp.clone());
                 merge_handler_for_acp.set_document_acp(acp);
             })),
             wire_doc_pusher_acp: Some(Box::new(move |acp| {

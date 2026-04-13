@@ -40,7 +40,7 @@ mod validation;
 pub mod zanzibar;
 
 pub use auth_error::normalize_auth_error;
-pub use dac::DocumentACP;
+pub use dac::{DocumentACP, ReplicatedActorRelationship, ReplicatedDocActorRelationships};
 pub use error::{Error, Result};
 pub use identity::Identity;
 pub use local::{LocalDocumentACP, MemoryAcpStore};

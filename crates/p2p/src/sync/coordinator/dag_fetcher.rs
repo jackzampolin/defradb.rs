@@ -56,6 +56,7 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
                         sender_peer: Some(source_peer.to_string()),
                         is_explicit_replicator: false,
                         explicit_replay_authorization: None,
+                        acp_actor_relationships: None,
                     })
                     .await;
                 return;
@@ -147,6 +148,7 @@ pub async fn poll_fetch_dag<B: Blockstore + 'static, T: P2PTransport>(
                 sender_peer: Some(source_peer.to_string()),
                 is_explicit_replicator: false,
                 explicit_replay_authorization: None,
+                acp_actor_relationships: None,
             })
             .await;
     } else {
