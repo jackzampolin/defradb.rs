@@ -474,3 +474,60 @@ resources:
 }
 
 for_each_runtime!(acp_add_policy_extra_relations_allowed, acp_add_policy_extra_relations_allowed, .with_acp_local());
+
+// =========================================================================
+// Explicit owner relation — shared Rust/Go behavior (closes #744)
+// =========================================================================
+
+async fn acp_add_policy_explicit_owner_relation_rejected(cluster: TestCluster) {
+    // #744 originally claimed Go accepts explicit `owner` declarations
+    // while Rust rejects. Verified on defradb commit d5a5a879
+    // (2026-04-10): **both backends reject** with the same error
+    // ("owner is a reserved relation name"), because both delegate
+    // policy transformation to the same `sourcenetwork/acp_core`
+    // library. The original audit finding was incorrect — this is a
+    // shared constraint enforced by ACPCore's transformer, not a
+    // Rust-only behavior.
+    //
+    // This test locks in the shared rejection so neither side can
+    // diverge without a deliberate review.
+    let node = cluster.client(0);
+    let alice = generate_identity(node.binary_path()).expect("alice identity");
+
+    let policy = r#"
+name: test
+description: a policy with explicit owner declaration
+resources:
+  - name: users
+    permissions:
+      - name: read
+        expr: reader
+      - name: update
+        expr: updater
+      - name: delete
+        expr: deleter
+    relations:
+      - name: owner
+        types:
+          - actor
+      - name: reader
+        types:
+          - actor
+      - name: updater
+        types:
+          - actor
+      - name: deleter
+        types:
+          - actor
+"#;
+    let err = try_add_policy(&node, policy, &alice.private_key_hex)
+        .expect("explicit owner declaration must be rejected (shared Rust/Go behavior)");
+    let el = err.to_lowercase();
+    assert!(
+        el.contains("reserved relation name") || el.contains("bad_input"),
+        "expected reserved-owner error, got: {}",
+        err
+    );
+}
+
+for_each_runtime!(acp_add_policy_explicit_owner_relation_rejected, acp_add_policy_explicit_owner_relation_rejected, .with_acp_local());
