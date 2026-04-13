@@ -25,11 +25,47 @@ pub struct EventsQuery {
     pub event: Option<String>,
 }
 
-fn required_permission_for_event_filter(event: Option<&str>) -> NodePermission {
+#[derive(Debug)]
+struct EventSubscriptionFilter {
+    permissions: &'static [NodePermission],
+    events: Vec<events::EventName>,
+}
+
+const WILDCARD_EVENT_PERMISSIONS: &[NodePermission] = &[
+    NodePermission::DocumentRead,
+    NodePermission::P2pPeerInfo,
+    NodePermission::DacStatus,
+];
+
+fn parse_event_filter(event: Option<&str>) -> Result<EventSubscriptionFilter, HttpError> {
     match event {
-        Some("topic-peer-event") => NodePermission::P2pPeerInfo,
-        Some("acp-cache-invalidated") | Some("acp-height-advanced") => NodePermission::DacStatus,
-        Some("update") | Some("merge-complete") | None | Some(_) => NodePermission::DocumentRead,
+        None => Ok(EventSubscriptionFilter {
+            permissions: WILDCARD_EVENT_PERMISSIONS,
+            events: vec![events::EventName::WildCard],
+        }),
+        Some("topic-peer-event") => Ok(EventSubscriptionFilter {
+            permissions: &[NodePermission::P2pPeerInfo],
+            events: vec![events::EventName::TopicPeerEvent],
+        }),
+        Some("acp-cache-invalidated") => Ok(EventSubscriptionFilter {
+            permissions: &[NodePermission::DacStatus],
+            events: vec![events::EventName::AcpCacheInvalidated],
+        }),
+        Some("acp-height-advanced") => Ok(EventSubscriptionFilter {
+            permissions: &[NodePermission::DacStatus],
+            events: vec![events::EventName::AcpHeightAdvanced],
+        }),
+        Some("update") => Ok(EventSubscriptionFilter {
+            permissions: &[NodePermission::DocumentRead],
+            events: vec![events::EventName::Update],
+        }),
+        Some("merge-complete") => Ok(EventSubscriptionFilter {
+            permissions: &[NodePermission::DocumentRead],
+            events: vec![events::EventName::MergeComplete],
+        }),
+        Some(other) => Err(HttpError::BadRequest(format!(
+            "unsupported event filter: {other}"
+        ))),
     }
 }
 
@@ -75,14 +111,33 @@ impl EventAccessContext {
             return Ok(true);
         }
 
-        if doc_id.is_empty() {
+        let subject_doc_id = if doc_id.is_empty() {
+            None
+        } else {
+            Some(doc_id)
+        };
+
+        if let Some(subject_doc_id) = subject_doc_id {
+            let query = format!(
+                r#"query {{ {}(docID: "{}") {{ _docID }} }}"#,
+                collection.name, subject_doc_id
+            );
+            let response = execute_with_resolved_context(
+                self.executor.clone(),
+                QueryRequest::new(query).with_identity(self.did.clone()),
+                self.signing_config.clone(),
+                self.dac_bypass,
+            )
+            .await;
+
+            return Ok(response_has_data(&response));
+        }
+
+        if !collection.is_branchable {
             return Ok(false);
         }
 
-        let query = format!(
-            r#"query {{ {}(docID: "{}") {{ _docID }} }}"#,
-            collection.name, doc_id
-        );
+        let query = format!(r#"query {{ {}(limit: 1) {{ _docID }} }}"#, collection.name);
         let response = execute_with_resolved_context(
             self.executor.clone(),
             QueryRequest::new(query).with_identity(self.did.clone()),
@@ -103,28 +158,17 @@ pub async fn events_sse(
     identity: ExtractIdentity,
     Query(params): Query<EventsQuery>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, HttpError> {
-    require_permission(
-        &state,
-        &identity,
-        required_permission_for_event_filter(params.event.as_deref()),
-    )
-    .await?;
+    let filter = parse_event_filter(params.event.as_deref())?;
+    for permission in filter.permissions {
+        require_permission(&state, &identity, *permission).await?;
+    }
 
     let event_bus = state
         .event_bus
         .as_ref()
         .ok_or_else(|| HttpError::ServiceUnavailable("event bus is not available".to_string()))?;
 
-    let filter = match params.event.as_deref() {
-        Some("acp-cache-invalidated") => vec![events::EventName::AcpCacheInvalidated],
-        Some("acp-height-advanced") => vec![events::EventName::AcpHeightAdvanced],
-        Some("topic-peer-event") => vec![events::EventName::TopicPeerEvent],
-        Some("update") => vec![events::EventName::Update],
-        Some("merge-complete") => vec![events::EventName::MergeComplete],
-        _ => vec![events::EventName::WildCard],
-    };
-
-    let mut subscription = event_bus.subscribe(&filter);
+    let mut subscription = event_bus.subscribe(&filter.events);
     let access = EventAccessContext {
         executor: state.executor.clone(),
         collection_mgmt: state.collection_mgmt.clone(),
@@ -146,7 +190,8 @@ pub async fn events_sse(
                     }
                 })
             } else if let Some(update) = message.as_update() {
-                let Ok(can_observe) = access.can_observe_document_event(&update.collection_id, &update.doc_id).await else {
+                let subject_doc_id = update.subject_doc_id.as_deref().unwrap_or(&update.doc_id);
+                let Ok(can_observe) = access.can_observe_document_event(&update.collection_id, subject_doc_id).await else {
                     continue;
                 };
                 if !can_observe {
@@ -162,7 +207,8 @@ pub async fn events_sse(
                     }
                 })
             } else if let Some(data) = message.as_merge_complete() {
-                let Ok(can_observe) = access.can_observe_document_event(&data.collection_id, &data.doc_id).await else {
+                let subject_doc_id = data.subject_doc_id.as_deref().unwrap_or(&data.doc_id);
+                let Ok(can_observe) = access.can_observe_document_event(&data.collection_id, subject_doc_id).await else {
                     continue;
                 };
                 if !can_observe {
@@ -214,4 +260,22 @@ pub async fn events_sse(
     };
 
     Ok(Sse::new(stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_event_filter_rejects_unknown_filters() {
+        let err = parse_event_filter(Some("typo-event")).unwrap_err();
+        assert!(matches!(err, HttpError::BadRequest(_)));
+    }
+
+    #[test]
+    fn parse_event_filter_wildcard_requires_all_stream_permissions() {
+        let filter = parse_event_filter(None).expect("wildcard filter");
+        assert_eq!(filter.events, vec![events::EventName::WildCard]);
+        assert_eq!(filter.permissions, WILDCARD_EVENT_PERMISSIONS);
+    }
 }

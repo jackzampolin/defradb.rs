@@ -286,6 +286,7 @@ mod tests {
         bus.publish(Message::merge());
         bus.publish(Message::merge_complete(crate::MergeCompleteData {
             doc_id: "test-doc".to_string(),
+            subject_doc_id: None,
             cid: cid::Cid::default(),
             collection_id: "test-col".to_string(),
             by_peer: "test-peer".to_string(),

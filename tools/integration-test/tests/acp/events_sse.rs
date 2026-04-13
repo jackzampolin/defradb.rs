@@ -92,6 +92,13 @@ async fn open_events_sse_with_auth(
     (handle, events)
 }
 
+fn branchable_users_schema_with_policy(policy_id: &str) -> String {
+    format!(
+        r#"type User @branchable @policy(id: "{}", resource: "users") {{ name: String  age: Int }}"#,
+        policy_id
+    )
+}
+
 async fn acp_events_sse_filters_unauthorized_subscribers_test(cluster: TestCluster) {
     let node = cluster.client(0);
     let binary_path = node.binary_path().to_path_buf();
@@ -171,4 +178,74 @@ async fn rust_acp_events_sse_filters_unauthorized_subscribers() {
         .await
         .unwrap();
     acp_events_sse_filters_unauthorized_subscribers_test(cluster).await;
+}
+
+#[tokio::test]
+async fn rust_acp_events_sse_preserves_authorized_branchable_collection_updates() {
+    let cluster = TestCluster::builder()
+        .rust_nodes(1)
+        .with_acp_local()
+        .build()
+        .await
+        .unwrap();
+
+    let node = cluster.client(0);
+    let binary_path = node.binary_path().to_path_buf();
+    let api_url = cluster.api_url(0).to_string();
+
+    let alice = generate_identity(&binary_path).expect("generate Alice identity");
+
+    let policy = node
+        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
+        .expect("add ACP policy");
+    let policy_id = policy["PolicyID"]
+        .as_str()
+        .or_else(|| policy["policyID"].as_str())
+        .expect("missing PolicyID");
+
+    let schema = branchable_users_schema_with_policy(policy_id);
+    node.schema_add_with_identity(&schema, &alice.private_key_hex)
+        .expect("add branchable schema with ACP policy");
+
+    let created = node
+        .query_with_identity(
+            r#"mutation { add_User(input: {name: "Secret", age: 42}) { _docID } }"#,
+            &alice.private_key_hex,
+        )
+        .expect("create protected branchable doc");
+    let doc_id = created["add_User"][0]["_docID"]
+        .as_str()
+        .expect("missing _docID")
+        .to_string();
+
+    let (alice_handle, alice_events) =
+        open_events_sse_with_auth(&api_url, "update", &alice.private_key_hex).await;
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    node.query_with_identity(
+        r#"mutation { update_User(filter: {name: {_eq: "Secret"}}, input: {age: 43}) { _docID } }"#,
+        &alice.private_key_hex,
+    )
+    .expect("update protected branchable doc");
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    alice_handle.abort();
+
+    let alice_events = alice_events.lock().unwrap().clone();
+    assert!(
+        alice_events.iter().any(|event| {
+            event.pointer("/data/doc_id").and_then(Value::as_str) == Some(doc_id.as_str())
+        }),
+        "authorized subscriber should still receive the document-scoped update, got: {:?}",
+        alice_events
+    );
+    assert!(
+        alice_events
+            .iter()
+            .any(|event| event.pointer("/data/doc_id").and_then(Value::as_str) == Some("")),
+        "authorized subscriber should still receive the branchable collection-level update, got: {:?}",
+        alice_events
+    );
 }
