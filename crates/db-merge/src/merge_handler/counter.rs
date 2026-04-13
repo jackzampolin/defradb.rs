@@ -519,7 +519,10 @@ async fn cleanup_counter_nonce_for_cid<S: Store, B: blockstore::Blockstore + Sen
     let txn = db.new_txn(false).await?;
     {
         let mut datastore = txn.datastore()?;
-        let _ = counter.clear_nonce(&mut datastore, payload.nonce).await;
+        counter
+            .clear_nonce(&mut datastore, payload.nonce)
+            .await
+            .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
     }
     txn.force_commit().await?;
 

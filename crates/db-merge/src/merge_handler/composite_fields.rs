@@ -88,8 +88,6 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         let linked_block = Block::from_dag_cbor(&linked_block_data)
             .map_err(|e| MergeError::BlockDecode(e.to_string()))?;
 
-        state.linked_field_cids.push(*link_cid);
-
         if let Some(heads) = &linked_block.heads {
             state
                 .field_block_heads
@@ -158,6 +156,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 )));
             }
         }
+
+        state.linked_field_cids.push(*link_cid);
 
         Ok(None)
     }

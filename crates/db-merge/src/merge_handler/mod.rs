@@ -484,8 +484,8 @@ mod tests {
     use blockstore::{Blockstore as _, DefraBlockstore};
     use crypto::PrivateKey as _;
     use defra_core::block::{
-        Block, CollectionDefinitionDeltaPayload, CounterDeltaPayload, CrdtDelta, LwwDeltaPayload,
-        Signature, SignatureHeader, SignatureType,
+        Block, CollectionDefinitionDeltaPayload, CompositeDeltaPayload, CounterDeltaPayload,
+        CrdtDelta, DAGLink, Encryption, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
     };
     use events::{Bus, ChannelBus, EventName};
     use schema::{CType, CollectionVersion, FieldDescription, FieldKind};
@@ -1097,6 +1097,86 @@ mod tests {
         assert!(
             !removed,
             "nonce marker should be removed once the CID is finalized as merged"
+        );
+    }
+
+    #[tokio::test]
+    async fn composite_skip_field_does_not_mark_unreadable_linked_counter_merged() {
+        let (handler, blockstore) = make_handler_with_counter_schema().await;
+        let mut doc = Document::new();
+        doc.generate_and_set_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().to_string();
+
+        let encryption = Encryption::new_for_field(
+            doc_id.as_bytes().to_vec(),
+            "score".to_string(),
+            b"wrong-key".to_vec(),
+        );
+        let encryption_cid = encryption.generate_cid().unwrap();
+        let encryption_data = encryption.to_dag_cbor().unwrap();
+        blockstore
+            .put(&encryption_cid, &encryption_data)
+            .await
+            .unwrap();
+
+        let field_payload = CounterDeltaPayload {
+            doc_id: doc_id.as_bytes().to_vec(),
+            field_name: "score".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            data: b"not-a-valid-encrypted-counter".to_vec(),
+            nonce: 777,
+        };
+        let field_block = Block {
+            delta: CrdtDelta::Counter(field_payload),
+            heads: None,
+            links: None,
+            encryption: Some(encryption_cid),
+            signature: None,
+        };
+        let field_cid = field_block.generate_cid().unwrap();
+        let field_block_data = field_block.to_dag_cbor().unwrap();
+        blockstore.put(&field_cid, &field_block_data).await.unwrap();
+
+        let composite_payload = CompositeDeltaPayload {
+            doc_id: doc_id.as_bytes().to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            status: 0,
+        };
+        let composite_block = Block {
+            delta: CrdtDelta::Composite(composite_payload.clone()),
+            heads: None,
+            links: Some(vec![DAGLink::new("score", field_cid)]),
+            encryption: None,
+            signature: None,
+        };
+        let composite_cid = composite_block.generate_cid().unwrap();
+
+        let metadata = BlockMetadata::normal(
+            &doc_id,
+            "col-counters",
+            "did:key:z6MkrCompositeEncryptedSkip",
+            None,
+            false,
+        );
+
+        let outcome = handler
+            .process_composite_delta(
+                &composite_cid,
+                &composite_block,
+                &composite_payload,
+                &metadata,
+                false,
+                0,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, MergeOutcome::Merged);
+        assert!(
+            !blockstore.is_merged(&field_cid).await.unwrap(),
+            "linked field block should stay unmerged when decryption fails and the field is skipped"
         );
     }
 }
