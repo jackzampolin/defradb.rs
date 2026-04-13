@@ -147,7 +147,10 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
     let charlie_node1 = node1
         .query_with_identity("query { User { _docID name } }", &charlie.private_key_hex)
         .expect("Charlie query on node1");
-    let charlie_node1_count = charlie_node1["User"].as_array().map(|a| a.len()).unwrap_or(0);
+    let charlie_node1_count = charlie_node1["User"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
     assert_eq!(
         charlie_node1_count, 0,
         "replication must not grant access on node1 to identities without a relationship"
@@ -180,7 +183,6 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
         1,
         "Alice must read her document on node1 as owner"
     );
-
 }
 
 #[tokio::test]
