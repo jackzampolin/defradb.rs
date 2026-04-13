@@ -65,3 +65,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 hex.workspace = true
 blst = "0.3"
 getrandom = "0.2"
+
+[lints]
+workspace = true

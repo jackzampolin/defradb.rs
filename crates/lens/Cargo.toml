@@ -42,3 +42,6 @@ wasmtime = { version = "43.0.1", optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
+
+[lints]
+workspace = true

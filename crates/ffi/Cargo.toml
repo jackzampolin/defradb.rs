@@ -78,3 +78,6 @@ cbindgen = "0.28"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

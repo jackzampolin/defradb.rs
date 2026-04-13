@@ -78,3 +78,6 @@ tempfile = "3.8"
 [[bench]]
 name = "transaction"
 harness = false
+
+[lints]
+workspace = true

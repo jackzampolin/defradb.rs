@@ -58,3 +58,6 @@ crypto = { path = "../crypto" }
 
 # Enable test-utils feature for integration tests
 defra-http = { path = ".", features = ["test-utils"] }
+
+[lints]
+workspace = true

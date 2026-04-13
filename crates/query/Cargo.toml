@@ -84,3 +84,6 @@ harness = false
 [[bench]]
 name = "planner"
 harness = false
+
+[lints]
+workspace = true
