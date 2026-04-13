@@ -20,16 +20,16 @@ pub use broadcast_mutator::BroadcastMutator;
 pub use head_provider::DbHeadProvider;
 pub use merge_handler::{DbMergeHandler, MergeError};
 pub use peer_identity::{
-    PeerIdentityError, create_peer_to_did_mapper, peer_id_to_did, public_key_to_did,
+    create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
 };
 pub use push_docs::{push_existing_docs, retry_doc};
 pub use push_docs_transport::{push_existing_docs_via_transport, retry_doc_via_transport};
 pub use replication::{
-    ReplicationStack, attach_failure_channel, create_acp_merge_handler, create_broadcast_mutator,
+    attach_failure_channel, create_acp_merge_handler, create_broadcast_mutator,
     create_head_provider, create_merge_handler, create_replication_stack,
-    load_document_head_blocks, load_persisted_collections,
+    load_document_head_blocks, load_persisted_collections, ReplicationStack,
 };
 pub use se::{
-    FieldQuery, FieldValueQuery, SECoordinator, fetch_doc_ids, generate_doc_artifacts,
-    generate_field_artifact, store_artifacts,
+    fetch_doc_ids, generate_doc_artifacts, generate_field_artifact, store_artifacts, FieldQuery,
+    FieldValueQuery, SECoordinator,
 };

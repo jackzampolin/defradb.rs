@@ -16,12 +16,8 @@ pub trait TransportDocPusher: Send + Sync {
         se_key: Option<&[u8]>,
     ) -> P2PResult<()>;
 
-    async fn retry_doc(
-        &self,
-        peer_id: &PeerId,
-        doc_id: &str,
-        collection_id: &str,
-    ) -> P2PResult<()>;
+    async fn retry_doc(&self, peer_id: &PeerId, doc_id: &str, collection_id: &str)
+        -> P2PResult<()>;
 
     async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Vec<u8>)>>;
 
