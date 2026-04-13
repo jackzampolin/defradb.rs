@@ -484,11 +484,11 @@ mod tests {
     use blockstore::{Blockstore as _, DefraBlockstore};
     use crypto::PrivateKey as _;
     use defra_core::block::{
-        Block, CollectionDefinitionDeltaPayload, CrdtDelta, LwwDeltaPayload, Signature,
-        SignatureHeader, SignatureType,
+        Block, CollectionDefinitionDeltaPayload, CounterDeltaPayload, CrdtDelta, LwwDeltaPayload,
+        Signature, SignatureHeader, SignatureType,
     };
     use events::{Bus, ChannelBus, EventName};
-    use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use schema::{CType, CollectionVersion, FieldDescription, FieldKind};
     use storage::backends::MemoryStore;
     use storage::corekv::Key;
     use storage::keys::systemstore::CollectionID;
@@ -534,6 +534,31 @@ mod tests {
         let blockstore = Arc::new(DefraBlockstore::new(store, false));
         let handler = DbMergeHandler::new(db, blockstore.clone());
         (handler, blockstore, bus)
+    }
+
+    async fn make_handler_with_counter_schema() -> (
+        DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
+        Arc<DefraBlockstore<MemoryStore>>,
+    ) {
+        let store = Arc::new(MemoryStore::new());
+        let db = Arc::new(DB::from_arc(store.clone()).unwrap());
+
+        db.create_collection(CollectionVersion::new(
+            "Counters",
+            "v1",
+            "col-counters",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "score", FieldKind::int())
+                    .with_crdt_type(CType::PnCounter),
+            ],
+        ))
+        .await
+        .unwrap();
+
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let handler = DbMergeHandler::new(db, blockstore.clone());
+        (handler, blockstore)
     }
 
     struct FailingPostCommitAction;
@@ -1005,6 +1030,73 @@ mod tests {
         assert!(
             mapping.is_some(),
             "expected synced schema to persist a root_id mapping"
+        );
+    }
+
+    #[tokio::test]
+    async fn counter_merge_marks_cid_merged_and_clears_nonce_marker() {
+        let (handler, blockstore) = make_handler_with_counter_schema().await;
+        let mut doc = Document::new();
+        doc.generate_and_set_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().to_string();
+
+        let mut delta_data = Vec::new();
+        ciborium::into_writer(&5_i64, &mut delta_data).unwrap();
+
+        let payload = CounterDeltaPayload {
+            doc_id: doc_id.as_bytes().to_vec(),
+            field_name: "score".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            data: delta_data,
+            nonce: 4242,
+        };
+        let block = Block {
+            delta: CrdtDelta::Counter(payload.clone()),
+            heads: None,
+            links: None,
+            encryption: None,
+            signature: None,
+        };
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+        blockstore.put(&cid, &block_data).await.unwrap();
+
+        let metadata = BlockMetadata::normal(
+            &doc_id,
+            "col-counters",
+            "did:key:z6MkrCounterMergeTest",
+            None,
+            false,
+        );
+
+        let outcome = handler
+            .process_counter_delta(&cid, &payload, &metadata)
+            .await
+            .unwrap();
+        assert_eq!(outcome, MergeOutcome::Merged);
+        assert!(blockstore.is_merged(&cid).await.unwrap());
+
+        let counter = crdt::Counter::new(
+            payload.schema_version_id.clone(),
+            &payload.doc_id,
+            payload.field_name.clone(),
+            true,
+            crdt::NumericKind::Int64,
+        )
+        .unwrap();
+
+        let txn = handler.db.new_txn(true).await.unwrap();
+        let mut datastore = txn.datastore().unwrap();
+        let removed = counter
+            .clear_nonce(&mut datastore, payload.nonce)
+            .await
+            .unwrap();
+        let _ = txn.discard();
+
+        assert!(
+            !removed,
+            "nonce marker should be removed once the CID is finalized as merged"
         );
     }
 }

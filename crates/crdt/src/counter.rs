@@ -20,12 +20,6 @@ pub enum NumericKind {
     Float64,
 }
 
-/// Exact replay protection window per counter field.
-///
-/// The most recent `DEFAULT_NONCE_RETENTION_LIMIT` applied nonces are retained.
-/// Older nonces are evicted in insertion order to keep storage bounded.
-pub const DEFAULT_NONCE_RETENTION_LIMIT: u64 = 1024;
-
 /// Internal helper for computed new values (used in apply_delta)
 enum NewValue {
     Int64(i64),
@@ -196,12 +190,6 @@ pub struct Counter {
     value_key: Vec<u8>,
     /// Storage key for tracking applied nonces
     nonce_prefix: Vec<u8>,
-    /// Ring buffer prefix for bounded nonce retention
-    nonce_ring_prefix: Vec<u8>,
-    /// Monotonic insertion sequence key for nonce ring bookkeeping
-    nonce_seq_key: Vec<u8>,
-    /// Maximum number of nonces retained for replay protection
-    nonce_retention_limit: u64,
     /// Schema version
     schema_version_id: String,
     /// Field name
@@ -256,18 +244,9 @@ impl Counter {
         let mut nonce_prefix = value_key.clone();
         nonce_prefix.extend_from_slice(b"/nonces/");
 
-        let mut nonce_ring_prefix = value_key.clone();
-        nonce_ring_prefix.extend_from_slice(b"/nonce-ring/");
-
-        let mut nonce_seq_key = nonce_ring_prefix.clone();
-        nonce_seq_key.extend_from_slice(b"next-seq");
-
         Ok(Self {
             value_key,
             nonce_prefix,
-            nonce_ring_prefix,
-            nonce_seq_key,
-            nonce_retention_limit: DEFAULT_NONCE_RETENTION_LIMIT,
             schema_version_id,
             field_name,
             allow_decrement,
@@ -281,35 +260,6 @@ impl Counter {
         nonce_key
     }
 
-    fn nonce_ring_slot_key(&self, slot: u64) -> Vec<u8> {
-        let mut slot_key = self.nonce_ring_prefix.clone();
-        slot_key.extend_from_slice(&slot.to_be_bytes());
-        slot_key
-    }
-
-    async fn next_nonce_sequence(&self, reader: &dyn Reader) -> Result<u64> {
-        match reader
-            .get(&self.nonce_seq_key)
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?
-        {
-            Some(bytes) => {
-                if bytes.len() != 8 {
-                    return Err(Error::MergeError(format!(
-                        "invalid nonce sequence length for field '{}' in schema '{}': expected 8 bytes, got {} bytes",
-                        self.field_name,
-                        self.schema_version_id,
-                        bytes.len()
-                    )));
-                }
-                Ok(u64::from_be_bytes(
-                    bytes[..8].try_into().expect("validated above"),
-                ))
-            }
-            None => Ok(0),
-        }
-    }
-
     /// Check if a nonce has been applied
     async fn has_nonce(&self, reader: &dyn Reader, nonce: i64) -> Result<bool> {
         reader
@@ -321,52 +271,28 @@ impl Counter {
     /// Mark a nonce as applied
     ///
     async fn mark_nonce(&self, rw: &mut dyn ReaderWriter, nonce: i64) -> Result<()> {
-        if self.nonce_retention_limit == 0 {
-            return Ok(());
-        }
-
-        let next_seq = self.next_nonce_sequence(rw).await?;
-        let slot_key = self.nonce_ring_slot_key(next_seq % self.nonce_retention_limit);
-
-        if let Some(existing) = rw
-            .get(&slot_key)
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?
-        {
-            if existing.len() != 16 {
-                return Err(Error::MergeError(format!(
-                    "invalid nonce ring slot length for field '{}' in schema '{}': expected 16 bytes, got {} bytes",
-                    self.field_name,
-                    self.schema_version_id,
-                    existing.len()
-                )));
-            }
-
-            let prev_nonce =
-                i64::from_be_bytes(existing[8..16].try_into().expect("validated above"));
-            rw.delete(&self.nonce_key(prev_nonce))
-                .await
-                .map_err(|e| Error::Storage(e.to_string()))?;
-        }
-
         let nonce_key = self.nonce_key(nonce);
-        rw.set(&nonce_key, &next_seq.to_be_bytes())
+        rw.set(&nonce_key, &[1])
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    /// Remove a nonce marker once block/CID-level merge dedup is durable.
+    ///
+    /// Returns `true` if a marker existed and was removed.
+    pub async fn clear_nonce(&self, rw: &mut dyn ReaderWriter, nonce: i64) -> Result<bool> {
+        let nonce_key = self.nonce_key(nonce);
+        let exists = rw
+            .has(&nonce_key)
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
-
-        let mut slot_value = [0u8; 16];
-        slot_value[..8].copy_from_slice(&next_seq.to_be_bytes());
-        slot_value[8..].copy_from_slice(&nonce.to_be_bytes());
-        rw.set(&slot_key, &slot_value)
+        if !exists {
+            return Ok(false);
+        }
+        rw.delete(&nonce_key)
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
-
-        rw.set(
-            &self.nonce_seq_key,
-            &(next_seq.wrapping_add(1)).to_be_bytes(),
-        )
-        .await
-        .map_err(|e| Error::Storage(e.to_string()))
+        Ok(true)
     }
 
     /// Get current value as i64
