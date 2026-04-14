@@ -55,6 +55,7 @@ proptest.workspace = true
 serde_json.workspace = true
 serial_test = "3.0"
 tokio.workspace = true    # Async runtime for tests
+multicodec.workspace = true
 
 [lints]
 workspace = true

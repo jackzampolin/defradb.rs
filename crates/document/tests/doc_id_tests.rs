@@ -1,18 +1,18 @@
 //! Integration tests for DocID type
 
 use cid::Cid;
+use defra_core::SHA2_256_CODE;
 use document::{DocID, DOC_ID_V0, SDN_NAMESPACE_V0};
+use multicodec::Codec;
 use multihash::MultihashGeneric;
 use sha2::{Digest, Sha256};
-
-const SHA2_256_CODE: u64 = 0x12;
 
 fn test_cid() -> Cid {
     let mut hasher = Sha256::new();
     hasher.update(b"test document content");
     let hash_bytes = hasher.finalize();
-    let mh: MultihashGeneric<64> = MultihashGeneric::wrap(SHA2_256_CODE, &hash_bytes).unwrap();
-    Cid::new_v1(0x55, mh) // 0x55 = raw codec
+    let mh: MultihashGeneric<64> = MultihashGeneric::wrap(*SHA2_256_CODE, &hash_bytes).unwrap();
+    Cid::new_v1(Codec::Bin.code() as u64, mh)
 }
 
 #[test]
@@ -49,15 +49,15 @@ fn test_different_cids_produce_different_uuids() {
     let mut hasher1 = Sha256::new();
     hasher1.update(b"document 1");
     let hash1 = hasher1.finalize();
-    let mh1: MultihashGeneric<64> = MultihashGeneric::wrap(SHA2_256_CODE, &hash1).unwrap();
+    let mh1: MultihashGeneric<64> = MultihashGeneric::wrap(*SHA2_256_CODE, &hash1).unwrap();
 
     let mut hasher2 = Sha256::new();
     hasher2.update(b"document 2");
     let hash2 = hasher2.finalize();
-    let mh2: MultihashGeneric<64> = MultihashGeneric::wrap(SHA2_256_CODE, &hash2).unwrap();
+    let mh2: MultihashGeneric<64> = MultihashGeneric::wrap(*SHA2_256_CODE, &hash2).unwrap();
 
-    let cid1 = Cid::new_v1(0x55, mh1);
-    let cid2 = Cid::new_v1(0x55, mh2);
+    let cid1 = Cid::new_v1(Codec::Bin.code() as u64, mh1);
+    let cid2 = Cid::new_v1(Codec::Bin.code() as u64, mh2);
 
     let doc_id1 = DocID::new_v0(cid1);
     let doc_id2 = DocID::new_v0(cid2);

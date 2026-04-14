@@ -9,6 +9,8 @@ use crypto::merkle_proof::{
 };
 use defra_core::block::{Block, CrdtDelta, LwwDeltaPayload};
 use defra_core::Result;
+use defra_core::{DAG_CBOR_CODEC, SHA2_256_CODE};
+use multicodec::Codec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -513,12 +515,10 @@ fn test_verify_cid_unsupported_hash_algorithm() {
 
     // Create a CID with unsupported hash algorithm (Blake2b-256 = 0xb220)
     const BLAKE2B_256_CODE: u64 = 0xb220;
-    const DAG_CBOR_CODEC: u64 = 0x71;
-
     // Create a fake hash (all zeros) with Blake2b code
     let fake_digest = [0u8; 32];
     let mh = MultihashGeneric::<64>::wrap(BLAKE2B_256_CODE, &fake_digest).unwrap();
-    let unsupported_cid = Cid::new_v1(DAG_CBOR_CODEC, mh);
+    let unsupported_cid = Cid::new_v1(*DAG_CBOR_CODEC, mh);
 
     let node = ProofNode {
         cid: unsupported_cid,
@@ -544,12 +544,9 @@ fn test_verify_cid_unsupported_codec() {
     let data = block.to_dag_cbor().unwrap();
 
     // Create a CID with unsupported codec (raw = 0x55)
-    const SHA2_256_CODE: u64 = 0x12;
-    const RAW_CODEC: u64 = 0x55;
-
     let fake_digest = [0u8; 32];
-    let mh = MultihashGeneric::<64>::wrap(SHA2_256_CODE, &fake_digest).unwrap();
-    let unsupported_cid = Cid::new_v1(RAW_CODEC, mh);
+    let mh = MultihashGeneric::<64>::wrap(*SHA2_256_CODE, &fake_digest).unwrap();
+    let unsupported_cid = Cid::new_v1(Codec::Bin.code() as u64, mh);
 
     let node = ProofNode {
         cid: unsupported_cid,
