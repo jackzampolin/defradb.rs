@@ -83,6 +83,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                                 cid,
                                 doc_id: msg.doc_id.clone(),
                                 collection_id: msg.collection_id.clone(),
+                                acp_actor_relationships: msg.acp_actor_relationships.clone(),
                             })
                             .await
                             .is_err()
@@ -150,6 +151,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         cid: *cid,
                         doc_id: msg.doc_id.clone(),
                         collection_id: msg.collection_id.clone(),
+                        acp_actor_relationships: msg.acp_actor_relationships.clone(),
                     })
                     .await
                     .is_err()
@@ -256,6 +258,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     sender_peer: sender_peer.map(str::to_owned),
                     is_explicit_replicator,
                     explicit_replay_authorization,
+                    acp_actor_relationships: msg.acp_actor_relationships.clone(),
                 })
                 .await
                 .is_err()
@@ -316,6 +319,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                                 is_explicit_replicator,
                                 explicit_replay_authorization: explicit_replay_authorization
                                     .clone(),
+                                acp_actor_relationships: msg.acp_actor_relationships.clone(),
                                 inserted_at: now,
                             },
                         );
@@ -350,6 +354,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     sender_peer: sender_peer.map(str::to_owned),
                     is_explicit_replicator,
                     explicit_replay_authorization,
+                    acp_actor_relationships: msg.acp_actor_relationships.clone(),
                 })
                 .await
                 .is_err()

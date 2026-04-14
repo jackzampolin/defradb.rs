@@ -267,6 +267,7 @@ fn test_pushlog_broadcast_serialization() {
         "collection1".to_string(),
         "creator1".to_string(),
         Bytes::from(vec![5, 6, 7, 8]),
+        None,
     );
 
     let encoded = encode_with_ciborium(&broadcast);
@@ -288,6 +289,7 @@ fn test_pushlog_broadcast_cbor_field_names() {
         "collection3".to_string(),
         "creator3".to_string(),
         Bytes::from(vec![4, 5, 6]),
+        None,
     );
 
     let encoded = encode_with_ciborium(&broadcast);
@@ -367,6 +369,7 @@ fn test_pushlog_broadcast_to_request() {
         "col3".to_string(),
         "creator3".to_string(),
         Bytes::from(vec![100, 110, 120]),
+        None,
     );
 
     let request = broadcast.to_request();

@@ -5,14 +5,15 @@ use integration_test::{
     USER_ACP_POLICY,
 };
 
-/// 02-24: P2P replication does not grant cross-node access to ACP-protected documents.
+/// 02-24: P2P replication must not grant access to identities without a relationship.
 ///
-/// When a document replicates from node0 to node1, the ACP state does NOT replicate.
-/// An identity that was not granted access on node1 must not be able to read the
-/// protected document on node1 even after replication.
+/// When a document replicates from node0 to node1, only the explicit document
+/// relationships should carry across. An unrelated identity must not gain read
+/// access on the receiving node just because the document replicated.
 ///
-/// This tests the merge-denial property: receiving a replicated block does not
-/// automatically grant read permission to any identity on the receiving node.
+/// This keeps the merge-denial property: receiving a replicated block must not
+/// automatically grant read permission to identities without a matching ACP
+/// relationship.
 async fn p2p_merge_denial_test(cluster: TestCluster) {
     let node0 = cluster.client(0);
     let node1 = cluster.client(1);
@@ -20,6 +21,7 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
 
     let alice = generate_identity(&binary).expect("Alice identity");
     let bob = generate_identity(&binary).expect("Bob identity");
+    let charlie = generate_identity(&binary).expect("Charlie identity");
 
     let timeout = Duration::from_secs(15);
     cluster
@@ -112,16 +114,51 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
     )
     .await;
 
-    // Bob queries node1 — the ACP grant from node0 did NOT replicate.
-    // Bob must see 0 documents on node1 (merge-denial: replication ≠ access grant).
+    let node1_ref = &node1;
+    let bob_key = bob.private_key_hex.clone();
+    poll_until(
+        || {
+            node1_ref
+                .query_with_identity("query { User { _docID name } }", &bob_key)
+                .ok()
+                .and_then(|v| v["User"].as_array().map(|a| a.len() == 1))
+                .unwrap_or(false)
+        },
+        Duration::from_secs(15),
+        Duration::from_millis(200),
+        "Bob did not gain access on node1 after the replicated reader grant",
+    )
+    .await;
+
+    // Bob queries node1. His reader grant from node0 should now replicate.
     let bob_node1 = node1
         .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
         .expect("Bob query on node1");
     let bob_node1_count = bob_node1["User"].as_array().map(|a| a.len()).unwrap_or(0);
     assert_eq!(
-        bob_node1_count, 0,
-        "ACP relationships must not replicate — Bob must not access the document on node1 without an explicit grant there"
+        bob_node1_count, 1,
+        "Bob must see the replicated document on node1 after the reader grant replicates"
     );
+
+    poll_until(
+        || {
+            node1_ref
+                .query_with_identity(
+                    &format!(
+                        r#"query {{ _commits(docID: "{}") {{ cid height }} }}"#,
+                        doc_id
+                    ),
+                    &bob_key,
+                )
+                .ok()
+                .and_then(|v| v["_commits"].as_array().map(|a| !a.is_empty()))
+                .unwrap_or(false)
+        },
+        Duration::from_secs(15),
+        Duration::from_millis(200),
+        "Bob did not gain _commits visibility on node1 after the replicated reader grant",
+    )
+    .await;
 
     let bob_commits_node1 = node1
         .query_with_identity(
@@ -136,9 +173,41 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
         .as_array()
         .map(|a| a.len())
         .unwrap_or(0);
+    assert!(
+        bob_commits_count > 0,
+        "Bob must read _commits on node1 after the reader grant replicates"
+    );
+
+    // Charlie was never granted access, so replication must not make the
+    // document visible to him on node1.
+    let charlie_node1 = node1
+        .query_with_identity("query { User { _docID name } }", &charlie.private_key_hex)
+        .expect("Charlie query on node1");
+    let charlie_node1_count = charlie_node1["User"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
     assert_eq!(
-        bob_commits_count, 0,
-        "Bob must not read _commits on node1 before a local ACP grant"
+        charlie_node1_count, 0,
+        "replication must not grant access on node1 to identities without a relationship"
+    );
+
+    let charlie_commits_node1 = node1
+        .query_with_identity(
+            &format!(
+                r#"query {{ _commits(docID: "{}") {{ cid height }} }}"#,
+                doc_id
+            ),
+            &charlie.private_key_hex,
+        )
+        .expect("Charlie commits query on node1");
+    let charlie_commits_count = charlie_commits_node1["_commits"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
+    assert_eq!(
+        charlie_commits_count, 0,
+        "Charlie must not read _commits on node1 without a local or replicated grant"
     );
 
     // Alice can still read the document on node1 (she's the owner, not relying on grant)
@@ -149,40 +218,6 @@ async fn p2p_merge_denial_test(cluster: TestCluster) {
         alice_node1["User"].as_array().map(|a| a.len()).unwrap_or(0),
         1,
         "Alice must read her document on node1 as owner"
-    );
-
-    node1
-        .acp_relationship_add("User", &doc_id, "reader", &bob.did, &alice.private_key_hex)
-        .expect("grant Bob reader on node1");
-
-    let bob_node1_after_grant = node1
-        .query_with_identity("query { User { _docID name } }", &bob.private_key_hex)
-        .expect("Bob query on node1 after grant");
-    assert_eq!(
-        bob_node1_after_grant["User"]
-            .as_array()
-            .map(|a| a.len())
-            .unwrap_or(0),
-        1,
-        "Bob must see the replicated document on node1 after a local reader grant"
-    );
-
-    let bob_commits_after_grant = node1
-        .query_with_identity(
-            &format!(
-                r#"query {{ _commits(docID: "{}") {{ cid height }} }}"#,
-                doc_id
-            ),
-            &bob.private_key_hex,
-        )
-        .expect("Bob commits query on node1 after grant");
-    let bob_commits_after_grant_count = bob_commits_after_grant["_commits"]
-        .as_array()
-        .map(|a| a.len())
-        .unwrap_or(0);
-    assert!(
-        bob_commits_after_grant_count > 0,
-        "Bob must see _commits on node1 after a local reader grant"
     );
 }
 

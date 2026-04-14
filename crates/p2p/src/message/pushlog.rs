@@ -3,6 +3,8 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
+use acp::ReplicatedDocActorRelationships;
+
 use super::cbor::{nullable_bytes, optional_bytes};
 use super::metadata::MetaData;
 use super::traits::Message;
@@ -46,6 +48,14 @@ pub struct PushLogRequest {
         default
     )]
     pub explicit_replay_capability: Option<String>,
+
+    /// Optional local-ACP actor relationship snapshot for this document.
+    #[serde(
+        rename = "ACPActorRelationships",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
 }
 
 impl PushLogRequest {
@@ -65,6 +75,7 @@ impl PushLogRequest {
             creator,
             block,
             explicit_replay_capability: None,
+            acp_actor_relationships: None,
         }
     }
 }
@@ -260,6 +271,14 @@ pub struct PushLogBroadcast {
     /// Uses bytes_as_cbor for CBOR byte string compatibility with Go.
     #[serde(rename = "Block", with = "super::cbor::bytes_as_cbor")]
     pub block: Bytes,
+
+    /// Optional local-ACP actor relationship snapshot for this document.
+    #[serde(
+        rename = "ACPActorRelationships",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
 }
 
 impl PushLogBroadcast {
@@ -270,6 +289,7 @@ impl PushLogBroadcast {
         collection_id: String,
         creator: String,
         block: Bytes,
+        acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
     ) -> Self {
         Self {
             doc_id,
@@ -277,6 +297,7 @@ impl PushLogBroadcast {
             collection_id,
             creator,
             block,
+            acp_actor_relationships,
         }
     }
 
@@ -288,17 +309,20 @@ impl PushLogBroadcast {
             collection_id: req.collection_id.clone(),
             creator: req.creator.clone(),
             block: req.block.clone(),
+            acp_actor_relationships: req.acp_actor_relationships.clone(),
         }
     }
 
     /// Convert to a PushLogRequest (adds default metadata, O(1) Bytes clone).
     pub fn to_request(&self) -> PushLogRequest {
-        PushLogRequest::new(
+        let mut request = PushLogRequest::new(
             self.doc_id.clone(),
             self.cid.clone(),
             self.collection_id.clone(),
             self.creator.clone(),
             self.block.clone(),
-        )
+        );
+        request.acp_actor_relationships = self.acp_actor_relationships.clone();
+        request
     }
 }

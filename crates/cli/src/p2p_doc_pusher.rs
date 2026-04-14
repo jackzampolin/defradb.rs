@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
+use acp::ReplicatedDocActorRelationships;
 use async_trait::async_trait;
+use cid::Cid;
 
 use p2p::P2PHostHandle;
 
@@ -168,6 +170,70 @@ impl<S: storage::corekv::Store + 'static> DocPusher for DbDocPusher<S> {
             collection_id,
         )
         .await
+    }
+
+    async fn load_document_head_blocks(&self, doc_id: &str) -> Result<Vec<(Cid, Vec<u8>)>, String> {
+        let provider = db_merge::DbHeadProvider::new(self.db.clone());
+        let heads =
+            <db_merge::DbHeadProvider<S> as p2p::sync::DocumentHeadProvider>::get_document_heads(
+                &provider, doc_id,
+            )
+            .await
+            .map_err(|e| format!("failed to load document heads: {}", e))?;
+
+        let txn = self
+            .db
+            .new_txn(true)
+            .await
+            .map_err(|e| format!("failed to create read transaction: {}", e))?;
+        let blockstore = txn
+            .blockstore()
+            .map_err(|e| format!("failed to get blockstore: {}", e))?;
+
+        let mut blocks = Vec::with_capacity(heads.len());
+        for cid in heads {
+            let bytes = blockstore
+                .get(&cid.to_bytes())
+                .await
+                .map_err(|e| format!("failed to read head block {cid}: {e}"))?
+                .ok_or_else(|| format!("head block {cid} not found"))?;
+            blocks.push((cid, bytes));
+        }
+        Ok(blocks)
+    }
+
+    async fn load_doc_actor_relationships(
+        &self,
+        collection_name: &str,
+        doc_id: &str,
+    ) -> Result<Option<ReplicatedDocActorRelationships>, String> {
+        let Some(acp) = self.document_acp.get() else {
+            return Ok(None);
+        };
+        let collection = match self.db.get_collection(collection_name) {
+            Ok(Some(collection)) => collection,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                return Err(format!(
+                    "failed to load collection for ACP relationships: {}",
+                    e
+                ));
+            }
+        };
+        let Some(policy) = collection.schema().policy.as_ref() else {
+            return Ok(None);
+        };
+
+        let relationships = acp
+            .export_actor_relationships(&policy.id, &policy.resource_name, doc_id)
+            .await
+            .map_err(|e| format!("failed to export ACP relationships: {}", e))?;
+
+        Ok(Some(ReplicatedDocActorRelationships {
+            policy_id: policy.id.clone(),
+            resource_name: policy.resource_name.clone(),
+            relationships,
+        }))
     }
 }
 

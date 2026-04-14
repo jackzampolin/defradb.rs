@@ -606,10 +606,20 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             .load_document_head_blocks(doc_id)
             .await
             .map_err(P2PError::from)?;
+        let acp_actor_relationships = pusher
+            .load_doc_actor_relationships(collection_name, doc_id)
+            .await?;
 
         for (cid, block) in head_blocks {
             coordinator
-                .broadcast_local_update(&cid, &block, doc_id, &collection_id)
+                .broadcast_local_update_with_creator_and_relationships(
+                    &cid,
+                    &block,
+                    doc_id,
+                    &collection_id,
+                    None,
+                    acp_actor_relationships.clone(),
+                )
                 .await
                 .map_err(|error| {
                     P2PError::transport(format!("failed to republish document head {cid}: {error}"))

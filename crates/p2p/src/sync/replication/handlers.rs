@@ -3,6 +3,8 @@
 use blockstore::Blockstore;
 use cid::Cid;
 
+use acp::ReplicatedDocActorRelationships;
+
 use super::config::ReplicationConfig;
 use super::result::ReplicationResult;
 use crate::sync::coordinator::SyncCoordinator;
@@ -75,6 +77,7 @@ pub(super) async fn handle_block_received<B, T, H>(
     config: &ReplicationConfig,
     cid: Cid,
     metadata: BlockMetadata<'_>,
+    acp_actor_relationships: Option<&ReplicatedDocActorRelationships>,
 ) -> ReplicationResult
 where
     B: Blockstore + 'static,
@@ -166,6 +169,16 @@ where
                 }
             }
 
+            if let Err(error) = coordinator
+                .apply_replicated_actor_relationships(&doc_id_for_result, acp_actor_relationships)
+                .await
+            {
+                return ReplicationResult::Failed {
+                    cid,
+                    error: error.to_string(),
+                };
+            }
+
             ReplicationResult::Merged {
                 cid,
                 doc_id: doc_id_for_result,
@@ -178,6 +191,18 @@ where
                     return ReplicationResult::MergedButNotMarked {
                         cid,
                         error: format!("skipped but failed to mark: {}", e),
+                    };
+                }
+                if let Err(error) = coordinator
+                    .apply_replicated_actor_relationships(
+                        &doc_id_for_result,
+                        acp_actor_relationships,
+                    )
+                    .await
+                {
+                    return ReplicationResult::Failed {
+                        cid,
+                        error: error.to_string(),
                     };
                 }
             }
@@ -199,10 +224,17 @@ where
 
 /// Returns true if this event type can be batch-merged.
 pub(super) fn is_mergeable_event(event: &SyncEvent) -> bool {
-    matches!(
-        event,
-        SyncEvent::BlockReceived { .. } | SyncEvent::DagReady { .. }
-    )
+    match event {
+        SyncEvent::BlockReceived {
+            acp_actor_relationships,
+            ..
+        }
+        | SyncEvent::DagReady {
+            acp_actor_relationships,
+            ..
+        } => acp_actor_relationships.is_none(),
+        _ => false,
+    }
 }
 
 /// Extract merge block metadata from a SyncEvent.
@@ -226,6 +258,7 @@ fn event_to_merge_metadata(
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
+            ..
         } => (
             *cid,
             doc_id.clone(),
@@ -243,6 +276,7 @@ fn event_to_merge_metadata(
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
+            ..
         } => (
             *root_cid,
             doc_id.clone(),
@@ -401,6 +435,7 @@ where
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
+            acp_actor_relationships,
         } => {
             handle_block_received(
                 coordinator,
@@ -415,6 +450,7 @@ where
                     is_explicit_replicator,
                 )
                 .with_explicit_replay_authorization(explicit_replay_authorization),
+                acp_actor_relationships.as_ref(),
             )
             .await
         }
@@ -422,13 +458,26 @@ where
             cid,
             doc_id,
             collection_id,
-        } => ReplicationResult::Skipped {
-            cid,
-            doc_id,
-            collection_id,
-            reason: "already merged".to_string(),
-            terminal: true,
-        },
+            acp_actor_relationships,
+        } => {
+            if let Err(error) = coordinator
+                .apply_replicated_actor_relationships(&doc_id, acp_actor_relationships.as_ref())
+                .await
+            {
+                ReplicationResult::Failed {
+                    cid,
+                    error: error.to_string(),
+                }
+            } else {
+                ReplicationResult::Skipped {
+                    cid,
+                    doc_id,
+                    collection_id,
+                    reason: "already merged".to_string(),
+                    terminal: true,
+                }
+            }
+        }
         SyncEvent::SyncError { cid, error } => ReplicationResult::Failed { cid, error },
         SyncEvent::DagNeedsFetch {
             root_cid,
@@ -444,6 +493,7 @@ where
             sender_peer,
             is_explicit_replicator,
             explicit_replay_authorization,
+            acp_actor_relationships,
         } => {
             // DAG is complete after Bitswap fetch - process as block received
             tracing::info!(
@@ -464,6 +514,7 @@ where
                     is_explicit_replicator,
                 )
                 .with_explicit_replay_authorization(explicit_replay_authorization),
+                acp_actor_relationships.as_ref(),
             )
             .await
         }

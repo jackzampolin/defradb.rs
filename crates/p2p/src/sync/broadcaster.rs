@@ -11,6 +11,8 @@
 use bytes::Bytes;
 use cid::Cid;
 
+use acp::ReplicatedDocActorRelationships;
+
 use crate::error::{Error, Result};
 use crate::message::PushLogBroadcast;
 use crate::topics::DefraTopic;
@@ -142,6 +144,7 @@ impl<T: P2PTransport> Broadcaster<T> {
         doc_id: &str,
         collection_id: &str,
         creator: &str,
+        acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
     ) -> PushLogBroadcast {
         PushLogBroadcast::new(
             doc_id.to_string(),
@@ -149,6 +152,7 @@ impl<T: P2PTransport> Broadcaster<T> {
             collection_id.to_string(),
             creator.to_string(),
             Bytes::copy_from_slice(block),
+            acp_actor_relationships,
         )
     }
 
@@ -178,6 +182,7 @@ mod tests {
             doc_id,
             collection_id,
             creator,
+            None,
         );
 
         assert_eq!(broadcast.doc_id, doc_id);

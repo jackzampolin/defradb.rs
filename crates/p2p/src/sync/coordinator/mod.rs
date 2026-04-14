@@ -56,6 +56,7 @@ pub use result_types::{CreateReplicatorResult, LoadReplicatorsResult};
 
 use std::sync::Arc;
 
+use acp::DocumentACP;
 use blockstore::Blockstore;
 
 use crate::bitswap::{AccessMode, ReplicatorRegistry};
@@ -147,6 +148,9 @@ pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
 
     /// Subscription and doc-sync support state.
     pub(super) subscriptions: SyncSubscriptionState,
+
+    /// Optional document ACP used for local ACP relationship snapshot replay.
+    pub(super) document_acp: std::sync::OnceLock<Arc<dyn DocumentACP>>,
 }
 
 /// Type alias for SyncCoordinator using the libp2p transport.

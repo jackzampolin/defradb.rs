@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use cid::Cid;
 
 use p2p::P2PHostHandle;
 
@@ -73,6 +74,21 @@ impl DocPusher for LookupOnlyDocPusher {
         _collection_id: &str,
     ) -> Result<(), String> {
         Err("retry_doc not available (no database context)".to_string())
+    }
+
+    async fn load_document_head_blocks(
+        &self,
+        _doc_id: &str,
+    ) -> Result<Vec<(Cid, Vec<u8>)>, String> {
+        Err("load_document_head_blocks not available (no database context)".to_string())
+    }
+
+    async fn load_doc_actor_relationships(
+        &self,
+        _collection_name: &str,
+        _doc_id: &str,
+    ) -> Result<Option<acp::ReplicatedDocActorRelationships>, String> {
+        Err("load_doc_actor_relationships not available (no database context)".to_string())
     }
 }
 

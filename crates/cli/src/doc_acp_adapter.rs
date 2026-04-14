@@ -12,6 +12,7 @@ pub struct DocumentAcpAdapter<S: Store> {
     database: Arc<db::DB<S>>,
     acp: Arc<dyn acp::DocumentACP>,
     store: Arc<dyn acp::ZanzibarStore>,
+    p2p: Option<Arc<dyn defra_http::router::P2POperations>>,
 }
 
 impl<S: Store + 'static> DocumentAcpAdapter<S> {
@@ -20,11 +21,13 @@ impl<S: Store + 'static> DocumentAcpAdapter<S> {
         database: Arc<db::DB<S>>,
         acp: Arc<dyn acp::DocumentACP>,
         store: Arc<dyn acp::ZanzibarStore>,
+        p2p: Option<Arc<dyn defra_http::router::P2POperations>>,
     ) -> Self {
         Self {
             database,
             acp,
             store,
+            p2p,
         }
     }
 
@@ -33,8 +36,9 @@ impl<S: Store + 'static> DocumentAcpAdapter<S> {
         database: Arc<db::DB<S>>,
         acp: Arc<dyn acp::DocumentACP>,
         store: Arc<dyn acp::ZanzibarStore>,
+        p2p: Option<Arc<dyn defra_http::router::P2POperations>>,
     ) -> Arc<dyn DocumentAcpOperations> {
-        Arc::new(Self::new(database, acp, store))
+        Arc::new(Self::new(database, acp, store, p2p))
     }
 
     /// Look up policy info for a collection by name.
@@ -111,7 +115,8 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
             .validate_and_get_managing_relations(&policy_id, &resource_name, relation)
             .await?;
 
-        self.acp
+        let added = self
+            .acp
             .add_actor_relationship(
                 requestor,
                 &target,
@@ -122,7 +127,22 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
                 &managing,
             )
             .await
-            .map_err(|e| format!("{}", e))
+            .map_err(|e| format!("{}", e))?;
+
+        if added {
+            if let Some(p2p) = &self.p2p {
+                if let Err(error) = p2p.republish_document(collection, doc_id).await {
+                    tracing::debug!(
+                        error = %error,
+                        collection,
+                        doc_id,
+                        "best-effort DAC republish after grant failed"
+                    );
+                }
+            }
+        }
+
+        Ok(added)
     }
 
     async fn delete_doc_relationship(
@@ -147,7 +167,8 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
             .validate_and_get_managing_relations(&policy_id, &resource_name, relation)
             .await?;
 
-        self.acp
+        let deleted = self
+            .acp
             .delete_actor_relationship(
                 requestor,
                 &target,
@@ -158,6 +179,21 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
                 &managing,
             )
             .await
-            .map_err(|e| format!("{}", e))
+            .map_err(|e| format!("{}", e))?;
+
+        if deleted {
+            if let Some(p2p) = &self.p2p {
+                if let Err(error) = p2p.republish_document(collection, doc_id).await {
+                    tracing::debug!(
+                        error = %error,
+                        collection,
+                        doc_id,
+                        "best-effort DAC republish after revoke failed"
+                    );
+                }
+            }
+        }
+
+        Ok(deleted)
     }
 }

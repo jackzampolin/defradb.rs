@@ -470,12 +470,13 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
             );
         }
 
-        // Validate node handle and get database, document_acp, and policy_store
-        let (database, document_acp, policy_store) = match NODES.get(node_ptr, |state| {
+        // Validate node handle and get database, document_acp, policy_store, and optional p2p
+        let (database, document_acp, policy_store, p2p_system) = match NODES.get(node_ptr, |state| {
             (
                 state.database.clone(),
                 state.document_acp.clone(),
                 state.policy_store.clone(),
+                state.p2p.clone(),
             )
         }) {
             Some(tuple) => tuple,
@@ -538,6 +539,25 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
                 )
                 .await
                 .map_err(|e| e.to_string())?;
+
+            if deleted {
+                if let Some(system) = p2p_system {
+                    if let Err(error) = system
+                        .system
+                        .ops()
+                        .republish_document(&collection_id_str, &doc_id_str)
+                        .await
+                        .map_err(crate::p2p::FfiP2PError::from)
+                    {
+                        tracing::debug!(
+                            error = %error,
+                            collection_id = %collection_id_str,
+                            doc_id = %doc_id_str,
+                            "best-effort DAC republish after revoke failed"
+                        );
+                    }
+                }
+            }
 
             let json = serde_json::json!({ "deleted": deleted }).to_string();
             Ok::<String, String>(json)

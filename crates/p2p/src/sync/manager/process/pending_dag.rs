@@ -116,6 +116,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 source_peer: Some(source_peer),
                 is_explicit_replicator: false,
                 explicit_replay_authorization: None,
+                acp_actor_relationships: None,
                 inserted_at: Instant::now(),
             },
         ) {
@@ -154,6 +155,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 source_peer: Some(source_peer),
                 is_explicit_replicator: false,
                 explicit_replay_authorization: None,
+                acp_actor_relationships: None,
                 inserted_at: Instant::now(),
             },
         ) {
@@ -273,6 +275,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 sender_peer: info.source_peer.clone(),
                 is_explicit_replicator: info.is_explicit_replicator,
                 explicit_replay_authorization: info.explicit_replay_authorization.clone(),
+                acp_actor_relationships: info.acp_actor_relationships.clone(),
             })
             .await;
 

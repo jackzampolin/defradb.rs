@@ -125,6 +125,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     collection_store,
                     head_provider,
                 },
+                document_acp: std::sync::OnceLock::new(),
             },
             events,
         ))

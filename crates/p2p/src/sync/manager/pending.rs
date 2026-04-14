@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use acp::ReplicatedDocActorRelationships;
 use cid::Cid;
 
 use crate::ExplicitReplayAuthorization;
@@ -39,6 +40,8 @@ pub struct PendingDag {
     pub is_explicit_replicator: bool,
     /// Capability-based explicit replay authorization carried by two-stream pushes.
     pub explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+    /// Optional local-ACP actor relationship snapshot for the document.
+    pub acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
     /// When this entry was inserted (for TTL eviction).
     pub inserted_at: Instant,
 }

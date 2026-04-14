@@ -158,6 +158,7 @@ where
         version_syncer,
     );
     adapter.set_initial_tracked_documents(restored_doc_ids);
+    let coordinator_for_acp = coordinator.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let system = Arc::new(ManagedP2PSystem::new(
         TransportKind::Libp2p,
@@ -178,6 +179,7 @@ where
         mutator: replication.broadcast_mutator,
         merge_handler: replication.merge_handler,
         wire_document_acp: Some(Box::new(move |acp| {
+            coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());
             broadcast_mutator_for_acp.set_document_acp(acp);
         })),
@@ -285,6 +287,7 @@ where
         version_syncer,
     );
     adapter.set_initial_tracked_documents(restored_doc_ids);
+    let coordinator_for_acp = coordinator.clone();
     let broadcast_mutator_for_acp = replication.broadcast_mutator.clone();
     let system = Arc::new(ManagedP2PSystem::new(
         TransportKind::Iroh,
@@ -306,6 +309,7 @@ where
         mutator: replication.broadcast_mutator,
         merge_handler: replication.merge_handler,
         wire_document_acp: Some(Box::new(move |acp| {
+            coordinator_for_acp.set_document_acp(acp.clone());
             doc_pusher_for_acp.set_document_acp(acp.clone());
             broadcast_mutator_for_acp.set_document_acp(acp);
         })),

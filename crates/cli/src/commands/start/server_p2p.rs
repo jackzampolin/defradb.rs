@@ -112,6 +112,7 @@ impl Node {
 
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
+        let coordinator_for_acp = coordinator.clone();
 
         match db_merge::load_persisted_collections(&coordinator).await {
             Ok(count) => {
@@ -385,6 +386,7 @@ impl Node {
             mutator: broadcast_mutator,
             http_adapter: Some(Arc::new(adapter)),
             wire_merge_acp: Some(Box::new(move |acp| {
+                coordinator_for_acp.set_document_acp(acp.clone());
                 merge_handler_for_acp.set_document_acp(acp);
             })),
             wire_doc_pusher_acp: Some(Box::new(move |acp| {
@@ -445,6 +447,7 @@ impl Node {
 
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
+        let coordinator_for_acp = coordinator.clone();
 
         match db_merge::load_persisted_collections(&coordinator).await {
             Ok(count) => {
@@ -688,6 +691,7 @@ impl Node {
             mutator: broadcast_mutator,
             http_adapter: Some(Arc::new(adapter)),
             wire_merge_acp: Some(Box::new(move |acp| {
+                coordinator_for_acp.set_document_acp(acp.clone());
                 merge_handler_for_acp.set_document_acp(acp);
             })),
             wire_doc_pusher_acp: Some(Box::new(move |acp| {
