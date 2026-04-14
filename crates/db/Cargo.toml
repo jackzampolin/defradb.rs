@@ -69,6 +69,7 @@ parking_lot.workspace = true
 db-blocks = { path = "../db-blocks" }
 db-index = { path = "../db-index" }
 db-nac = { path = "../db-nac", default-features = false }
+db-search = { path = "../db-search" }
 storage = { path = "../storage" }
 datastore = { path = "../datastore" }
 schema = { path = "../schema" }

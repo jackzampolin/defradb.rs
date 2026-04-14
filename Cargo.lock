@@ -3559,6 +3559,7 @@ dependencies = [
  "db-blocks",
  "db-index",
  "db-nac",
+ "db-search",
  "defra-core",
  "document",
  "events",
@@ -3675,6 +3676,22 @@ dependencies = [
  "identity",
  "serde",
  "storage",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "db-search"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "document",
+ "query",
+ "reqwest 0.12.28",
+ "schema",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

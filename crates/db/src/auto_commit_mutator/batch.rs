@@ -150,7 +150,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         let embedding_config = self.db.options().embedding_config();
 
-        crate::embedding::set_embedding(
+        db_search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
             true,
@@ -287,7 +287,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         let embedding_config = self.db.options().embedding_config();
 
-        let generated = crate::embedding::set_embedding(
+        let generated = db_search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
             false,
