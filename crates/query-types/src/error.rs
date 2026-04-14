@@ -270,49 +270,14 @@ impl QueryError {
     }
 }
 
-impl From<defra_errors::Error> for QueryError {
-    fn from(err: defra_errors::Error) -> Self {
-        // Bridge the unified subsystem error into the query-layer error.
-        // Extracted crates (db-commits-fetcher, db-lensed-fetcher, etc.)
-        // return `defra_errors::Error`; this impl lets callers in the
-        // query crate use `?` without manual mapping.
-        //
-        // For the structured wrappers (Storage/Datastore/Schema/Document/
-        // Core) we flatten into `Execution` / `Internal` with the full
-        // chain stringified, because QueryError's structured variants take
-        // specific inner error types that don't line up directly with
-        // defra_errors' broader storage::Error / datastore::Error shapes.
-        match err {
-            defra_errors::Error::Storage(e) => {
-                QueryError::Execution(format!("storage error: {}", e))
-            }
-            defra_errors::Error::Datastore(e) => {
-                QueryError::Execution(format!("datastore error: {}", e))
-            }
-            defra_errors::Error::Schema(e) => QueryError::Execution(format!("schema error: {}", e)),
-            defra_errors::Error::Document(e) => {
-                QueryError::Internal(format!("document error: {}", e))
-            }
-            defra_errors::Error::Core(e) => QueryError::Internal(format!("core error: {}", e)),
-            defra_errors::Error::InvalidDocument(msg) => {
-                QueryError::Execution(format!("invalid document: {}", msg))
-            }
-            defra_errors::Error::DocumentNotFound(msg) => QueryError::DocumentNotFound(msg),
-            defra_errors::Error::CollectionNotFound(msg) => QueryError::CollectionNotFound(msg),
-            defra_errors::Error::NotFound(msg) => {
-                QueryError::Execution(format!("not found: {}", msg))
-            }
-            defra_errors::Error::AlreadyExists(msg) => {
-                QueryError::Execution(format!("already exists: {}", msg))
-            }
-            defra_errors::Error::InvalidArgument(msg) => {
-                QueryError::Execution(format!("invalid argument: {}", msg))
-            }
-            defra_errors::Error::Other(msg) => QueryError::Execution(msg),
-            other => QueryError::Internal(other.to_string()),
-        }
-    }
-}
+// A `From<defra_errors::Error> for QueryError` bridge is intentionally NOT
+// provided yet. `QueryError::Storage` wraps `storage::corekv::Error` while
+// `defra_errors::Error::Storage` wraps the broader `storage::Error` — they
+// don't line up, so any bridge today would either stringify (losing
+// structure) or need a structural fix to one of the two enums. When the
+// first extracted subsystem actually threads errors into query code, we
+// reshape QueryError at that point. Adding the bridge preemptively with a
+// stringifying workaround would paper over the mismatch.
 
 #[cfg(test)]
 mod tests {

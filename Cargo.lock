@@ -10002,7 +10002,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "defra-core",
- "defra-errors",
  "document",
  "schema",
  "serde",

@@ -30,7 +30,6 @@ schema = { path = "../schema" }
 storage = { path = "../storage" }
 document = { path = "../document" }
 defra-core = { path = "../defra-core" }
-defra-errors = { path = "../defra-errors" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
