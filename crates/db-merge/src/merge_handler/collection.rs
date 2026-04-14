@@ -1,4 +1,4 @@
-use super::batch::{PendingMergeEvent, PendingPostCommitAction};
+use super::batch::{PendingFieldBlockFinalization, PendingMergeEvent, PendingPostCommitAction};
 use super::*;
 
 impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
@@ -333,6 +333,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         batch_merged_collections: &std::sync::Mutex<HashSet<Cid>>,
         pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
         pending_post_commit_actions: &std::sync::Mutex<Vec<PendingPostCommitAction>>,
+        pending_field_block_finalizations: &std::sync::Mutex<Vec<PendingFieldBlockFinalization>>,
         depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
         if depth >= super::MAX_MERGE_DEPTH {
@@ -391,6 +392,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         batch_merged_collections,
                         pending_events,
                         pending_post_commit_actions,
+                        pending_field_block_finalizations,
                         depth + 1,
                     ))
                     .await
@@ -442,6 +444,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                             batch_merged_collections,
                             pending_events,
                             pending_post_commit_actions,
+                            pending_field_block_finalizations,
                             depth + 1,
                         )
                         .await

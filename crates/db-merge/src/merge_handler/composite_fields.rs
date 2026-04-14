@@ -157,6 +157,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             }
         }
 
+        state.linked_field_cids.push(*link_cid);
+
         Ok(None)
     }
 

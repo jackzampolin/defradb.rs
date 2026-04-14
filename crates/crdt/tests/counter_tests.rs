@@ -107,6 +107,51 @@ async fn test_counter_idempotency() {
 }
 
 #[tokio::test]
+async fn test_counter_clear_nonce_removes_replay_marker() {
+    let store = MemoryStore::new();
+    let counter = Counter::new(
+        "v1".to_string(),
+        b"doc1",
+        "count".to_string(),
+        true,
+        NumericKind::Int64,
+    )
+    .unwrap();
+
+    let ctx = Context {
+        doc_id: DocId::new_unchecked("doc1"),
+        schema_version: "v1".to_string(),
+        is_create: false,
+    };
+
+    let mut txn = store.new_txn(false).await.unwrap();
+
+    let delta = CounterDelta::new_int64(
+        b"doc1".to_vec(),
+        "count".to_string(),
+        1,
+        1,
+        "v1".to_string(),
+        1,
+    )
+    .unwrap();
+    counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+
+    let replay_within_window = counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
+    assert!(matches!(
+        replay_within_window,
+        MergeResult::SkippedAlreadyApplied { nonce: 1 }
+    ));
+
+    assert!(counter.clear_nonce(&mut *txn, 1).await.unwrap());
+    assert!(!counter.clear_nonce(&mut *txn, 1).await.unwrap());
+
+    let value_bytes = counter.value(&*txn).await.unwrap();
+    let value = i64::from_be_bytes(value_bytes.try_into().unwrap());
+    assert_eq!(value, 1);
+}
+
+#[tokio::test]
 async fn test_counter_decrement_not_allowed() {
     let store = MemoryStore::new();
     let counter = Counter::new(

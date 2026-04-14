@@ -13,6 +13,13 @@ pub(crate) struct PendingPostCommitAction {
     pub action: Box<dyn CompositePostCommitAction>,
 }
 
+/// Field blocks that should be marked merged and have any transient replay state cleaned up
+/// once the surrounding batch transaction commits.
+pub(crate) struct PendingFieldBlockFinalization {
+    pub cids: Vec<Cid>,
+    pub fallback_collection_id: Option<String>,
+}
+
 impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMergeHandler<S, B> {
     /// Process blocks individually, each with its own transaction.
     pub(crate) async fn merge_blocks_individually(
@@ -125,6 +132,9 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
             std::sync::Mutex::new(Vec::new());
         let pending_post_commit_actions: std::sync::Mutex<Vec<PendingPostCommitAction>> =
             std::sync::Mutex::new(Vec::new());
+        let pending_field_block_finalizations: std::sync::Mutex<
+            Vec<PendingFieldBlockFinalization>,
+        > = std::sync::Mutex::new(Vec::new());
 
         let mut results = Vec::with_capacity(blocks.len());
         let mut batch_error: Option<MergeError> = None;
@@ -157,6 +167,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                         &batch_merged_collections,
                         &pending_events,
                         &pending_post_commit_actions,
+                        &pending_field_block_finalizations,
                     )
                     .await
                 {
@@ -200,6 +211,15 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
             }
         }
 
+        let field_block_finalizations = pending_field_block_finalizations.into_inner().unwrap();
+        for finalization in field_block_finalizations {
+            self.best_effort_finalize_linked_field_blocks(
+                &finalization.cids,
+                finalization.fallback_collection_id.as_deref(),
+            )
+            .await;
+        }
+
         // Emit all collected events
         if let Some(bus) = self.db.event_bus() {
             let events = pending_events.into_inner().unwrap();
@@ -226,6 +246,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
         batch_merged_collections: &std::sync::Mutex<HashSet<Cid>>,
         pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
         pending_post_commit_actions: &std::sync::Mutex<Vec<PendingPostCommitAction>>,
+        pending_field_block_finalizations: &std::sync::Mutex<Vec<PendingFieldBlockFinalization>>,
     ) -> Result<MergeOutcome, MergeError> {
         // Decode the block from DAG-CBOR
         let block =
@@ -304,6 +325,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     batch_merged_collections,
                     pending_events,
                     pending_post_commit_actions,
+                    pending_field_block_finalizations,
                     0,
                 )
                 .await
@@ -320,6 +342,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     batch_merged_collections,
                     pending_events,
                     pending_post_commit_actions,
+                    pending_field_block_finalizations,
                     0,
                 )
                 .await
@@ -347,8 +370,40 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> DbMe
                     .process_counter_delta_in_txn(&mut ds, cid, payload, metadata.collection_id)
                     .await;
                 match result {
-                    Ok(r) if r.applied => Ok(MergeOutcome::Merged),
-                    Ok(_) => Ok(MergeOutcome::terminal_skip("rejected by CRDT")),
+                    Ok(r) if r.applied => {
+                        pending_field_block_finalizations
+                            .lock()
+                            .unwrap_or_else(|e| {
+                                tracing::warn!(
+                                    "pending_field_block_finalizations lock poisoned, recovering"
+                                );
+                                e.into_inner()
+                            })
+                            .push(PendingFieldBlockFinalization {
+                                cids: vec![*cid],
+                                fallback_collection_id: metadata
+                                    .collection_id
+                                    .map(ToOwned::to_owned),
+                            });
+                        Ok(MergeOutcome::Merged)
+                    }
+                    Ok(_) => {
+                        pending_field_block_finalizations
+                            .lock()
+                            .unwrap_or_else(|e| {
+                                tracing::warn!(
+                                    "pending_field_block_finalizations lock poisoned, recovering"
+                                );
+                                e.into_inner()
+                            })
+                            .push(PendingFieldBlockFinalization {
+                                cids: vec![*cid],
+                                fallback_collection_id: metadata
+                                    .collection_id
+                                    .map(ToOwned::to_owned),
+                            });
+                        Ok(MergeOutcome::terminal_skip("rejected by CRDT"))
+                    }
                     Err(e) => Err(e),
                 }
             }
