@@ -1,11 +1,5 @@
-use std::ffi::c_char;
-
+use crate::ffi_node_db_async_body;
 use acp::nac::NodePermission;
-
-use crate::helpers::{get_node_database, get_rt, require_c_str};
-use crate::nac_check::check_nac_for_node;
-use crate::types::FfiResult;
-use crate::{ffi_async, ffi_entry, try_ffi};
 
 /// Get a collection by name.
 ///
@@ -28,31 +22,26 @@ use crate::{ffi_async, ffi_entry, try_ffi};
 #[no_mangle]
 pub unsafe extern "C" fn get_collection_by_name(
     node_ptr: usize,
-    identity_did: *const c_char,
-    name: *const c_char,
-) -> FfiResult {
-    ffi_entry! {
-        let rt = try_ffi!(get_rt());
-        try_ffi!(check_nac_for_node(
-            rt,
-            node_ptr,
-            identity_did,
-            NodePermission::CollectionGet
-        ));
-        let name_str = try_ffi!(require_c_str(name, "name"));
-        let database = try_ffi!(get_node_database(node_ptr));
+    identity_did: *const std::ffi::c_char,
+    name: *const std::ffi::c_char,
+) -> crate::types::FfiResult {
+    ffi_node_db_async_body! {
+        node = node_ptr,
+        identity = identity_did,
+        database = database,
+        permission = NodePermission::CollectionGet,
+        name => name_str: "name";
+        {
+        let collection = database
+            .get_collection(&name_str)
+            .map_err(|e| format!("failed to get collection: {}", e))?
+            .ok_or_else(|| format!("collection '{}' not found", name_str))?;
 
-        ffi_async!(rt, {
-            let collection = database
-                .get_collection(&name_str)
-                .map_err(|e| format!("failed to get collection: {}", e))?
-                .ok_or_else(|| format!("collection '{}' not found", name_str))?;
+        let json = serde_json::to_string(collection.schema())
+            .map_err(|e| format!("failed to serialize collection: {}", e))?;
 
-            let json = serde_json::to_string(collection.schema())
-                .map_err(|e| format!("failed to serialize collection: {}", e))?;
-
-            Ok(json)
-        })
+        Ok(json)
+    }
     }
 }
 
@@ -76,27 +65,22 @@ pub unsafe extern "C" fn get_collection_by_name(
 #[no_mangle]
 pub unsafe extern "C" fn has_collection(
     node_ptr: usize,
-    identity_did: *const c_char,
-    name: *const c_char,
-) -> FfiResult {
-    ffi_entry! {
-        let rt = try_ffi!(get_rt());
-        try_ffi!(check_nac_for_node(
-            rt,
-            node_ptr,
-            identity_did,
-            NodePermission::CollectionGet
-        ));
-        let name_str = try_ffi!(require_c_str(name, "name"));
-        let database = try_ffi!(get_node_database(node_ptr));
+    identity_did: *const std::ffi::c_char,
+    name: *const std::ffi::c_char,
+) -> crate::types::FfiResult {
+    ffi_node_db_async_body! {
+        node = node_ptr,
+        identity = identity_did,
+        database = database,
+        permission = NodePermission::CollectionGet,
+        name => name_str: "name";
+        {
+        let exists = database
+            .has_collection(&name_str)
+            .map_err(|e| format!("failed to check collection: {}", e))?;
 
-        ffi_async!(rt, {
-            let exists = database
-                .has_collection(&name_str)
-                .map_err(|e| format!("failed to check collection: {}", e))?;
-
-            Ok(exists.to_string())
-        })
+        Ok(exists.to_string())
+    }
     }
 }
 
@@ -121,33 +105,28 @@ pub unsafe extern "C" fn has_collection(
 #[no_mangle]
 pub unsafe extern "C" fn find_collection_by_id(
     node_ptr: usize,
-    identity_did: *const c_char,
-    collection_id: *const c_char,
-) -> FfiResult {
-    ffi_entry! {
-        let rt = try_ffi!(get_rt());
-        try_ffi!(check_nac_for_node(
-            rt,
-            node_ptr,
-            identity_did,
-            NodePermission::CollectionGet
-        ));
-        let id_str = try_ffi!(require_c_str(collection_id, "collection_id"));
-        let database = try_ffi!(get_node_database(node_ptr));
+    identity_did: *const std::ffi::c_char,
+    collection_id: *const std::ffi::c_char,
+) -> crate::types::FfiResult {
+    ffi_node_db_async_body! {
+        node = node_ptr,
+        identity = identity_did,
+        database = database,
+        permission = NodePermission::CollectionGet,
+        collection_id => id_str: "collection_id";
+        {
+        let collection = database
+            .find_collection_by_id(&id_str)
+            .map_err(|e| format!("failed to find collection: {}", e))?;
 
-        ffi_async!(rt, {
-            let collection = database
-                .find_collection_by_id(&id_str)
-                .map_err(|e| format!("failed to find collection: {}", e))?;
+        let json = match collection {
+            Some(c) => serde_json::to_string(c.schema())
+                .map_err(|e| format!("failed to serialize collection: {}", e))?,
+            None => "null".to_string(),
+        };
 
-            let json = match collection {
-                Some(c) => serde_json::to_string(c.schema())
-                    .map_err(|e| format!("failed to serialize collection: {}", e))?,
-                None => "null".to_string(),
-            };
-
-            Ok(json)
-        })
+        Ok(json)
+    }
     }
 }
 
@@ -171,34 +150,29 @@ pub unsafe extern "C" fn find_collection_by_id(
 #[no_mangle]
 pub unsafe extern "C" fn get_collection_by_version_id(
     node_ptr: usize,
-    identity_did: *const c_char,
-    version_id: *const c_char,
-) -> FfiResult {
-    ffi_entry! {
-        let rt = try_ffi!(get_rt());
-        try_ffi!(check_nac_for_node(
-            rt,
-            node_ptr,
-            identity_did,
-            NodePermission::CollectionGet
-        ));
-        let version_str = try_ffi!(require_c_str(version_id, "version_id"));
-        let database = try_ffi!(get_node_database(node_ptr));
+    identity_did: *const std::ffi::c_char,
+    version_id: *const std::ffi::c_char,
+) -> crate::types::FfiResult {
+    ffi_node_db_async_body! {
+        node = node_ptr,
+        identity = identity_did,
+        database = database,
+        permission = NodePermission::CollectionGet,
+        version_id => version_str: "version_id";
+        {
+        let collection = database
+            .get_collection_by_version_id_full(&version_str)
+            .await
+            .map_err(|e| format!("failed to get collection: {}", e))?;
 
-        ffi_async!(rt, {
-            let collection = database
-                .get_collection_by_version_id_full(&version_str)
-                .await
-                .map_err(|e| format!("failed to get collection: {}", e))?;
+        let json = match collection {
+            Some(c) => serde_json::to_string(c.schema())
+                .map_err(|e| format!("failed to serialize collection: {}", e))?,
+            None => "null".to_string(),
+        };
 
-            let json = match collection {
-                Some(c) => serde_json::to_string(c.schema())
-                    .map_err(|e| format!("failed to serialize collection: {}", e))?,
-                None => "null".to_string(),
-            };
-
-            Ok(json)
-        })
+        Ok(json)
+    }
     }
 }
 

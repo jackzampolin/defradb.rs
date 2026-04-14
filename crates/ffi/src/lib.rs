@@ -138,6 +138,46 @@ macro_rules! ffi_async_ok {
     }};
 }
 
+/// Expand the common `FfiResult` wrapper body for the
+/// node-permission-database async path.
+///
+/// The exported `extern "C"` function item stays explicit so cbindgen can keep
+/// emitting it in `defra.h`, while the repeated runtime / NAC / C-string /
+/// database prelude is shared in one place.
+#[macro_export]
+macro_rules! ffi_node_db_async_body {
+    (
+        node = $node_ptr:ident,
+        identity = $identity_did:ident,
+        database = $database:ident,
+        permission = $permission:expr
+        $(, $arg:ident => $parsed:ident : $arg_name:literal)*
+        $(,)?
+        ;
+        $body:block
+    ) => {
+        $crate::ffi_entry! {
+            let rt = $crate::try_ffi!($crate::helpers::get_rt());
+            $crate::try_ffi!($crate::nac_check::check_nac_for_node(
+                rt,
+                $node_ptr,
+                $identity_did,
+                $permission
+            ));
+            $(
+                let ffi_arg_ptr = $arg;
+                let ffi_arg_name = $arg_name;
+                let $parsed = $crate::try_ffi!(unsafe {
+                    $crate::helpers::require_c_str(ffi_arg_ptr, ffi_arg_name)
+                });
+            )*
+            let $database = $crate::try_ffi!($crate::helpers::get_node_database($node_ptr));
+
+            $crate::ffi_async!(rt, $body)
+        }
+    };
+}
+
 // Re-export FFI functions at crate root
 pub use acp::{
     add_dac_actor_relationship, add_dac_policy, add_nac_actor_relationship,
