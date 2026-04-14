@@ -87,7 +87,10 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/{name}/truncate", delete(handlers::truncate_collection))
         .route("/{name}/document/{docID}", get(handlers::get_document))
         .route("/{name}/document/{docID}", patch(handlers::update_document))
-        .route("/{name}/document/{docID}", delete(handlers::delete_document))
+        .route(
+            "/{name}/document/{docID}",
+            delete(handlers::delete_document),
+        )
         // Go-compatible index routes (collection in path)
         .route("/{name}/indexes", get(handlers::index::go_list_indexes))
         .route("/{name}/indexes", post(handlers::index::go_create_index))

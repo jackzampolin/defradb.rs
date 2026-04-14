@@ -1,7 +1,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use std::hint::black_box;
 use defra_core::block::generate_cid_from_bytes;
 use defra_core::{Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload};
+use std::hint::black_box;
 
 fn lww_block() -> Block {
     Block::new(

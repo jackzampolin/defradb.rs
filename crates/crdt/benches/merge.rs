@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 use crdt::traits::{Context, ReplicatedData, ValueReader};
 use crdt::{decode_priority, encode_priority, Lww, LwwDelta};
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
-use std::hint::black_box;
 use defra_core::types::DocId;
+use std::hint::black_box;
 use storage::{MemoryStore, Store};
 
 fn runtime() -> &'static tokio::runtime::Runtime {
