@@ -32,9 +32,7 @@ impl Collection {
         }
 
         // Serialize document to CBOR
-        let data = doc
-            .to_cbor()
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let data = doc.to_cbor()?;
 
         // Store document
         datastore.set(&key, &data).await.map_err(Error::Storage)?;
@@ -77,8 +75,7 @@ impl Collection {
         // Get old document for index update
         let old_doc = match datastore.get(&key).await.map_err(Error::Storage)? {
             Some(bytes) => {
-                let mut d =
-                    Document::from_cbor(&bytes).map_err(|e| Error::Serialization(e.to_string()))?;
+                let mut d = Document::from_cbor(&bytes)?;
                 d.set_id(doc_id.clone());
                 d
             }
@@ -86,9 +83,7 @@ impl Collection {
         };
 
         // Serialize and store
-        let data = doc
-            .to_cbor()
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let data = doc.to_cbor()?;
 
         datastore.set(&key, &data).await.map_err(Error::Storage)?;
 
@@ -125,8 +120,7 @@ impl Collection {
         // Get the document for index cleanup
         let doc = match datastore.get(&key).await.map_err(Error::Storage)? {
             Some(bytes) => {
-                let mut d =
-                    Document::from_cbor(&bytes).map_err(|e| Error::Serialization(e.to_string()))?;
+                let mut d = Document::from_cbor(&bytes)?;
                 d.set_id(doc_id.clone());
                 d
             }

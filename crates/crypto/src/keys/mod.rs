@@ -18,7 +18,12 @@ pub trait Key: defra_core::thread_bounds::MaybeSendSync {
     fn equal(&self, other: &dyn Key) -> bool;
 
     /// Get the raw bytes of this key
-    fn raw(&self) -> Vec<u8>;
+    fn raw(&self) -> &[u8];
+
+    /// Get an owned copy of the raw bytes when required by external APIs.
+    fn raw_owned(&self) -> Vec<u8> {
+        self.raw().to_vec()
+    }
 
     /// Get the hex-encoded string representation of this key
     fn to_hex_string(&self) -> String {
@@ -31,7 +36,10 @@ pub trait Key: defra_core::thread_bounds::MaybeSendSync {
 
 /// Public key operations
 pub trait PublicKey: Key {
-    /// Verify a signature over data using this public key
+    /// Verify a signature over data using this public key.
+    ///
+    /// Returns `Ok(true)` on success and `Err` for malformed signatures or
+    /// cryptographic verification failures.
     fn verify(&self, data: &[u8], signature: &[u8]) -> defra_core::Result<bool>;
 
     /// Generate a DID key representation of this public key
@@ -44,5 +52,5 @@ pub trait PrivateKey: Key {
     fn sign(&self, data: &[u8]) -> defra_core::Result<Vec<u8>>;
 
     /// Get the corresponding public key
-    fn public_key(&self) -> Box<dyn PublicKey>;
+    fn public_key(&self) -> &dyn PublicKey;
 }

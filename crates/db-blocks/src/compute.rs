@@ -17,8 +17,8 @@ pub struct ComputedBlocks {
 /// For creates: priority is always 1, no headstore reads, no prev heads.
 /// The entire computation is a pure function of the inputs.
 ///
-/// For each field: CBOR encode → optional encrypt → build Block → optional sign →
-/// serialize → CID. Then builds composite block the same way.
+/// For each field: CBOR encode -> optional encrypt -> build Block -> optional sign ->
+/// serialize -> CID. Then builds composite block the same way.
 /// Accumulates all (key, value) pairs instead of writing to storage.
 pub fn compute_document_blocks(
     doc: &Document,
@@ -91,7 +91,7 @@ pub fn compute_document_blocks(
             .unwrap_or(false)
             || doc.get_counter_delta(field_name).is_some();
 
-        // For creates, heads are always empty → nonce is always 0
+        // For creates, heads are always empty -> nonce is always 0
         let nonce: i64 = 0;
 
         let delta = if is_counter {
@@ -131,7 +131,7 @@ pub fn compute_document_blocks(
 
         blockstore_entries.push((field_cid.to_bytes(), field_block_bytes));
 
-        // Head entry: /d/{doc_id}/{field_name}/{cid} → priority
+        // Head entry: /d/{doc_id}/{field_name}/{cid} -> priority
         let head_key = HeadstoreDocKey::new(&doc_id_str, field_name, field_cid);
         let priority_bytes = encode_priority_varint(priority);
         headstore_entries.push((head_key.bytes(), priority_bytes));
@@ -168,12 +168,12 @@ pub fn compute_document_blocks(
         doc_id: doc_id_bytes,
         schema_version_id: schema_version_id.to_string(),
         priority,
-        status: 1, // Active document
+        status: 1,
     };
 
     let mut composite_block = Block::new_with_options(
         CrdtDelta::Composite(composite_payload),
-        vec![], // No prev heads for creates
+        vec![],
         field_links,
         composite_encryption_cid,
         None,

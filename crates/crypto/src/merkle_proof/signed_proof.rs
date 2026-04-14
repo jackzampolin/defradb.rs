@@ -89,11 +89,7 @@ impl SignedMerkleProof {
         // Verify the signature. A failed signature check is a security event —
         // return Err to match Go's verifySignature convention.
         let proof_bytes = self.proof.to_dag_cbor()?;
-        if !public_key.verify(&proof_bytes, &self.signature.value)? {
-            return Err(Error::Crypto(
-                "proof signature verification failed".to_string(),
-            ));
-        }
+        public_key.verify(&proof_bytes, &self.signature.value)?;
 
         // Verify the proof itself
         self.proof.verify()
@@ -108,11 +104,7 @@ impl SignedMerkleProof {
         // Verify the signature. A failed signature check is a security event —
         // return Err to match Go's verifySignature convention.
         let proof_bytes = self.proof.to_dag_cbor()?;
-        if !public_key.verify(&proof_bytes, &self.signature.value)? {
-            return Err(Error::Crypto(
-                "proof signature verification failed".to_string(),
-            ));
-        }
+        public_key.verify(&proof_bytes, &self.signature.value)?;
 
         // Verify the proof itself
         self.proof.verify()
@@ -120,12 +112,12 @@ impl SignedMerkleProof {
 
     /// Serialize to DAG-CBOR
     pub fn to_dag_cbor(&self) -> Result<Vec<u8>> {
-        serde_ipld_dagcbor::to_vec(self).map_err(|e| Error::Serialization(e.to_string()))
+        Ok(serde_ipld_dagcbor::to_vec(self)?)
     }
 
     /// Deserialize from DAG-CBOR
     pub fn from_dag_cbor(bytes: &[u8]) -> Result<Self> {
-        serde_ipld_dagcbor::from_slice(bytes).map_err(|e| Error::Serialization(e.to_string()))
+        Ok(serde_ipld_dagcbor::from_slice(bytes)?)
     }
 }
 

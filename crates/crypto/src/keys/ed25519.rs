@@ -6,9 +6,9 @@
 //! - Signatures: 64 bytes
 
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use subtle::ConstantTimeEq;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use defra_core::Result;
 
@@ -39,6 +39,8 @@ use crate::types::KeyType;
 #[derive(Clone)]
 pub struct Ed25519PrivateKey {
     key: SigningKey,
+    raw_bytes: Zeroizing<Vec<u8>>,
+    public_key: Ed25519PublicKey,
 }
 
 impl PartialEq for Ed25519PrivateKey {
@@ -104,12 +106,22 @@ impl Ed25519PrivateKey {
         }
 
         seed.zeroize();
-        Ok(Self { key })
+        let public_key = Ed25519PublicKey::from_verifying_key(key.verifying_key());
+        Ok(Self {
+            key,
+            raw_bytes: Zeroizing::new(bytes.to_vec()),
+            public_key,
+        })
     }
 
     /// Get the underlying ed25519-dalek signing key
     pub fn underlying(&self) -> &SigningKey {
         &self.key
+    }
+
+    /// Derive the corresponding Ed25519 public key without dynamic dispatch.
+    pub fn to_public_key(&self) -> Ed25519PublicKey {
+        self.public_key.clone()
     }
 }
 
@@ -124,18 +136,11 @@ impl Key for Ed25519PrivateKey {
         if self_raw.len() != other_raw.len() {
             return false;
         }
-        self_raw.ct_eq(&other_raw).into()
+        self_raw.ct_eq(other_raw).into()
     }
 
-    fn raw(&self) -> Vec<u8> {
-        // Return 64 bytes: 32-byte seed + 32-byte public key
-        // DefraDB format (not RFC 8032 standard) for Go compatibility
-        let seed = self.key.to_bytes();
-        let public = self.key.verifying_key().to_bytes();
-        let mut result = Vec::with_capacity(64);
-        result.extend_from_slice(&seed);
-        result.extend_from_slice(&public);
-        result
+    fn raw(&self) -> &[u8] {
+        &self.raw_bytes
     }
 
     fn key_type(&self) -> KeyType {
@@ -149,19 +154,16 @@ impl PrivateKey for Ed25519PrivateKey {
         Ok(signature.to_bytes().to_vec())
     }
 
-    fn public_key(&self) -> Box<dyn PublicKey> {
-        Box::new(Ed25519PublicKey {
-            key: self.key.verifying_key(),
-        })
+    fn public_key(&self) -> &dyn PublicKey {
+        &self.public_key
     }
 }
 
 /// Ed25519 public key wrapper
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ed25519PublicKey {
-    #[serde(with = "ed25519_public_key_serde")]
     key: VerifyingKey,
+    raw_bytes: [u8; PUBLIC_KEY_LENGTH],
 }
 
 impl Ed25519PublicKey {
@@ -192,12 +194,22 @@ impl Ed25519PublicKey {
         let key = VerifyingKey::from_bytes(&key_bytes)
             .map_err(|e| crypto_error(format!("invalid Ed25519 public key: {}", e)))?;
 
-        Ok(Self { key })
+        Ok(Self {
+            key,
+            raw_bytes: key_bytes,
+        })
     }
 
     /// Get the underlying ed25519-dalek verifying key
     pub fn underlying(&self) -> &VerifyingKey {
         &self.key
+    }
+
+    fn from_verifying_key(key: VerifyingKey) -> Self {
+        Self {
+            raw_bytes: key.to_bytes(),
+            key,
+        }
     }
 }
 
@@ -212,11 +224,11 @@ impl Key for Ed25519PublicKey {
         if self_raw.len() != other_raw.len() {
             return false;
         }
-        self_raw.ct_eq(&other_raw).into()
+        self_raw.ct_eq(other_raw).into()
     }
 
-    fn raw(&self) -> Vec<u8> {
-        self.key.to_bytes().to_vec()
+    fn raw(&self) -> &[u8] {
+        &self.raw_bytes
     }
 
     fn key_type(&self) -> KeyType {
@@ -224,10 +236,32 @@ impl Key for Ed25519PublicKey {
     }
 }
 
+impl Serialize for Ed25519PublicKey {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&self.raw_bytes)
+    }
+}
+
+impl<'de> Deserialize<'de> for Ed25519PublicKey {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = <Vec<u8>>::deserialize(deserializer)?;
+        Self::from_bytes(&bytes).map_err(serde::de::Error::custom)
+    }
+}
+
 impl PublicKey for Ed25519PublicKey {
     fn verify(&self, data: &[u8], signature: &[u8]) -> Result<bool> {
         if signature.len() != 64 {
-            return Ok(false);
+            return Err(crypto_error(format!(
+                "invalid Ed25519 signature length: expected 64 bytes, got {}",
+                signature.len()
+            )));
         }
 
         let sig_bytes: [u8; 64] = signature
@@ -236,14 +270,14 @@ impl PublicKey for Ed25519PublicKey {
 
         let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
 
-        match self.key.verify(data, &signature) {
-            Ok(_) => Ok(true),
-            Err(_) => Ok(false),
-        }
+        self.key
+            .verify(data, &signature)
+            .map(|_| true)
+            .map_err(|e| crypto_error(format!("Ed25519 signature verification failed: {}", e)))
     }
 
     fn did(&self) -> Result<String> {
-        crate::did::create_did_key(KeyType::Ed25519, &self.raw())
+        crate::did::create_did_key(KeyType::Ed25519, self.raw())
     }
 }
 
@@ -263,33 +297,4 @@ pub fn ed25519_key_from_seed(seed: &[u8]) -> Result<Vec<u8>> {
     full_key.extend_from_slice(verifying_key.as_bytes());
     seed_array.zeroize();
     Ok(full_key)
-}
-
-// Custom serde module for VerifyingKey
-mod ed25519_public_key_serde {
-    use ed25519_dalek::VerifyingKey;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(key: &VerifyingKey, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_bytes(&key.to_bytes())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<VerifyingKey, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let bytes = <Vec<u8>>::deserialize(deserializer)?;
-        if bytes.len() != 32 {
-            return Err(serde::de::Error::custom(
-                "invalid Ed25519 public key length",
-            ));
-        }
-        let key_bytes: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| serde::de::Error::custom("invalid Ed25519 public key bytes"))?;
-        VerifyingKey::from_bytes(&key_bytes).map_err(serde::de::Error::custom)
-    }
 }

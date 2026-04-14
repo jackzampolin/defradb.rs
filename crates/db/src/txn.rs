@@ -258,10 +258,13 @@ impl<S: Store> DbTxn<S> {
                                     collection_name = %name,
                                     "Failed to deserialize schema for collection"
                                 );
-                                Error::Serialization(format!(
-                                    "failed to deserialize schema for collection '{}': {}",
-                                    name, e
-                                ))
+                                Error::collection_schema_json(
+                                    format!(
+                                        "failed to deserialize schema for collection '{}'",
+                                        name
+                                    ),
+                                    e,
+                                )
                             })?;
                         populate_collection_root_id(&systemstore, &mut schema).await?;
                         self.collection_cache.add(Collection::new(schema));
@@ -288,10 +291,10 @@ impl<S: Store> DbTxn<S> {
                     version_id = %version_id,
                     "Failed to deserialize schema for collection"
                 );
-                Error::Serialization(format!(
-                    "failed to deserialize schema for collection '{}': {}",
-                    name, e
-                ))
+                Error::collection_schema_json(
+                    format!("failed to deserialize schema for collection '{}'", name),
+                    e,
+                )
             })?;
             populate_collection_root_id(&systemstore, &mut schema).await?;
             self.collection_cache.add(Collection::new(schema));
@@ -345,7 +348,7 @@ impl<S: Store> DbTxn<S> {
                     key_bytes = ?&pair.key[..pair.key.len().min(50)],
                     "Collection key contains invalid UTF-8"
                 );
-                Error::Serialization(format!("collection key contains invalid UTF-8: {}", e))
+                Error::text_decode("collection key contains invalid UTF-8", e)
             })?;
 
             let prefix_str = String::from_utf8(prefix.clone()).map_err(|e| {
@@ -373,20 +376,20 @@ impl<S: Store> DbTxn<S> {
             }
 
             // Old format: value is full JSON
-            let mut schema: CollectionVersion =
-                serde_json::from_slice(&pair.value).map_err(|e| {
-                    tracing::error!(
-                        error = ?e,
-                        collection_name = %name,
-                        "Failed to deserialize schema for collection '{}': {}",
-                        name,
-                        e
-                    );
-                    Error::Serialization(format!(
-                        "failed to deserialize schema for collection '{}': {}",
-                        name, e
-                    ))
-                })?;
+            let schema: CollectionVersion = serde_json::from_slice(&pair.value).map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    collection_name = %name,
+                    "Failed to deserialize schema for collection '{}': {}",
+                    name,
+                    e
+                );
+                Error::collection_schema_json(
+                    format!("failed to deserialize schema for collection '{}'", name),
+                    e,
+                )
+            })?;
+            let mut schema = schema;
             populate_collection_root_id(&systemstore, &mut schema).await?;
 
             collections.push(Collection::new(schema));
@@ -402,19 +405,19 @@ impl<S: Store> DbTxn<S> {
             let collection_key = CollectionKey::new(&version_id);
             match systemstore.get(&collection_key.bytes()).await {
                 Ok(Some(data)) => {
-                    let mut schema: CollectionVersion =
-                        serde_json::from_slice(&data).map_err(|e| {
-                            tracing::error!(
-                                error = ?e,
-                                collection_name = %name,
-                                version_id = %version_id,
-                                "Failed to deserialize schema"
-                            );
-                            Error::Serialization(format!(
-                                "failed to deserialize schema for collection '{}': {}",
-                                name, e
-                            ))
-                        })?;
+                    let schema: CollectionVersion = serde_json::from_slice(&data).map_err(|e| {
+                        tracing::error!(
+                            error = ?e,
+                            collection_name = %name,
+                            version_id = %version_id,
+                            "Failed to deserialize schema"
+                        );
+                        Error::collection_schema_json(
+                            format!("failed to deserialize schema for collection '{}'", name),
+                            e,
+                        )
+                    })?;
+                    let mut schema = schema;
                     populate_collection_root_id(&systemstore, &mut schema).await?;
                     collections.push(Collection::new(schema));
                 }

@@ -80,7 +80,7 @@ impl<S: Store> crate::database::DB<S> {
                         key_bytes = ?&pair.key[..pair.key.len().min(50)],
                         "Collection key contains invalid UTF-8"
                     );
-                    Error::Serialization(format!("collection key contains invalid UTF-8: {}", e))
+                    Error::text_decode("collection key contains invalid UTF-8", e)
                 })?;
 
                 let prefix_str = String::from_utf8(prefix.clone()).map_err(|e| {
@@ -114,10 +114,13 @@ impl<S: Store> crate::database::DB<S> {
                         collection_name = %name,
                         "Collection version ID contains invalid UTF-8"
                     );
-                    Error::Serialization(format!(
-                        "collection version ID for '{}' contains invalid UTF-8: {}",
-                        name, e
-                    ))
+                    Error::text_decode(
+                        format!(
+                            "collection version ID for '{}' contains invalid UTF-8",
+                            name
+                        ),
+                        e,
+                    )
                 })?;
 
                 // Look up the full collection definition from /collection/id/{version_id}
@@ -155,10 +158,10 @@ impl<S: Store> crate::database::DB<S> {
                             json_preview = %String::from_utf8_lossy(&collection_json[..collection_json.len().min(200)]),
                             "Failed to deserialize collection schema"
                         );
-                        Error::Serialization(format!(
-                            "failed to deserialize schema for collection '{}': {}",
-                            name, e
-                        ))
+                        Error::collection_schema_json(
+                            format!("failed to deserialize schema for collection '{}'", name),
+                            e,
+                        )
                     })?;
 
                 populate_collection_root_id(&systemstore, &mut schema).await?;

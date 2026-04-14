@@ -273,6 +273,7 @@ impl SourceHubProvider for CosmosProvider {
             return Ok(Some(ProviderPolicyInfo {
                 id: cached.id,
                 name: cached.name,
+                raw_policy: None,
             }));
         }
 
@@ -288,6 +289,7 @@ impl SourceHubProvider for CosmosProvider {
         Ok(result.map(|p| ProviderPolicyInfo {
             id: p.id,
             name: p.name,
+            raw_policy: p.raw_policy,
         }))
     }
 
@@ -329,13 +331,15 @@ mod tests {
     fn store_remote_secp256r1_identity(did: &str) {
         let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
         let public_key = private_key.public_key();
+        let public_key_bytes = public_key.raw_owned();
+        let public_key_hex = hex::encode(&public_key_bytes);
         defra_core::signing::store_identity(
             did,
             defra_core::signing::SigningConfig {
                 key_type: "secp256r1".to_string(),
                 private_key_bytes: Vec::new(),
-                public_key_bytes: public_key.raw(),
-                public_key_hex: hex::encode(public_key.raw()),
+                public_key_bytes,
+                public_key_hex,
                 remote_signer: None,
                 signing_authorization: None,
             },

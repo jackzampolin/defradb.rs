@@ -96,7 +96,7 @@ impl Node {
         let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
             Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
         let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
-            Arc::new(db_merge::DbHeadProvider::new(database.clone()));
+            Arc::new(db_merge::create_head_provider(database.clone()));
 
         let (mut coordinator, sync_events) = p2p::sync::SyncCoordinator::with_head_provider(
             p2p::Libp2pTransport::new(handle.clone()),
@@ -110,12 +110,11 @@ impl Node {
         .await
         .map_err(Error::P2P)?;
 
-        let (failure_tx, failure_rx) = tokio::sync::mpsc::channel::<p2p::sync::PushFailure>(1024);
-        coordinator.set_failure_channel(failure_tx);
+        let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
         let coordinator_for_acp = coordinator.clone();
 
-        match coordinator.load_p2p_collections().await {
+        match db_merge::load_persisted_collections(&coordinator).await {
             Ok(count) => {
                 if count > 0 {
                     info!("Loaded {} persisted P2P collection subscription(s)", count);
@@ -127,12 +126,15 @@ impl Node {
         }
 
         let merge_blockstore_for_syncer = merge_blockstore.clone();
-        let merge_handler_inner = Arc::new(db_merge::DbMergeHandler::new(
+        let replication = db_merge::create_replication_stack(
             database.clone(),
             merge_blockstore,
-        ));
-        let merge_handler = Arc::new(db_merge::AcpMergeHandler::new(merge_handler_inner.clone()));
-        let merge_handler_for_acp = merge_handler.clone();
+            coordinator.clone(),
+        );
+        let merge_handler_for_loop = replication.merge_handler.clone();
+        let merge_handler_inner_for_syncer = replication.merge_handler_inner.clone();
+        let broadcast_mutator = replication.broadcast_mutator.clone();
+        let merge_handler_for_acp = replication.merge_handler.clone();
 
         let coordinator_for_replication = coordinator.clone();
         let replication_task = tokio::spawn(async move {
@@ -140,7 +142,7 @@ impl Node {
             p2p::sync::ReplicationLoop::run_parallel(
                 coordinator_for_replication,
                 sync_events,
-                merge_handler,
+                merge_handler_for_loop,
                 p2p::sync::ReplicationConfig {
                     continue_on_error: true,
                     rebroadcast_on_merge: false,
@@ -232,7 +234,7 @@ impl Node {
         let version_syncer: Arc<dyn crate::p2p_adapter::VersionSyncer> =
             crate::version_syncer::DbVersionSyncer::new_arc(
                 merge_blockstore_for_syncer,
-                merge_handler_inner,
+                merge_handler_inner_for_syncer,
                 database.clone(),
             );
 
@@ -381,7 +383,7 @@ impl Node {
                 failure_recorder_task,
                 retry_loop_task,
             }),
-            mutator: Arc::new(db_merge::BroadcastMutator::new(database, coordinator)),
+            mutator: broadcast_mutator,
             http_adapter: Some(Arc::new(adapter)),
             wire_merge_acp: Some(Box::new(move |acp| {
                 coordinator_for_acp.set_document_acp(acp.clone());
@@ -411,7 +413,7 @@ impl Node {
         let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
             Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
         let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
-            Arc::new(db_merge::DbHeadProvider::new(database.clone()));
+            Arc::new(db_merge::create_head_provider(database.clone()));
 
         let iroh_secret_key = Self::iroh_secret_key(peer_keypair.as_ref())?;
         let (command_tx, mut iroh_events, host_task) =
@@ -443,12 +445,11 @@ impl Node {
         .await
         .map_err(Error::P2P)?;
 
-        let (failure_tx, failure_rx) = tokio::sync::mpsc::channel::<p2p::sync::PushFailure>(1024);
-        coordinator.set_failure_channel(failure_tx);
+        let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
         let coordinator_for_acp = coordinator.clone();
 
-        match coordinator.load_p2p_collections().await {
+        match db_merge::load_persisted_collections(&coordinator).await {
             Ok(count) => {
                 if count > 0 {
                     info!("Loaded {} persisted P2P collection subscription(s)", count);
@@ -460,12 +461,15 @@ impl Node {
         }
 
         let merge_blockstore_for_syncer = merge_blockstore.clone();
-        let merge_handler_inner = Arc::new(db_merge::DbMergeHandler::new(
+        let replication = db_merge::create_replication_stack(
             database.clone(),
             merge_blockstore,
-        ));
-        let merge_handler = Arc::new(db_merge::AcpMergeHandler::new(merge_handler_inner.clone()));
-        let merge_handler_for_acp = merge_handler.clone();
+            coordinator.clone(),
+        );
+        let merge_handler_for_loop = replication.merge_handler.clone();
+        let merge_handler_inner_for_syncer = replication.merge_handler_inner.clone();
+        let broadcast_mutator = replication.broadcast_mutator.clone();
+        let merge_handler_for_acp = replication.merge_handler.clone();
 
         let coordinator_for_replication = coordinator.clone();
         let replication_task = tokio::spawn(async move {
@@ -473,7 +477,7 @@ impl Node {
             p2p::sync::ReplicationLoop::run(
                 coordinator_for_replication,
                 sync_events,
-                merge_handler,
+                merge_handler_for_loop,
                 p2p::sync::ReplicationConfig {
                     continue_on_error: true,
                     rebroadcast_on_merge: false,
@@ -540,7 +544,7 @@ impl Node {
         let version_syncer: Arc<dyn crate::transport_version_syncer::TransportVersionSyncer> =
             crate::transport_version_syncer::DbTransportVersionSyncer::new_arc(
                 merge_blockstore_for_syncer,
-                merge_handler_inner,
+                merge_handler_inner_for_syncer,
                 database.clone(),
                 transport.clone(),
             );
@@ -684,7 +688,7 @@ impl Node {
                 failure_recorder_task,
                 retry_loop_task,
             }),
-            mutator: Arc::new(db_merge::BroadcastMutator::new(database, coordinator)),
+            mutator: broadcast_mutator,
             http_adapter: Some(Arc::new(adapter)),
             wire_merge_acp: Some(Box::new(move |acp| {
                 coordinator_for_acp.set_document_acp(acp.clone());

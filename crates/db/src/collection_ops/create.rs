@@ -131,10 +131,10 @@ impl<S: Store> crate::database::DB<S> {
         // 1. Store full schema at /collection/id/{version_id}
         let collection_key = CollectionKey::new(version_id.as_str());
         let data = serde_json::to_vec(&schema).map_err(|e| {
-            Error::Serialization(format!(
-                "failed to serialize schema for collection '{}': {}",
-                name, e
-            ))
+            Error::collection_schema_json(
+                format!("failed to serialize schema for collection '{}'", name),
+                e,
+            )
         })?;
         systemstore
             .set(&collection_key.bytes(), &data)
@@ -354,10 +354,10 @@ impl<S: Store> crate::database::DB<S> {
                 if changed {
                     let collection_key = CollectionKey::new(&schema.version_id);
                     let data = serde_json::to_vec(&schema).map_err(|e| {
-                        Error::Serialization(format!(
-                            "failed to re-serialize schema for '{}': {}",
-                            schema.name, e
-                        ))
+                        Error::collection_schema_json(
+                            format!("failed to re-serialize schema for '{}'", schema.name),
+                            e,
+                        )
                     })?;
                     systemstore
                         .set(&collection_key.bytes(), &data)

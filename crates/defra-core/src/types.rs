@@ -1,7 +1,7 @@
 //! Core type definitions for DefraDB
 
 use crate::doc_id::validate_doc_id_str;
-use crate::{Error, Result};
+use crate::{Error, Result, SHA2_256_CODE};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
@@ -166,7 +166,7 @@ pub struct CID(cid::Cid);
 impl CID {
     /// Create a CID from bytes with validation
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let c = cid::Cid::try_from(bytes).map_err(|e| Error::InvalidCID(e.to_string()))?;
+        let c = cid::Cid::try_from(bytes)?;
 
         // Validate version
         match c.version() {
@@ -175,8 +175,7 @@ impl CID {
 
         // Validate hash function (only support SHA-256 for now)
         let hash = c.hash();
-        if hash.code() != 0x12 {
-            // 0x12 = SHA-256
+        if hash.code() != *SHA2_256_CODE {
             return Err(Error::InvalidCID(format!(
                 "unsupported hash function: {}",
                 hash.code()
@@ -188,7 +187,7 @@ impl CID {
 
     /// Create a CID from a string
     pub fn from_string(s: &str) -> Result<Self> {
-        let c = cid::Cid::try_from(s).map_err(|e| Error::InvalidCID(e.to_string()))?;
+        let c = cid::Cid::try_from(s)?;
 
         // Validate version
         match c.version() {
@@ -197,7 +196,7 @@ impl CID {
 
         // Validate hash function
         let hash = c.hash();
-        if hash.code() != 0x12 {
+        if hash.code() != *SHA2_256_CODE {
             return Err(Error::InvalidCID(format!(
                 "unsupported hash function: {}",
                 hash.code()

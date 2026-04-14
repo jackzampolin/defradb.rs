@@ -254,34 +254,45 @@ impl Counter {
         })
     }
 
-    /// Check if a nonce has been applied
-    async fn has_nonce(&self, reader: &dyn Reader, nonce: i64) -> Result<bool> {
+    fn nonce_key(&self, nonce: i64) -> Vec<u8> {
         let mut nonce_key = self.nonce_prefix.clone();
         nonce_key.extend_from_slice(&nonce.to_be_bytes());
+        nonce_key
+    }
+
+    /// Check if a nonce has been applied
+    async fn has_nonce(&self, reader: &dyn Reader, nonce: i64) -> Result<bool> {
         reader
-            .has(&nonce_key)
+            .has(&self.nonce_key(nonce))
             .await
             .map_err(|e| Error::Storage(e.to_string()))
     }
 
     /// Mark a nonce as applied
     ///
-    /// Note: Nonces are stored permanently and never garbage collected in this implementation.
-    /// For production use, consider implementing nonce garbage collection strategies:
-    ///
-    /// 1. Time-based: Remove nonces older than a configurable retention period
-    /// 2. CID-based: Track nonces per DAG block and remove when blocks are pruned
-    /// 3. Hybrid: Combine time-based with causality tracking
-    ///
-    /// Nonce storage grows unbounded without GC, which could become a storage leak for
-    /// high-throughput counters. The trade-off is between storage cost and idempotency window.
     async fn mark_nonce(&self, rw: &mut dyn ReaderWriter, nonce: i64) -> Result<()> {
-        let mut nonce_key = self.nonce_prefix.clone();
-        nonce_key.extend_from_slice(&nonce.to_be_bytes());
-        // Store [1] as marker (value unused, only key existence matters)
+        let nonce_key = self.nonce_key(nonce);
         rw.set(&nonce_key, &[1])
             .await
             .map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    /// Remove a nonce marker once block/CID-level merge dedup is durable.
+    ///
+    /// Returns `true` if a marker existed and was removed.
+    pub async fn clear_nonce(&self, rw: &mut dyn ReaderWriter, nonce: i64) -> Result<bool> {
+        let nonce_key = self.nonce_key(nonce);
+        let exists = rw
+            .has(&nonce_key)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        if !exists {
+            return Ok(false);
+        }
+        rw.delete(&nonce_key)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(true)
     }
 
     /// Get current value as i64

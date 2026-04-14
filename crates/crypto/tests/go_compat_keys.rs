@@ -717,13 +717,15 @@ fn test_secp256k1_high_s_signature_is_rejected() {
         "High-S variant should be mathematically equivalent to the known-valid low-S signature"
     );
 
-    let valid = public_key
+    let err = public_key
         .verify(SECP256K1_TEST_MESSAGE, &high_s_signature)
-        .unwrap();
+        .expect_err("high-S secp256k1 signature should return Err");
 
     assert!(
-        !valid,
-        "Verifier must reject high-S secp256k1 signatures instead of normalizing them"
+        err.to_string()
+            .contains("secp256k1 signature verification failed"),
+        "unexpected error: {}",
+        err
     );
 }
 
@@ -877,10 +879,15 @@ fn test_secp256r1_signature_verification_rejects_wrong_message() {
         .expect("Should parse Go public key");
 
     // Verify Go-generated signature fails with wrong message
-    let valid = public_key
+    let err = public_key
         .verify(b"wrong message", SECP256R1_SIGNATURE)
-        .unwrap();
-    assert!(!valid, "Should reject signature with wrong message");
+        .expect_err("wrong message should return Err");
+    assert!(
+        err.to_string()
+            .contains("secp256r1 signature verification failed"),
+        "unexpected error: {}",
+        err
+    );
 }
 
 #[test]
@@ -892,10 +899,16 @@ fn test_secp256r1_signature_verification_rejects_tampered_signature() {
     let mut tampered_sig = SECP256R1_SIGNATURE.to_vec();
     tampered_sig[20] ^= 0x01;
 
-    let valid = public_key
+    let err = public_key
         .verify(SECP256R1_TEST_MESSAGE, &tampered_sig)
-        .unwrap();
-    assert!(!valid, "Should reject tampered signature");
+        .expect_err("tampered signature should return Err");
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("invalid secp256r1 DER signature")
+            || err_msg.contains("secp256r1 signature verification failed"),
+        "unexpected error: {}",
+        err_msg
+    );
 }
 
 #[test]

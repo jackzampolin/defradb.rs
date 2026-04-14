@@ -104,13 +104,13 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 );
                 Ok(Some(verified_did))
             }
-            Ok(false) => Err(MergeError::SignatureVerificationFailed {
-                cid: *cid,
-                reason: "signature value does not match block content".to_string(),
-            }),
             Err(e) => Err(MergeError::SignatureVerificationFailed {
                 cid: *cid,
                 reason: format!("signature verification error: {}", e),
+            }),
+            Ok(false) => Err(MergeError::SignatureVerificationFailed {
+                cid: *cid,
+                reason: "signature verification returned false unexpectedly".to_string(),
             }),
         }
     }

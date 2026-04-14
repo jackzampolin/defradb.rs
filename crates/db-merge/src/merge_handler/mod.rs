@@ -138,7 +138,8 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
 
     /// Decrypt block delta data using the encryption metadata block.
     ///
-    /// If `encryption_cid` is Some, loads the Encryption block from blockstore,
+    /// If `encryption_cid` is Some, loads the Encryption block from encstore,
+    /// falling back to the P2P blockstore when the metadata arrived via replay,
     /// extracts the AES key, and decrypts the data. Returns data unchanged if
     /// no encryption CID is present.
     pub(crate) async fn decrypt_block_data(
@@ -151,15 +152,28 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
             None => return Ok(data.to_vec()),
         };
 
-        // Load the Encryption block from blockstore
-        let enc_data = self
+        let enc_txn = self.db.new_txn(true).await.map_err(MergeError::Database)?;
+        let encstore = enc_txn.encstore().map_err(MergeError::Database)?;
+        let enc_cid_bytes = enc_cid.to_bytes();
+        let enc_data = if let Some(enc_data) = encstore
+            .get(&enc_cid_bytes)
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))?
+        {
+            enc_data
+        } else if let Some(enc_data) = self
             .blockstore
             .get(enc_cid)
             .await
             .map_err(|e| MergeError::Storage(e.to_string()))?
-            .ok_or_else(|| {
-                MergeError::Storage(format!("Encryption block {} not found", enc_cid))
-            })?;
+        {
+            enc_data.to_vec()
+        } else {
+            return Err(MergeError::Storage(format!(
+                "Encryption block {} not found",
+                enc_cid
+            )));
+        };
 
         let enc_block = Encryption::from_dag_cbor(&enc_data).map_err(|e| {
             MergeError::BlockDecode(format!("Failed to decode encryption block: {}", e))
@@ -484,11 +498,11 @@ mod tests {
     use blockstore::{Blockstore as _, DefraBlockstore};
     use crypto::PrivateKey as _;
     use defra_core::block::{
-        Block, CollectionDefinitionDeltaPayload, CrdtDelta, LwwDeltaPayload, Signature,
-        SignatureHeader, SignatureType,
+        Block, CollectionDefinitionDeltaPayload, CompositeDeltaPayload, CounterDeltaPayload,
+        CrdtDelta, DAGLink, Encryption, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
     };
     use events::{Bus, ChannelBus, EventName};
-    use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use schema::{CType, CollectionVersion, FieldDescription, FieldKind};
     use storage::backends::MemoryStore;
     use storage::corekv::Key;
     use storage::keys::systemstore::CollectionID;
@@ -534,6 +548,31 @@ mod tests {
         let blockstore = Arc::new(DefraBlockstore::new(store, false));
         let handler = DbMergeHandler::new(db, blockstore.clone());
         (handler, blockstore, bus)
+    }
+
+    async fn make_handler_with_counter_schema() -> (
+        DbMergeHandler<MemoryStore, DefraBlockstore<MemoryStore>>,
+        Arc<DefraBlockstore<MemoryStore>>,
+    ) {
+        let store = Arc::new(MemoryStore::new());
+        let db = Arc::new(DB::from_arc(store.clone()).unwrap());
+
+        db.create_collection(CollectionVersion::new(
+            "Counters",
+            "v1",
+            "col-counters",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "score", FieldKind::int())
+                    .with_crdt_type(CType::PnCounter),
+            ],
+        ))
+        .await
+        .unwrap();
+
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let handler = DbMergeHandler::new(db, blockstore.clone());
+        (handler, blockstore)
     }
 
     struct FailingPostCommitAction;
@@ -1005,6 +1044,153 @@ mod tests {
         assert!(
             mapping.is_some(),
             "expected synced schema to persist a root_id mapping"
+        );
+    }
+
+    #[tokio::test]
+    async fn counter_merge_marks_cid_merged_and_clears_nonce_marker() {
+        let (handler, blockstore) = make_handler_with_counter_schema().await;
+        let mut doc = Document::new();
+        doc.generate_and_set_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().to_string();
+
+        let mut delta_data = Vec::new();
+        ciborium::into_writer(&5_i64, &mut delta_data).unwrap();
+
+        let payload = CounterDeltaPayload {
+            doc_id: doc_id.as_bytes().to_vec(),
+            field_name: "score".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            data: delta_data,
+            nonce: 4242,
+        };
+        let block = Block {
+            delta: CrdtDelta::Counter(payload.clone()),
+            heads: None,
+            links: None,
+            encryption: None,
+            signature: None,
+        };
+        let cid = block.generate_cid().unwrap();
+        let block_data = block.to_dag_cbor().unwrap();
+        blockstore.put(&cid, &block_data).await.unwrap();
+
+        let metadata = BlockMetadata::normal(
+            &doc_id,
+            "col-counters",
+            "did:key:z6MkrCounterMergeTest",
+            None,
+            false,
+        );
+
+        let outcome = handler
+            .process_counter_delta(&cid, &payload, &metadata)
+            .await
+            .unwrap();
+        assert_eq!(outcome, MergeOutcome::Merged);
+        assert!(blockstore.is_merged(&cid).await.unwrap());
+
+        let counter = crdt::Counter::new(
+            payload.schema_version_id.clone(),
+            &payload.doc_id,
+            payload.field_name.clone(),
+            true,
+            crdt::NumericKind::Int64,
+        )
+        .unwrap();
+
+        let txn = handler.db.new_txn(true).await.unwrap();
+        let mut datastore = txn.datastore().unwrap();
+        let removed = counter
+            .clear_nonce(&mut datastore, payload.nonce)
+            .await
+            .unwrap();
+        let _ = txn.discard();
+
+        assert!(
+            !removed,
+            "nonce marker should be removed once the CID is finalized as merged"
+        );
+    }
+
+    #[tokio::test]
+    async fn composite_skip_field_does_not_mark_unreadable_linked_counter_merged() {
+        let (handler, blockstore) = make_handler_with_counter_schema().await;
+        let mut doc = Document::new();
+        doc.generate_and_set_doc_id().unwrap();
+        let doc_id = doc.id().unwrap().to_string();
+
+        let encryption = Encryption::new_for_field(
+            doc_id.as_bytes().to_vec(),
+            "score".to_string(),
+            b"wrong-key".to_vec(),
+        );
+        let encryption_cid = encryption.generate_cid().unwrap();
+        let encryption_data = encryption.to_dag_cbor().unwrap();
+        blockstore
+            .put(&encryption_cid, &encryption_data)
+            .await
+            .unwrap();
+
+        let field_payload = CounterDeltaPayload {
+            doc_id: doc_id.as_bytes().to_vec(),
+            field_name: "score".to_string(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            data: b"not-a-valid-encrypted-counter".to_vec(),
+            nonce: 777,
+        };
+        let field_block = Block {
+            delta: CrdtDelta::Counter(field_payload),
+            heads: None,
+            links: None,
+            encryption: Some(encryption_cid),
+            signature: None,
+        };
+        let field_cid = field_block.generate_cid().unwrap();
+        let field_block_data = field_block.to_dag_cbor().unwrap();
+        blockstore.put(&field_cid, &field_block_data).await.unwrap();
+
+        let composite_payload = CompositeDeltaPayload {
+            doc_id: doc_id.as_bytes().to_vec(),
+            schema_version_id: "v1".to_string(),
+            priority: 1,
+            status: 0,
+        };
+        let composite_block = Block {
+            delta: CrdtDelta::Composite(composite_payload.clone()),
+            heads: None,
+            links: Some(vec![DAGLink::new("score", field_cid)]),
+            encryption: None,
+            signature: None,
+        };
+        let composite_cid = composite_block.generate_cid().unwrap();
+
+        let metadata = BlockMetadata::normal(
+            &doc_id,
+            "col-counters",
+            "did:key:z6MkrCompositeEncryptedSkip",
+            None,
+            false,
+        );
+
+        let outcome = handler
+            .process_composite_delta(
+                &composite_cid,
+                &composite_block,
+                &composite_payload,
+                &metadata,
+                false,
+                0,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, MergeOutcome::Merged);
+        assert!(
+            !blockstore.is_merged(&field_cid).await.unwrap(),
+            "linked field block should stay unmerged when decryption fails and the field is skipped"
         );
     }
 }

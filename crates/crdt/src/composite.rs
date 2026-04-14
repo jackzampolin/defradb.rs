@@ -3,7 +3,7 @@
 //! The Composite CRDT manages document-level state by coordinating
 //! multiple field-level CRDTs (LWW, Counter, etc).
 
-use crate::counter::NumericKind;
+use crate::counter::{Counter, CounterDelta, NumericKind};
 use crate::priority::{decode_priority, encode_priority};
 use crate::traits::{Context, Delta, MergeResult, ReplicatedData};
 use async_trait::async_trait;
@@ -287,27 +287,11 @@ impl CompositeDAG {
                     kind,
                 },
                 FieldDelta::Counter {
-                    priority: _,
+                    priority,
                     nonce,
                     data,
                 },
             ) => {
-                let value_key = self.build_value_key(field_name);
-
-                // Check nonce idempotency (counters are commutative, no priority comparison needed)
-                let mut nonce_key = value_key.clone();
-                nonce_key.extend_from_slice(b"/nonces/");
-                nonce_key.extend_from_slice(&nonce.to_be_bytes());
-
-                if !is_create
-                    && rw
-                        .has(&nonce_key)
-                        .await
-                        .map_err(|e| Error::Storage(e.to_string()))?
-                {
-                    return Ok(MergeResult::SkippedAlreadyApplied { nonce: *nonce });
-                }
-
                 if data.len() != 8 {
                     return Err(Error::MergeError(format!(
                         "invalid counter increment data for field '{}': expected 8 bytes, got {}",
@@ -316,96 +300,54 @@ impl CompositeDAG {
                     )));
                 }
 
-                // Dispatch on numeric kind, enforcing allow_decrement for each type.
-                // Nonce is marked FIRST, then value updated — matching standalone Counter
-                // crash-recovery semantics (under-count on crash is safer than double-count).
-                let new_value_bytes: [u8; 8] = match kind {
-                    NumericKind::Int64 => {
-                        let increment = i64::from_be_bytes(data[..8].try_into().map_err(|_| {
+                let counter = Counter::new(
+                    self.schema_version_id.clone(),
+                    self.doc_id.as_str().as_bytes(),
+                    field_name.to_string(),
+                    *allow_decrement,
+                    *kind,
+                )?;
+
+                let delta = match kind {
+                    NumericKind::Int64 => CounterDelta::new_int64(
+                        self.doc_id.as_str().as_bytes().to_vec(),
+                        field_name.to_string(),
+                        *priority,
+                        *nonce,
+                        self.schema_version_id.clone(),
+                        i64::from_be_bytes(data[..8].try_into().map_err(|_| {
                             Error::MergeError(format!(
                                 "invalid counter increment data for field '{}': expected 8 bytes, got {}",
                                 field_name, data.len()
                             ))
-                        })?);
-                        if !allow_decrement && increment < 0 {
-                            return Err(Error::MergeError("decrement not allowed".into()));
-                        }
-                        let current: i64 = if is_create {
-                            0
-                        } else {
-                            match rw
-                                .get(&value_key)
-                                .await
-                                .map_err(|e| Error::Storage(e.to_string()))?
-                            {
-                                Some(bytes) => {
-                                    if bytes.len() != 8 {
-                                        return Err(Error::MergeError(format!(
-                                            "invalid counter data length for field '{}': expected 8 bytes, got {}",
-                                            field_name, bytes.len()
-                                        )));
-                                    }
-                                    i64::from_be_bytes(bytes[..8].try_into().map_err(|_| {
-                                        Error::MergeError(format!(
-                                            "corrupted counter data for field '{}': expected 8 bytes, got {}",
-                                            field_name, bytes.len()
-                                        ))
-                                    })?)
-                                }
-                                None => 0,
-                            }
-                        };
-                        current.wrapping_add(increment).to_be_bytes()
-                    }
-                    NumericKind::Float64 => {
-                        let increment = f64::from_be_bytes(data[..8].try_into().map_err(|_| {
+                        })?),
+                    )?,
+                    NumericKind::Float64 => CounterDelta::new_float64(
+                        self.doc_id.as_str().as_bytes().to_vec(),
+                        field_name.to_string(),
+                        *priority,
+                        *nonce,
+                        self.schema_version_id.clone(),
+                        f64::from_be_bytes(data[..8].try_into().map_err(|_| {
                             Error::MergeError(format!(
                                 "invalid counter increment data for field '{}': expected 8 bytes, got {}",
                                 field_name, data.len()
                             ))
-                        })?);
-                        if !allow_decrement && increment < 0.0 {
-                            return Err(Error::MergeError("decrement not allowed".into()));
-                        }
-                        let current: f64 = if is_create {
-                            0.0
-                        } else {
-                            match rw
-                                .get(&value_key)
-                                .await
-                                .map_err(|e| Error::Storage(e.to_string()))?
-                            {
-                                Some(bytes) => {
-                                    if bytes.len() != 8 {
-                                        return Err(Error::MergeError(format!(
-                                            "invalid counter data length for field '{}': expected 8 bytes, got {}",
-                                            field_name, bytes.len()
-                                        )));
-                                    }
-                                    f64::from_be_bytes(bytes[..8].try_into().map_err(|_| {
-                                        Error::MergeError(format!(
-                                            "corrupted counter data for field '{}': expected 8 bytes, got {}",
-                                            field_name, bytes.len()
-                                        ))
-                                    })?)
-                                }
-                                None => 0.0,
-                            }
-                        };
-                        (current + increment).to_be_bytes()
-                    }
+                        })?),
+                    )?,
                 };
 
-                // Mark nonce FIRST to prevent double-counting on crash recovery
-                rw.set(&nonce_key, &[1])
+                counter
+                    .merge(
+                        rw,
+                        &Context {
+                            doc_id: self.doc_id.clone(),
+                            schema_version: self.schema_version_id.clone(),
+                            is_create,
+                        },
+                        &delta,
+                    )
                     .await
-                    .map_err(|e| Error::Storage(e.to_string()))?;
-                // Then update value
-                rw.set(&value_key, &new_value_bytes)
-                    .await
-                    .map_err(|e| Error::Storage(e.to_string()))?;
-
-                Ok(MergeResult::Applied)
             }
             (_, FieldDelta::Delete { priority }) => {
                 let value_key = self.build_value_key(field_name);

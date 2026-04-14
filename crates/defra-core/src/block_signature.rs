@@ -7,7 +7,7 @@ use std::fmt;
 use cid::Cid;
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result};
+use crate::Result;
 
 use super::block::generate_cid_from_bytes;
 
@@ -50,12 +50,12 @@ impl Encryption {
 
     /// Serialize to DAG-CBOR bytes
     pub fn to_dag_cbor(&self) -> Result<Vec<u8>> {
-        serde_ipld_dagcbor::to_vec(self).map_err(|e| Error::Serialization(e.to_string()))
+        Ok(serde_ipld_dagcbor::to_vec(self)?)
     }
 
     /// Deserialize from DAG-CBOR bytes
     pub fn from_dag_cbor(bytes: &[u8]) -> Result<Self> {
-        serde_ipld_dagcbor::from_slice(bytes).map_err(|e| Error::Serialization(e.to_string()))
+        Ok(serde_ipld_dagcbor::from_slice(bytes)?)
     }
 
     /// Generate CID for this encryption block
@@ -86,12 +86,12 @@ impl Signature {
 
     /// Serialize to DAG-CBOR bytes
     pub fn to_dag_cbor(&self) -> Result<Vec<u8>> {
-        serde_ipld_dagcbor::to_vec(self).map_err(|e| Error::Serialization(e.to_string()))
+        Ok(serde_ipld_dagcbor::to_vec(self)?)
     }
 
     /// Deserialize from DAG-CBOR bytes
     pub fn from_dag_cbor(bytes: &[u8]) -> Result<Self> {
-        serde_ipld_dagcbor::from_slice(bytes).map_err(|e| Error::Serialization(e.to_string()))
+        Ok(serde_ipld_dagcbor::from_slice(bytes)?)
     }
 
     /// Generate CID for this signature block

@@ -53,8 +53,8 @@ impl Key for BlsPublicKey {
         self.raw_bytes == other.raw()
     }
 
-    fn raw(&self) -> Vec<u8> {
-        self.raw_bytes.clone()
+    fn raw(&self) -> &[u8] {
+        &self.raw_bytes
     }
 
     fn key_type(&self) -> KeyType {
@@ -64,12 +64,17 @@ impl Key for BlsPublicKey {
 
 impl PublicKey for BlsPublicKey {
     fn verify(&self, data: &[u8], signature: &[u8]) -> Result<bool> {
-        let sig = match blst::min_pk::Signature::from_bytes(signature) {
-            Ok(s) => s,
-            Err(_) => return Ok(false),
-        };
+        let sig = blst::min_pk::Signature::from_bytes(signature)
+            .map_err(|e| crypto_error(format!("invalid BLS12-381 signature: {:?}", e)))?;
         let err = sig.verify(true, data, DST, &[], &self.key, true);
-        Ok(err == blst::BLST_ERROR::BLST_SUCCESS)
+        if err == blst::BLST_ERROR::BLST_SUCCESS {
+            Ok(true)
+        } else {
+            Err(crypto_error(format!(
+                "BLS12-381 signature verification failed: {:?}",
+                err
+            )))
+        }
     }
 
     fn did(&self) -> Result<String> {

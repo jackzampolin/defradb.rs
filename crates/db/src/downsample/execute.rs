@@ -4,6 +4,7 @@ use super::parse::*;
 use super::types::*;
 use crate::error::{Error, Result};
 use chrono::Utc;
+use db_blocks::decode_priority_varint;
 use document::{DocID, Document, NormalValue};
 use query::fetcher::CommitsQueryOptions;
 use query::mutator::DocMutator;

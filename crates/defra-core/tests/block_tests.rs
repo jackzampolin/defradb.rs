@@ -297,7 +297,7 @@ fn test_block_cid_uses_dag_cbor_codec() {
     let block = Block::new(test_lww_delta(), vec![], vec![]);
     let cid = block.generate_cid().unwrap();
 
-    assert_eq!(cid.codec(), DAG_CBOR_CODEC);
+    assert_eq!(cid.codec(), *DAG_CBOR_CODEC);
 }
 
 #[test]

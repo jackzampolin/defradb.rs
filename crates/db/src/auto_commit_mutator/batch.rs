@@ -40,24 +40,20 @@ impl<S: Store> BatchMutator<S> {
         }
     }
 
-    async fn blockstore(&self) -> query::error::Result<datastore::NamespaceView> {
+    async fn block_and_head_stores(
+        &self,
+    ) -> query::error::Result<(datastore::NamespaceView, datastore::NamespaceView)> {
         let txn = self.txn.lock().await;
         let txn = txn.as_ref().ok_or_else(|| {
             query::error::QueryError::execution("mutation batch transaction is no longer active")
         })?;
-        txn.blockstore().map_err(|e| {
+        let blockstore = txn.blockstore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
-        })
-    }
-
-    async fn headstore(&self) -> query::error::Result<datastore::NamespaceView> {
-        let txn = self.txn.lock().await;
-        let txn = txn.as_ref().ok_or_else(|| {
-            query::error::QueryError::execution("mutation batch transaction is no longer active")
         })?;
-        txn.headstore().map_err(|e| {
+        let headstore = txn.headstore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get headstore: {}", e))
-        })
+        })?;
+        Ok((blockstore, headstore))
     }
 
     async fn take_txn(&self) -> query::error::Result<DbTxn<S>> {
@@ -83,6 +79,7 @@ impl<S: Store> BatchMutator<S> {
 
     fn emit_update_event(&self, event: PendingUpdateEvent) {
         if let Some(bus) = self.db.event_bus() {
+            let subject_doc_id = event.doc_id.clone();
             let update = Update::new(
                 event.doc_id,
                 event.cid,
@@ -94,8 +91,9 @@ impl<S: Store> BatchMutator<S> {
             bus.publish(Message::update(update));
 
             if event.branchable {
-                let collection_update = Update::new(
+                let collection_update = Update::new_with_subject_doc_id(
                     String::new(),
+                    subject_doc_id,
                     event.cid,
                     event.collection_id,
                     vec![],
@@ -198,8 +196,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let sign_config = get_signing_config();
 
         let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
-            let blockstore = self.blockstore().await?;
-            let headstore = self.headstore().await?;
+            let (blockstore, headstore) = self.block_and_head_stores().await?;
 
             match write_document_blocks(
                 &blockstore,
@@ -341,8 +338,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let sign_config = get_signing_config();
 
         let commit_result: Option<(Cid, Vec<u8>, Option<(Cid, Vec<u8>)>)> = {
-            let blockstore = self.blockstore().await?;
-            let headstore = self.headstore().await?;
+            let (blockstore, headstore) = self.block_and_head_stores().await?;
 
             match write_document_blocks(
                 &blockstore,
@@ -440,8 +436,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let sign_config = get_signing_config();
 
         let commit_result: Option<(Cid, Vec<u8>)> = {
-            let blockstore = self.blockstore().await?;
-            let headstore = self.headstore().await?;
+            let (blockstore, headstore) = self.block_and_head_stores().await?;
 
             match write_delete_block(
                 &blockstore,

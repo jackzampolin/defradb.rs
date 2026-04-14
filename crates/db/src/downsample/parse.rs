@@ -5,22 +5,6 @@ use document::NormalValue;
 use schema::{CollectionVersion, QuerySource, ScalarKind};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-pub(super) fn decode_priority_varint(buf: &[u8]) -> u64 {
-    let mut value: u64 = 0;
-    let mut shift: u32 = 0;
-    for &byte in buf {
-        if shift >= 64 {
-            return 0;
-        }
-        value |= ((byte & 0x7f) as u64) << shift;
-        if byte < 0x80 {
-            return value;
-        }
-        shift += 7;
-    }
-    value
-}
-
 pub(super) fn supported_downsample_aggregate_fields() -> [AggregateField; 5] {
     [
         AggregateField::Count,

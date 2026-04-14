@@ -215,8 +215,15 @@ fn test_verify_go_sig_1kb_message() {
 fn test_go_sig_rejected_for_wrong_message() {
     let pub_key = Secp256r1PublicKey::from_bytes(&PUBLIC_KEY_COMPRESSED).expect("valid public key");
 
-    let valid = pub_key.verify(b"wrong message", GO_SIG_HIGH_S).unwrap();
-    assert!(!valid, "Go signature must not verify against wrong message");
+    let err = pub_key
+        .verify(b"wrong message", GO_SIG_HIGH_S)
+        .expect_err("wrong message should return Err");
+    assert!(
+        err.to_string()
+            .contains("secp256r1 signature verification failed"),
+        "unexpected error: {}",
+        err
+    );
 }
 
 #[test]
@@ -226,8 +233,16 @@ fn test_tampered_go_sig_rejected() {
     let mut tampered = GO_SIG_HIGH_S.to_vec();
     tampered[20] ^= 0x01;
 
-    let valid = pub_key.verify(b"test message", &tampered).unwrap();
-    assert!(!valid, "Tampered Go signature must not verify");
+    let err = pub_key
+        .verify(b"test message", &tampered)
+        .expect_err("tampered signature should return Err");
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("invalid secp256r1 DER signature")
+            || err_msg.contains("secp256r1 signature verification failed"),
+        "unexpected error: {}",
+        err_msg
+    );
 }
 
 // ===== All Go Signatures Have Consistent S Behavior =====

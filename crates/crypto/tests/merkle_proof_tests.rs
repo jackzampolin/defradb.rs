@@ -9,6 +9,8 @@ use crypto::merkle_proof::{
 };
 use defra_core::block::{Block, CrdtDelta, LwwDeltaPayload};
 use defra_core::Result;
+use defra_core::{DAG_CBOR_CODEC, SHA2_256_CODE};
+use multicodec::Codec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -240,7 +242,7 @@ async fn test_signed_proof_ed25519() {
     let signed = SignedMerkleProof::sign(proof, &private_key as &dyn PrivateKey).unwrap();
 
     // Verify with explicit public key
-    assert!(signed.verify(public_key.as_ref()).unwrap());
+    assert!(signed.verify(public_key).unwrap());
 
     // Verify with embedded key
     assert!(signed.verify_with_embedded_key().unwrap());
@@ -259,7 +261,7 @@ async fn test_signed_proof_secp256k1() {
     let signed = SignedMerkleProof::sign(proof, &private_key as &dyn PrivateKey).unwrap();
 
     // Verify with explicit public key
-    assert!(signed.verify(public_key.as_ref()).unwrap());
+    assert!(signed.verify(public_key).unwrap());
 
     // Verify with embedded key
     assert!(signed.verify_with_embedded_key().unwrap());
@@ -280,7 +282,7 @@ async fn test_signed_proof_wrong_key_fails() {
 
     let signed = SignedMerkleProof::sign(proof, &private_key1 as &dyn PrivateKey).unwrap();
 
-    let result = signed.verify(wrong_public_key.as_ref());
+    let result = signed.verify(wrong_public_key);
     assert!(
         result.is_err(),
         "wrong key should return Err, not Ok(false)"
@@ -407,7 +409,7 @@ async fn test_key_type_mismatch_returns_error() {
     // Try to verify with secp256k1 key - should return error, not false
     let secp_key = generate_secp256k1().unwrap();
     let secp_public = secp_key.public_key();
-    let result = signed.verify(secp_public.as_ref());
+    let result = signed.verify(secp_public);
 
     assert!(result.is_err(), "Key type mismatch should return error");
     let err_msg = result.unwrap_err().to_string();
@@ -513,12 +515,10 @@ fn test_verify_cid_unsupported_hash_algorithm() {
 
     // Create a CID with unsupported hash algorithm (Blake2b-256 = 0xb220)
     const BLAKE2B_256_CODE: u64 = 0xb220;
-    const DAG_CBOR_CODEC: u64 = 0x71;
-
     // Create a fake hash (all zeros) with Blake2b code
     let fake_digest = [0u8; 32];
     let mh = MultihashGeneric::<64>::wrap(BLAKE2B_256_CODE, &fake_digest).unwrap();
-    let unsupported_cid = Cid::new_v1(DAG_CBOR_CODEC, mh);
+    let unsupported_cid = Cid::new_v1(*DAG_CBOR_CODEC, mh);
 
     let node = ProofNode {
         cid: unsupported_cid,
@@ -544,12 +544,9 @@ fn test_verify_cid_unsupported_codec() {
     let data = block.to_dag_cbor().unwrap();
 
     // Create a CID with unsupported codec (raw = 0x55)
-    const SHA2_256_CODE: u64 = 0x12;
-    const RAW_CODEC: u64 = 0x55;
-
     let fake_digest = [0u8; 32];
-    let mh = MultihashGeneric::<64>::wrap(SHA2_256_CODE, &fake_digest).unwrap();
-    let unsupported_cid = Cid::new_v1(RAW_CODEC, mh);
+    let mh = MultihashGeneric::<64>::wrap(*SHA2_256_CODE, &fake_digest).unwrap();
+    let unsupported_cid = Cid::new_v1(Codec::Bin.code() as u64, mh);
 
     let node = ProofNode {
         cid: unsupported_cid,
@@ -890,7 +887,7 @@ async fn test_signed_proof_signature_failure_returns_err() {
 
     // Direct verify() path
     let pub_key = private_key.public_key();
-    let result_verify = signed.verify(pub_key.as_ref());
+    let result_verify = signed.verify(pub_key);
     assert!(
         result_verify.is_err(),
         "verify() must return Err on signature failure, got {:?}",
@@ -931,13 +928,13 @@ async fn test_signed_proof_identity_mismatch_returns_err() {
 
     // Using a key of a different curve type — hits the key_type check first.
     let other_pub = other_key.public_key();
-    let result_type = signed.verify(other_pub.as_ref());
+    let result_type = signed.verify(other_pub);
     assert!(result_type.is_err(), "key type mismatch should return Err");
 
     // Using a different ed25519 key — hits the identity check.
     let wrong_ed = generate_ed25519().unwrap();
     let wrong_pub = wrong_ed.public_key();
-    let result_identity = signed.verify(wrong_pub.as_ref());
+    let result_identity = signed.verify(wrong_pub);
     assert!(
         result_identity.is_err(),
         "identity mismatch should return Err, got {:?}",
@@ -967,6 +964,6 @@ async fn test_valid_signed_proof_still_returns_ok_true() {
     let signed = SignedMerkleProof::sign(proof, &private_key as &dyn PrivateKey).unwrap();
 
     let pub_key = private_key.public_key();
-    assert!(signed.verify(pub_key.as_ref()).unwrap());
+    assert!(signed.verify(pub_key).unwrap());
     assert!(signed.verify_with_embedded_key().unwrap());
 }

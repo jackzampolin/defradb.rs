@@ -2,15 +2,17 @@
 //!
 //! Computes a Merkle root from collected CIDs, signs the root with the
 //! node's private key, and provides verification of batch signatures.
+//!
+//! This module is intentionally kept as a live compatibility surface for the
+//! Rust HTTP and FFI batch-signing endpoints used by the indexer flow.
 
 use cid::Cid;
 use serde::{Deserialize, Serialize};
 
-use defra_core::batch_signing::compute_merkle_root;
-use defra_core::signing::SigningConfig;
-
 use crate::keys::{PrivateKey, PublicKey};
 use crate::{Ed25519PrivateKey, Ed25519PublicKey, Secp256k1PrivateKey, Secp256k1PublicKey};
+use defra_core::batch_signing::compute_merkle_root;
+use defra_core::signing::SigningConfig;
 
 /// Errors that can occur during batch signing.
 #[derive(Debug, thiserror::Error)]
@@ -131,10 +133,11 @@ mod tests {
     use super::*;
     use crate::keys::Key;
     use cid::multihash::{Code, MultihashDigest};
+    use defra_core::DAG_CBOR_CODEC;
 
     fn make_cid(data: &[u8]) -> Cid {
         let hash = Code::Sha2_256.digest(data);
-        Cid::new_v1(0x71, hash)
+        Cid::new_v1(*DAG_CBOR_CODEC, hash)
     }
 
     fn test_ed25519_config() -> SigningConfig {
@@ -142,8 +145,8 @@ mod tests {
         let public_key = private_key.public_key();
         SigningConfig {
             key_type: "ed25519".to_string(),
-            private_key_bytes: private_key.raw(),
-            public_key_bytes: public_key.raw(),
+            private_key_bytes: private_key.raw_owned(),
+            public_key_bytes: public_key.raw_owned(),
             public_key_hex: public_key.to_hex_string(),
             remote_signer: None,
             signing_authorization: None,
@@ -155,8 +158,8 @@ mod tests {
         let public_key = private_key.public_key();
         SigningConfig {
             key_type: "secp256k1".to_string(),
-            private_key_bytes: private_key.raw(),
-            public_key_bytes: public_key.raw(),
+            private_key_bytes: private_key.raw_owned(),
+            public_key_bytes: public_key.raw_owned(),
             public_key_hex: public_key.to_hex_string(),
             remote_signer: None,
             signing_authorization: None,

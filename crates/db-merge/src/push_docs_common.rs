@@ -74,8 +74,9 @@ pub(crate) async fn resolve_push_creator(
     fallback_creator.to_string()
 }
 
-pub(crate) async fn load_push_dag_blocks<R: Reader + ?Sized>(
-    reader: &R,
+pub(crate) async fn load_push_dag_blocks<R: Reader + ?Sized, E: Reader + ?Sized>(
+    block_reader: &R,
+    enc_reader: &E,
     root_cid: Cid,
     root_data: Vec<u8>,
 ) -> Vec<(Cid, Vec<u8>)> {
@@ -97,15 +98,26 @@ pub(crate) async fn load_push_dag_blocks<R: Reader + ?Sized>(
         stack.push((cid, data, true));
 
         for linked_cid in linked_cids.into_iter().rev() {
-            match reader.get(&linked_cid.to_bytes()).await {
+            match block_reader.get(&linked_cid.to_bytes()).await {
                 Ok(Some(linked_data)) => stack.push((linked_cid, linked_data, false)),
-                Ok(None) => {
-                    tracing::warn!(
-                        root_cid = %root_cid,
-                        missing_cid = %linked_cid,
-                        "Replay DAG block missing from local blockstore"
-                    );
-                }
+                Ok(None) => match enc_reader.get(&linked_cid.to_bytes()).await {
+                    Ok(Some(linked_data)) => stack.push((linked_cid, linked_data, false)),
+                    Ok(None) => {
+                        tracing::warn!(
+                            root_cid = %root_cid,
+                            missing_cid = %linked_cid,
+                            "Replay DAG block missing from local blockstore and encstore"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            root_cid = %root_cid,
+                            missing_cid = %linked_cid,
+                            error = %error,
+                            "Failed to load replay DAG block from local encstore"
+                        );
+                    }
+                },
                 Err(error) => {
                     tracing::warn!(
                         root_cid = %root_cid,

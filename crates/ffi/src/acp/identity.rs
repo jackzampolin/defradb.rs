@@ -450,7 +450,7 @@ mod tests {
         let _guard = remote_test_lock().lock().unwrap();
 
         let private_key = crypto::generate_secp256r1().unwrap();
-        *remote_key_store().lock().unwrap() = private_key.raw();
+        *remote_key_store().lock().unwrap() = private_key.raw().to_vec();
 
         let raw_identity = identity::RawIdentity::from_secp256r1(private_key).unwrap();
         let did = raw_identity.did().unwrap().to_string();
@@ -497,7 +497,7 @@ mod tests {
         let _guard = remote_test_lock().lock().unwrap();
 
         let private_key = crypto::generate_secp256r1().unwrap();
-        *remote_key_store().lock().unwrap() = private_key.raw();
+        *remote_key_store().lock().unwrap() = private_key.raw().to_vec();
 
         let raw_identity = identity::RawIdentity::from_secp256r1(private_key).unwrap();
         let did = raw_identity.did().unwrap().to_string();
@@ -566,7 +566,7 @@ mod tests {
         assert!(crate::runtime::init_runtime());
 
         let private_key = crypto::generate_secp256r1().unwrap();
-        *remote_key_store().lock().unwrap() = private_key.raw();
+        *remote_key_store().lock().unwrap() = private_key.raw().to_vec();
 
         let raw_identity = identity::RawIdentity::from_secp256r1(private_key).unwrap();
         let did = raw_identity.did().unwrap().to_string();

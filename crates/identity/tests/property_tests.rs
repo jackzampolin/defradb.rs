@@ -45,8 +45,8 @@ proptest! {
         let key1 = generate_ed25519().unwrap();
         let bytes = key1.raw();
 
-        let identity1 = RawIdentity::from_bytes(KeyType::Ed25519, &bytes).unwrap();
-        let identity2 = RawIdentity::from_bytes(KeyType::Ed25519, &bytes).unwrap();
+        let identity1 = RawIdentity::from_bytes(KeyType::Ed25519, bytes).unwrap();
+        let identity2 = RawIdentity::from_bytes(KeyType::Ed25519, bytes).unwrap();
 
         let did1 = identity1.did().unwrap();
         let did2 = identity2.did().unwrap();
@@ -59,8 +59,8 @@ proptest! {
         let key1 = generate_secp256k1().unwrap();
         let bytes = key1.raw();
 
-        let identity1 = RawIdentity::from_bytes(KeyType::Secp256k1, &bytes).unwrap();
-        let identity2 = RawIdentity::from_bytes(KeyType::Secp256k1, &bytes).unwrap();
+        let identity1 = RawIdentity::from_bytes(KeyType::Secp256k1, bytes).unwrap();
+        let identity2 = RawIdentity::from_bytes(KeyType::Secp256k1, bytes).unwrap();
 
         let did1 = identity1.did().unwrap();
         let did2 = identity2.did().unwrap();
@@ -101,9 +101,14 @@ proptest! {
         let signature = identity.sign(&original_msg).unwrap();
 
         // Signature should NOT verify for a different message
-        let valid_for_different = identity.pub_key().verify(&different_msg, &signature).unwrap();
+        let err = identity.pub_key().verify(&different_msg, &signature).unwrap_err();
 
-        prop_assert!(!valid_for_different, "Signature must not verify for different message");
+        prop_assert!(
+            err.to_string()
+                .contains("Ed25519 signature verification failed"),
+            "unexpected error: {}",
+            err
+        );
     }
 }
 
@@ -122,9 +127,14 @@ proptest! {
         let signature = identity1.sign(&data).unwrap();
 
         // Verify with identity2 (should fail)
-        let valid = identity2.pub_key().verify(&data, &signature).unwrap();
+        let err = identity2.pub_key().verify(&data, &signature).unwrap_err();
 
-        prop_assert!(!valid, "Different identity must not verify another's signature");
+        prop_assert!(
+            err.to_string()
+                .contains("Ed25519 signature verification failed"),
+            "unexpected error: {}",
+            err
+        );
     }
 }
 

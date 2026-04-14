@@ -1206,6 +1206,7 @@ impl Planner {
                 {
                     if can_use_direct_indexed_child_cache(nested_select)
                         && !has_filter_child_plan
+                        && !self.has_acp()
                         && !select.show_deleted
                     {
                         join_many = join_many.with_indexed_child_fetch(

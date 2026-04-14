@@ -4,10 +4,11 @@
 //! All types match the Go implementation in `internal/core/block/` for wire compatibility.
 
 use cid::Cid;
+use multicodec::Codec;
 use multihash::MultihashGeneric;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
 use crate::{Error, Result};
 
@@ -23,10 +24,10 @@ pub use crate::block_signature::{
 };
 
 /// DAG-CBOR codec identifier (multicodec 0x71)
-pub const DAG_CBOR_CODEC: u64 = 0x71;
+pub static DAG_CBOR_CODEC: LazyLock<u64> = LazyLock::new(|| Codec::Dag_Cbor.code() as u64);
 
 /// SHA2-256 multihash code
-pub const SHA2_256_CODE: u64 = 0x12;
+pub static SHA2_256_CODE: LazyLock<u64> = LazyLock::new(|| Codec::Sha2_256.code() as u64);
 
 // ============================================================================
 // Block - The fundamental unit of content-addressed storage
@@ -120,12 +121,12 @@ impl Block {
 
     /// Serialize to DAG-CBOR bytes
     pub fn to_dag_cbor(&self) -> Result<Vec<u8>> {
-        serde_ipld_dagcbor::to_vec(self).map_err(|e| Error::Serialization(e.to_string()))
+        Ok(serde_ipld_dagcbor::to_vec(self)?)
     }
 
     /// Deserialize from DAG-CBOR bytes
     pub fn from_dag_cbor(bytes: &[u8]) -> Result<Self> {
-        serde_ipld_dagcbor::from_slice(bytes).map_err(|e| Error::Serialization(e.to_string()))
+        Ok(serde_ipld_dagcbor::from_slice(bytes)?)
     }
 
     /// Generate CID from block content
@@ -361,9 +362,9 @@ pub fn generate_cid_from_bytes(bytes: &[u8]) -> Result<Cid> {
     let digest = hasher.finalize();
 
     // Create multihash
-    let mh = MultihashGeneric::<64>::wrap(SHA2_256_CODE, &digest)
+    let mh = MultihashGeneric::<64>::wrap(*SHA2_256_CODE, &digest)
         .map_err(|e| Error::BlockError(format!("Failed to create multihash: {}", e)))?;
 
     // Create CIDv1 with DAG-CBOR codec
-    Ok(Cid::new_v1(DAG_CBOR_CODEC, mh))
+    Ok(Cid::new_v1(*DAG_CBOR_CODEC, mh))
 }

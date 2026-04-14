@@ -30,8 +30,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             bus.publish(Message::update(update));
 
             if collection.schema().is_branchable {
-                let col_update = Update::new(
+                let col_update = Update::new_with_subject_doc_id(
                     String::new(), // empty doc_id → keyed by collection_id
+                    doc_id_str.to_string(),
                     cid,
                     collection.collection_id().to_string(),
                     vec![],

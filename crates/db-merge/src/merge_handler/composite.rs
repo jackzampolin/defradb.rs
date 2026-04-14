@@ -1,4 +1,4 @@
-use super::batch::{PendingMergeEvent, PendingPostCommitAction};
+use super::batch::{PendingFieldBlockFinalization, PendingMergeEvent, PendingPostCommitAction};
 use super::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,6 +51,7 @@ pub(crate) struct CompositeMergeState {
     pub(crate) any_field_applied: bool,
     pub(crate) encrypted_policy_checked: bool,
     pub(crate) field_block_heads: HashMap<String, Vec<Cid>>,
+    pub(crate) linked_field_cids: Vec<Cid>,
     pub(crate) is_branchable: bool,
 }
 
@@ -262,6 +263,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     if let Some(bus) = self.db.event_bus() {
                         let merge_complete = MergeCompleteData {
                             doc_id: doc_id_str.clone(),
+                            subject_doc_id: None,
                             cid: *cid,
                             collection_id: metadata
                                 .collection_id
@@ -280,6 +282,12 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 }
 
                 txn.force_commit().await?;
+
+                self.best_effort_finalize_linked_field_blocks(
+                    &state.linked_field_cids,
+                    metadata.collection_id,
+                )
+                .await;
 
                 {
                     let mut merged = self.merged_composites.lock().unwrap_or_else(|e| {
@@ -327,6 +335,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     if !from_collection {
                         let merge_complete = MergeCompleteData {
                             doc_id: doc_id_str.clone(),
+                            subject_doc_id: None,
                             cid: *cid,
                             collection_id: metadata
                                 .collection_id
@@ -340,6 +349,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     if state.is_branchable {
                         let merge_complete = MergeCompleteData {
                             doc_id: String::new(),
+                            subject_doc_id: Some(doc_id_str.clone()),
                             cid: *cid,
                             collection_id: metadata
                                 .collection_id
@@ -388,6 +398,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
         _batch_merged_collections: &std::sync::Mutex<HashSet<Cid>>,
         pending_events: &std::sync::Mutex<Vec<PendingMergeEvent>>,
         pending_post_commit_actions: &std::sync::Mutex<Vec<PendingPostCommitAction>>,
+        pending_field_block_finalizations: &std::sync::Mutex<Vec<PendingFieldBlockFinalization>>,
         depth: usize,
     ) -> std::result::Result<MergeOutcome, MergeError> {
         if depth >= super::MAX_MERGE_DEPTH {
@@ -503,6 +514,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         _batch_merged_collections,
                         pending_events,
                         pending_post_commit_actions,
+                        pending_field_block_finalizations,
                         depth + 1,
                     ))
                     .await
@@ -548,6 +560,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                 if outcome.is_terminal_skip() && !from_collection {
                     let merge_complete = MergeCompleteData {
                         doc_id: doc_id_str.clone(),
+                        subject_doc_id: None,
                         cid: *cid,
                         collection_id: metadata
                             .collection_id
@@ -576,6 +589,21 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                         e.into_inner()
                     });
                     batch_merged_guard.insert(*cid);
+                }
+
+                if !state.linked_field_cids.is_empty() {
+                    pending_field_block_finalizations
+                        .lock()
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(
+                                "pending_field_block_finalizations lock poisoned, recovering"
+                            );
+                            e.into_inner()
+                        })
+                        .push(PendingFieldBlockFinalization {
+                            cids: state.linked_field_cids.clone(),
+                            fallback_collection_id: metadata.collection_id.map(ToOwned::to_owned),
+                        });
                 }
 
                 if let (Some(collection), Some(hook)) =
@@ -617,6 +645,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     if !from_collection {
                         let merge_complete = MergeCompleteData {
                             doc_id: doc_id_str.clone(),
+                            subject_doc_id: None,
                             cid: *cid,
                             collection_id: metadata
                                 .collection_id
@@ -632,6 +661,7 @@ impl<S: Store, B: blockstore::Blockstore + Send + Sync> DbMergeHandler<S, B> {
                     if state.is_branchable {
                         let merge_complete = MergeCompleteData {
                             doc_id: String::new(),
+                            subject_doc_id: Some(doc_id_str.clone()),
                             cid: *cid,
                             collection_id: metadata
                                 .collection_id

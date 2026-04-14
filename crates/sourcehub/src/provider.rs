@@ -10,6 +10,7 @@ pub enum SubjectRef {
 pub struct ProviderPolicyInfo {
     pub id: String,
     pub name: String,
+    pub raw_policy: Option<String>,
 }
 
 #[derive(Debug, Clone)]

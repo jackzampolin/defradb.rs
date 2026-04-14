@@ -58,6 +58,8 @@ impl std::fmt::Display for EventName {
 pub struct MergeCompleteData {
     /// Document ID that was merged.
     pub doc_id: String,
+    /// Document ID used for authorization when this is a collection-level event.
+    pub subject_doc_id: Option<String>,
     /// CID of the merged block.
     pub cid: Cid,
     /// Collection ID the document belongs to.
@@ -111,6 +113,8 @@ pub struct AcpCacheInvalidatedData {
 pub struct Update {
     /// Document ID that was updated.
     pub doc_id: String,
+    /// Document ID used for authorization when this is a collection-level event.
+    pub subject_doc_id: Option<String>,
     /// CID of the update block.
     pub cid: Cid,
     /// Collection ID (schema version ID) the document belongs to.
@@ -135,6 +139,28 @@ impl Update {
     ) -> Self {
         Self {
             doc_id,
+            subject_doc_id: None,
+            cid,
+            collection_id,
+            block: block.into(),
+            is_retry,
+            is_relay,
+        }
+    }
+
+    /// Create a new Update event with an internal authorization subject document ID.
+    pub fn new_with_subject_doc_id(
+        doc_id: String,
+        subject_doc_id: String,
+        cid: Cid,
+        collection_id: String,
+        block: impl Into<Bytes>,
+        is_retry: bool,
+        is_relay: bool,
+    ) -> Self {
+        Self {
+            doc_id,
+            subject_doc_id: Some(subject_doc_id),
             cid,
             collection_id,
             block: block.into(),
@@ -323,6 +349,7 @@ mod tests {
 
         let mc_data = MergeCompleteData {
             doc_id: "doc-789".to_string(),
+            subject_doc_id: None,
             cid: Cid::default(),
             collection_id: "col-abc".to_string(),
             by_peer: "peer-xyz".to_string(),

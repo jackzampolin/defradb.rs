@@ -28,9 +28,7 @@ impl Collection {
         }
 
         // Serialize document to CBOR
-        let data = doc
-            .to_cbor()
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let data = doc.to_cbor()?;
 
         // Store document
         datastore.set(&key, &data).await.map_err(Error::Storage)?;
@@ -51,8 +49,7 @@ impl Collection {
 
         match data {
             Some(bytes) => {
-                let mut doc =
-                    Document::from_cbor(&bytes).map_err(|e| Error::Serialization(e.to_string()))?;
+                let mut doc = Document::from_cbor(&bytes)?;
                 // Set the document ID (stored as part of the key, not in the serialized document)
                 doc.set_id(doc_id.clone());
 
@@ -86,9 +83,7 @@ impl Collection {
         }
 
         // Serialize and store
-        let data = doc
-            .to_cbor()
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let data = doc.to_cbor()?;
 
         let datastore = txn.datastore()?;
         datastore.set(&key, &data).await.map_err(Error::Storage)?;
@@ -141,9 +136,7 @@ impl Collection {
         let key = self.doc_key(&doc_id);
 
         // Serialize and store (upsert)
-        let data = doc
-            .to_cbor()
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let data = doc.to_cbor()?;
 
         txn.datastore()?
             .set(&key, &data)
@@ -169,13 +162,8 @@ impl Collection {
             .map_err(Error::Storage)?;
 
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
-            let mut doc = Document::from_cbor(&pair.value).map_err(|e| {
-                Error::Serialization(format!(
-                    "failed to deserialize document at key {:?}: {}",
-                    String::from_utf8_lossy(&pair.key),
-                    e
-                ))
-            })?;
+            let mut doc = Document::from_cbor(&pair.value)
+                .map_err(|e| Error::document_at_key(&pair.key, e))?;
 
             // Extract doc_id from key (format: /d/<collection_id>/<doc_id>)
             // Find the last '/' and extract the doc_id string after it

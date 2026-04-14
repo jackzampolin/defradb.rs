@@ -1,6 +1,7 @@
 use super::*;
 use blockstore::{Blockstore, DefraBlockstore};
 use crypto::keys::PublicKey;
+use defra_core::encryption::EncryptionConfig;
 use defra_core::SignatureType;
 use std::sync::{Arc, Mutex};
 use storage::backends::MemoryStore;
@@ -114,6 +115,26 @@ async fn test_composite_block_has_field_links() {
     }
 }
 
+#[test]
+fn test_compute_document_blocks_places_encryption_metadata_in_blockstore_entries() {
+    let mut doc = Document::new();
+    doc.generate_and_set_doc_id().unwrap();
+    doc.set("secret", NormalValue::String("classified".to_string()));
+
+    let enc = EncryptionConfig {
+        encrypt_doc: false,
+        encrypt_fields: vec!["secret".to_string()],
+    };
+
+    let computed = compute_document_blocks(&doc, "schema-v1", Some(&enc), None)
+        .expect("blocks should compute");
+
+    assert!(
+        computed.blockstore_entries.len() >= 3,
+        "encryption metadata should be included in blockstore entries alongside field and composite blocks"
+    );
+}
+
 struct TestRemoteSecp256r1Signer {
     private_key: crypto::Secp256r1PrivateKey,
 }
@@ -149,7 +170,7 @@ fn test_compute_signature_supports_remote_secp256r1() {
     let signer = defra_core::signing::SigningConfig {
         key_type: "secp256r1".to_string(),
         private_key_bytes: Vec::new(),
-        public_key_bytes: public_key.raw(),
+        public_key_bytes: public_key.raw_owned(),
         public_key_hex: hex::encode(public_key.raw()),
         remote_signer: Some(Arc::new(TestRemoteSecp256r1Signer { private_key })),
         signing_authorization: None,
@@ -214,7 +235,7 @@ fn test_compute_signature_passes_signing_authorization_to_remote_signer() {
     let signer = defra_core::signing::SigningConfig {
         key_type: "secp256r1".to_string(),
         private_key_bytes: Vec::new(),
-        public_key_bytes: public_key.raw(),
+        public_key_bytes: public_key.raw_owned(),
         public_key_hex: hex::encode(public_key.raw()),
         remote_signer: Some(Arc::new(CapturingRemoteSigner {
             private_key,

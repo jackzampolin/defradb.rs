@@ -99,6 +99,7 @@ ed25519-dalek = { version = "2.1", features = ["serde", "zeroize"] }
 uuid = { version = "1.0", features = ["v4"] }
 k256 = { version = "0.13", features = ["ecdsa", "serde"] }
 sha2 = { version = "0.10", features = ["asm"] }
+rand = "0.8"
 aes-gcm = "0.10"
 hex = "0.4"
 base64 = "0.22"
@@ -116,6 +117,7 @@ bs58 = "0.5"
 # IPLD
 cid = { version = "0.10", features = ["serde"] }
 multihash = "0.18"
+multicodec = "0.1"
 serde_ipld_dagcbor = "0.6"
 libipld = { version = "0.16", features = ["serde-codec"] }
 

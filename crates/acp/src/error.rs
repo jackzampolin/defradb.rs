@@ -9,6 +9,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// JSON serialization/deserialization errors
+    #[error("serialization error: {0}")]
+    Json(#[from] serde_json::Error),
+
     /// Permission denied for the requested operation
     #[error("permission denied: {0}")]
     PermissionDenied(String),
@@ -106,12 +110,6 @@ pub enum Error {
     },
 }
 
-impl From<serde_json::Error> for Error {
-    fn from(err: serde_json::Error) -> Self {
-        Error::Serialization(err.to_string())
-    }
-}
-
 impl From<zanzibar::error::Error> for Error {
     fn from(e: zanzibar::error::Error) -> Self {
         match e {
@@ -184,5 +182,18 @@ impl Error {
             operation: operation.into(),
             details: err.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    #[test]
+    fn json_errors_preserve_their_type() {
+        let err = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let error: Error = err.into();
+        assert!(matches!(error, Error::Json(_)));
+        assert!(error.to_string().starts_with("serialization error: "));
     }
 }

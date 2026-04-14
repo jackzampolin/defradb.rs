@@ -11,6 +11,7 @@ pub mod peer_identity;
 pub mod push_docs;
 pub mod push_docs_common;
 pub mod push_docs_transport;
+pub mod replication;
 pub mod se;
 
 // Re-export primary types
@@ -23,6 +24,11 @@ pub use peer_identity::{
 };
 pub use push_docs::{push_existing_docs, retry_doc};
 pub use push_docs_transport::{push_existing_docs_via_transport, retry_doc_via_transport};
+pub use replication::{
+    attach_failure_channel, create_acp_merge_handler, create_broadcast_mutator,
+    create_head_provider, create_merge_handler, create_replication_stack,
+    load_document_head_blocks, load_persisted_collections, ReplicationStack,
+};
 pub use se::{
     fetch_doc_ids, generate_doc_artifacts, generate_field_artifact, store_artifacts, FieldQuery,
     FieldValueQuery, SECoordinator,
