@@ -8,7 +8,8 @@ use crate::types::{c_str_to_string, DefraRemoteSignCallback, FfiResult};
 use crate::{ffi_async, ffi_entry, try_ffi};
 
 use super::identity_ops::{
-    decode_and_validate_public_key, store_remote_identity, validate_public_key_bytes,
+    decode_and_validate_public_key, parse_signing_key_type, store_remote_identity,
+    validate_public_key_bytes,
 };
 
 /// Get the node's identity (DID).
@@ -75,6 +76,7 @@ pub extern "C" fn RegisterIdentity(
                 unsafe { c_str_to_string(public_key_hex) }.ok_or("invalid public_key_hex parameter")?;
             let key_type_str =
                 unsafe { c_str_to_string(key_type) }.unwrap_or_else(|| "secp256k1".to_string());
+            let signing_key_type = parse_signing_key_type(&key_type_str)?;
 
             let private_key_bytes =
                 hex::decode(&priv_hex).map_err(|e| format!("invalid private key hex: {}", e))?;
@@ -86,7 +88,7 @@ pub extern "C" fn RegisterIdentity(
             defra_core::signing::store_identity(
                 &did_str,
                 defra_core::signing::SigningConfig {
-                    key_type: key_type_str,
+                    key_type: signing_key_type,
                     private_key_bytes,
                     public_key_bytes,
                     public_key_hex: pub_hex,
@@ -129,15 +131,16 @@ pub extern "C" fn register_remote_identity(
                 unsafe { c_str_to_string(public_key_hex) }.ok_or("invalid public_key_hex parameter")?;
             let key_type_str =
                 unsafe { c_str_to_string(key_type) }.unwrap_or_else(|| "secp256r1".to_string());
+            let signing_key_type = parse_signing_key_type(&key_type_str)?;
 
             let public_key_bytes =
-                decode_and_validate_public_key(&did_str, &pub_hex, &key_type_str)?;
+                decode_and_validate_public_key(&did_str, &pub_hex, signing_key_type)?;
 
             store_remote_identity(
                 did_str,
                 public_key_bytes,
                 pub_hex,
-                key_type_str,
+                signing_key_type,
                 signer_handle,
                 callback,
             )
@@ -183,19 +186,20 @@ pub extern "C" fn register_remote_identity_bytes(
             }
             let key_type_str =
                 unsafe { c_str_to_string(key_type) }.unwrap_or_else(|| "secp256r1".to_string());
+            let signing_key_type = parse_signing_key_type(&key_type_str)?;
             // SAFETY: `public_key_ptr` is non-null and `public_key_len` is
             // bounded (checked above). The caller guarantees the pointer is
             // valid for `public_key_len` bytes.
             let public_key_bytes =
                 unsafe { std::slice::from_raw_parts(public_key_ptr, public_key_len) }.to_vec();
 
-            validate_public_key_bytes(&did_str, &public_key_bytes, &key_type_str)?;
+            validate_public_key_bytes(&did_str, &public_key_bytes, signing_key_type)?;
 
             store_remote_identity(
                 did_str,
                 public_key_bytes.clone(),
                 hex::encode(&public_key_bytes),
-                key_type_str,
+                signing_key_type,
                 signer_handle,
                 callback,
             )
@@ -306,7 +310,7 @@ pub extern "C" fn create_identity() -> FfiResult {
             defra_core::signing::store_identity(
                 did.as_ref(),
                 defra_core::signing::SigningConfig {
-                    key_type: "ed25519".to_string(),
+                    key_type: defra_core::signing::SigningKeyType::Ed25519,
                     private_key_bytes: identity.private_key_bytes().to_vec(),
                     public_key_bytes: identity.public_key_bytes().to_vec(),
                     public_key_hex,
@@ -473,7 +477,10 @@ mod tests {
         }
 
         let config = defra_core::signing::get_identity(&did).expect("identity should be stored");
-        assert_eq!(config.key_type, "secp256r1");
+        assert_eq!(
+            config.key_type,
+            defra_core::signing::SigningKeyType::Secp256r1
+        );
         assert!(config.private_key_bytes.is_empty());
         assert!(config.remote_signer.is_some());
 
@@ -523,10 +530,32 @@ mod tests {
         }
 
         let config = defra_core::signing::get_identity(&did).expect("identity should be stored");
-        assert_eq!(config.key_type, "secp256r1");
+        assert_eq!(
+            config.key_type,
+            defra_core::signing::SigningKeyType::Secp256r1
+        );
         assert_eq!(config.public_key_bytes, public_key_bytes);
         assert_eq!(config.public_key_hex, hex::encode(public_key_bytes));
         assert!(config.remote_signer.is_some());
+    }
+
+    #[test]
+    fn test_register_remote_identity_rejects_invalid_key_type() {
+        let did_c = CString::new("did:key:zInvalid").unwrap();
+        let pub_c = CString::new("abcd").unwrap();
+        let key_type_c = CString::new("not-a-key").unwrap();
+
+        let result = register_remote_identity(
+            did_c.as_ptr(),
+            pub_c.as_ptr(),
+            key_type_c.as_ptr(),
+            1,
+            test_remote_sign_callback,
+        );
+        assert_eq!(result.status, 1);
+        let error = unsafe { CStr::from_ptr(result.error).to_string_lossy().into_owned() };
+        assert_eq!(error, "unsupported signing key type: not-a-key");
+        unsafe { crate::types::defra_free_string(result.error) };
     }
 
     #[test]

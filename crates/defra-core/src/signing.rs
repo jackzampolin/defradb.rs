@@ -113,13 +113,6 @@ impl PartialEq<&str> for SigningKeyType {
     }
 }
 
-/// Backward-compat: allow constructing from a `String` (panics on invalid).
-impl From<String> for SigningKeyType {
-    fn from(s: String) -> Self {
-        s.parse().unwrap_or_else(|e: String| panic!("{e}"))
-    }
-}
-
 /// Backward-compat: allow converting to String for callers that need it.
 impl From<SigningKeyType> for String {
     fn from(kt: SigningKeyType) -> Self {
@@ -135,8 +128,8 @@ impl From<SigningKeyType> for crate::block::SignatureType {
 
 /// Signing configuration containing key material for block signing.
 pub struct SigningConfig {
-    /// Key type: "ed25519", "secp256k1", "secp256r1", or "bls"
-    pub key_type: String,
+    /// Signing key type.
+    pub key_type: SigningKeyType,
     /// Raw private key bytes (empty for remote signers like Orbis)
     pub private_key_bytes: Vec<u8>,
     /// Raw public key bytes (for identity in signature header)
@@ -152,7 +145,7 @@ pub struct SigningConfig {
 impl Clone for SigningConfig {
     fn clone(&self) -> Self {
         Self {
-            key_type: self.key_type.clone(),
+            key_type: self.key_type,
             private_key_bytes: self.private_key_bytes.clone(),
             public_key_bytes: self.public_key_bytes.clone(),
             public_key_hex: self.public_key_hex.clone(),
@@ -171,22 +164,6 @@ impl SigningConfig {
     /// Returns true if this identity can sign by delegating to a remote signer.
     pub fn has_remote_signer(&self) -> bool {
         self.remote_signer.is_some()
-    }
-
-    /// Map the identity key type to a block signature type.
-    pub fn signature_type(&self) -> Result<crate::block::SignatureType, String> {
-        match self.key_type.as_str() {
-            "ed25519" => Ok(crate::block::SignatureType::EdDSA),
-            "secp256k1" => Ok(crate::block::SignatureType::ES256K),
-            "secp256r1" => Ok(crate::block::SignatureType::ES256),
-            "bls" => Ok(crate::block::SignatureType::BLS),
-            other => Err(format!("unsupported signing key type: {}", other)),
-        }
-    }
-
-    /// Parse the key type string into a `SigningKeyType` enum.
-    pub fn signing_key_type(&self) -> Result<SigningKeyType, String> {
-        self.key_type.parse()
     }
 }
 
@@ -335,7 +312,7 @@ mod tests {
 
     fn make_config(label: &str) -> SigningConfig {
         SigningConfig {
-            key_type: label.to_string(),
+            key_type: SigningKeyType::Secp256k1,
             private_key_bytes: vec![],
             public_key_bytes: vec![],
             public_key_hex: label.to_string(),
@@ -388,7 +365,7 @@ mod tests {
         store_identity(
             "did:key:remote",
             SigningConfig {
-                key_type: "bls".to_string(),
+                key_type: SigningKeyType::Bls,
                 private_key_bytes: vec![],
                 public_key_bytes: vec![],
                 public_key_hex: "remote".to_string(),
@@ -401,6 +378,12 @@ mod tests {
         assert_eq!(resolved, "did:key:remote");
 
         clear_identity_store();
+    }
+
+    #[test]
+    fn signing_key_type_from_str_rejects_invalid_values() {
+        let error = "invalid".parse::<SigningKeyType>().unwrap_err();
+        assert_eq!(error, "unsupported signing key type: invalid");
     }
 }
 

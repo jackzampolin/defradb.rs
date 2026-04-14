@@ -168,7 +168,7 @@ fn test_compute_signature_supports_remote_secp256r1() {
     );
 
     let signer = defra_core::signing::SigningConfig {
-        key_type: "secp256r1".to_string(),
+        key_type: defra_core::signing::SigningKeyType::Secp256r1,
         private_key_bytes: Vec::new(),
         public_key_bytes: public_key.raw_owned(),
         public_key_hex: hex::encode(public_key.raw()),
@@ -233,7 +233,7 @@ fn test_compute_signature_passes_signing_authorization_to_remote_signer() {
     );
 
     let signer = defra_core::signing::SigningConfig {
-        key_type: "secp256r1".to_string(),
+        key_type: defra_core::signing::SigningKeyType::Secp256r1,
         private_key_bytes: Vec::new(),
         public_key_bytes: public_key.raw_owned(),
         public_key_hex: hex::encode(public_key.raw()),

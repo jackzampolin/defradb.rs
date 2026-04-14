@@ -41,9 +41,9 @@ pub(crate) fn create_node_identity(
                 .map_err(|error| anyhow!("failed to derive node DID: {error}"))?;
             let did_str = did.to_string();
             let key_type = match key {
-                Some(SigningKey::Ed25519(_)) => "ed25519".to_string(),
-                Some(SigningKey::Secp256r1(_)) => "secp256r1".to_string(),
-                _ => "secp256k1".to_string(),
+                Some(SigningKey::Ed25519(_)) => defra_core::signing::SigningKeyType::Ed25519,
+                Some(SigningKey::Secp256r1(_)) => defra_core::signing::SigningKeyType::Secp256r1,
+                _ => defra_core::signing::SigningKeyType::Secp256k1,
             };
 
             defra_core::signing::store_identity(
@@ -95,25 +95,28 @@ pub(crate) fn create_node_identity(
 pub(crate) fn raw_identity_from_stored_config(
     config: &defra_core::signing::SigningConfig,
 ) -> Result<identity::RawIdentity> {
-    match config.key_type.as_str() {
-        "ed25519" => {
+    match config.key_type {
+        defra_core::signing::SigningKeyType::Ed25519 => {
             let private_key = crypto::Ed25519PrivateKey::from_bytes(&config.private_key_bytes)
                 .map_err(|error| anyhow!("failed to load stored ed25519 key: {error}"))?;
             identity::RawIdentity::from_ed25519(private_key)
                 .map_err(|error| anyhow!("failed to create stored ed25519 identity: {error}"))
         }
-        "secp256k1" => {
+        defra_core::signing::SigningKeyType::Secp256k1 => {
             let private_key = crypto::Secp256k1PrivateKey::from_bytes(&config.private_key_bytes)
                 .map_err(|error| anyhow!("failed to load stored secp256k1 key: {error}"))?;
             identity::RawIdentity::from_secp256k1(private_key)
                 .map_err(|error| anyhow!("failed to create stored secp256k1 identity: {error}"))
         }
-        "secp256r1" => {
+        defra_core::signing::SigningKeyType::Secp256r1 => {
             let private_key = crypto::Secp256r1PrivateKey::from_bytes(&config.private_key_bytes)
                 .map_err(|error| anyhow!("failed to load stored secp256r1 key: {error}"))?;
             identity::RawIdentity::from_secp256r1(private_key)
                 .map_err(|error| anyhow!("failed to create stored secp256r1 identity: {error}"))
         }
+        defra_core::signing::SigningKeyType::Bls => Err(anyhow!(
+            "stored identity bls cannot be used as a node identity"
+        )),
         other => Err(anyhow!(
             "stored identity {} cannot be used as a node identity",
             other
