@@ -68,6 +68,7 @@ parking_lot.workspace = true
 # Internal crates
 db-blocks = { path = "../db-blocks" }
 db-nac = { path = "../db-nac", default-features = false }
+db-search = { path = "../db-search" }
 storage = { path = "../storage" }
 datastore = { path = "../datastore" }
 schema = { path = "../schema" }

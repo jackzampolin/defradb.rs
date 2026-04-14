@@ -42,7 +42,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let mut prepared_docs: Vec<(Document, bool)> = Vec::with_capacity(docs.len());
         let embedding_config = self.db.options().embedding_config();
         for mut doc in docs {
-            crate::embedding::set_embedding(
+            db_search::set_embedding(
                 &collection.schema().vector_embeddings,
                 &mut doc,
                 true,

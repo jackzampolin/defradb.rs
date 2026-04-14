@@ -61,12 +61,12 @@ mod commit_priority_index;
 pub(crate) mod commits_fetcher;
 pub mod database;
 pub mod definition_validation;
-pub mod dense_search;
+// dense_search and embedding extracted to standalone db-search crate (Phase 6 of #796).
+pub use db_search as dense_search;
 pub(crate) mod doc_fetcher;
 pub(crate) mod doc_mutator;
 pub mod downsample;
 pub(crate) mod dump;
-pub(crate) mod embedding;
 pub mod error;
 pub mod index_manager;
 pub(crate) mod json_patch;
@@ -106,14 +106,14 @@ pub use collection_snapshot::CollectionSnapshot;
 pub use commits_fetcher::{CommitsFetcher, CommitsQueryOptions};
 pub use database::{DbOptions, EmbeddingClientConfig, DB};
 pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
-pub use dense_search::{
-    hybrid_search_dense, require_query_success, DenseHybridSearchHit, DenseHybridSearchRequest,
-    DenseHybridSearchResponse,
+// dense_search items re-exported transparently from db-search
+pub use db_search::{
+    embed_text, hybrid_search_dense, require_query_success, DenseHybridSearchHit,
+    DenseHybridSearchRequest, DenseHybridSearchResponse,
 };
 pub use doc_fetcher::DbDocFetcher;
 pub use doc_mutator::DbDocMutator;
 pub use downsample::GcDownsampleHistoriesOptions;
-pub use embedding::embed_text;
 pub use error::{Error, Result};
 pub use index_manager::{BulkIndexResult, IndexManager};
 pub use lensed_auto_commit_fetcher::LensedAutoCommitFetcher;
