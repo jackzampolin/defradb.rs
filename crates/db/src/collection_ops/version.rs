@@ -36,10 +36,13 @@ impl<S: Store> crate::database::DB<S> {
 
             let mut target_schema: CollectionVersion = serde_json::from_slice(&target_bytes)
                 .map_err(|e| {
-                    Error::Serialization(format!(
-                        "failed to deserialize schema for version_id '{}': {}",
-                        version_id, e
-                    ))
+                    Error::collection_schema_json(
+                        format!(
+                            "failed to deserialize schema for version_id '{}'",
+                            version_id
+                        ),
+                        e,
+                    )
                 })?;
             crate::collection::populate_collection_root_id(&systemstore, &mut target_schema)
                 .await?;
@@ -52,10 +55,10 @@ impl<S: Store> crate::database::DB<S> {
 
             // Store the updated target schema
             let target_data = serde_json::to_vec(&target_schema).map_err(|e| {
-                Error::Serialization(format!(
-                    "failed to serialize schema for version_id '{}': {}",
-                    version_id, e
-                ))
+                Error::collection_schema_json(
+                    format!("failed to serialize schema for version_id '{}'", version_id),
+                    e,
+                )
             })?;
             systemstore
                 .set(&collection_key.bytes(), &target_data)
@@ -238,10 +241,10 @@ impl<S: Store> crate::database::DB<S> {
                 .ok_or(Error::CollectionVersionNotFound(version_id.to_string()))?;
             let mut schema =
                 serde_json::from_slice::<CollectionVersion>(&target_bytes).map_err(|e| {
-                    Error::Serialization(format!(
-                        "failed to deserialize version '{}': {}",
-                        version_id, e
-                    ))
+                    Error::collection_schema_json(
+                        format!("failed to deserialize version '{}'", version_id),
+                        e,
+                    )
                 })?;
 
             crate::collection::populate_collection_root_id(&systemstore, &mut schema).await?;

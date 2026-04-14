@@ -97,9 +97,8 @@ impl<S: Store> crate::database::DB<S> {
             .collect();
 
         // Apply the patch to the schema JSON
-        let mut schema_json = serde_json::to_value(&old_schema).map_err(|e| {
-            Error::Serialization(format!("failed to serialize schema to JSON: {}", e))
-        })?;
+        let mut schema_json = serde_json::to_value(&old_schema)
+            .map_err(|e| Error::collection_schema_json("failed to serialize schema to JSON", e))?;
 
         // Normalize JSON to match Go's serialization format before applying patches.
         // Go always serializes struct fields (null for nil pointers, [] for nil slices),
@@ -225,10 +224,13 @@ impl<S: Store> crate::database::DB<S> {
                 let systemstore = txn.systemstore()?;
                 let key = CollectionKey::new(&old_version_id);
                 let data = serde_json::to_vec(&new_schema).map_err(|e| {
-                    Error::Serialization(format!(
-                        "failed to serialize updated schema version '{}': {}",
-                        old_version_id, e
-                    ))
+                    Error::collection_schema_json(
+                        format!(
+                            "failed to serialize updated schema version '{}'",
+                            old_version_id
+                        ),
+                        e,
+                    )
                 })?;
                 systemstore
                     .set(&key.bytes(), &data)

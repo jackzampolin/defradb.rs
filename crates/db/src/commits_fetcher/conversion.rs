@@ -211,8 +211,7 @@ impl<S: Store> CommitsFetcher<S> {
         };
         map.insert("signature".to_string(), sig_value);
 
-        Document::from_map(map)
-            .map_err(|e| Error::Serialization(format!("Failed to create document: {}", e)))
+        Ok(Document::from_map(map)?)
     }
 
     /// Build simple links array (without recursive nesting) for nested queries.

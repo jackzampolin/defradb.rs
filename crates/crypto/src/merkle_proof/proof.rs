@@ -123,12 +123,12 @@ impl MerkleProof {
 
     /// Serialize the proof to DAG-CBOR
     pub fn to_dag_cbor(&self) -> Result<Vec<u8>> {
-        serde_ipld_dagcbor::to_vec(self).map_err(|e| Error::Serialization(e.to_string()))
+        Ok(serde_ipld_dagcbor::to_vec(self)?)
     }
 
     /// Deserialize the proof from DAG-CBOR
     pub fn from_dag_cbor(bytes: &[u8]) -> Result<Self> {
-        serde_ipld_dagcbor::from_slice(bytes).map_err(|e| Error::Serialization(e.to_string()))
+        Ok(serde_ipld_dagcbor::from_slice(bytes)?)
     }
 
     /// Get the proof path length
