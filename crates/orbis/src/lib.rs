@@ -9,4 +9,4 @@ pub mod proto {
     tonic::include_proto!("orbis.utility.v1");
 }
 
-pub use client::OrbisClient;
+pub use client::{OrbisClient, OrbisClientError};
