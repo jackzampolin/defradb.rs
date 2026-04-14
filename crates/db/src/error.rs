@@ -124,6 +124,16 @@ impl From<lens::Error> for Error {
     }
 }
 
+impl From<db_index::Error> for Error {
+    fn from(err: db_index::Error) -> Self {
+        match err {
+            db_index::Error::Storage(e) => Error::Storage(e),
+            db_index::Error::InvalidDocument(msg) => Error::InvalidDocument(msg),
+            db_index::Error::Other(msg) => Error::Other(msg),
+        }
+    }
+}
+
 impl Error {
     pub fn document_at_key(key: &[u8], source: document::Error) -> Self {
         Self::DocumentAtKey {

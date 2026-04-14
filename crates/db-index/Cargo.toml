@@ -1,0 +1,26 @@
+[package]
+name = "db-index"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Secondary index manager for DefraDB collections"
+
+[dependencies]
+# Internal crates
+datastore = { path = "../datastore" }
+defra-core = { path = "../defra-core" }
+document = { path = "../document" }
+schema = { path = "../schema" }
+storage = { path = "../storage" }
+
+# Error handling
+thiserror.workspace = true
+
+# Async
+async-trait.workspace = true
+
+[lints]
+workspace = true

@@ -68,7 +68,8 @@ pub mod downsample;
 pub(crate) mod dump;
 pub(crate) mod embedding;
 pub mod error;
-pub mod index_manager;
+// Index manager extracted to standalone db-index crate.
+pub use db_index as index_manager;
 pub(crate) mod json_patch;
 #[allow(dead_code)]
 pub(crate) mod lens_utils;

@@ -18,6 +18,7 @@ members = [
     "crates/datastore",
     "crates/db",
     "crates/db-blocks",
+    "crates/db-index",
     "crates/db-nac",
     "crates/db-merge",
     "crates/keyring",
