@@ -50,7 +50,7 @@ pub(crate) fn encode_secp256k1<I: FullIdentity, T: Serialize>(
         .sign(signing_input.as_bytes())
         .map_err(|e| Error::TokenEncoding(format!("signing failed: {}", e)))?;
 
-    let raw_sig = der::der_to_raw(&signature)?;
+    let raw_sig = der::k256_der_to_raw(&signature)?;
     let sig_b64 = URL_SAFE_NO_PAD.encode(&raw_sig);
     Ok(format!("{}.{}", signing_input, sig_b64))
 }
@@ -65,8 +65,8 @@ pub(crate) fn encode_secp256r1<I: FullIdentity, T: Serialize>(
         .sign(signing_input.as_bytes())
         .map_err(|e| Error::TokenEncoding(format!("signing failed: {}", e)))?;
 
-    // ES256 JWT uses raw R||S (64 bytes), same as ES256K
-    let raw_sig = der::der_to_raw(&signature)?;
+    // ES256 JWT uses raw R||S (64 bytes), same as ES256K but on the P-256 curve.
+    let raw_sig = der::p256_der_to_raw(&signature)?;
     let sig_b64 = URL_SAFE_NO_PAD.encode(&raw_sig);
     Ok(format!("{}.{}", signing_input, sig_b64))
 }
