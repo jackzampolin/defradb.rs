@@ -10,6 +10,7 @@ members = [
     "crates/query",
     "crates/query-types",
     "crates/query-parse",
+    "crates/query-plan",
     "crates/document",
     "crates/p2p",
     "crates/crypto",

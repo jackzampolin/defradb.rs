@@ -1,17 +1,16 @@
 [package]
-name = "query"
+name = "query-plan"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Query plan tree, planner, and fetcher/mutator/txn abstractions for DefraDB"
 
 [dependencies]
 # Internal crates
 query-types = { path = "../query-types" }
-query-parse = { path = "../query-parse" }
-query-plan = { path = "../query-plan" }
 defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 storage = { path = "../storage" }
@@ -47,44 +46,12 @@ tracing.workspace = true
 # Full-text search
 bm25.workspace = true
 
-# GraphQL parsing
-graphql-parser.workspace = true
-
-# GraphQL introspection execution
-async-graphql = "7"
-
-# Regex for SDL preprocessing
-regex = "1"
-
-# Time handling (for DateTime parsing in mutations)
+# Time handling
 chrono = { version = "0.4", features = ["serde"] }
 
-# Tokio is only needed on non-WASM targets (for query timeouts)
+# Tokio task-local storage only on non-WASM (used by txn::context)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["time"] }
-
-[dev-dependencies]
-proptest.workspace = true
-criterion.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-db = { path = "../db" }
-datastore = { path = "../datastore" }
-
-[[bench]]
-name = "parsing"
-harness = false
-
-[[bench]]
-name = "filter"
-harness = false
-
-[[bench]]
-name = "groupby"
-harness = false
-
-[[bench]]
-name = "planner"
-harness = false
 
 [lints]
 workspace = true
