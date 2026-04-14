@@ -126,10 +126,11 @@ impl From<lens::Error> for Error {
 
 impl From<defra_errors::Error> for Error {
     fn from(err: defra_errors::Error) -> Self {
-        // Map each variant of the unified error to the closest db::Error
-        // variant so callers can keep pattern-matching on db::Error as before.
-        // New subsystem crates use defra_errors::Error directly and get
-        // bridged into db::Error when they thread errors up to the db layer.
+        // Needed for the `?` operator: extracted subsystem crates return
+        // `defra_errors::Error`, and db-layer functions that call into
+        // them return `db::Error`. This conversion lets `?` bridge
+        // automatically. It is not a compatibility shim — db::Error is
+        // still being actively reshaped in Phase 7 of the epic.
         match err {
             defra_errors::Error::Storage(e) => Error::Storage(e),
             defra_errors::Error::Datastore(e) => Error::Datastore(e),
