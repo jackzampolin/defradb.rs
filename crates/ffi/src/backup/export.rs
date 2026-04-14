@@ -45,7 +45,7 @@ pub unsafe extern "C" fn basic_export(node_ptr: usize, config_json: *const c_cha
 
         ffi_async_ok!(rt, {
             let json_output =
-                db::backup::export_database(&database, &runner, &config.collections, config.pretty)
+                db_backup::export_database(&database, &runner, &config.collections, config.pretty)
                     .await?;
 
             // Write via temp file for atomic operation

@@ -44,7 +44,8 @@
 /// ```
 pub(crate) mod auto_commit_fetcher;
 pub mod auto_commit_mutator;
-pub mod backup;
+// Backup extracted to standalone db-backup crate (#789). Callers now
+// import directly from `db_backup::*`.
 // Block builder extracted to standalone db-blocks crate for parallel compilation.
 pub(crate) use db_blocks as block_builder;
 pub mod block_reader;

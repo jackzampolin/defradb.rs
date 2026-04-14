@@ -7,7 +7,7 @@ use schema::CollectionVersion;
 use storage::corekv::Store;
 
 use super::{classify_schema_fields, compute_doc_id_new};
-use crate::database::DB;
+use db::DB;
 
 /// Export database contents to a JSON string.
 ///
