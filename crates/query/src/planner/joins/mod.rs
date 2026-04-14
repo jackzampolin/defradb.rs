@@ -1046,7 +1046,7 @@ impl Planner {
             }
 
             // Insert ACP permission filter for the child collection (if ACP-protected).
-            child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection);
+            child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection, None);
 
             // Update parent mapping with the final child mapping (after sub-joins)
             // This ensures the nested relation mappings are included

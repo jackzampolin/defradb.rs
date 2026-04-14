@@ -150,19 +150,31 @@ impl Planner {
     }
 
     /// Conditionally wrap a plan with a PermissionFilterNode if the collection has an ACP policy.
+    ///
+    /// `requested_doc_ids` should be passed when the caller targets specific
+    /// documents by ID (e.g. via `_docID: { _eq: "..." }`); the filter then
+    /// surfaces an explicit permission-denied error when any of those IDs are
+    /// filtered out, instead of silently returning fewer results (#551).
     pub(super) fn maybe_wrap_with_acp_filter(
         &self,
         plan: Box<dyn PlanNode>,
         collection: &CollectionVersion,
+        requested_doc_ids: Option<&[String]>,
     ) -> Box<dyn PlanNode> {
         if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
-            Box::new(PermissionFilterNode::from_optional_did(
+            let mut node = PermissionFilterNode::from_optional_did(
                 plan,
                 acp.clone(),
                 self.identity_did.clone(),
                 &policy.id,
                 &policy.resource_name,
-            ))
+            );
+            if let Some(ids) = requested_doc_ids {
+                if !ids.is_empty() {
+                    node = node.with_requested_doc_ids(ids.to_vec());
+                }
+            }
+            Box::new(node)
         } else {
             plan
         }
@@ -575,7 +587,7 @@ impl Planner {
 
         // Insert ACP permission filter for the root collection (if ACP-protected).
         // Position: after Select/joins/similarity but before GroupBy/Aggregates/OrderBy/Limit.
-        plan = self.maybe_wrap_with_acp_filter(plan, &collection);
+        plan = self.maybe_wrap_with_acp_filter(plan, &collection, select.doc_ids.as_deref());
 
         // Apply GroupBy/OrderBy/Limit (or just OrderBy/Aggregates/Limit without GROUP BY)
         plan = self.apply_groupby_ordering_limit(

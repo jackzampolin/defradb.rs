@@ -271,13 +271,22 @@ pub(crate) fn build_plan(
     // Insert ACP permission filter after Select, before OrderBy/Limit/Aggregates.
     // This ensures aggregates (count, average, etc.) operate on filtered documents.
     if let Some(acf) = acp_filter {
-        plan = Box::new(PermissionFilterNode::new(
+        let mut filter_node = PermissionFilterNode::new(
             plan,
             acf.acp,
             acf.identity,
             acf.policy_id,
             acf.resource_name,
-        ));
+        );
+        // If the caller asked for specific docs by ID, surface an explicit
+        // permission-denied error when any of them are filtered out
+        // (#551 — Backbone parity for read-side denial shape).
+        if let Some(ref doc_ids) = select.doc_ids {
+            if !doc_ids.is_empty() {
+                filter_node = filter_node.with_requested_doc_ids(doc_ids.clone());
+            }
+        }
+        plan = Box::new(filter_node);
     }
 
     // Check if we have GROUP BY

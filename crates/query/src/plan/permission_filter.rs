@@ -3,6 +3,7 @@
 //! This node wraps a source node and filters out documents that the
 //! identity context doesn't have permission to read.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use acp::{DocumentACP, DocumentPermission, Identity};
@@ -10,7 +11,7 @@ use async_trait::async_trait;
 use identity::Did;
 
 use crate::document::DocumentMapping;
-use crate::error::Result;
+use crate::error::{QueryError, Result};
 use crate::planner::{Doc, PlanNode};
 use crate::txn::check_doc_access_with_overlay;
 
@@ -40,6 +41,18 @@ pub struct PermissionFilterNode {
 
     /// Document mapping from source
     document_mapping: DocumentMapping,
+
+    /// Doc IDs the caller explicitly requested (e.g., via
+    /// `_docID: { _eq: "..." }` or `docID: "..."`). When non-empty and
+    /// at least one of these is denied, `next()` returns a
+    /// `permission_denied` error after the source is exhausted instead
+    /// of silently returning fewer results — matching Go's behavior and
+    /// closing the read-side gap reported in #551.
+    requested_doc_ids: HashSet<String>,
+
+    /// Subset of `requested_doc_ids` that were emitted by the source
+    /// but failed the read-permission check.
+    denied_requested_ids: Vec<String>,
 }
 
 impl PermissionFilterNode {
@@ -67,7 +80,20 @@ impl PermissionFilterNode {
             resource_name: resource_name.into(),
             current_doc: Doc::default(),
             document_mapping,
+            requested_doc_ids: HashSet::new(),
+            denied_requested_ids: Vec::new(),
         }
+    }
+
+    /// Mark a set of document IDs as explicitly requested by the caller.
+    ///
+    /// When any of these IDs are emitted by the source but denied by ACP,
+    /// `next()` will return a `permission_denied` error after the source is
+    /// drained instead of silently filtering them out. Browse queries
+    /// (no explicit doc IDs) keep the existing filter-only semantics.
+    pub fn with_requested_doc_ids(mut self, doc_ids: Vec<String>) -> Self {
+        self.requested_doc_ids = doc_ids.into_iter().collect();
+        self
     }
 
     /// Create from an optional DID for backward compatibility.
@@ -129,6 +155,19 @@ impl PlanNode for PermissionFilterNode {
         loop {
             // Get next document from source
             if !self.source.next().await? {
+                // Source drained. If the caller explicitly asked for
+                // specific doc IDs and any of those were denied by ACP,
+                // surface that as an explicit permission-denied error
+                // instead of silently returning fewer results (#551).
+                if !self.denied_requested_ids.is_empty() {
+                    let mut ids = std::mem::take(&mut self.denied_requested_ids);
+                    ids.sort();
+                    ids.dedup();
+                    return Err(QueryError::permission_denied(format!(
+                        "read denied for doc_id(s): {}",
+                        ids.join(", ")
+                    )));
+                }
                 return Ok(false);
             }
 
@@ -151,6 +190,12 @@ impl PlanNode for PermissionFilterNode {
             if self.has_read_permission(&doc_id).await? {
                 self.current_doc = doc.deep_clone();
                 return Ok(true);
+            }
+
+            // Denied. If this doc was explicitly requested by ID, remember
+            // it so we can surface an error after the source is drained.
+            if self.requested_doc_ids.contains(&doc_id) {
+                self.denied_requested_ids.push(doc_id);
             }
 
             // No permission, continue to next document

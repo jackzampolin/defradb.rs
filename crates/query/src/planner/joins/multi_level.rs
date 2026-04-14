@@ -102,7 +102,7 @@ impl Planner {
             let mut child_plan: Box<dyn PlanNode> = Box::new(child_scan);
 
             // Insert ACP permission filter for the child collection (if ACP-protected).
-            child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection);
+            child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection, None);
 
             // Find the other side of the relation
             let target_relation_field = if let Some(rel_name) = &relation_field.relation_name {
@@ -226,7 +226,7 @@ impl Planner {
         let mut child_plan: Box<dyn PlanNode> = Box::new(child_scan);
 
         // Insert ACP permission filter for the child collection (if ACP-protected).
-        child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection);
+        child_plan = self.maybe_wrap_with_acp_filter(child_plan, &target_collection, None);
 
         // Add sub-joins for remaining path levels within the child plan
         if path.len() > 1 {
