@@ -311,7 +311,10 @@ pub extern "C" fn create_identity() -> FfiResult {
                 did.as_ref(),
                 defra_core::signing::SigningConfig {
                     key_type: defra_core::signing::SigningKeyType::Ed25519,
-                    private_key_bytes: identity.private_key_bytes().to_vec(),
+                    private_key_bytes:
+                        defra_core::signing::SigningConfig::private_key_bytes_from_vec(
+                            identity.private_key_bytes().to_vec(),
+                        ),
                     public_key_bytes: identity.public_key_bytes().to_vec(),
                     public_key_hex,
                     remote_signer: None,

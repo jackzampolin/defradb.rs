@@ -173,6 +173,7 @@ impl Node {
             }
         }
 
+        defra_core::signing::clear_identity_store();
         info!("DefraDB node shutdown complete");
         Ok(())
     }

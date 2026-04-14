@@ -210,6 +210,8 @@ impl ShutdownHandle {
                 }
             }
         }
+
+        defra_core::signing::clear_identity_store();
     }
 }
 
