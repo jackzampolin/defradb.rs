@@ -47,8 +47,8 @@ pub struct BatchSignature {
 pub fn sign_batch(cids: &[Cid], config: &SigningConfig) -> Result<BatchSignature, BatchSignError> {
     let root = compute_merkle_root(cids).ok_or(BatchSignError::MissingKey)?;
 
-    let (sig_type, sig_bytes) = match config.key_type.as_str() {
-        "ed25519" => {
+    let (sig_type, sig_bytes) = match config.key_type {
+        defra_core::signing::SigningKeyType::Ed25519 => {
             let key = Ed25519PrivateKey::from_bytes(&config.private_key_bytes).map_err(|e| {
                 BatchSignError::SigningFailed(format!("invalid ed25519 key: {}", e))
             })?;
@@ -57,7 +57,7 @@ pub fn sign_batch(cids: &[Cid], config: &SigningConfig) -> Result<BatchSignature
             })?;
             ("EdDSA".to_string(), sig)
         }
-        "secp256k1" => {
+        defra_core::signing::SigningKeyType::Secp256k1 => {
             let key = Secp256k1PrivateKey::from_bytes(&config.private_key_bytes).map_err(|e| {
                 BatchSignError::SigningFailed(format!("invalid secp256k1 key: {}", e))
             })?;
@@ -65,6 +65,12 @@ pub fn sign_batch(cids: &[Cid], config: &SigningConfig) -> Result<BatchSignature
                 BatchSignError::SigningFailed(format!("secp256k1 sign failed: {}", e))
             })?;
             ("ES256K".to_string(), sig)
+        }
+        defra_core::signing::SigningKeyType::Secp256r1
+        | defra_core::signing::SigningKeyType::Bls => {
+            return Err(BatchSignError::UnsupportedKeyType(
+                config.key_type.to_string(),
+            ))
         }
         other => return Err(BatchSignError::UnsupportedKeyType(other.to_string())),
     };
@@ -144,7 +150,7 @@ mod tests {
         let private_key = crate::keys::generation::generate_ed25519().unwrap();
         let public_key = private_key.public_key();
         SigningConfig {
-            key_type: "ed25519".to_string(),
+            key_type: defra_core::signing::SigningKeyType::Ed25519,
             private_key_bytes: private_key.raw_owned(),
             public_key_bytes: public_key.raw_owned(),
             public_key_hex: public_key.to_hex_string(),
@@ -157,7 +163,7 @@ mod tests {
         let private_key = crate::keys::generation::generate_secp256k1().unwrap();
         let public_key = private_key.public_key();
         SigningConfig {
-            key_type: "secp256k1".to_string(),
+            key_type: defra_core::signing::SigningKeyType::Secp256k1,
             private_key_bytes: private_key.raw_owned(),
             public_key_bytes: public_key.raw_owned(),
             public_key_hex: public_key.to_hex_string(),

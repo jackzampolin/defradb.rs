@@ -54,7 +54,23 @@ impl Node {
             defra_core::signing::store_identity(
                 did.as_ref(),
                 defra_core::signing::SigningConfig {
-                    key_type: identity.identity_key_type().to_string(),
+                    key_type: match identity.identity_key_type() {
+                        identity::IdentityKeyType::Ed25519 => {
+                            defra_core::signing::SigningKeyType::Ed25519
+                        }
+                        identity::IdentityKeyType::Secp256k1 => {
+                            defra_core::signing::SigningKeyType::Secp256k1
+                        }
+                        identity::IdentityKeyType::Secp256r1 => {
+                            defra_core::signing::SigningKeyType::Secp256r1
+                        }
+                        other => {
+                            return Err(Error::InvalidIdentity(format!(
+                                "unsupported identity key type for node signing: {}",
+                                other
+                            )))
+                        }
+                    },
                     private_key_bytes: identity.private_key_bytes(),
                     public_key_bytes: identity.public_key_bytes(),
                     public_key_hex: hex::encode(identity.public_key_bytes()),

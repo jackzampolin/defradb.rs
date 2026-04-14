@@ -67,7 +67,9 @@ pub(crate) fn resolve_registered_or_passthrough_bearer_token(
     use k256::ecdsa::SigningKey;
 
     if let Some(signing_config) = defra_core::signing::get_identity(did) {
-        if signing_config.has_local_private_key() && signing_config.key_type == "secp256k1" {
+        if signing_config.has_local_private_key()
+            && signing_config.key_type == defra_core::signing::SigningKeyType::Secp256k1
+        {
             let key = SigningKey::from_slice(&signing_config.private_key_bytes).map_err(|e| {
                 crate::provider::ProviderError::Config(format!("invalid signing key: {}", e))
             })?;

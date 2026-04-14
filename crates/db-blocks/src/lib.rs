@@ -66,19 +66,19 @@ pub(crate) fn compute_signature(
 
     // Determine signature type and sign. Remote signers can back any supported
     // key type so mobile/TEE and Orbis-backed identities use the same path.
-    let sig_type = signer.signature_type()?;
+    let sig_type: defra_core::block::SignatureType = signer.key_type.into();
     let sig_bytes = if let Some(remote) = signer.remote_signer.as_ref() {
         remote.sign_sync(&block_bytes, signer.signing_authorization.as_ref())?
     } else {
-        match signer.key_type.as_str() {
-            "ed25519" => {
+        match signer.key_type {
+            defra_core::signing::SigningKeyType::Ed25519 => {
                 let private_key = crypto::Ed25519PrivateKey::from_bytes(&signer.private_key_bytes)
                     .map_err(|e| format!("Failed to load Ed25519 private key: {}", e))?;
                 private_key
                     .sign(&block_bytes)
                     .map_err(|e| format!("Failed to sign block: {}", e))?
             }
-            "secp256k1" => {
+            defra_core::signing::SigningKeyType::Secp256k1 => {
                 let private_key =
                     crypto::Secp256k1PrivateKey::from_bytes(&signer.private_key_bytes)
                         .map_err(|e| format!("Failed to load secp256k1 private key: {}", e))?;
@@ -86,7 +86,7 @@ pub(crate) fn compute_signature(
                     .sign(&block_bytes)
                     .map_err(|e| format!("Failed to sign block: {}", e))?
             }
-            "secp256r1" => {
+            defra_core::signing::SigningKeyType::Secp256r1 => {
                 let private_key =
                     crypto::Secp256r1PrivateKey::from_bytes(&signer.private_key_bytes)
                         .map_err(|e| format!("Failed to load secp256r1 private key: {}", e))?;
@@ -94,10 +94,12 @@ pub(crate) fn compute_signature(
                     .sign(&block_bytes)
                     .map_err(|e| format!("Failed to sign block: {}", e))?
             }
-            "bls" => {
+            defra_core::signing::SigningKeyType::Bls => {
                 return Err("BLS signing requires a remote signer".to_string());
             }
-            other => return Err(format!("Unsupported key type for signing: {}", other)),
+            other => {
+                return Err(format!("Unsupported key type for signing: {}", other));
+            }
         }
     };
 
