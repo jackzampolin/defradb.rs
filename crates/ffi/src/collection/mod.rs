@@ -2,6 +2,10 @@
 //!
 //! This module exposes collection lifecycle and management functions
 //! that match Go's collection management behavior.
+//!
+//! The read/write wrappers are the current code-generation prototype for #692:
+//! they keep explicit `extern "C"` items for cbindgen, but share the repeated
+//! node/runtime/NAC/database prelude through `ffi_node_db_async_body!`.
 
 mod migration;
 mod purge;
