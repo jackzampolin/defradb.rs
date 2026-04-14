@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use defra_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
-use storage::{Reader, ReaderWriter};
+use storage::{corekv::Key, keys::CRDTValueKey, Reader, ReaderWriter};
 
 /// Numeric kind for counter values
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,22 +231,16 @@ impl Counter {
             return Err(Error::MergeError("field_name cannot be empty".into()));
         }
 
-        // Construct storage keys
-        let mut value_key = Vec::new();
-        value_key.extend_from_slice(b"/data/");
-        value_key.extend_from_slice(schema_version_id.as_bytes());
-        value_key.push(b'/');
-        value_key.extend_from_slice(doc_id);
-        value_key.push(b'/');
-        value_key.extend_from_slice(field_name.as_bytes());
-
-        // Nonce tracking prefix
-        let mut nonce_prefix = value_key.clone();
-        nonce_prefix.extend_from_slice(b"/nonces/");
+        let value_key = CRDTValueKey::new(
+            schema_version_id.clone(),
+            doc_id.to_vec(),
+            field_name.clone(),
+        );
+        let nonce_prefix = value_key.nonce_prefix();
 
         Ok(Self {
-            value_key,
-            nonce_prefix,
+            value_key: value_key.bytes(),
+            nonce_prefix: nonce_prefix.bytes(),
             schema_version_id,
             field_name,
             allow_decrement,

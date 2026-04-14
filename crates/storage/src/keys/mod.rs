@@ -1,7 +1,7 @@
 /// Key hierarchy for DefraDB storage
 ///
-/// This module provides 29 key types organized across 6 stores:
-/// - Datastore (5 keys): Document and collection data
+/// This module provides 33 key types organized across 6 stores:
+/// - Datastore (9 keys): Document, collection, and CRDT data
 /// - Headstore (6 keys): Merkle tree heads, definitions, and priority indexes
 /// - Systemstore (11 keys): Metadata and configuration
 /// - Peerstore (4 keys): Peer and replication metadata
@@ -38,6 +38,7 @@
 /// let string = key.to_string(); // Debug representation
 /// ```
 pub mod blockstore;
+pub mod crdt;
 pub mod datastore;
 pub mod encstore;
 pub mod headstore;
@@ -47,6 +48,7 @@ pub mod utils;
 
 // Re-export commonly used types
 pub use blockstore::{BlockstoreKey, ToMergeIndexKey, MERGE_PREFIX};
+pub use crdt::{CRDTNonceKey, CRDTNoncePrefix, CRDTPriorityKey, CRDTValueKey};
 pub use datastore::{
     DataStoreKey, DatastoreSE, IndexDataStoreKey, IndexedField, PrimaryDataStoreKey, ViewCacheKey,
     DATASTORE_DOC_VERSION_FIELD_ID,
@@ -84,6 +86,11 @@ mod tests {
         let _: Box<dyn Key> = Box::new(IndexDataStoreKey::new(1, 2, vec![]));
         let _: Box<dyn Key> = Box::new(DatastoreSE::new("col", "idx", vec![], "doc"));
         let _: Box<dyn Key> = Box::new(ViewCacheKey::new(1, 5));
+        let _: Box<dyn Key> = Box::new(CRDTValueKey::new("schema", b"doc".to_vec(), "field"));
+        let _: Box<dyn Key> = Box::new(CRDTPriorityKey::new("schema", b"doc".to_vec(), "field"));
+        let _: Box<dyn Key> = Box::new(CRDTNoncePrefix::new("schema", b"doc".to_vec(), "field"));
+        let _: Box<dyn Key> =
+            Box::new(CRDTNoncePrefix::new("schema", b"doc".to_vec(), "field").nonce_key(1));
 
         // Headstore keys
         let cid = test_cid();
@@ -132,6 +139,10 @@ mod tests {
         let _d3 = IndexDataStoreKey::new(1, 2, vec![]);
         let _d4 = DatastoreSE::new("c", "i", vec![], "d");
         let _d5 = ViewCacheKey::new(1, 5);
+        let _d6 = CRDTValueKey::new("s", b"d".to_vec(), "f");
+        let _d7 = CRDTPriorityKey::new("s", b"d".to_vec(), "f");
+        let _d8 = CRDTNoncePrefix::new("s", b"d".to_vec(), "f");
+        let _d9 = CRDTNoncePrefix::new("s", b"d".to_vec(), "f").nonce_key(1);
 
         // Headstore: 6 keys
         let cid = test_cid();
@@ -168,6 +179,6 @@ mod tests {
         // Encstore: 1 key
         let _e1 = EncstoreKey::new(cid);
 
-        // Total: 5 + 6 + 11 + 4 + 2 + 1 = 29 active key types.
+        // Total: 9 + 6 + 11 + 4 + 2 + 1 = 33 active key types.
     }
 }
