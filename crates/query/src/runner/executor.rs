@@ -75,13 +75,12 @@ async fn check_nac<F: DocFetcher + 'static, R: crate::txn::TransactionRegistry>(
     identity: &Option<Did>,
     parsed: &ParsedOperation,
 ) -> Option<QueryResponse> {
-    let nac = runner.nac.as_ref()?;
     let did = match identity {
         Some(d) => d.clone(),
         None => Did::wildcard(),
     };
     let permission = permission_for_operation(parsed);
-    if !nac.check_permission(&did, permission).await {
+    if !runner.nac.check_permission(&did, permission).await {
         return Some(QueryResponse::success(serde_json::json!({})));
     }
     None

@@ -38,15 +38,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Convert storage documents to values for aggregation
         let mut plan_docs = documents_to_plan_docs(&docs, &mapping)?;
 
-        // Apply ACP filtering if collection has a policy and ACP is configured
-        if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+        // Apply ACP filtering when the collection is policy-backed.
+        if let Some(ref policy) = collection.policy {
             let acp_identity = Identity::from(identity);
             let mut filtered = Vec::with_capacity(plan_docs.len());
             for doc in plan_docs {
                 if let Some(doc_id_val) = doc.get(0) {
                     if let Some(doc_id) = doc_id_val.as_str() {
                         let has_access = crate::txn::check_doc_access_with_overlay(
-                            acp.as_ref(),
+                            self.acp.as_ref(),
                             &acp_identity,
                             DocumentPermission::Read,
                             &policy.id,
@@ -266,10 +266,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let collections: Vec<CollectionVersion> =
             collections_map.values().map(|c| (**c).clone()).collect();
 
-        let mut planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
-        if let Some(ref acp) = self.acp {
-            planner = planner.with_acp(acp.clone(), identity);
-        }
+        let mut planner = Planner::new(collections)
+            .with_fetcher(Arc::new(fetcher_arc))
+            .with_acp(self.acp.clone(), identity);
         if let Some(ref lens_store) = self.lens_store {
             planner = planner.with_lens_store(lens_store.clone());
         }

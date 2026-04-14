@@ -709,7 +709,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // ACP filtering: check read permission for each commit's document.
         // _commits must enforce the same ACP rules as regular document queries.
-        if let Some(ref acp) = self.acp {
+        {
             use acp::{DocumentPermission, Identity};
 
             let identity = Identity::from(caller_identity.clone());
@@ -749,7 +749,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     let mut any_granted = false;
                     for &(policy_id, resource_name) in &policies {
                         match crate::txn::check_doc_access_with_overlay(
-                            acp.as_ref(),
+                            self.acp.as_ref(),
                             &identity,
                             DocumentPermission::Read,
                             policy_id,
