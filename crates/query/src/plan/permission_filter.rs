@@ -3,7 +3,7 @@
 //! This node wraps a source node and filters out documents that the
 //! identity context doesn't have permission to read.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use acp::{DocumentACP, DocumentPermission, Identity};
@@ -53,6 +53,12 @@ pub struct PermissionFilterNode {
     /// Subset of `requested_doc_ids` that were emitted by the source
     /// but failed the read-permission check.
     denied_requested_ids: Vec<String>,
+
+    /// Queue of permitted documents, populated in `start()` after the
+    /// source is fully drained and all ACP checks are dispatched in
+    /// parallel via `futures::future::try_join_all`. `next()` simply
+    /// pops from the front (#519).
+    permitted_docs: VecDeque<Doc>,
 }
 
 impl PermissionFilterNode {
@@ -82,6 +88,7 @@ impl PermissionFilterNode {
             document_mapping,
             requested_doc_ids: HashSet::new(),
             denied_requested_ids: Vec::new(),
+            permitted_docs: VecDeque::new(),
         }
     }
 
@@ -148,58 +155,87 @@ impl PlanNode for PermissionFilterNode {
     }
 
     async fn start(&mut self) -> Result<()> {
-        self.source.start().await
-    }
+        self.source.start().await?;
 
-    async fn next(&mut self) -> Result<bool> {
-        loop {
-            // Get next document from source
-            if !self.source.next().await? {
-                // Source drained. If the caller explicitly asked for
-                // specific doc IDs and any of those were denied by ACP,
-                // surface that as an explicit permission-denied error
-                // instead of silently returning fewer results (#551).
-                if !self.denied_requested_ids.is_empty() {
-                    let mut ids = std::mem::take(&mut self.denied_requested_ids);
-                    ids.sort();
-                    ids.dedup();
-                    return Err(QueryError::permission_denied(format!(
-                        "read denied for doc_id(s): {}",
-                        ids.join(", ")
-                    )));
-                }
-                return Ok(false);
-            }
+        // Drain the source eagerly and dispatch all ACP checks in parallel
+        // (#519). Previously this filter awaited each `has_read_permission`
+        // call serially in `next()`, which on remote backends like SourceHub
+        // (gRPC, ~50–100ms per check) made a 1000-doc result set serialize
+        // into 50–100s of pure wait time.
+        //
+        // Why drain-and-parallelize: the upstream ScanNode already
+        // materializes the full document set in `init()` via `Vec<Doc>`,
+        // so the "streaming" of `PlanNode::next()` is fictional at the
+        // bottom of the plan tree. Capturing full per-query parallelism
+        // here is a one-file change with zero planner contract impact.
+        // If/when scans ever become true streams, this should evolve to
+        // a `FuturesUnordered`-based sliding window with bounded
+        // concurrency (textbook async best practice for I/O parallelism).
 
+        let docid_index = self.document_mapping.first_index_of_name("_docID");
+
+        // Phase 1: drain the source into (doc_id, doc) pairs.
+        let mut pending: Vec<(String, Doc)> = Vec::new();
+        while self.source.next().await? {
             let doc = self.source.value();
-
-            // Child join scan mappings may place `_docID` at a non-zero index to keep
-            // schema fields aligned for FK lookups, so resolve it from the mapping
-            // instead of assuming Doc field index 0.
-            let doc_id = match self
-                .document_mapping
-                .first_index_of_name("_docID")
+            let doc_id = match docid_index
                 .and_then(|index| doc.get(index))
                 .and_then(|value| value.as_str())
             {
                 Some(id) => id.to_string(),
+                // Docs without a `_docID` mapping cannot be ACP-checked
+                // and were silently skipped in the previous serial loop;
+                // preserve that behavior.
                 None => continue,
             };
+            pending.push((doc_id, doc.deep_clone()));
+        }
 
-            // Check read permission
-            if self.has_read_permission(&doc_id).await? {
-                self.current_doc = doc.deep_clone();
-                return Ok(true);
-            }
+        if pending.is_empty() {
+            return Ok(());
+        }
 
-            // Denied. If this doc was explicitly requested by ID, remember
-            // it so we can surface an error after the source is drained.
-            if self.requested_doc_ids.contains(&doc_id) {
+        // Phase 2: dispatch every read-permission check concurrently.
+        // `has_read_permission` borrows `&self`; the borrow checker is
+        // happy because we don't mutate `self` until after the join.
+        let checks = pending
+            .iter()
+            .map(|(doc_id, _)| self.has_read_permission(doc_id));
+        let decisions = futures::future::try_join_all(checks).await?;
+
+        // Phase 3: walk results, queue permitted docs, track denied
+        // explicit-id requests for the #551 error path.
+        for ((doc_id, doc), allowed) in pending.into_iter().zip(decisions) {
+            if allowed {
+                self.permitted_docs.push_back(doc);
+            } else if self.requested_doc_ids.contains(&doc_id) {
                 self.denied_requested_ids.push(doc_id);
             }
-
-            // No permission, continue to next document
         }
+
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<bool> {
+        if let Some(doc) = self.permitted_docs.pop_front() {
+            self.current_doc = doc;
+            return Ok(true);
+        }
+
+        // Queue drained. If the caller explicitly asked for specific
+        // doc IDs and any were denied by ACP, surface a permission-denied
+        // error instead of silently returning fewer results (#551).
+        if !self.denied_requested_ids.is_empty() {
+            let mut ids = std::mem::take(&mut self.denied_requested_ids);
+            ids.sort();
+            ids.dedup();
+            return Err(QueryError::permission_denied(format!(
+                "read denied for doc_id(s): {}",
+                ids.join(", ")
+            )));
+        }
+
+        Ok(false)
     }
 
     fn value(&self) -> &Doc {
