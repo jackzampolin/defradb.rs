@@ -223,10 +223,8 @@ impl<'de> Deserialize<'de> for Secp256k1PublicKey {
 impl PublicKey for Secp256k1PublicKey {
     fn verify(&self, data: &[u8], signature: &[u8]) -> Result<bool> {
         // Parse DER-encoded signature
-        let sig = match Signature::from_der(signature) {
-            Ok(s) => s,
-            Err(_) => return Ok(false),
-        };
+        let sig = Signature::from_der(signature)
+            .map_err(|e| crypto_error(format!("invalid secp256k1 DER signature: {}", e)))?;
 
         // Preserve the caller-provided DER signature as-is so secp256k1
         // verification enforces canonical low-S semantics and matches Go.
@@ -236,10 +234,10 @@ impl PublicKey for Secp256k1PublicKey {
         hasher.update(data);
 
         // Verify signature against the pre-hashed digest
-        match self.key.verify_digest(hasher, &sig) {
-            Ok(_) => Ok(true),
-            Err(_) => Ok(false),
-        }
+        self.key
+            .verify_digest(hasher, &sig)
+            .map(|_| true)
+            .map_err(|e| crypto_error(format!("secp256k1 signature verification failed: {}", e)))
     }
 
     fn did(&self) -> Result<String> {

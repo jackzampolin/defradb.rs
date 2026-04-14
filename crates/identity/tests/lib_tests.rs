@@ -90,15 +90,17 @@ fn test_signature_not_reusable() {
     let signature = identity.sign(message1).unwrap();
 
     let valid_for_msg1 = identity.pub_key().verify(message1, &signature).unwrap();
-    let valid_for_msg2 = identity.pub_key().verify(message2, &signature).unwrap();
+    let err = identity.pub_key().verify(message2, &signature).unwrap_err();
 
     assert!(
         valid_for_msg1,
         "Signature should verify for original message"
     );
     assert!(
-        !valid_for_msg2,
-        "Signature should not verify for different message"
+        err.to_string()
+            .contains("Ed25519 signature verification failed"),
+        "unexpected error: {}",
+        err
     );
 }
 
@@ -110,6 +112,11 @@ fn test_wrong_key_verification_fails() {
     let message = b"test message";
     let signature = identity1.sign(message).unwrap();
 
-    let valid = identity2.pub_key().verify(message, &signature).unwrap();
-    assert!(!valid, "Signature should not verify with wrong key");
+    let err = identity2.pub_key().verify(message, &signature).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Ed25519 signature verification failed"),
+        "unexpected error: {}",
+        err
+    );
 }

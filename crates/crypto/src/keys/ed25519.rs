@@ -258,7 +258,10 @@ impl<'de> Deserialize<'de> for Ed25519PublicKey {
 impl PublicKey for Ed25519PublicKey {
     fn verify(&self, data: &[u8], signature: &[u8]) -> Result<bool> {
         if signature.len() != 64 {
-            return Ok(false);
+            return Err(crypto_error(format!(
+                "invalid Ed25519 signature length: expected 64 bytes, got {}",
+                signature.len()
+            )));
         }
 
         let sig_bytes: [u8; 64] = signature
@@ -267,10 +270,10 @@ impl PublicKey for Ed25519PublicKey {
 
         let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
 
-        match self.key.verify(data, &signature) {
-            Ok(_) => Ok(true),
-            Err(_) => Ok(false),
-        }
+        self.key
+            .verify(data, &signature)
+            .map(|_| true)
+            .map_err(|e| crypto_error(format!("Ed25519 signature verification failed: {}", e)))
     }
 
     fn did(&self) -> Result<String> {

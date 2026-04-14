@@ -220,10 +220,8 @@ impl PublicKey for Secp256r1PublicKey {
         use p256::ecdsa::signature::DigestVerifier;
 
         // Parse DER-encoded signature
-        let sig = match Signature::from_der(signature) {
-            Ok(s) => s,
-            Err(_) => return Ok(false),
-        };
+        let sig = Signature::from_der(signature)
+            .map_err(|e| crypto_error(format!("invalid secp256r1 DER signature: {}", e)))?;
 
         // Normalize S to low-S form for compatibility with various signers
         let sig = sig.normalize_s().unwrap_or(sig);
@@ -234,10 +232,10 @@ impl PublicKey for Secp256r1PublicKey {
         let digest = Sha256::new_with_prefix(data);
 
         // Verify signature using pre-hashed digest
-        match self.key.verify_digest(digest, &sig) {
-            Ok(_) => Ok(true),
-            Err(_) => Ok(false),
-        }
+        self.key
+            .verify_digest(digest, &sig)
+            .map(|_| true)
+            .map_err(|e| crypto_error(format!("secp256r1 signature verification failed: {}", e)))
     }
 
     fn did(&self) -> Result<String> {
