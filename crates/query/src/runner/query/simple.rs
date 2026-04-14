@@ -109,24 +109,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             documents_to_plan_docs(&docs, &mapping)?
         };
 
-        // Build ACP filter config if collection has policy and ACP is configured
-        let acp_filter = if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy)
-        {
-            Some(plan::AcpFilter {
-                acp: acp.clone(),
-                identity: Identity::from(identity),
-                policy_id: policy.id.clone(),
-                resource_name: policy.resource_name.clone(),
-            })
-        } else {
-            if collection.policy.is_some() && self.acp.is_none() {
-                tracing::warn!(
-                    collection = %collection.name,
-                    "Collection has ACP policy but QueryRunner has no ACP configured - ACP enforcement is DISABLED"
-                );
-            }
-            None
-        };
+        // Build ACP filter config when the collection is policy-backed.
+        let acp_filter = collection.policy.as_ref().map(|policy| plan::AcpFilter {
+            acp: self.acp.clone(),
+            identity: Identity::from(identity),
+            policy_id: policy.id.clone(),
+            resource_name: policy.resource_name.clone(),
+        });
 
         // Build and execute the plan (ACP filter is inserted inside, after Select but before aggregates)
         let mut plan =

@@ -291,7 +291,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // This matches Go's behavior where GQL mutations on invisible documents return
         // empty results, while mutations on visible-but-unauthorized documents return errors.
         let mut acp_filtered_doc_ids: Option<Vec<String>> = None;
-        if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+        if let Some(ref policy) = collection.policy {
             match mutation.mutation_type {
                 MutationType::Update | MutationType::Upsert => {
                     if let Some(ref doc_ids) = doc_ids_for_check {
@@ -300,7 +300,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         for doc_id in doc_ids {
                             // Phase 1: Check if the identity can read the document
                             let can_read = crate::txn::check_doc_access_with_overlay(
-                                acp.as_ref(),
+                                self.acp.as_ref(),
                                 &identity_for_acp,
                                 DocumentPermission::Read,
                                 &policy.id,
@@ -317,7 +317,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
                             // Phase 2: Check if the identity can update the document
                             let can_update = crate::txn::check_doc_access_with_overlay(
-                                acp.as_ref(),
+                                self.acp.as_ref(),
                                 &identity_for_acp,
                                 DocumentPermission::Update,
                                 &policy.id,
@@ -344,7 +344,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         for doc_id in doc_ids {
                             // Phase 1: Check if the identity can read the document
                             let can_read = crate::txn::check_doc_access_with_overlay(
-                                acp.as_ref(),
+                                self.acp.as_ref(),
                                 &identity_for_acp,
                                 DocumentPermission::Read,
                                 &policy.id,
@@ -361,7 +361,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
                             // Phase 2: Check if the identity can delete the document
                             let can_delete = crate::txn::check_doc_access_with_overlay(
-                                acp.as_ref(),
+                                self.acp.as_ref(),
                                 &identity_for_acp,
                                 DocumentPermission::Delete,
                                 &policy.id,
@@ -429,11 +429,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         resource = ?collection.policy.as_ref().map(|p| p.resource_name.clone()),
                         "create mutation entering remote signer authorization path"
                     );
-                    if let (Some(acp), Some(identity_did), Some(policy)) = (
-                        self.acp.as_ref(),
-                        caller_identity.as_ref(),
-                        collection.policy.as_ref(),
-                    ) {
+                    if let (Some(identity_did), Some(policy)) =
+                        (caller_identity.as_ref(), collection.policy.as_ref())
+                    {
                         tracing::info!(
                             actor_did = %identity_did,
                             policy_id = %policy.id,
@@ -442,7 +440,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             permission = "writer",
                             "create mutation requesting access decision"
                         );
-                        let decision_id = acp
+                        let decision_id = self
+                            .acp
                             .create_access_decision(
                                 &Identity::from(identity_did.clone()),
                                 &policy.id,
@@ -484,7 +483,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     } else {
                         tracing::warn!(
                             collection = %mutation.collection_name,
-                            has_acp = self.acp.is_some(),
+                            has_acp = true,
                             has_caller_identity = caller_identity.is_some(),
                             has_policy = collection.policy.is_some(),
                             "create mutation skipped remote signer authorization due to missing prerequisites"
@@ -613,7 +612,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Execute the plan.
         // When ACP is active, wrap DocumentNotFound errors to match Go's generic message
         // (security best practice: don't reveal whether document exists vs unauthorized).
-        let has_acp = self.acp.is_some() && collection.policy.is_some();
+        let has_acp = collection.policy.is_some();
         let map_doc_not_found = |e: QueryError| -> QueryError {
             if has_acp {
                 match &e {
@@ -670,14 +669,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mutation.mutation_type,
             MutationType::Create | MutationType::Upsert
         ) {
-            if let (Some(ref acp), Some(ref policy), Some(ref identity_did)) =
-                (&self.acp, &collection.policy, &caller_identity)
+            if let (Some(ref policy), Some(ref identity_did)) =
+                (&collection.policy, &caller_identity)
             {
                 for result in &results {
                     if let Some(doc_id) = result.get("_docID").and_then(|v| v.as_str()) {
                         // Check if document is already registered (for upsert of existing doc)
                         let is_registered = crate::txn::is_doc_registered_with_overlay(
-                            acp.as_ref(),
+                            self.acp.as_ref(),
                             &policy.id,
                             &policy.resource_name,
                             doc_id,
@@ -704,7 +703,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                     );
                                 deferred_acp_mutations
                                     .schedule_register_doc_object(
-                                        acp.clone(),
+                                        self.acp.clone(),
                                         identity_did.clone(),
                                         policy.id.clone(),
                                         policy.resource_name.clone(),
@@ -714,7 +713,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                     .map_err(QueryError::execution)?;
                             } else {
                                 let acp_registration_start = Instant::now();
-                                acp.register_doc_object(
+                                self.acp
+                                    .register_doc_object(
                                     identity_did,
                                     &policy.id,
                                     &policy.resource_name,
@@ -744,7 +744,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // For DELETE operations: unregister deleted docs from ACP
         // This cleans up ACP state to prevent orphaned registrations
         if matches!(mutation.mutation_type, MutationType::Delete) {
-            if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+            if let Some(ref policy) = collection.policy {
                 let request_bearer_token = caller_identity
                     .as_ref()
                     .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
@@ -757,7 +757,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             crate::txn::current_deferred_acp_mutations()
                         {
                             if let Err(err) = deferred_acp_mutations.schedule_unregister_doc_object(
-                                acp.clone(),
+                                self.acp.clone(),
                                 policy.id.clone(),
                                 policy.resource_name.clone(),
                                 doc_id.to_string(),
@@ -771,7 +771,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                     "Failed to defer ACP unregister for deleted document"
                                 );
                             }
-                        } else if let Err(e) = acp
+                        } else if let Err(e) = self
+                            .acp
                             .unregister_doc_object(&policy.id, &policy.resource_name, doc_id)
                             .await
                         {

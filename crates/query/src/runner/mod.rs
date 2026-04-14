@@ -39,7 +39,7 @@ mod query;
 mod version;
 
 use acp::nac::NodePermission;
-use acp::DocumentACP;
+use acp::{DocumentACP, Identity as AcpIdentity, ReplicatedActorRelationship};
 use async_trait::async_trait;
 use identity::Did;
 use schema::CollectionVersion;
@@ -73,6 +73,96 @@ pub trait NacChecker: Send + Sync {
     async fn check_permission(&self, identity: &Did, permission: NodePermission) -> bool;
 }
 
+struct NoOpNacChecker;
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl NacChecker for NoOpNacChecker {
+    async fn check_permission(&self, _identity: &Did, _permission: NodePermission) -> bool {
+        true
+    }
+}
+
+struct NoOpDocumentAcp;
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl DocumentACP for NoOpDocumentAcp {
+    async fn register_doc_object(
+        &self,
+        _identity: &Did,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<()> {
+        Ok(())
+    }
+
+    async fn is_doc_registered(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<bool> {
+        Ok(false)
+    }
+
+    async fn check_doc_access(
+        &self,
+        _identity: &AcpIdentity,
+        _permission: acp::DocumentPermission,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<bool> {
+        Ok(true)
+    }
+
+    async fn add_actor_relationship(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+        _policy_id: &str,
+        _collection_id: &str,
+        _doc_id: &str,
+        _relation: &str,
+        _managing_relations: &[String],
+    ) -> acp::Result<bool> {
+        Ok(false)
+    }
+
+    async fn delete_actor_relationship(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+        _policy_id: &str,
+        _collection_id: &str,
+        _doc_id: &str,
+        _relation: &str,
+        _managing_relations: &[String],
+    ) -> acp::Result<bool> {
+        Ok(false)
+    }
+
+    async fn export_actor_relationships(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<Vec<ReplicatedActorRelationship>> {
+        Ok(Vec::new())
+    }
+
+    async fn unregister_doc_object(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<()> {
+        Ok(())
+    }
+}
+
 /// Query runner that executes GraphQL queries against storage.
 pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRegistry> {
     /// Document fetcher for storage access (used for non-transactional queries)
@@ -83,8 +173,11 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     pub(crate) registry: Arc<R>,
     /// Document mutator for mutation operations (optional)
     pub(crate) mutator: Option<Arc<dyn DocMutator>>,
-    /// Document ACP for permission checks (optional)
-    pub(crate) acp: Option<Arc<dyn DocumentACP>>,
+    /// Document ACP for permission checks.
+    ///
+    /// Defaults to a no-op ACP implementation that allows access and treats
+    /// documents as unregistered, matching the "ACP not configured" behavior.
+    pub(crate) acp: Arc<dyn DocumentACP>,
     /// Default identity for ACP permission checks.
     ///
     /// Used when a request doesn't include an explicit identity (e.g., no bearer token).
@@ -92,8 +185,10 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     pub(crate) default_identity: Option<Did>,
     /// Optional lens transform store for view queries with transforms
     pub(crate) lens_store: Option<Arc<dyn lens::TransformStore>>,
-    /// Optional NAC checker for query-level enforcement.
-    pub(crate) nac: Option<Arc<dyn NacChecker>>,
+    /// NAC checker for query-level enforcement.
+    ///
+    /// Defaults to a no-op checker that allows every request.
+    pub(crate) nac: Arc<dyn NacChecker>,
     /// Query execution timeout in seconds (0 = no timeout). Default: 30.
     pub(crate) query_timeout: u64,
 }
@@ -109,10 +204,10 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             collection_provider: Arc::new(StaticCollectionProvider::new(collections)),
             registry: Arc::new(NoOpTransactionRegistry),
             mutator: None,
-            acp: None,
+            acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
             lens_store: None,
-            nac: None,
+            nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
         }
     }
@@ -127,10 +222,10 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             collection_provider: provider,
             registry: Arc::new(NoOpTransactionRegistry),
             mutator: None,
-            acp: None,
+            acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
             lens_store: None,
-            nac: None,
+            nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
         }
     }
@@ -147,10 +242,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             collection_provider: Arc::new(StaticCollectionProvider::new(collections)),
             registry: Arc::new(registry),
             mutator: None,
-            acp: None,
+            acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
             lens_store: None,
-            nac: None,
+            nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
         }
     }
@@ -170,10 +265,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             collection_provider: provider,
             registry: Arc::new(registry),
             mutator: None,
-            acp: None,
+            acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
             lens_store: None,
-            nac: None,
+            nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
         }
     }
@@ -192,10 +287,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             collection_provider: provider,
             registry,
             mutator: None,
-            acp: None,
+            acp: Arc::new(NoOpDocumentAcp),
             default_identity: None,
             lens_store: None,
-            nac: None,
+            nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
         }
     }
@@ -213,7 +308,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// When set, queries will filter results based on the identity's permissions.
     /// Collections with a policy will have ACP enforced; others are unaffected.
     pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>) -> Self {
-        self.acp = Some(acp);
+        self.acp = acp;
         self
     }
 
@@ -228,7 +323,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// When set, queries will be checked against NAC permissions before execution.
     /// Denied operations return a GraphQL error (HTTP 200) matching Go behavior.
     pub fn with_nac(mut self, nac: Arc<dyn NacChecker>) -> Self {
-        self.nac = Some(nac);
+        self.nac = nac;
         self
     }
 

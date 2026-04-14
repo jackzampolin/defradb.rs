@@ -70,7 +70,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Apply ACP filtering: check read permission for each reconstructed document.
         // CID-based time-travel queries must enforce the same ACP rules as regular queries.
         // Documents the caller lacks read permission for are silently excluded (Go behavior).
-        let documents = if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+        let documents = if let Some(ref policy) = collection.policy {
             let identity = Identity::from(caller_identity);
             let mut permitted = Vec::with_capacity(documents.len());
             for doc in documents {
@@ -79,7 +79,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     None => continue,
                 };
                 match crate::txn::check_doc_access_with_overlay(
-                    acp.as_ref(),
+                    self.acp.as_ref(),
                     &identity,
                     DocumentPermission::Read,
                     &policy.id,
