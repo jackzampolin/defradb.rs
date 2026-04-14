@@ -111,7 +111,7 @@ fn test_generate_auth_token_secp256k1_32_bytes() {
     let key_bytes = private_key.raw();
     assert_eq!(key_bytes.len(), 32, "secp256k1 key should be 32 bytes");
 
-    let hex_key = hex::encode(&key_bytes);
+    let hex_key = hex::encode(key_bytes);
     let result = cli::commands::client::generate_auth_token(&hex_key, "http://localhost:9181");
 
     assert!(result.is_ok(), "Should generate token for secp256k1 key");
@@ -131,7 +131,7 @@ fn test_generate_auth_token_ed25519_64_bytes() {
     let key_bytes = private_key.raw();
     assert_eq!(key_bytes.len(), 64, "ed25519 key should be 64 bytes");
 
-    let hex_key = hex::encode(&key_bytes);
+    let hex_key = hex::encode(key_bytes);
     let result = cli::commands::client::generate_auth_token(&hex_key, "http://localhost:9181");
 
     assert!(result.is_ok(), "Should generate token for ed25519 key");

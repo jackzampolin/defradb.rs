@@ -9,9 +9,10 @@
 
 use p256::ecdsa::{signature::DigestSigner, Signature, SigningKey, VerifyingKey};
 use p256::EncodedPoint;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
 
 use defra_core::Result;
 
@@ -23,6 +24,8 @@ use crate::types::{KeyType, SECP256R1_PRIVATE_KEY_SIZE};
 #[derive(Clone)]
 pub struct Secp256r1PrivateKey {
     key: SigningKey,
+    raw_bytes: Zeroizing<Vec<u8>>,
+    public_key: Secp256r1PublicKey,
 }
 
 impl PartialEq for Secp256r1PrivateKey {
@@ -58,12 +61,22 @@ impl Secp256r1PrivateKey {
 
         let key = SigningKey::from_slice(bytes)
             .map_err(|e| crypto_error(format!("invalid secp256r1 private key: {}", e)))?;
-        Ok(Self { key })
+        let public_key = Secp256r1PublicKey::from_verifying_key(*key.verifying_key());
+        Ok(Self {
+            key,
+            raw_bytes: Zeroizing::new(bytes.to_vec()),
+            public_key,
+        })
     }
 
     /// Get the underlying p256 signing key
     pub fn underlying(&self) -> &SigningKey {
         &self.key
+    }
+
+    /// Derive the corresponding secp256r1 public key without dynamic dispatch.
+    pub fn to_public_key(&self) -> Secp256r1PublicKey {
+        self.public_key.clone()
     }
 }
 
@@ -77,11 +90,11 @@ impl Key for Secp256r1PrivateKey {
         if self_raw.len() != other_raw.len() {
             return false;
         }
-        self_raw.ct_eq(&other_raw).into()
+        self_raw.ct_eq(other_raw).into()
     }
 
-    fn raw(&self) -> Vec<u8> {
-        self.key.to_bytes().to_vec()
+    fn raw(&self) -> &[u8] {
+        &self.raw_bytes
     }
 
     fn key_type(&self) -> KeyType {
@@ -103,18 +116,16 @@ impl PrivateKey for Secp256r1PrivateKey {
         Ok(signature.to_der().as_bytes().to_vec())
     }
 
-    fn public_key(&self) -> Box<dyn PublicKey> {
-        Box::new(Secp256r1PublicKey {
-            key: *self.key.verifying_key(),
-        })
+    fn public_key(&self) -> &dyn PublicKey {
+        &self.public_key
     }
 }
 
 /// secp256r1 (P-256) public key wrapper
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Secp256r1PublicKey {
-    #[serde(with = "secp256r1_public_key_serde")]
     key: VerifyingKey,
+    raw_bytes: Vec<u8>,
 }
 
 impl PartialEq for Secp256r1PublicKey {
@@ -148,12 +159,17 @@ impl Secp256r1PublicKey {
         let key = VerifyingKey::from_encoded_point(&point)
             .map_err(|_| crypto_error("invalid secp256r1 public key: not on curve"))?;
 
-        Ok(Self { key })
+        Ok(Self::from_verifying_key(key))
     }
 
     /// Get the underlying p256 verifying key
     pub fn underlying(&self) -> &VerifyingKey {
         &self.key
+    }
+
+    fn from_verifying_key(key: VerifyingKey) -> Self {
+        let raw_bytes = key.to_encoded_point(true).as_bytes().to_vec();
+        Self { key, raw_bytes }
     }
 }
 
@@ -168,15 +184,34 @@ impl Key for Secp256r1PublicKey {
         if self_raw.len() != other_raw.len() {
             return false;
         }
-        self_raw.ct_eq(&other_raw).into()
+        self_raw.ct_eq(other_raw).into()
     }
 
-    fn raw(&self) -> Vec<u8> {
-        self.key.to_encoded_point(true).as_bytes().to_vec()
+    fn raw(&self) -> &[u8] {
+        &self.raw_bytes
     }
 
     fn key_type(&self) -> KeyType {
         KeyType::Secp256r1
+    }
+}
+
+impl Serialize for Secp256r1PublicKey {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&self.raw_bytes)
+    }
+}
+
+impl<'de> Deserialize<'de> for Secp256r1PublicKey {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes = <Vec<u8>>::deserialize(deserializer)?;
+        Self::from_bytes(&bytes).map_err(serde::de::Error::custom)
     }
 }
 
@@ -229,30 +264,4 @@ pub fn secp256r1_private_key_to_xy(private_bytes: &[u8]) -> Result<(Vec<u8>, Vec
         .ok_or_else(|| crypto_error("secp256r1: missing y coordinate"))?
         .to_vec();
     Ok((x, y))
-}
-
-// Custom serde module for VerifyingKey
-mod secp256r1_public_key_serde {
-    use p256::ecdsa::VerifyingKey;
-    use p256::EncodedPoint;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(key: &VerifyingKey, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        // Serialize as compressed format
-        let bytes = key.to_encoded_point(true);
-        serializer.serialize_bytes(bytes.as_bytes())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<VerifyingKey, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let bytes = <Vec<u8>>::deserialize(deserializer)?;
-        let point = EncodedPoint::from_bytes(&bytes)
-            .map_err(|e| serde::de::Error::custom(e.to_string()))?;
-        VerifyingKey::from_encoded_point(&point).map_err(serde::de::Error::custom)
-    }
 }

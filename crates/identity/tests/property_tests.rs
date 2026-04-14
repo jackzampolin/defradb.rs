@@ -45,8 +45,8 @@ proptest! {
         let key1 = generate_ed25519().unwrap();
         let bytes = key1.raw();
 
-        let identity1 = RawIdentity::from_bytes(KeyType::Ed25519, &bytes).unwrap();
-        let identity2 = RawIdentity::from_bytes(KeyType::Ed25519, &bytes).unwrap();
+        let identity1 = RawIdentity::from_bytes(KeyType::Ed25519, bytes).unwrap();
+        let identity2 = RawIdentity::from_bytes(KeyType::Ed25519, bytes).unwrap();
 
         let did1 = identity1.did().unwrap();
         let did2 = identity2.did().unwrap();
@@ -59,8 +59,8 @@ proptest! {
         let key1 = generate_secp256k1().unwrap();
         let bytes = key1.raw();
 
-        let identity1 = RawIdentity::from_bytes(KeyType::Secp256k1, &bytes).unwrap();
-        let identity2 = RawIdentity::from_bytes(KeyType::Secp256k1, &bytes).unwrap();
+        let identity1 = RawIdentity::from_bytes(KeyType::Secp256k1, bytes).unwrap();
+        let identity2 = RawIdentity::from_bytes(KeyType::Secp256k1, bytes).unwrap();
 
         let did1 = identity1.did().unwrap();
         let did2 = identity2.did().unwrap();

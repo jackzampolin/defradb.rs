@@ -33,11 +33,11 @@ impl Node {
                 let key_bytes = private_key.raw();
 
                 // Store in keyring
-                kr.set(PEER_KEY, &key_bytes)
+                kr.set(PEER_KEY, key_bytes)
                     .map_err(|e| Error::Keyring(e.to_string()))?;
 
-                let did = Self::derive_and_log_identity_did(&key_bytes)?;
-                let keypair = Self::keypair_from_ed25519_bytes(&key_bytes)?;
+                let did = Self::derive_and_log_identity_did(key_bytes)?;
+                let keypair = Self::keypair_from_ed25519_bytes(key_bytes)?;
                 Ok((keypair, did))
             }
             Err(e) => Err(Error::Keyring(e.to_string())),
