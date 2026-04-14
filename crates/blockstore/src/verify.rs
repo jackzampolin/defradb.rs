@@ -3,12 +3,11 @@
 //! Only SHA2-256 (multihash code 0x12) is accepted for P2P blocks. Any other
 //! hash algorithm is rejected to prevent bypass via unsupported algorithm codes.
 
+use cid::multihash::Code;
 use cid::Cid;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
-
-const SHA2_256_CODE: u64 = 0x12;
 
 /// Verify that `data` hashes to the digest encoded in `cid`.
 ///
@@ -20,7 +19,7 @@ pub fn verify_block_cid(cid: &Cid, data: &[u8]) -> Result<()> {
     let mh = cid.hash();
     let code = mh.code();
 
-    if code != SHA2_256_CODE {
+    if code != u64::from(Code::Sha2_256) {
         return Err(Error::UnsupportedHashAlgorithm {
             code,
             cid: cid.to_string(),
