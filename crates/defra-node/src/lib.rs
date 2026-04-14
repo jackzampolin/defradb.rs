@@ -435,6 +435,11 @@ impl NodeBuilder {
 
             match self.storage_backend {
                 StorageBackend::Redb => {
+                    tracing::info!(
+                        storage_backend = "redb",
+                        data_path = %path.display(),
+                        "embedded node starting"
+                    );
                     let store = Arc::new(
                         storage::RedbStore::open(path.to_str().ok_or_else(|| {
                             anyhow::anyhow!("data_path contains non-UTF8 characters")
@@ -458,6 +463,11 @@ impl NodeBuilder {
                 }
                 #[cfg(feature = "rocksdb")]
                 StorageBackend::RocksDb => {
+                    tracing::info!(
+                        storage_backend = "rocksdb",
+                        data_path = %path.display(),
+                        "embedded node starting"
+                    );
                     let store = Arc::new(
                         storage::RocksDbStore::open(&path)
                             .map_err(|e| anyhow::anyhow!("failed to open rocksdb store: {}", e))?,
@@ -486,6 +496,10 @@ impl NodeBuilder {
                 }
             }
         } else {
+            tracing::info!(
+                storage_backend = "memory",
+                "embedded node starting (ephemeral, no data_path)"
+            );
             let store = Arc::new(storage::MemoryStore::new());
             let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
 

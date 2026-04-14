@@ -136,6 +136,12 @@ impl NodeBuilder {
                 }
             }
 
+            tracing::info!(
+                storage_backend = "redb",
+                data_path = %path.display(),
+                "embedded node starting"
+            );
+
             let redb = storage::RedbStore::open(
                 path.to_str()
                     .ok_or_else(|| anyhow!("data path contains non-UTF-8 characters"))?,
@@ -144,6 +150,10 @@ impl NodeBuilder {
 
             (Arc::new(EmbeddedStore::Redb(redb)), Persistence::Persistent)
         } else {
+            tracing::info!(
+                storage_backend = "memory",
+                "embedded node starting (ephemeral, no data_path)"
+            );
             (
                 Arc::new(EmbeddedStore::Memory(storage::MemoryStore::new())),
                 Persistence::Memory,
