@@ -1,11 +1,5 @@
-use std::ffi::c_char;
-
+use crate::ffi_node_db_async_body;
 use acp::nac::NodePermission;
-
-use crate::helpers::{get_node_database, get_rt, require_c_str};
-use crate::nac_check::check_nac_for_node;
-use crate::types::FfiResult;
-use crate::{ffi_async, ffi_entry, try_ffi};
 
 /// Delete a collection by name.
 ///
@@ -27,28 +21,23 @@ use crate::{ffi_async, ffi_entry, try_ffi};
 #[no_mangle]
 pub unsafe extern "C" fn delete_collection(
     node_ptr: usize,
-    identity_did: *const c_char,
-    name: *const c_char,
-) -> FfiResult {
-    ffi_entry! {
-        let rt = try_ffi!(get_rt());
-        try_ffi!(check_nac_for_node(
-            rt,
-            node_ptr,
-            identity_did,
-            NodePermission::CollectionPatch
-        ));
-        let name_str = try_ffi!(require_c_str(name, "name"));
-        let database = try_ffi!(get_node_database(node_ptr));
+    identity_did: *const std::ffi::c_char,
+    name: *const std::ffi::c_char,
+) -> crate::types::FfiResult {
+    ffi_node_db_async_body! {
+        node = node_ptr,
+        identity = identity_did,
+        database = database,
+        permission = NodePermission::CollectionPatch,
+        name => name_str: "name";
+        {
+        database
+            .delete_collection(&name_str)
+            .await
+            .map_err(|e| format!("failed to delete collection: {}", e))?;
 
-        ffi_async!(rt, {
-            database
-                .delete_collection(&name_str)
-                .await
-                .map_err(|e| format!("failed to delete collection: {}", e))?;
-
-            Ok("{}".to_string())
-        })
+        Ok("{}".to_string())
+    }
     }
 }
 
@@ -73,28 +62,23 @@ pub unsafe extern "C" fn delete_collection(
 #[no_mangle]
 pub unsafe extern "C" fn set_active_collection_version(
     node_ptr: usize,
-    identity_did: *const c_char,
-    version_id: *const c_char,
-) -> FfiResult {
-    ffi_entry! {
-        let rt = try_ffi!(get_rt());
-        try_ffi!(check_nac_for_node(
-            rt,
-            node_ptr,
-            identity_did,
-            NodePermission::CollectionPatch
-        ));
-        let version_str = try_ffi!(require_c_str(version_id, "version_id"));
-        let database = try_ffi!(get_node_database(node_ptr));
+    identity_did: *const std::ffi::c_char,
+    version_id: *const std::ffi::c_char,
+) -> crate::types::FfiResult {
+    ffi_node_db_async_body! {
+        node = node_ptr,
+        identity = identity_did,
+        database = database,
+        permission = NodePermission::CollectionPatch,
+        version_id => version_str: "version_id";
+        {
+        database
+            .set_active_collection_version(&version_str)
+            .await
+            .map_err(|e| format!("failed to set active collection version: {}", e))?;
 
-        ffi_async!(rt, {
-            database
-                .set_active_collection_version(&version_str)
-                .await
-                .map_err(|e| format!("failed to set active collection version: {}", e))?;
-
-            Ok("{}".to_string())
-        })
+        Ok("{}".to_string())
+    }
     }
 }
 
@@ -120,33 +104,28 @@ pub unsafe extern "C" fn set_active_collection_version(
 #[no_mangle]
 pub unsafe extern "C" fn patch_collection(
     node_ptr: usize,
-    identity_did: *const c_char,
-    collection_name: *const c_char,
-    patch: *const c_char,
-) -> FfiResult {
-    ffi_entry! {
-        let rt = try_ffi!(get_rt());
-        try_ffi!(check_nac_for_node(
-            rt,
-            node_ptr,
-            identity_did,
-            NodePermission::CollectionPatch
-        ));
-        let name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
-        let patch_str = try_ffi!(require_c_str(patch, "patch"));
-        let database = try_ffi!(get_node_database(node_ptr));
+    identity_did: *const std::ffi::c_char,
+    collection_name: *const std::ffi::c_char,
+    patch: *const std::ffi::c_char,
+) -> crate::types::FfiResult {
+    ffi_node_db_async_body! {
+        node = node_ptr,
+        identity = identity_did,
+        database = database,
+        permission = NodePermission::CollectionPatch,
+        collection_name => name_str: "collection_name",
+        patch => patch_str: "patch";
+        {
+        let updated_schema = database
+            .patch_collection(&name_str, &patch_str)
+            .await
+            .map_err(|e| format!("failed to patch collection: {}", e))?;
 
-        ffi_async!(rt, {
-            let updated_schema = database
-                .patch_collection(&name_str, &patch_str)
-                .await
-                .map_err(|e| format!("failed to patch collection: {}", e))?;
+        let json = serde_json::to_string(&updated_schema)
+            .map_err(|e| format!("failed to serialize updated schema: {}", e))?;
 
-            let json = serde_json::to_string(&updated_schema)
-                .map_err(|e| format!("failed to serialize updated schema: {}", e))?;
-
-            Ok(json)
-        })
+        Ok(json)
+    }
     }
 }
 
@@ -171,28 +150,23 @@ pub unsafe extern "C" fn patch_collection(
 #[no_mangle]
 pub unsafe extern "C" fn truncate_collection(
     node_ptr: usize,
-    identity_did: *const c_char,
-    name: *const c_char,
-) -> FfiResult {
-    ffi_entry! {
-        let rt = try_ffi!(get_rt());
-        try_ffi!(check_nac_for_node(
-            rt,
-            node_ptr,
-            identity_did,
-            NodePermission::CollectionTruncate
-        ));
-        let name_str = try_ffi!(require_c_str(name, "name"));
-        let database = try_ffi!(get_node_database(node_ptr));
+    identity_did: *const std::ffi::c_char,
+    name: *const std::ffi::c_char,
+) -> crate::types::FfiResult {
+    ffi_node_db_async_body! {
+        node = node_ptr,
+        identity = identity_did,
+        database = database,
+        permission = NodePermission::CollectionTruncate,
+        name => name_str: "name";
+        {
+        database
+            .truncate_collection(&name_str)
+            .await
+            .map_err(|e| format!("failed to truncate collection: {}", e))?;
 
-        ffi_async!(rt, {
-            database
-                .truncate_collection(&name_str)
-                .await
-                .map_err(|e| format!("failed to truncate collection: {}", e))?;
-
-            Ok("{}".to_string())
-        })
+        Ok("{}".to_string())
+    }
     }
 }
 

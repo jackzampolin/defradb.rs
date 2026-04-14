@@ -258,7 +258,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let collections: Vec<CollectionVersion> =
                 collections_map.values().map(|c| (**c).clone()).collect();
 
-            let mut planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+            let mut planner = Planner::new(collections)
+                .with_fetcher(Arc::new(fetcher_arc))
+                .with_acp(self.acp.clone(), caller_identity.clone());
             if let Some(ref lens_store) = self.lens_store {
                 planner = planner.with_lens_store(lens_store.clone());
             }
@@ -266,10 +268,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let mut plan = plan_result.plan;
 
             // Wrap with permission filter if needed (explain path)
-            if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
+            if let Some(ref policy) = collection.policy {
                 plan = Box::new(PermissionFilterNode::new(
                     plan,
-                    acp.clone(),
+                    self.acp.clone(),
                     Identity::from(caller_identity),
                     &policy.id,
                     &policy.resource_name,
@@ -328,17 +330,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let _doc_count = plan_docs.len();
 
             // Build ACP filter config if collection has policy and ACP is configured
-            let acp_filter =
-                if let (Some(ref acp), Some(ref policy)) = (&self.acp, &collection.policy) {
-                    Some(plan::AcpFilter {
-                        acp: acp.clone(),
-                        identity: Identity::from(caller_identity),
-                        policy_id: policy.id.clone(),
-                        resource_name: policy.resource_name.clone(),
-                    })
-                } else {
-                    None
-                };
+            let acp_filter = collection.policy.as_ref().map(|policy| plan::AcpFilter {
+                acp: self.acp.clone(),
+                identity: Identity::from(caller_identity),
+                policy_id: policy.id.clone(),
+                resource_name: policy.resource_name.clone(),
+            });
 
             // Build the plan (ACP filter is inserted inside, after Select but before aggregates)
             let mut plan = plan::build_plan(

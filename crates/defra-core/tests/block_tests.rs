@@ -393,7 +393,30 @@ fn test_block_new_sorts_links_by_cid_string() {
 }
 
 #[test]
-fn test_dag_link_equality_ignores_sort_cache_state() {
+fn test_cid_order_matches_string_order_for_block_sort_inputs() {
+    let mut sorted_by_cid = vec![
+        test_cid(),
+        test_cid2(),
+        Cid::from_str(GO_LWW_SIMPLE_CID).unwrap(),
+        Cid::from_str(GO_LWW_HIGH_PRIORITY_CID).unwrap(),
+        Cid::from_str(GO_COUNTER_CID).unwrap(),
+        Cid::from_str(GO_COMPOSITE_ACTIVE_CID).unwrap(),
+        Cid::from_str(GO_COMPOSITE_DELETED_CID).unwrap(),
+        Cid::from_str(GO_COLLECTION_CID).unwrap(),
+        Cid::from_str(GO_LWW_DELETION_CID).unwrap(),
+        Cid::from_str(GO_BLOCK_WITH_ONE_HEAD_CID).unwrap(),
+        Cid::from_str(GO_COMPOSITE_BLOCK_WITH_LINKS_CID).unwrap(),
+    ];
+    let mut sorted_by_string = sorted_by_cid.clone();
+
+    sorted_by_cid.sort_unstable();
+    sorted_by_string.sort_by_cached_key(|cid| cid.to_string());
+
+    assert_eq!(sorted_by_cid, sorted_by_string);
+}
+
+#[test]
+fn test_dag_link_equality_is_unaffected_by_sorting() {
     let link = DAGLink::new("field", test_cid());
     let mut sorted = [link.clone()];
     sorted.sort();

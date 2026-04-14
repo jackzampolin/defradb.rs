@@ -8,7 +8,7 @@ use multicodec::Codec;
 use multihash::MultihashGeneric;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::LazyLock;
 
 use crate::{Error, Result};
 
@@ -80,7 +80,7 @@ impl Block {
     pub fn new(delta: CrdtDelta, heads: Vec<Cid>, links: Vec<DAGLink>) -> Self {
         // Sort and normalize heads
         let mut sorted_heads = heads;
-        sorted_heads.sort_by_cached_key(|a| a.to_string());
+        sorted_heads.sort_unstable();
         let heads = if sorted_heads.is_empty() {
             None
         } else {
@@ -196,9 +196,6 @@ pub struct DAGLink {
 
     /// CID of the linked block
     pub link: Cid,
-
-    #[serde(skip)]
-    sort_key: OnceLock<String>,
 }
 
 impl DAGLink {
@@ -207,12 +204,7 @@ impl DAGLink {
         Self {
             name: name.into(),
             link,
-            sort_key: OnceLock::new(),
         }
-    }
-
-    fn sort_key(&self) -> &str {
-        self.sort_key.get_or_init(|| self.link.to_string())
     }
 }
 
@@ -232,8 +224,9 @@ impl PartialOrd for DAGLink {
 
 impl Ord for DAGLink {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Sort by link CID multibase string (matching Go's strings.Compare)
-        self.sort_key().cmp(other.sort_key())
+        // DefraDB block links are CIDv1 DAG-CBOR SHA2-256 values, so native CID ordering
+        // matches the prior multibase string ordering without allocating.
+        self.link.cmp(&other.link)
     }
 }
 

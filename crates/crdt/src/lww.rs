@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use defra_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
-use storage::{Reader, ReaderWriter};
+use storage::{corekv::Key, keys::CRDTValueKey, Reader, ReaderWriter};
 use tracing::instrument;
 
 /// LWW Delta - represents a change to an LWW register
@@ -169,23 +169,16 @@ impl Lww {
             return Err(Error::MergeError("field_name cannot be empty".into()));
         }
 
-        // Construct storage keys
-        // Format: /data/<schema_version>/<doc_id>/<field_name>
-        let mut value_key = Vec::new();
-        value_key.extend_from_slice(b"/data/");
-        value_key.extend_from_slice(schema_version_id.as_bytes());
-        value_key.push(b'/');
-        value_key.extend_from_slice(doc_id);
-        value_key.push(b'/');
-        value_key.extend_from_slice(field_name.as_bytes());
-
-        // Priority key: value_key + "/priority"
-        let mut priority_key = value_key.clone();
-        priority_key.extend_from_slice(b"/priority");
+        let value_key = CRDTValueKey::new(
+            schema_version_id.clone(),
+            doc_id.to_vec(),
+            field_name.clone(),
+        );
+        let priority_key = value_key.priority_key();
 
         Ok(Self {
-            value_key,
-            priority_key,
+            value_key: value_key.bytes(),
+            priority_key: priority_key.bytes(),
             schema_version_id,
             field_name,
         })

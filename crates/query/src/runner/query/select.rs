@@ -365,8 +365,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         // Apply ACP filtering: remove document IDs the caller cannot read.
-        let filtered_ids =
-            Self::filter_ids_by_acp(&matching_ids, &self.acp, &collection, caller_identity).await;
+        let filtered_ids = Self::filter_ids_by_acp(
+            &matching_ids,
+            self.acp.as_ref(),
+            &collection,
+            caller_identity,
+        )
+        .await;
 
         Ok(serde_json::json!([{"docIDs": filtered_ids}]))
     }
@@ -377,13 +382,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Fail-closed: any ACP check error results in the document being excluded.
     async fn filter_ids_by_acp(
         doc_ids: &[String],
-        acp: &Option<std::sync::Arc<dyn DocumentACP>>,
+        acp: &dyn DocumentACP,
         collection: &schema::CollectionVersion,
         caller_identity: Option<Did>,
     ) -> Vec<String> {
-        let (acp, policy) = match (acp, &collection.policy) {
-            (Some(acp), Some(policy)) => (acp, policy),
-            _ => return doc_ids.to_vec(),
+        let policy = match &collection.policy {
+            Some(policy) => policy,
+            None => return doc_ids.to_vec(),
         };
 
         let identity = Identity::from(caller_identity);
@@ -391,7 +396,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         for doc_id in doc_ids {
             let has_access = crate::txn::check_doc_access_with_overlay(
-                acp.as_ref(),
+                acp,
                 &identity,
                 DocumentPermission::Read,
                 &policy.id,

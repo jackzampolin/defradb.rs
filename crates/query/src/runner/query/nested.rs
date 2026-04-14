@@ -62,12 +62,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         profile.precompute_fulltext_elapsed = precompute_fulltext_start.elapsed();
 
         let plan_build_start = Instant::now();
-        let mut planner = Planner::new(collections).with_fetcher(Arc::new(fetcher_arc));
+        let mut planner = Planner::new(collections)
+            .with_fetcher(Arc::new(fetcher_arc))
+            .with_acp(self.acp.clone(), identity);
         if !fts_scores.is_empty() {
             planner = planner.with_fts_scores(fts_scores);
-        }
-        if let Some(ref acp) = self.acp {
-            planner = planner.with_acp(acp.clone(), identity);
         }
         if let Some(ref lens_store) = self.lens_store {
             planner = planner.with_lens_store(lens_store.clone());

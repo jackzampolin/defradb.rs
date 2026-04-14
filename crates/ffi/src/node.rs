@@ -147,11 +147,21 @@ fn resolve_embedded_config(
             };
             let key_type = unsafe { c_str_to_string(options.signing_key_type) }
                 .unwrap_or_else(|| "secp256k1".to_string());
+            let signing_key_type: defra_core::signing::SigningKeyType = key_type.parse()?;
 
-            Some(match key_type.as_str() {
-                "secp256k1" => embedded::SigningKey::Secp256k1(key_bytes),
-                "secp256r1" => embedded::SigningKey::Secp256r1(key_bytes),
-                "ed25519" => embedded::SigningKey::Ed25519(key_bytes),
+            Some(match signing_key_type {
+                defra_core::signing::SigningKeyType::Secp256k1 => {
+                    embedded::SigningKey::Secp256k1(key_bytes)
+                }
+                defra_core::signing::SigningKeyType::Secp256r1 => {
+                    embedded::SigningKey::Secp256r1(key_bytes)
+                }
+                defra_core::signing::SigningKeyType::Ed25519 => {
+                    embedded::SigningKey::Ed25519(key_bytes)
+                }
+                defra_core::signing::SigningKeyType::Bls => {
+                    return Err("unsupported signing key type: bls".to_string())
+                }
                 other => return Err(format!("unsupported signing key type: {}", other)),
             })
         } else {

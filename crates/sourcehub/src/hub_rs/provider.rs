@@ -637,7 +637,7 @@ mod tests {
         defra_core::signing::store_identity(
             did,
             defra_core::signing::SigningConfig {
-                key_type: "secp256r1".to_string(),
+                key_type: defra_core::signing::SigningKeyType::Secp256r1,
                 private_key_bytes: Vec::new(),
                 public_key_bytes,
                 public_key_hex,
@@ -677,9 +677,9 @@ mod tests {
         defra_core::signing::store_identity(
             &did,
             defra_core::signing::SigningConfig {
-                key_type: "secp256k1".to_string(),
+                key_type: defra_core::signing::SigningKeyType::Secp256k1,
                 private_key_bytes: defra_core::signing::SigningConfig::private_key_bytes_from_vec(
-                    raw_identity.private_key_bytes(),
+                    raw_identity.private_key_bytes().to_vec(),
                 ),
                 public_key_bytes: raw_identity.public_key_bytes().to_vec(),
                 public_key_hex: hex::encode(raw_identity.public_key_bytes()),

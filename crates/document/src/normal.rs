@@ -120,7 +120,138 @@ pub enum NormalValue {
     JsonLeaf(JsonLeafValue),
 }
 
+#[derive(Clone, Copy)]
+struct NormalValueClassification {
+    is_nil: bool,
+    is_nillable: bool,
+    is_array: bool,
+}
+
+macro_rules! normal_value_classifications {
+    (
+        $value:expr;
+        scalar = [$($scalar:ident),+ $(,)?];
+        nillable_scalar = [$($nillable_scalar:ident),+ $(,)?];
+        array = [$($array:ident),+ $(,)?];
+        nillable_array = [$($nillable_array:ident),+ $(,)?];
+        nillable_element_array = [$($nillable_element_array:ident),+ $(,)?];
+        misc = {
+            $($variant:ident $(($pattern:pat))? => $classification:expr),+ $(,)?
+        }
+    ) => {
+        match $value {
+            $(NormalValue::$scalar(_) => NormalValueClassification {
+                is_nil: false,
+                is_nillable: false,
+                is_array: false,
+            },)+
+            $(NormalValue::$nillable_scalar(None) => NormalValueClassification {
+                is_nil: true,
+                is_nillable: true,
+                is_array: false,
+            },
+            NormalValue::$nillable_scalar(Some(_)) => NormalValueClassification {
+                is_nil: false,
+                is_nillable: true,
+                is_array: false,
+            },)+
+            $(NormalValue::$array(_) => NormalValueClassification {
+                is_nil: false,
+                is_nillable: false,
+                is_array: true,
+            },)+
+            $(NormalValue::$nillable_array(None) => NormalValueClassification {
+                is_nil: true,
+                is_nillable: true,
+                is_array: true,
+            },
+            NormalValue::$nillable_array(Some(_)) => NormalValueClassification {
+                is_nil: false,
+                is_nillable: true,
+                is_array: true,
+            },)+
+            $(NormalValue::$nillable_element_array(_) => NormalValueClassification {
+                is_nil: false,
+                is_nillable: true,
+                is_array: true,
+            },)+
+            $(NormalValue::$variant $(($pattern))? => $classification,)+
+        }
+    };
+}
+
 impl NormalValue {
+    fn classification(&self) -> NormalValueClassification {
+        // Exhaustive by construction: adding a new enum variant must update this table.
+        normal_value_classifications!(
+            self;
+            scalar = [
+                Bool,
+                Int,
+                Float64,
+                Float32,
+                String,
+                Bytes,
+                Time,
+                Document,
+                Json,
+            ];
+            nillable_scalar = [
+                NillableBool,
+                NillableInt,
+                NillableFloat64,
+                NillableFloat32,
+                NillableString,
+                NillableBytes,
+                NillableTime,
+                NillableDocument,
+            ];
+            array = [
+                BoolArray,
+                IntArray,
+                Float64Array,
+                Float32Array,
+                StringArray,
+                BytesArray,
+                TimeArray,
+                DocumentArray,
+                JsonArray,
+            ];
+            nillable_array = [
+                NillableBoolArray,
+                NillableIntArray,
+                NillableFloat64Array,
+                NillableFloat32Array,
+                NillableStringArray,
+                NillableBytesArray,
+                NillableTimeArray,
+                NillableDocumentArray,
+            ];
+            nillable_element_array = [
+                NillableBoolElementArray,
+                NillableIntElementArray,
+                NillableFloat64ElementArray,
+                NillableFloat32ElementArray,
+                NillableStringElementArray,
+                NillableBytesElementArray,
+                NillableTimeElementArray,
+                NillableDocumentElementArray,
+            ];
+            misc = {
+                Null => NormalValueClassification {
+                    is_nil: true,
+                    is_nillable: true,
+                    is_array: false,
+                },
+                JsonLeaf(_) => NormalValueClassification {
+                    is_nil: false,
+                    is_nillable: false,
+                    is_array: false,
+                }
+            }
+        )
+    }
+
     /// Returns a reference to self wrapped in Some, or None if this is the Null variant.
     ///
     /// Note: This does NOT unwrap nillable variants like `NillableInt(None)`.
@@ -134,87 +265,17 @@ impl NormalValue {
 
     /// Returns true if this value is nil/null.
     pub fn is_nil(&self) -> bool {
-        matches!(self, NormalValue::Null)
-            || matches!(self, NormalValue::NillableBool(None))
-            || matches!(self, NormalValue::NillableInt(None))
-            || matches!(self, NormalValue::NillableFloat64(None))
-            || matches!(self, NormalValue::NillableFloat32(None))
-            || matches!(self, NormalValue::NillableString(None))
-            || matches!(self, NormalValue::NillableBytes(None))
-            || matches!(self, NormalValue::NillableTime(None))
-            || matches!(self, NormalValue::NillableDocument(None))
-            || matches!(self, NormalValue::NillableBoolArray(None))
-            || matches!(self, NormalValue::NillableIntArray(None))
-            || matches!(self, NormalValue::NillableFloat64Array(None))
-            || matches!(self, NormalValue::NillableFloat32Array(None))
-            || matches!(self, NormalValue::NillableStringArray(None))
-            || matches!(self, NormalValue::NillableBytesArray(None))
-            || matches!(self, NormalValue::NillableTimeArray(None))
-            || matches!(self, NormalValue::NillableDocumentArray(None))
+        self.classification().is_nil
     }
 
     /// Returns true if this value type can be nil.
     pub fn is_nillable(&self) -> bool {
-        matches!(
-            self,
-            NormalValue::Null
-                | NormalValue::NillableBool(_)
-                | NormalValue::NillableInt(_)
-                | NormalValue::NillableFloat64(_)
-                | NormalValue::NillableFloat32(_)
-                | NormalValue::NillableString(_)
-                | NormalValue::NillableBytes(_)
-                | NormalValue::NillableTime(_)
-                | NormalValue::NillableDocument(_)
-                | NormalValue::NillableBoolArray(_)
-                | NormalValue::NillableIntArray(_)
-                | NormalValue::NillableFloat64Array(_)
-                | NormalValue::NillableFloat32Array(_)
-                | NormalValue::NillableStringArray(_)
-                | NormalValue::NillableBytesArray(_)
-                | NormalValue::NillableTimeArray(_)
-                | NormalValue::NillableDocumentArray(_)
-                | NormalValue::NillableBoolElementArray(_)
-                | NormalValue::NillableIntElementArray(_)
-                | NormalValue::NillableFloat64ElementArray(_)
-                | NormalValue::NillableFloat32ElementArray(_)
-                | NormalValue::NillableStringElementArray(_)
-                | NormalValue::NillableBytesElementArray(_)
-                | NormalValue::NillableTimeElementArray(_)
-                | NormalValue::NillableDocumentElementArray(_)
-        )
+        self.classification().is_nillable
     }
 
     /// Returns true if this value is an array type.
     pub fn is_array(&self) -> bool {
-        matches!(
-            self,
-            NormalValue::BoolArray(_)
-                | NormalValue::IntArray(_)
-                | NormalValue::Float64Array(_)
-                | NormalValue::Float32Array(_)
-                | NormalValue::StringArray(_)
-                | NormalValue::BytesArray(_)
-                | NormalValue::TimeArray(_)
-                | NormalValue::DocumentArray(_)
-                | NormalValue::JsonArray(_)
-                | NormalValue::NillableBoolArray(_)
-                | NormalValue::NillableIntArray(_)
-                | NormalValue::NillableFloat64Array(_)
-                | NormalValue::NillableFloat32Array(_)
-                | NormalValue::NillableStringArray(_)
-                | NormalValue::NillableBytesArray(_)
-                | NormalValue::NillableTimeArray(_)
-                | NormalValue::NillableDocumentArray(_)
-                | NormalValue::NillableBoolElementArray(_)
-                | NormalValue::NillableIntElementArray(_)
-                | NormalValue::NillableFloat64ElementArray(_)
-                | NormalValue::NillableFloat32ElementArray(_)
-                | NormalValue::NillableStringElementArray(_)
-                | NormalValue::NillableBytesElementArray(_)
-                | NormalValue::NillableTimeElementArray(_)
-                | NormalValue::NillableDocumentElementArray(_)
-        )
+        self.classification().is_array
     }
 
     // === Type-specific accessors ===
@@ -381,6 +442,27 @@ mod tests {
         assert!(NormalValue::StringArray(vec!["a".into()]).is_array());
         assert!(!NormalValue::Int(42).is_array());
         assert!(!NormalValue::String("hello".into()).is_array());
+    }
+
+    #[test]
+    fn test_classifier_edge_cases() {
+        let nillable_array = NormalValue::NillableStringArray(None);
+        assert!(nillable_array.is_nil());
+        assert!(nillable_array.is_nillable());
+        assert!(nillable_array.is_array());
+
+        let nillable_elements = NormalValue::NillableIntElementArray(vec![Some(1), None]);
+        assert!(!nillable_elements.is_nil());
+        assert!(nillable_elements.is_nillable());
+        assert!(nillable_elements.is_array());
+
+        let json_leaf = NormalValue::JsonLeaf(JsonLeafValue::new(
+            crate::json_path::JsonPath::new(),
+            JsonScalarValue::String("value".into()),
+        ));
+        assert!(!json_leaf.is_nil());
+        assert!(!json_leaf.is_nillable());
+        assert!(!json_leaf.is_array());
     }
 
     #[test]

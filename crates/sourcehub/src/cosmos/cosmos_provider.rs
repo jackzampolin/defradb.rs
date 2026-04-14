@@ -98,10 +98,15 @@ fn resolve_cosmos_bearer_token(
         return Ok(defra_core::signing::get_request_bearer_token(did));
     }
 
-    let key_type: crypto::KeyType = match signing_config.key_type.as_str() {
-        "ed25519" => crypto::KeyType::Ed25519,
-        "secp256k1" => crypto::KeyType::Secp256k1,
-        "secp256r1" => crypto::KeyType::Secp256r1,
+    let key_type: crypto::KeyType = match signing_config.key_type {
+        defra_core::signing::SigningKeyType::Ed25519 => crypto::KeyType::Ed25519,
+        defra_core::signing::SigningKeyType::Secp256k1 => crypto::KeyType::Secp256k1,
+        defra_core::signing::SigningKeyType::Secp256r1 => crypto::KeyType::Secp256r1,
+        defra_core::signing::SigningKeyType::Bls => {
+            return Err(ProviderError::Config(
+                "unsupported key type: bls".to_string(),
+            ))
+        }
         other => {
             return Err(ProviderError::Config(format!(
                 "unsupported key type: {}",
@@ -336,7 +341,7 @@ mod tests {
         defra_core::signing::store_identity(
             did,
             defra_core::signing::SigningConfig {
-                key_type: "secp256r1".to_string(),
+                key_type: defra_core::signing::SigningKeyType::Secp256r1,
                 private_key_bytes: Vec::new(),
                 public_key_bytes,
                 public_key_hex,
@@ -376,9 +381,9 @@ mod tests {
         defra_core::signing::store_identity(
             &did,
             defra_core::signing::SigningConfig {
-                key_type: "secp256r1".to_string(),
+                key_type: defra_core::signing::SigningKeyType::Secp256r1,
                 private_key_bytes: defra_core::signing::SigningConfig::private_key_bytes_from_vec(
-                    raw_identity.private_key_bytes(),
+                    raw_identity.private_key_bytes().to_vec(),
                 ),
                 public_key_bytes: raw_identity.public_key_bytes().to_vec(),
                 public_key_hex: hex::encode(raw_identity.public_key_bytes()),

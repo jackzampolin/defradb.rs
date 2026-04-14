@@ -26,6 +26,24 @@ enum TxnState {
     Discarded,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxnCallbackPhase {
+    Success,
+    Error,
+    Discard,
+}
+
+enum RegisteredCallback {
+    Sync {
+        phase: TxnCallbackPhase,
+        callback: TxnCallback,
+    },
+    Async {
+        phase: TxnCallbackPhase,
+        callback: AsyncCallback,
+    },
+}
+
 /// BasicTxn wraps a corekv transaction with DefraDB-specific functionality.
 ///
 /// This matches Go's BasicTxn in internal/datastore/txn.go, providing:
@@ -37,14 +55,7 @@ pub struct BasicTxn {
     id: u64,
     readonly: bool,
     state: TxnState,
-
-    success_fns: Vec<TxnCallback>,
-    error_fns: Vec<TxnCallback>,
-    discard_fns: Vec<TxnCallback>,
-
-    success_async_fns: Vec<AsyncCallback>,
-    error_async_fns: Vec<AsyncCallback>,
-    discard_async_fns: Vec<AsyncCallback>,
+    callbacks: Vec<RegisteredCallback>,
 }
 
 impl BasicTxn {
@@ -65,12 +76,7 @@ impl BasicTxn {
             id,
             readonly,
             state: TxnState::Active,
-            success_fns: Vec::new(),
-            error_fns: Vec::new(),
-            discard_fns: Vec::new(),
-            success_async_fns: Vec::new(),
-            error_async_fns: Vec::new(),
-            discard_async_fns: Vec::new(),
+            callbacks: Vec::new(),
         }
     }
 
@@ -121,32 +127,83 @@ impl BasicTxn {
 
     /// Register a callback to be called on successful commit.
     pub fn on_success(&mut self, callback: TxnCallback) {
-        self.success_fns.push(callback);
+        self.callbacks.push(RegisteredCallback::Sync {
+            phase: TxnCallbackPhase::Success,
+            callback,
+        });
     }
 
     /// Register a callback to be called on commit error.
     pub fn on_error(&mut self, callback: TxnCallback) {
-        self.error_fns.push(callback);
+        self.callbacks.push(RegisteredCallback::Sync {
+            phase: TxnCallbackPhase::Error,
+            callback,
+        });
     }
 
     /// Register a callback to be called on discard.
     pub fn on_discard(&mut self, callback: TxnCallback) {
-        self.discard_fns.push(callback);
+        self.callbacks.push(RegisteredCallback::Sync {
+            phase: TxnCallbackPhase::Discard,
+            callback,
+        });
     }
 
     /// Register an async callback to be called on successful commit.
     pub fn on_success_async(&mut self, callback: AsyncCallback) {
-        self.success_async_fns.push(callback);
+        self.callbacks.push(RegisteredCallback::Async {
+            phase: TxnCallbackPhase::Success,
+            callback,
+        });
     }
 
     /// Register an async callback to be called on commit error.
     pub fn on_error_async(&mut self, callback: AsyncCallback) {
-        self.error_async_fns.push(callback);
+        self.callbacks.push(RegisteredCallback::Async {
+            phase: TxnCallbackPhase::Error,
+            callback,
+        });
     }
 
     /// Register an async callback to be called on discard.
     pub fn on_discard_async(&mut self, callback: AsyncCallback) {
-        self.discard_async_fns.push(callback);
+        self.callbacks.push(RegisteredCallback::Async {
+            phase: TxnCallbackPhase::Discard,
+            callback,
+        });
+    }
+
+    fn split_callbacks(
+        callbacks: Vec<RegisteredCallback>,
+        phase: TxnCallbackPhase,
+    ) -> (
+        Vec<TxnCallback>,
+        Vec<AsyncCallback>,
+        Vec<RegisteredCallback>,
+    ) {
+        let mut retained = Vec::with_capacity(callbacks.len());
+        let mut sync_callbacks = Vec::new();
+        let mut async_callbacks = Vec::new();
+
+        for callback in callbacks {
+            match callback {
+                RegisteredCallback::Sync {
+                    phase: callback_phase,
+                    callback,
+                } if callback_phase == phase => {
+                    sync_callbacks.push(callback);
+                }
+                RegisteredCallback::Async {
+                    phase: callback_phase,
+                    callback,
+                } if callback_phase == phase => {
+                    async_callbacks.push(callback);
+                }
+                callback => retained.push(callback),
+            }
+        }
+
+        (sync_callbacks, async_callbacks, retained)
     }
 
     /// Commit the transaction.
@@ -171,6 +228,7 @@ impl BasicTxn {
         // Extract the underlying transaction
         // The SharedTxn holds it in an Arc<RwLock<Box<dyn Txn>>>
         // We need to get ownership to call commit
+        let callbacks = std::mem::take(&mut self.callbacks);
         let shared = Arc::try_unwrap(self.shared_txn).map_err(|_| {
             Error::Storage(storage::corekv::Error::Other(
                 "Cannot commit: transaction still has references".into(),
@@ -180,12 +238,13 @@ impl BasicTxn {
         let txn = shared.into_txn();
         let result = txn.commit().await;
 
-        let (sync_fns, async_fns) = if result.is_ok() {
+        let (sync_fns, async_fns, retained_callbacks) = if result.is_ok() {
             self.state = TxnState::Committed;
-            (self.success_fns, self.success_async_fns)
+            Self::split_callbacks(callbacks, TxnCallbackPhase::Success)
         } else {
-            (self.error_fns, self.error_async_fns)
+            Self::split_callbacks(callbacks, TxnCallbackPhase::Error)
         };
+        self.callbacks = retained_callbacks;
 
         // Callbacks run directly so the runtime's panic strategy stays explicit:
         // unwind propagates in dev/test, and release aborts the process.
@@ -226,6 +285,7 @@ impl BasicTxn {
         }
 
         // Extract and discard the underlying transaction
+        let callbacks = std::mem::take(&mut self.callbacks);
         let shared = Arc::try_unwrap(self.shared_txn).map_err(|_| Error::TxnStillInUse)?;
 
         let txn = shared.into_txn();
@@ -236,14 +296,17 @@ impl BasicTxn {
         // Async discard callbacks are spawned and run directly. On native
         // targets a panic in the task follows the runtime panic strategy.
         let txn_id = self.id;
-        if !self.discard_async_fns.is_empty() {
-            let callback_count = self.discard_async_fns.len();
+        let (discard_fns, discard_async_fns, retained_callbacks) =
+            Self::split_callbacks(callbacks, TxnCallbackPhase::Discard);
+        self.callbacks = retained_callbacks;
+        if !discard_async_fns.is_empty() {
+            let callback_count = discard_async_fns.len();
             tracing::debug!(
                 txn_id = txn_id,
                 count = callback_count,
                 "Spawning async discard callbacks in background"
             );
-            for callback in self.discard_async_fns {
+            for callback in discard_async_fns {
                 #[cfg(not(target_arch = "wasm32"))]
                 tokio::spawn(async move {
                     callback().await;
@@ -258,7 +321,7 @@ impl BasicTxn {
             }
         }
 
-        for callback in self.discard_fns {
+        for callback in discard_fns {
             callback();
         }
 
