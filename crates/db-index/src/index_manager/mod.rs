@@ -68,7 +68,7 @@ fn is_valid_index_name(name: &str) -> bool {
 /// This key is intentionally invalid for public index creation APIs because
 /// full-text indexes are synthesized from `@fulltext` schema directives and do
 /// not share the same namespace as user-defined secondary indexes.
-pub(crate) fn fulltext_index_name(field_name: &str) -> String {
+pub fn fulltext_index_name(field_name: &str) -> String {
     format!("__fulltext__:{field_name}")
 }
 

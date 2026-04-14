@@ -1,8 +1,7 @@
 //! Tests for IndexManager.
 
 use db::database::DB;
-use db::index_manager::IndexManager;
-use db::Error;
+use db::index_manager::{Error, IndexManager};
 use document::{Document, NormalValue};
 use schema::{
     CollectionVersion, FieldDescription, FieldKind, FullTextIndexDescription, IndexDescription,

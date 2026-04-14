@@ -3557,6 +3557,7 @@ dependencies = [
  "crypto",
  "datastore",
  "db-blocks",
+ "db-index",
  "db-nac",
  "defra-core",
  "document",
@@ -3609,6 +3610,19 @@ dependencies = [
  "storage",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "db-index"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "datastore",
+ "defra-core",
+ "document",
+ "schema",
+ "storage",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
