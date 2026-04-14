@@ -3559,6 +3559,7 @@ dependencies = [
  "db-blocks",
  "db-nac",
  "defra-core",
+ "defra-errors",
  "document",
  "events",
  "futures",
@@ -3734,6 +3735,18 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "defra-errors"
+version = "0.5.0"
+dependencies = [
+ "datastore",
+ "defra-core",
+ "document",
+ "schema",
+ "storage",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -9989,6 +10002,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "defra-core",
+ "defra-errors",
  "document",
  "schema",
  "serde",

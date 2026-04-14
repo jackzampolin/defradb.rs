@@ -124,6 +124,37 @@ impl From<lens::Error> for Error {
     }
 }
 
+impl From<defra_errors::Error> for Error {
+    fn from(err: defra_errors::Error) -> Self {
+        // Map each variant of the unified error to the closest db::Error
+        // variant so callers can keep pattern-matching on db::Error as before.
+        // New subsystem crates use defra_errors::Error directly and get
+        // bridged into db::Error when they thread errors up to the db layer.
+        match err {
+            defra_errors::Error::Storage(e) => Error::Storage(e),
+            defra_errors::Error::Datastore(e) => Error::Datastore(e),
+            defra_errors::Error::Schema(e) => Error::Schema(e),
+            defra_errors::Error::Document(e) => Error::Document(e),
+            defra_errors::Error::Core(e) => Error::Core(e),
+            defra_errors::Error::InvalidDocument(msg) => Error::InvalidDocument(msg),
+            defra_errors::Error::DocumentNotFound(msg) => Error::DocumentNotFound(msg),
+            defra_errors::Error::CollectionNotFound(msg) => Error::CollectionNotFound(msg),
+            defra_errors::Error::NotFound(msg) => Error::Other(format!("not found: {}", msg)),
+            defra_errors::Error::AlreadyExists(msg) => {
+                Error::Other(format!("already exists: {}", msg))
+            }
+            defra_errors::Error::InvalidArgument(msg) => {
+                Error::Other(format!("invalid argument: {}", msg))
+            }
+            defra_errors::Error::Other(msg) => Error::Other(msg),
+            // `defra_errors::Error` is `#[non_exhaustive]` so new variants
+            // added upstream get a catch-all Other here until we choose to
+            // map them more specifically.
+            other => Error::Other(other.to_string()),
+        }
+    }
+}
+
 impl Error {
     pub fn document_at_key(key: &[u8], source: document::Error) -> Self {
         Self::DocumentAtKey {

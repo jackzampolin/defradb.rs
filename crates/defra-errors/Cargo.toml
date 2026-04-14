@@ -1,0 +1,23 @@
+[package]
+name = "defra-errors"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Unified error type for DefraDB — shared base across db, query, and extracted subsystems"
+
+[dependencies]
+# Foundation crates whose errors feed into the unified Error via #[from]
+defra-core = { path = "../defra-core" }
+document = { path = "../document" }
+schema = { path = "../schema" }
+storage = { path = "../storage" }
+datastore = { path = "../datastore" }
+
+# Error handling
+thiserror.workspace = true
+
+[lints]
+workspace = true
