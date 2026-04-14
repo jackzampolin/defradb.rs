@@ -55,7 +55,10 @@ impl Node {
                 did.as_ref(),
                 defra_core::signing::SigningConfig {
                     key_type: identity.identity_key_type().to_string(),
-                    private_key_bytes: identity.private_key_bytes(),
+                    private_key_bytes:
+                        defra_core::signing::SigningConfig::private_key_bytes_from_vec(
+                            identity.private_key_bytes(),
+                        ),
                     public_key_bytes: identity.public_key_bytes(),
                     public_key_hex: hex::encode(identity.public_key_bytes()),
                     remote_signer: None,

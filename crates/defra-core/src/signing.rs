@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroize;
 
 /// Remote signing delegate (e.g. Orbis, Secure Enclave host callbacks).
 ///
@@ -153,7 +154,7 @@ impl Clone for SigningConfig {
     fn clone(&self) -> Self {
         Self {
             key_type: self.key_type.clone(),
-            private_key_bytes: self.private_key_bytes.clone(),
+            private_key_bytes: Self::private_key_bytes_from_slice(&self.private_key_bytes),
             public_key_bytes: self.public_key_bytes.clone(),
             public_key_hex: self.public_key_hex.clone(),
             remote_signer: self.remote_signer.clone(),
@@ -162,7 +163,29 @@ impl Clone for SigningConfig {
     }
 }
 
+impl Drop for SigningConfig {
+    fn drop(&mut self) {
+        self.private_key_bytes.zeroize();
+    }
+}
+
 impl SigningConfig {
+    /// Copy private key bytes into an exactly sized allocation.
+    pub fn private_key_bytes_from_slice(bytes: &[u8]) -> Vec<u8> {
+        let mut exact = Vec::with_capacity(bytes.len());
+        exact.extend_from_slice(bytes);
+        exact
+    }
+
+    /// Normalize owned private key bytes to an exactly sized allocation.
+    pub fn private_key_bytes_from_vec(bytes: Vec<u8>) -> Vec<u8> {
+        if bytes.len() == bytes.capacity() {
+            bytes
+        } else {
+            Self::private_key_bytes_from_slice(&bytes)
+        }
+    }
+
     /// Returns true if this identity has locally exportable private key bytes.
     pub fn has_local_private_key(&self) -> bool {
         !self.private_key_bytes.is_empty()
@@ -285,7 +308,7 @@ pub fn resolve_signing_config_with_flag(
 /// Clear all stored identities (for node cleanup).
 pub fn clear_identity_store() {
     if let Ok(mut store) = identity_store().lock() {
-        store.clear();
+        drop(std::mem::take(&mut *store));
     }
 }
 
@@ -401,6 +424,18 @@ mod tests {
         assert_eq!(resolved, "did:key:remote");
 
         clear_identity_store();
+    }
+
+    #[test]
+    fn private_key_bytes_from_vec_shrinks_spare_capacity() {
+        let mut bytes = Vec::with_capacity(64);
+        bytes.extend_from_slice(&[1_u8, 2, 3, 4]);
+        assert_eq!(bytes.capacity(), 64);
+
+        let exact = SigningConfig::private_key_bytes_from_vec(bytes);
+
+        assert_eq!(exact, vec![1, 2, 3, 4]);
+        assert_eq!(exact.len(), exact.capacity());
     }
 }
 
