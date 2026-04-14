@@ -1,8 +1,8 @@
 //! Transaction guard for compile-time safety.
 
-use crate::error::TransactionError;
+use query_types::error::TransactionError;
 
-use super::handle::TransactionHandle;
+use super::TransactionHandle;
 
 /// A guard that ensures a transaction is properly finalized.
 ///

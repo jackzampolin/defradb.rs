@@ -33,15 +33,20 @@ pub use query_parse_ext::sdl_parse;
 pub use query_parse_ext::select_convert;
 
 pub mod executor;
-pub mod fetcher;
-pub mod mutator;
-pub mod plan;
-pub mod planner;
 pub mod rest;
 pub mod runner;
 pub mod subscription;
 #[cfg(test)]
 pub mod test_utils;
+
+// Plan layer extracted to query-plan crate (#670). Re-export these four
+// modules verbatim so downstream consumers keep using `query::plan::*`,
+// `query::planner::*`, `query::fetcher::*`, `query::mutator::*` unchanged.
+pub use query_plan::{fetcher, mutator, plan, planner};
+
+// `txn` is split: plan-layer primitives live in `query_plan::txn`, while
+// `TransactionGuard` stays in this crate because it is generic over
+// `QueryExecutor`. The local `txn` module re-exports both.
 pub mod txn;
 
 // Re-exports for convenience

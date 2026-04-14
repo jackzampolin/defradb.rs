@@ -9953,6 +9953,7 @@ dependencies = [
  "lens",
  "proptest",
  "query-parse",
+ "query-plan",
  "query-types",
  "regex",
  "schema",
@@ -9978,6 +9979,35 @@ dependencies = [
  "schema",
  "serde_json",
  "sha2 0.10.9",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "query-plan"
+version = "0.5.0"
+dependencies = [
+ "acp",
+ "async-trait",
+ "base64 0.22.1",
+ "blockstore",
+ "bm25",
+ "chrono",
+ "ciborium",
+ "cid 0.10.1",
+ "crdt",
+ "defra-core",
+ "document",
+ "futures",
+ "identity",
+ "lens",
+ "query-types",
+ "schema",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "storage",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
