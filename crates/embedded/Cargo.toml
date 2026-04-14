@@ -21,6 +21,7 @@ identity = { path = "../identity" }
 lens = { path = "../lens" }
 p2p = { path = "../p2p" }
 query = { path = "../query" }
+schema = { path = "../schema" }
 sourcehub = { path = "../sourcehub" }
 storage = { path = "../storage" }
 

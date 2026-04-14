@@ -55,7 +55,7 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
     pub async fn add_schema(&self, sdl: &str) -> Result<()> {
         let collections =
             query::parse_sdl(sdl).map_err(|error| anyhow!("SDL parse error: {error}"))?;
-        db::definition_validation::validate_new_collections(&collections)
+        schema::definition_validation::validate_new_collections(&collections)
             .map_err(|error| anyhow!("schema validation error: {error}"))?;
 
         for collection in collections {

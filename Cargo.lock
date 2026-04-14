@@ -4371,6 +4371,7 @@ dependencies = [
  "libp2p",
  "p2p",
  "query",
+ "schema",
  "serde",
  "serde_bytes",
  "serde_ipld_dagcbor",

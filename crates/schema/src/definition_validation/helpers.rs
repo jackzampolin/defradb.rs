@@ -1,6 +1,6 @@
 //! Helper functions for definition validation formatting and type checks.
 
-use schema::{CType, FieldKind, ScalarKind};
+use crate::{CType, FieldKind, ScalarKind};
 
 /// Check if a CRDT type is supported as a user-specified field type.
 /// Matches Go's IsSupportedFieldCType: only None, LwwRegister, PnCounter, PCounter.
@@ -17,7 +17,7 @@ pub(super) fn is_crdt_type_supported(crdt: CType) -> bool {
 pub(super) fn is_valid_embedding_kind(kind: &FieldKind) -> bool {
     matches!(
         kind,
-        FieldKind::ScalarArray(schema::ScalarArrayKind::Float32Array)
+        FieldKind::ScalarArray(crate::ScalarArrayKind::Float32Array)
     )
 }
 
@@ -45,7 +45,6 @@ pub(super) fn format_crdt_type(crdt: CType) -> String {
         CType::PnCounter => "pncounter".to_string(),
         CType::PCounter => "pcounter".to_string(),
         CType::Unknown(_) => "unknown".to_string(),
-        _ => String::new(),
     }
 }
 
@@ -63,24 +62,21 @@ pub(super) fn format_field_kind(kind: &FieldKind) -> String {
             ScalarKind::String => "String".to_string(),
             ScalarKind::Blob => "Blob".to_string(),
             ScalarKind::Json => "JSON".to_string(),
-            _ => String::new(),
         },
         FieldKind::ScalarArray(a) => match a {
-            schema::ScalarArrayKind::BoolArray => "[Boolean!]".to_string(),
-            schema::ScalarArrayKind::IntArray => "[Int!]".to_string(),
-            schema::ScalarArrayKind::Float64Array => "[Float64!]".to_string(),
-            schema::ScalarArrayKind::Float32Array => "[Float32!]".to_string(),
-            schema::ScalarArrayKind::StringArray => "[String!]".to_string(),
-            schema::ScalarArrayKind::NillableBoolArray => "[Boolean]".to_string(),
-            schema::ScalarArrayKind::NillableIntArray => "[Int]".to_string(),
-            schema::ScalarArrayKind::NillableFloat64Array => "[Float64]".to_string(),
-            schema::ScalarArrayKind::NillableFloat32Array => "[Float32]".to_string(),
-            schema::ScalarArrayKind::NillableStringArray => "[String]".to_string(),
-            _ => String::new(),
+            crate::ScalarArrayKind::BoolArray => "[Boolean!]".to_string(),
+            crate::ScalarArrayKind::IntArray => "[Int!]".to_string(),
+            crate::ScalarArrayKind::Float64Array => "[Float64!]".to_string(),
+            crate::ScalarArrayKind::Float32Array => "[Float32!]".to_string(),
+            crate::ScalarArrayKind::StringArray => "[String!]".to_string(),
+            crate::ScalarArrayKind::NillableBoolArray => "[Boolean]".to_string(),
+            crate::ScalarArrayKind::NillableIntArray => "[Int]".to_string(),
+            crate::ScalarArrayKind::NillableFloat64Array => "[Float64]".to_string(),
+            crate::ScalarArrayKind::NillableFloat32Array => "[Float32]".to_string(),
+            crate::ScalarArrayKind::NillableStringArray => "[String]".to_string(),
         },
         FieldKind::Relation { .. } | FieldKind::SelfRef { .. } | FieldKind::Named { .. } => {
             "Object".to_string()
         }
-        _ => unreachable!(),
     }
 }

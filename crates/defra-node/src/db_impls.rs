@@ -10,7 +10,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
         let collections =
             query::parse_sdl(sdl).map_err(|e| anyhow::anyhow!("SDL parse error: {}", e))?;
 
-        db::definition_validation::validate_new_collections(&collections)
+        schema::definition_validation::validate_new_collections(&collections)
             .map_err(|e| anyhow::anyhow!("schema validation error: {}", e))?;
 
         for collection in collections {

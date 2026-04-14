@@ -401,7 +401,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let collections = query::parse_sdl_with_known_types(sdl, known_types)
             .map_err(|e| Error::Other(format!("failed to parse SDL: {}", e)))?;
 
-        crate::definition_validation::validate_new_collections(&collections)
+        schema::definition_validation::validate_new_collections(&collections)
             .map_err(|e| Error::Other(format!("failed to validate schema: {}", e)))?;
 
         let mut finalized = Vec::new();

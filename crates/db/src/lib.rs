@@ -61,7 +61,8 @@ pub(crate) mod collection_snapshot;
 mod commit_priority_index;
 pub(crate) mod commits_fetcher;
 pub mod database;
-pub mod definition_validation;
+// Definition validation moved to the `schema` crate (was #791 substitute
+// slice) — see `schema::definition_validation`.
 // dense_search and embedding extracted to standalone db-search crate (Phase 6 of #796).
 pub use db_search as dense_search;
 pub(crate) mod doc_fetcher;
