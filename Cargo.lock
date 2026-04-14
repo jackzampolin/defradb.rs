@@ -5881,6 +5881,8 @@ dependencies = [
  "crypto",
  "defra-core",
  "hex",
+ "k256",
+ "p256",
  "proptest",
  "serde",
  "serde_json",
