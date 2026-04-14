@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use schema::CollectionVersion;
+use crate::CollectionVersion;
 
 use super::DefinitionState;
 
@@ -222,7 +222,7 @@ pub(super) fn validate_field_not_mutated(
             }
         };
 
-        let old_fields_by_id: HashMap<&str, &schema::FieldDescription> =
+        let old_fields_by_id: HashMap<&str, &crate::FieldDescription> =
             old_col.fields.iter().map(|f| (f.id.as_str(), f)).collect();
 
         for new_field in &new_col.fields {

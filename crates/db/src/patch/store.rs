@@ -42,7 +42,7 @@ impl<S: Store> crate::database::DB<S> {
             .cloned()
             .chain(std::iter::once(new_schema.clone()))
             .collect();
-        crate::definition_validation::validate_collection_changes(&all_existing, &new_collections)
+        schema::definition_validation::validate_collection_changes(&all_existing, &new_collections)
             .map_err(Error::InvalidPatch)?;
 
         // Also run schema-level validation for checks not covered by definition validators

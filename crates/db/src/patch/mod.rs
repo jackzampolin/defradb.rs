@@ -212,7 +212,7 @@ impl<S: Store> crate::database::DB<S> {
                 .cloned()
                 .chain(std::iter::once(new_schema.clone()))
                 .collect();
-            crate::definition_validation::validate_collection_changes(
+            schema::definition_validation::validate_collection_changes(
                 &all_existing,
                 &new_collections,
             )

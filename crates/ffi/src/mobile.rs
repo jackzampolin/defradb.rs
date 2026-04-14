@@ -395,7 +395,7 @@ pub extern "C" fn defra_mobile_ensure_schema(
                 }
             }
 
-            db::definition_validation::validate_new_collections(&to_create)
+            schema::definition_validation::validate_new_collections(&to_create)
                 .map_err(|error| format!("failed to validate schema: {}", error))?;
 
             let mut created = Vec::new();

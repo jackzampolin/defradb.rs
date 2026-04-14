@@ -2,7 +2,7 @@
 
 use super::helpers::*;
 use super::DefinitionState;
-use schema::ORPHAN_COLLECTION_ID;
+use crate::ORPHAN_COLLECTION_ID;
 
 /// Matches Go's validateCollectionNameUnique.
 pub(super) fn validate_collection_name_unique(

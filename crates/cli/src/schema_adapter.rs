@@ -84,7 +84,7 @@ impl<S: Store + 'static> SchemaAdapter<S> {
         let collections = query::parse_sdl_with_known_types(sdl, known_types)
             .map_err(|e| format!("failed to parse SDL: {}", e))?;
 
-        db::definition_validation::validate_new_collections(&collections)
+        schema::definition_validation::validate_new_collections(&collections)
             .map_err(|e| format!("failed to validate schema: {}", e))?;
 
         // #746: validate every @policy directive against the ACP store

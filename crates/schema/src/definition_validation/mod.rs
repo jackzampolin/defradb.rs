@@ -10,7 +10,7 @@ mod update_validators;
 use global_validators::*;
 use update_validators::*;
 
-use schema::CollectionVersion;
+use crate::CollectionVersion;
 use std::collections::HashMap;
 
 /// Snapshot of all collection versions for validation.

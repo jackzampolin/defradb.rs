@@ -19,6 +19,8 @@ mod relation;
 mod source;
 mod validation;
 
+pub mod definition_validation;
+
 pub use cid::{
     generate_collection_block_full, generate_collection_block_full_with_query,
     generate_collection_cid, generate_collection_cid_full, generate_collection_cid_full_with_query,
