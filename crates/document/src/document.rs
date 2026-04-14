@@ -265,9 +265,15 @@ impl Document {
     }
 
     /// Get a mutable field value by name.
+    ///
+    /// Only marks the document dirty when the requested field exists.
+    /// Returning `None` for a missing field must not trigger a save or
+    /// CRDT delta — matches Go's `document.go`, which sets the dirty flag
+    /// inside `doc.set()` only when a value is actually written.
     pub fn get_mut(&mut self, field: &str) -> Option<&mut FieldValue> {
+        let value = self.values.get_mut(field)?;
         self.is_dirty = true;
-        self.values.get_mut(field)
+        Some(value)
     }
 
     /// Set a field value.
@@ -621,6 +627,35 @@ mod tests {
         assert_eq!(
             cbor_bytes, expected_bytes,
             "CBOR encoding should match Go's JSON-type canonical encoding"
+        );
+    }
+
+    #[test]
+    fn get_mut_does_not_dirty_on_field_miss() {
+        // Regression for #812: Document::get_mut used to unconditionally set
+        // is_dirty = true before checking whether the field existed. A caller
+        // that probes for an optional field with get_mut and gets None would
+        // trigger unnecessary saves + CRDT delta generation without ever
+        // modifying the document. Match Go's document.go, which only sets
+        // the dirty flag inside doc.set() after a value is written.
+        let json = r#"{"name": "Alice"}"#;
+        let mut doc = Document::from_json_str(json).expect("should parse");
+        doc.clean(); // start from a fully-clean state
+
+        // Probe a field that doesn't exist.
+        let missing = doc.get_mut("does_not_exist");
+        assert!(missing.is_none(), "missing field must return None");
+        assert!(
+            !doc.is_dirty(),
+            "probing a missing field must not mark the document dirty"
+        );
+
+        // Probe a field that exists — now it should mark dirty.
+        let present = doc.get_mut("name");
+        assert!(present.is_some(), "existing field must return Some");
+        assert!(
+            doc.is_dirty(),
+            "mutating an existing field via get_mut must mark the document dirty"
         );
     }
 }
