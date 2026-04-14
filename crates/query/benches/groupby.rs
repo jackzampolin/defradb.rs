@@ -1,7 +1,8 @@
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use std::hint::black_box;
 use query::mapper::GroupBy;
 use query::plan::{GroupAlias, GroupByNode};
 use query::{Doc, DocumentMapping, PlanNode};

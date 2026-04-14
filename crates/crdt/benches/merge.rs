@@ -2,7 +2,8 @@ use std::sync::OnceLock;
 
 use crdt::traits::{Context, ReplicatedData, ValueReader};
 use crdt::{decode_priority, encode_priority, Lww, LwwDelta};
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use std::hint::black_box;
 use defra_core::types::DocId;
 use storage::{MemoryStore, Store};
 

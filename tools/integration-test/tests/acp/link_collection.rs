@@ -32,6 +32,7 @@
 //! - a policy that doesn't exist → `"policyID specified does not exist with acp"`
 //! - a resource name not on the policy → `"resource does not exist on the specified policy"`
 //! - a resource missing `read`/`update`/`delete` permission → `"resource is missing required permission on policy"`
+//!
 //! Error strings are Go-compatible so mixed Rust/Go deployments produce
 //! identical user-facing output.
 

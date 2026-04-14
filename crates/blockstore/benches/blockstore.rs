@@ -3,7 +3,8 @@ use std::sync::{Arc, OnceLock};
 
 use blockstore::{Blockstore, DefraBlockstore};
 use cid::Cid;
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use std::hint::black_box;
 use lru::LruCache;
 use multihash::MultihashGeneric;
 use sha2::{Digest, Sha256};
