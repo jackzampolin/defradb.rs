@@ -28,6 +28,7 @@ libipld.workspace = true
 # Cryptography (for CID generation)
 sha2.workspace = true
 rand.workspace = true
+zeroize = { version = "1.8", features = ["derive"] }
 
 # Async
 async-trait.workspace = true

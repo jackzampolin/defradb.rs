@@ -24,11 +24,14 @@ use rand::RngCore;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Wrapper for encryption key bytes with zeroization on drop.
 ///
-/// Ensures key material is cleared from memory when no longer needed.
-#[derive(Clone)]
+/// Uses `zeroize::ZeroizeOnDrop` to clear key material when dropped, with
+/// a memory fence after zeroing. This is the RustCrypto ecosystem standard
+/// and replaces a previous manual `unsafe { write_volatile }` implementation.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct EncryptionKey(Vec<u8>);
 
 impl EncryptionKey {
@@ -46,18 +49,6 @@ impl EncryptionKey {
 impl std::fmt::Debug for EncryptionKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "EncryptionKey([REDACTED; {} bytes])", self.0.len())
-    }
-}
-
-impl Drop for EncryptionKey {
-    fn drop(&mut self) {
-        for byte in self.0.iter_mut() {
-            // Use write_volatile to prevent the compiler from optimizing away the zeroing.
-            // SAFETY: We are writing to a valid, properly aligned mutable reference.
-            unsafe {
-                std::ptr::write_volatile(byte, 0);
-            }
-        }
     }
 }
 
@@ -170,7 +161,8 @@ pub fn clear_doc_encryption_store() {
 
 #[cfg(test)]
 mod tests {
-    use super::generate_encryption_key;
+    use super::{generate_encryption_key, EncryptionKey};
+    use zeroize::Zeroize;
 
     #[test]
     fn generate_encryption_key_is_random() {
@@ -178,5 +170,14 @@ mod tests {
         let k2 = generate_encryption_key();
         assert_ne!(k1, k2);
         assert_eq!(k1.len(), 32);
+    }
+
+    #[test]
+    fn encryption_key_zeroizes_buffer() {
+        let mut key = EncryptionKey::new(vec![0xAB; 32]);
+        assert_eq!(key.as_bytes(), &[0xAB; 32]);
+        key.zeroize();
+        // `Zeroize for Vec<u8>` zeroes the elements and truncates length to 0.
+        assert!(key.as_bytes().is_empty());
     }
 }
