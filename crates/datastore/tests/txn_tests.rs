@@ -4,6 +4,7 @@ use datastore::BasicTxn;
 use futures::FutureExt;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use storage::backends::MemoryStore;
 
 #[tokio::test]
@@ -312,6 +313,45 @@ async fn test_basic_txn_async_success_callback() {
 }
 
 #[tokio::test]
+async fn test_basic_txn_mixed_success_callbacks_preserve_execution_order() {
+    let store = MemoryStore::new();
+    let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+    let execution_order = Arc::new(Mutex::new(Vec::new()));
+
+    let order = execution_order.clone();
+    txn.on_success(Box::new(move || {
+        order.lock().unwrap().push("sync-1");
+    }));
+
+    let order = execution_order.clone();
+    txn.on_success_async(Box::new(move || {
+        Box::pin(async move {
+            order.lock().unwrap().push("async-1");
+        })
+    }));
+
+    let order = execution_order.clone();
+    txn.on_success(Box::new(move || {
+        order.lock().unwrap().push("sync-2");
+    }));
+
+    let order = execution_order.clone();
+    txn.on_success_async(Box::new(move || {
+        Box::pin(async move {
+            order.lock().unwrap().push("async-2");
+        })
+    }));
+
+    txn.commit().await.unwrap();
+
+    assert_eq!(
+        *execution_order.lock().unwrap(),
+        vec!["async-1", "async-2", "sync-1", "sync-2"]
+    );
+}
+
+#[tokio::test]
 async fn test_basic_txn_async_discard_callback() {
     use std::time::Duration;
 
@@ -332,6 +372,29 @@ async fn test_basic_txn_async_discard_callback() {
         .await
         .expect("Timeout waiting for async callback")
         .expect("Failed to receive from callback");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_basic_txn_discard_spawns_async_callbacks_before_sync_callbacks() {
+    use std::time::Duration;
+
+    let store = MemoryStore::new();
+    let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    txn.on_discard_async(Box::new(move || {
+        Box::pin(async move {
+            started_tx.send(()).unwrap();
+        })
+    }));
+
+    txn.on_discard(Box::new(move || {
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("async discard callback should be spawned before sync discard callback runs");
+    }));
+
+    txn.discard().unwrap();
 }
 
 #[tokio::test]
