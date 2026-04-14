@@ -17,6 +17,7 @@ members = [
     "crates/cli",
     "crates/datastore",
     "crates/db",
+    "crates/db-backup",
     "crates/db-blocks",
     "crates/db-nac",
     "crates/db-merge",

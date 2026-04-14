@@ -45,7 +45,7 @@ pub unsafe extern "C" fn basic_import(node_ptr: usize, filepath: *const c_char) 
                 }
             })?;
 
-            db::backup::import_database(&database, &runner, &content)
+            db_backup::import_database(&database, &runner, &content)
                 .await
                 .map(|_| ())
         })

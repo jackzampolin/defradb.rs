@@ -7,8 +7,7 @@ use serde_json::Value as JsonValue;
 use storage::corekv::Store;
 
 use super::classify_schema_fields;
-use crate::database::DB;
-use crate::AutoCommitMutator;
+use db::{AutoCommitMutator, DB};
 use query::mutator::DocMutator;
 
 /// Statistics from a backup import operation.

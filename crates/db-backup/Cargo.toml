@@ -1,0 +1,26 @@
+[package]
+name = "db-backup"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Database export/import (backup) for DefraDB"
+
+[dependencies]
+# Internal crates
+db = { path = "../db" }
+document = { path = "../document" }
+query = { path = "../query" }
+schema = { path = "../schema" }
+storage = { path = "../storage" }
+
+# Serialization
+serde_json.workspace = true
+
+# Async
+async-trait.workspace = true
+
+[lints]
+workspace = true

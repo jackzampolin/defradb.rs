@@ -2240,6 +2240,7 @@ dependencies = [
  "clap",
  "crypto",
  "db",
+ "db-backup",
  "db-merge",
  "defra-core",
  "defra-http",
@@ -3588,6 +3589,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "db-backup"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "db",
+ "document",
+ "query",
+ "schema",
+ "serde_json",
+ "storage",
+]
+
+[[package]]
 name = "db-blocks"
 version = "0.5.0"
 dependencies = [
@@ -4605,6 +4619,7 @@ dependencies = [
  "cid 0.10.1",
  "crypto",
  "db",
+ "db-backup",
  "db-merge",
  "defra-core",
  "document",
