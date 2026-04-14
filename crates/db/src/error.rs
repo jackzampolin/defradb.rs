@@ -16,9 +16,6 @@ pub enum Error {
     #[error("document error: {0}")]
     Document(#[from] document::Error),
 
-    #[error("core error: {0}")]
-    Core(#[from] defra_core::Error),
-
     #[error("failed to deserialize document at key {key:?}: {source}")]
     DocumentAtKey {
         key: String,
@@ -57,9 +54,6 @@ pub enum Error {
 
     #[error("explicit transaction must use force_commit/force_discard")]
     ExplicitTxnMustUseForce,
-
-    #[error("unsupported transaction type")]
-    UnsupportedTxnType,
 
     #[error("serialization error: {0}")]
     Serialization(String),
