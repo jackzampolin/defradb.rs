@@ -11,7 +11,7 @@ use defra_core::{types::DocId, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::HashMap;
-use storage::{Reader, ReaderWriter};
+use storage::{corekv::Key, keys::CRDTValueKey, Reader, ReaderWriter};
 
 /// Composite Delta - represents changes to multiple fields in a document
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,21 +177,23 @@ impl CompositeDAG {
 
     /// Build the value key for a field
     fn build_value_key(&self, field_name: &str) -> Vec<u8> {
-        let mut key = Vec::new();
-        key.extend_from_slice(b"/data/");
-        key.extend_from_slice(self.schema_version_id.as_bytes());
-        key.push(b'/');
-        key.extend_from_slice(self.doc_id.as_str().as_bytes());
-        key.push(b'/');
-        key.extend_from_slice(field_name.as_bytes());
-        key
+        CRDTValueKey::new(
+            self.schema_version_id.clone(),
+            self.doc_id.as_str().as_bytes().to_vec(),
+            field_name.to_string(),
+        )
+        .bytes()
     }
 
     /// Build the priority key for a field
     fn build_priority_key(&self, field_name: &str) -> Vec<u8> {
-        let mut key = self.build_value_key(field_name);
-        key.extend_from_slice(b"/priority");
-        key
+        CRDTValueKey::new(
+            self.schema_version_id.clone(),
+            self.doc_id.as_str().as_bytes().to_vec(),
+            field_name.to_string(),
+        )
+        .priority_key()
+        .bytes()
     }
 
     /// Get the current priority for a field (0 if not set)

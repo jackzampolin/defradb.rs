@@ -5,7 +5,7 @@
 /// - Multiple backend implementations (Memory, Redb)
 /// - MVCC transactions with snapshot isolation
 /// - Six specialized stores with namespace isolation (plus RootStore foundation)
-/// - 27 key types for hierarchical organization across 6 stores
+/// - 33 key types for hierarchical organization across 6 stores
 /// - Chunking support for large values (>1MB, up to 256MB)
 /// - Merge tracking for CRDT operations
 ///
@@ -67,7 +67,7 @@
 /// - Transaction callbacks
 ///
 /// ## Phase 2: Key Hierarchy ✅ (Complete)
-/// - 27 key types across 6 stores
+/// - 33 key types across 6 stores
 /// - Key encoding/decoding with CockroachDB-style varint
 /// - Hierarchical organization with prefixes
 ///
