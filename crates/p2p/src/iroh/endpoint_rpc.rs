@@ -2,7 +2,7 @@
 
 use iroh::{Endpoint, EndpointAddr};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::message::CarFetchRequest;
 use crate::transport::{PeerId, TransportEvent};
@@ -120,10 +120,12 @@ pub(super) async fn try_fetch_from_provider(
     direct_addr: Option<std::net::SocketAddr>,
     event_tx: &mpsc::Sender<TransportEvent<iroh::endpoint::SendStream>>,
 ) -> bool {
+    // Per-provider CAR failures log at debug — the caller aggregates per-DAG
+    // outcomes into a single WARN via BitswapComplete (see issue #858).
     let endpoint_id = match parse_endpoint_id(provider) {
         Ok(id) => id,
         Err(e) => {
-            warn!(provider = %provider, error = %e, "CAR fetch: invalid provider peer ID");
+            debug!(provider = %provider, error = %e, "CAR fetch: invalid provider peer ID");
             return false;
         }
     };
@@ -135,7 +137,7 @@ pub(super) async fn try_fetch_from_provider(
     let connection = match endpoint.connect(addr, protocols::ALPN_CAR).await {
         Ok(conn) => conn,
         Err(e) => {
-            warn!(
+            debug!(
                 provider = %provider,
                 root = %request.root_cid,
                 recursive = request.recursive,
@@ -150,7 +152,7 @@ pub(super) async fn try_fetch_from_provider(
     let (mut send, mut recv) = match connection.open_bi().await {
         Ok(streams) => streams,
         Err(e) => {
-            warn!(
+            debug!(
                 provider = %provider,
                 root = %request.root_cid,
                 error = %e,
@@ -161,7 +163,7 @@ pub(super) async fn try_fetch_from_provider(
     };
 
     if let Err(e) = protocols::write_message(&mut send, &request).await {
-        warn!(
+        debug!(
             provider = %provider,
             root = %request.root_cid,
             error = %e,
@@ -171,7 +173,7 @@ pub(super) async fn try_fetch_from_provider(
     }
     let _ = send.finish();
 
-    info!(
+    debug!(
         provider = %provider,
         root = %request.root_cid,
         recursive = request.recursive,
@@ -182,7 +184,7 @@ pub(super) async fn try_fetch_from_provider(
     let car_data = match recv.read_to_end(64 * 1024 * 1024).await {
         Ok(data) => data,
         Err(e) => {
-            warn!(
+            debug!(
                 provider = %provider,
                 root = %request.root_cid,
                 error = %e,
@@ -193,13 +195,31 @@ pub(super) async fn try_fetch_from_provider(
     };
 
     if car_data.is_empty() {
-        warn!(
+        debug!(
             provider = %provider,
             root = %request.root_cid,
             "CAR fetch: empty response"
         );
+        // Surface the empty response to the coordinator so it can increment
+        // the car_empty_responses diagnostic. Still counts as a provider
+        // failure for the aggregation in handle_block_sync (issue #858).
+        let _ = event_tx
+            .send(TransportEvent::CarFetchResponse {
+                peer_id: provider.clone(),
+                root_cid: request.root_cid,
+                car_data: Vec::new(),
+            })
+            .await;
         return false;
     }
+
+    // Distinguish a header-only CAR (server's "no blocks" signal) from a
+    // usable fetch. The coordinator still needs the bytes so it can count
+    // car_empty_responses, but the aggregation in `handle_block_sync` must
+    // treat a header-only response as a provider miss — otherwise the final
+    // "none returned usable blocks" WARN is suppressed when every provider
+    // replies empty (issue #858 review round 3).
+    let has_blocks = crate::sync::car::car_has_any_block(&car_data);
 
     debug!(
         provider = %provider,
@@ -207,6 +227,7 @@ pub(super) async fn try_fetch_from_provider(
         recursive = request.recursive,
         requested_count = request.wanted_cids.len(),
         car_bytes = car_data.len(),
+        has_blocks,
         "CAR fetch: response received"
     );
 
@@ -222,7 +243,7 @@ pub(super) async fn try_fetch_from_provider(
         warn!("Event channel closed, cannot emit CarFetchResponse");
         return false;
     }
-    true
+    has_blocks
 }
 
 /// CAR-based block sync: fetch blocks from providers concurrently.
@@ -270,6 +291,12 @@ pub(super) async fn handle_block_sync(
     }
 
     let mut any_success = false;
+    let provider_count = providers.len();
+    let kind = if missing.is_empty() {
+        "full-dag"
+    } else {
+        "selective"
+    };
 
     for task in tasks {
         match task.await {
@@ -284,15 +311,20 @@ pub(super) async fn handle_block_sync(
         }
     }
 
+    let error = if any_success {
+        None
+    } else {
+        Some(format!(
+            "{} CAR fetch failed: {} provider(s) tried, none returned usable blocks (root={})",
+            kind, provider_count, root
+        ))
+    };
+
     if event_tx
         .send(TransportEvent::BitswapComplete {
             query_id,
             success: any_success,
-            error: if any_success {
-                None
-            } else {
-                Some("all providers failed".to_string())
-            },
+            error,
         })
         .await
         .is_err()

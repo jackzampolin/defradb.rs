@@ -171,13 +171,30 @@ impl<S: Store> P2PHost<S> {
                         }
                     }
                     Err(e) => {
-                        warn!(
-                            peer_id = %propagation_source,
-                            topic = %topic,
-                            message_size = message.data.len(),
-                            error = %e,
-                            "Failed to decode gossipsub message as PushLogBroadcast or PushLogRequest"
-                        );
+                        // Exponential-backoff sampling: warn on the
+                        // 1st, 2nd, 4th, 8th... occurrence; remainder at
+                        // debug. Shared process-global counter with the
+                        // iroh transport (issue #858).
+                        let count = crate::sync::record_gossip_decode_failure();
+                        if count == 1 || count.is_power_of_two() {
+                            warn!(
+                                peer_id = %propagation_source,
+                                topic = %topic,
+                                message_size = message.data.len(),
+                                total_failures = count,
+                                error = %e,
+                                "Failed to decode gossipsub message as PushLogBroadcast or PushLogRequest"
+                            );
+                        } else {
+                            debug!(
+                                peer_id = %propagation_source,
+                                topic = %topic,
+                                message_size = message.data.len(),
+                                total_failures = count,
+                                error = %e,
+                                "Failed to decode gossipsub message"
+                            );
+                        }
                     }
                 }
             }

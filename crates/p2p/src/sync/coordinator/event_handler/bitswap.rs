@@ -56,7 +56,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         success: bool,
         error: Option<String>,
     ) -> Result<()> {
-        tracing::info!(
+        // Per-completion bookkeeping is debug: the coordinator receives one of
+        // these per DAG fetch, and success=true only means "the transport task
+        // exited", not "blocks were merged" (see issue #858).
+        tracing::debug!(
             query_id = query_id.0,
             success = success,
             error = ?error,
@@ -68,7 +71,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 tracing::warn!(
                     query_id = query_id.0,
                     error = %err,
-                    "Bitswap fetch failed, retrying pending DAGs"
+                    "Bitswap fetch failed after exhausting providers; retrying pending DAGs"
                 );
             }
         }
@@ -77,7 +80,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         for root_cid in pending_dags {
             match self.manager.retry_pending_dag(&root_cid).await {
                 Ok(true) => {
-                    tracing::info!(
+                    // Counter bump happens inside retry_pending_dag on success;
+                    // this log is the coordinator-side trace of that signal.
+                    tracing::debug!(
                         query_id = query_id.0,
                         root_cid = %root_cid,
                         "Pending DAG completed after Bitswap fetch"

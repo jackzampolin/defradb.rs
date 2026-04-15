@@ -44,4 +44,9 @@ pub struct PendingDag {
     pub acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
     /// When this entry was inserted (for TTL eviction).
     pub inserted_at: Instant,
+    /// How many times `retry_pending_dag` has been invoked for this root.
+    ///
+    /// Surfaced in diagnostic logs so the single aggregated WARN on terminal
+    /// failure can carry an attempt count without scraping intermediate noise.
+    pub attempts: u32,
 }

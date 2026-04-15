@@ -543,7 +543,25 @@ pub(super) async fn handle_subscribe(
                                 }
                             }
                             Err(e) => {
-                                warn!("Failed to decode gossip message: {}", e);
+                                // Exponential-backoff sampling: warn on the
+                                // 1st, 2nd, 4th, 8th... occurrence; remainder
+                                // at debug. Counter is process-global and
+                                // surfaced via SyncDiagnostics (issue #858).
+                                let count = crate::sync::record_gossip_decode_failure();
+                                if count == 1 || count.is_power_of_two() {
+                                    warn!(
+                                        total_failures = count,
+                                        error = %e,
+                                        "Failed to decode gossip message \
+                                         (version skew or malformed sender?)"
+                                    );
+                                } else {
+                                    debug!(
+                                        total_failures = count,
+                                        error = %e,
+                                        "Failed to decode gossip message"
+                                    );
+                                }
                             }
                         }
                     }

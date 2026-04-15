@@ -33,6 +33,17 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .unwrap_or_default()
     }
 
+    /// How many times `retry_pending_dag` has been called for this root.
+    ///
+    /// Returns 0 if no entry exists (either never registered or already resolved).
+    pub fn pending_dag_attempts(&self, root_cid: &Cid) -> u32 {
+        self.pending_dags
+            .read()
+            .get(root_cid)
+            .map(|dag| dag.attempts)
+            .unwrap_or(0)
+    }
+
     /// Get the source peer for a pending DAG (the peer that originally provided it).
     pub fn pending_dag_source_peer(&self, root_cid: &Cid) -> Option<String> {
         self.pending_dags
@@ -118,6 +129,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 explicit_replay_authorization: None,
                 acp_actor_relationships: None,
                 inserted_at: Instant::now(),
+                attempts: 0,
             },
         ) {
             tracing::warn!(
@@ -157,6 +169,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 explicit_replay_authorization: None,
                 acp_actor_relationships: None,
                 inserted_at: Instant::now(),
+                attempts: 0,
             },
         ) {
             tracing::warn!(
@@ -173,25 +186,35 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// blocks have arrived. We re-check the DAG for any remaining missing links
     /// (recursively, at all depths) and process it if complete.
     pub async fn retry_pending_dag(&self, root_cid: &Cid) -> Result<bool> {
-        // Get the pending DAG info
+        // Record the attempt (and capture the incremented value) while holding
+        // the lock so concurrent retries observe monotonic attempt counts.
         let pending_info = {
-            let pending = self.pending_dags.read();
-            pending.get(root_cid).cloned()
+            let mut pending = self.pending_dags.write();
+            pending.get_mut(root_cid).map(|dag| {
+                dag.attempts = dag.attempts.saturating_add(1);
+                dag.clone()
+            })
         };
 
         let Some(info) = pending_info else {
-            tracing::warn!(
+            tracing::debug!(
                 root_cid = %root_cid,
-                "No pending DAG found for retry"
+                "No pending DAG found for retry (already resolved or never registered)"
             );
             return Ok(false);
         };
 
+        self.diagnostics.record_missing_link_retry();
+
         // Check TTL before retrying.
         if info.inserted_at.elapsed() >= PENDING_DAG_TTL {
             self.pending_dags.write().remove(root_cid);
+            self.diagnostics.record_pending_dag_expired();
             tracing::warn!(
                 root_cid = %root_cid,
+                doc_id = %info.doc_id,
+                attempts = info.attempts,
+                age_secs = info.inserted_at.elapsed().as_secs(),
                 "Pending DAG expired (TTL exceeded), dropping"
             );
             return Ok(false);
@@ -258,9 +281,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         // DAG is complete at all depths - remove from pending and process
         self.pending_dags.write().remove(root_cid);
+        self.diagnostics.record_pending_dag_resolved();
         tracing::info!(
             root_cid = %root_cid,
             doc_id = %info.doc_id,
+            collection_id = %info.collection_id,
+            attempts = info.attempts,
+            pending_duration_ms = info.inserted_at.elapsed().as_millis() as u64,
             "DAG complete, emitting DagReady"
         );
 

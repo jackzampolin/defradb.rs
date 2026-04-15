@@ -29,6 +29,7 @@ use crate::sync::PeerStateTracker;
 
 use super::super::queue::ProcessQueue;
 use super::config::SyncConfig;
+use super::diagnostics::SyncDiagnostics;
 use super::events::SyncEvent;
 use super::pending::PendingDag;
 
@@ -80,6 +81,9 @@ pub struct SyncManager<B: Blockstore> {
 
     /// Maps Bitswap QueryId → root CID for tracking completions.
     pub(super) query_to_root: Arc<RwLock<HashMap<QueryId, Cid>>>,
+
+    /// Observability counters (see `SyncDiagnostics`).
+    pub(crate) diagnostics: Arc<SyncDiagnostics>,
 }
 
 impl<B: Blockstore + 'static> SyncManager<B> {
@@ -106,6 +110,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             peer_state,
             pending_dags: Arc::new(RwLock::new(HashMap::new())),
             query_to_root: Arc::new(RwLock::new(HashMap::new())),
+            diagnostics: Arc::new(SyncDiagnostics::default()),
         };
 
         (manager, event_rx)
@@ -151,5 +156,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// Get a clone of the sync event sender for spawning background tasks.
     pub fn event_sender(&self) -> mpsc::Sender<SyncEvent> {
         self.event_tx.clone()
+    }
+
+    /// Shared reference to the sync diagnostics counters.
+    pub fn diagnostics(&self) -> Arc<SyncDiagnostics> {
+        Arc::clone(&self.diagnostics)
     }
 }
