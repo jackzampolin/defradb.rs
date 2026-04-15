@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::node_acp::{create_document_acp, create_nac_manager};
@@ -33,6 +34,9 @@ pub struct EmbeddedNode<S: storage::corekv::Store> {
     pub node_identity_did: Option<String>,
     pub sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
     pub p2p: Option<Arc<ManagedP2PSystem>>,
+    /// Idempotency guard for [`EmbeddedNode::shutdown`]. Set to `true`
+    /// by the first caller of `shutdown()`; subsequent calls are no-ops.
+    shutdown_started: AtomicBool,
 }
 
 impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
@@ -68,6 +72,64 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
         }
 
         Ok(())
+    }
+
+    /// Shut the node down cleanly.
+    ///
+    /// Order:
+    /// 1. **P2P transport** — closes the iroh endpoint or libp2p host
+    ///    gracefully and aborts the replication/merge background tasks.
+    ///    Addresses the `Endpoint dropped without calling Endpoint::close`
+    ///    iroh warning downstream embedders have been hitting.
+    /// 2. **Database** — close-guards future transactions (new `begin_txn`
+    ///    calls will return `Error::DatabaseClosed`) and closes the
+    ///    underlying store.
+    ///
+    /// The background downsample task is aborted by the `Drop` impl on
+    /// `BackgroundTasks` when the node itself is dropped, so no explicit
+    /// step is needed here.
+    ///
+    /// This method is **idempotent** — the first caller performs the
+    /// work, subsequent calls return immediately. Safe to call from
+    /// multiple tasks concurrently.
+    ///
+    /// Embedded callers should `await` this before dropping the
+    /// [`EmbeddedNode`] to ensure clean teardown:
+    ///
+    /// ```ignore
+    /// node.shutdown().await;
+    /// drop(node);
+    /// ```
+    pub async fn shutdown(&self) {
+        // Idempotency guard. Swap to true and bail if another task
+        // already initiated shutdown.
+        if self.shutdown_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        // 1. P2P first — stops inbound/outbound traffic and awaits the
+        //    transport's graceful close path (iroh Endpoint::close /
+        //    libp2p Host::shutdown).
+        if let Some(p2p) = &self.p2p {
+            p2p.shutdown().await;
+        }
+
+        // 2. Database — sets the is_closed flag and closes the store.
+        //    Log but don't propagate errors: shutdown should complete
+        //    even if the store close returns an I/O error, so embedders
+        //    can't be blocked from exiting by a closing store.
+        if let Err(error) = self.database.close().await {
+            tracing::warn!(error = %error, "EmbeddedNode::shutdown: database close returned an error");
+        }
+    }
+
+    /// Returns true if [`EmbeddedNode::shutdown`] has been initiated.
+    ///
+    /// Does not guarantee that shutdown has finished — just that it has
+    /// started. Useful for embedders that want to short-circuit pending
+    /// operations when teardown is in progress.
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown_started.load(Ordering::SeqCst)
     }
 }
 
@@ -339,5 +401,6 @@ where
         node_identity_did,
         sourcehub_acp,
         p2p: p2p_setup.map(|setup| setup.system),
+        shutdown_started: AtomicBool::new(false),
     })
 }
