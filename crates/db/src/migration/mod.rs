@@ -49,9 +49,9 @@ impl<S: Store> DB<S> {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let clean_path = path.strip_prefix("file://").unwrap_or(path);
-                tokio::fs::read(clean_path).await.map_err(|e| {
-                    Error::Lens(format!("failed to read WASM from {}: {}", path, e))
-                })?
+                tokio::fs::read(clean_path)
+                    .await
+                    .map_err(|e| Error::Lens(format!("failed to read WASM from {}: {}", path, e)))?
             }
             #[cfg(target_arch = "wasm32")]
             {
