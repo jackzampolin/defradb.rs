@@ -48,6 +48,23 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 requested_count = request.wanted_cids.len(),
                 "CAR handler: no blocks found for request"
             );
+            // Send a header-only CAR so both transports (iroh and libp2p)
+            // receive a well-formed response they can decode. Without this,
+            // the libp2p response handler errors on empty bytes and the
+            // requester-side car_empty_responses counter stays at zero
+            // (issue #858 review feedback).
+            let car_data = encode_car(&response_roots, &[])?;
+            if let Some(token) = token {
+                self.runtime
+                    .transport
+                    .send_car_response_token(token, car_data)
+                    .await?;
+            } else {
+                self.runtime
+                    .transport
+                    .send_car_response(&peer_id, car_data)
+                    .await?;
+            }
             return Ok(());
         }
 
@@ -97,6 +114,19 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         root_cid: Cid,
         car_data: Vec<u8>,
     ) -> Result<()> {
+        // Raw-empty: transport received zero bytes (peer had nothing for
+        // this root, e.g. the serving side's handle_car_fetch_request
+        // returned without writing a body). Count and skip decode.
+        if car_data.is_empty() {
+            self.manager.diagnostics.record_car_empty_response();
+            tracing::debug!(
+                root_cid = %root_cid,
+                peer_id = %peer_id,
+                "Received empty CAR response (raw bytes)"
+            );
+            return Ok(());
+        }
+
         let (_roots, blocks) = decode_car(&car_data)?;
 
         if blocks.is_empty() {
@@ -108,7 +138,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             tracing::debug!(
                 root_cid = %root_cid,
                 peer_id = %peer_id,
-                "Received empty CAR response"
+                "Received empty CAR response (decoded 0 blocks)"
             );
             return Ok(());
         }

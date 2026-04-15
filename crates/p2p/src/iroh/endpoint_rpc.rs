@@ -200,6 +200,16 @@ pub(super) async fn try_fetch_from_provider(
             root = %request.root_cid,
             "CAR fetch: empty response"
         );
+        // Surface the empty response to the coordinator so it can increment
+        // the car_empty_responses diagnostic. Still counts as a provider
+        // failure for the aggregation in handle_block_sync (issue #858).
+        let _ = event_tx
+            .send(TransportEvent::CarFetchResponse {
+                peer_id: provider.clone(),
+                root_cid: request.root_cid,
+                car_data: Vec::new(),
+            })
+            .await;
         return false;
     }
 

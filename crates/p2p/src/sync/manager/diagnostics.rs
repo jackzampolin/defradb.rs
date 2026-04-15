@@ -24,7 +24,11 @@ static GOSSIP_DECODE_FAILURES: AtomicU64 = AtomicU64::new(0);
 /// Return value lets callers apply exponential-backoff sampling (warn on
 /// 1st/2nd/4th/8th… occurrence, debug otherwise) without maintaining their
 /// own atomic.
-pub fn record_gossip_decode_failure() -> u64 {
+///
+/// Crate-internal: only the libp2p and iroh transport paths call this.
+/// Downstream consumers read the total via `SyncDiagnostics::snapshot()`
+/// rather than synthesizing failures.
+pub(crate) fn record_gossip_decode_failure() -> u64 {
     GOSSIP_DECODE_FAILURES.fetch_add(1, Ordering::Relaxed) + 1
 }
 
