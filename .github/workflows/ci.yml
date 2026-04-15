@@ -54,7 +54,10 @@ jobs:
           shared-key: "wasm32"
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        # clang is needed because lz4-sys (transitive C dep) builds
+        # wasm-shim C sources via cc-rs when the target is wasm32.
+        # protoc is needed by prost-build.
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang
 
       - name: Exclude tools with private deps from workspace
         run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
