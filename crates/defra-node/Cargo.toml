@@ -29,6 +29,7 @@ sourcehub = { path = "../sourcehub" }
 identity = { path = "../identity" }
 defra-core = { path = "../defra-core" }
 schema = { path = "../schema" }
+lens = { path = "../lens" }
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

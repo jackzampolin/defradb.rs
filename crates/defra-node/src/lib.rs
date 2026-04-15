@@ -45,9 +45,11 @@ pub use config::P2PConfig;
 pub use config::{DocumentAcpConfig, SourceHubConfig};
 pub use dense_search::{DenseHybridSearchHit, DenseHybridSearchRequest, DenseHybridSearchResponse};
 pub use events::EventName;
+pub use lens::{LensConfig, LensModule, TransformId};
 #[cfg(feature = "p2p")]
 pub use p2p_error::{P2PError, P2PResult};
 pub use query::{QueryExecutor, QueryRequest, QueryResponse};
+pub use schema::CollectionVersion;
 
 #[cfg(all(feature = "http", feature = "p2p"))]
 struct HttpP2PAdapter {
@@ -243,6 +245,20 @@ pub trait P2POps: Send + Sync {
 trait SchemaOps: Send + Sync {
     async fn add_schema(&self, sdl: &str) -> anyhow::Result<()>;
     async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()>;
+    async fn patch_collection(
+        &self,
+        collection_name: &str,
+        patch: &str,
+    ) -> anyhow::Result<CollectionVersion>;
+    async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()>;
+    async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId>;
+    fn list_collections(&self) -> anyhow::Result<Vec<String>>;
+    fn get_collection(&self, name: &str) -> anyhow::Result<Option<CollectionVersion>>;
+    async fn get_collection_by_version_id(
+        &self,
+        version_id: &str,
+    ) -> anyhow::Result<Option<CollectionVersion>>;
+    async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>>;
 }
 
 /// Type-erased collection lookup for resolving names to CIDs.
@@ -374,6 +390,78 @@ impl EmbeddedNode {
     /// like `@downsample` that are forward-declared for future defradb.rs support).
     pub async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()> {
         self.schema_ops.add_view(source_query, target_sdl).await
+    }
+
+    /// Apply a JSON Patch (RFC 6902) to an existing collection's schema.
+    ///
+    /// Returns the updated [`CollectionVersion`] (with a new `version_id`). The
+    /// prior version is deactivated and the patched version is activated, unless
+    /// the patch is a metadata-only or in-place change (see [`db::DB::patch_collection`]).
+    ///
+    /// `collection_name` may be a collection name, version ID, or variant; the
+    /// underlying implementation falls back to version-ID lookup if name lookup fails.
+    pub async fn patch_collection(
+        &self,
+        collection_name: &str,
+        patch: &str,
+    ) -> anyhow::Result<CollectionVersion> {
+        self.schema_ops
+            .patch_collection(collection_name, patch)
+            .await
+    }
+
+    /// Activate a specific collection version by its `version_id`.
+    ///
+    /// Deactivates sibling versions of the same collection and updates the
+    /// collection-name pointer to resolve to this version. If migrations are
+    /// registered, documents are reindexed through them.
+    pub async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()> {
+        self.schema_ops
+            .set_active_collection_version(version_id)
+            .await
+    }
+
+    /// Register a Lens migration between two collection versions.
+    ///
+    /// Returns the content-addressed [`TransformId`] of the stored transform.
+    /// Placeholder versions are created if the source or destination are not
+    /// yet materialized, allowing migrations to be registered ahead of patches.
+    pub async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId> {
+        self.schema_ops.set_migration(config).await
+    }
+
+    /// List the names of every active collection known to the node.
+    ///
+    /// Useful for idempotent schema-bootstrap flows that need to decide whether
+    /// to call [`Self::add_schema`] (create) or [`Self::patch_collection`] (evolve).
+    pub fn list_collections(&self) -> anyhow::Result<Vec<String>> {
+        self.schema_ops.list_collections()
+    }
+
+    /// Fetch the active schema definition for a collection by name.
+    ///
+    /// Returns `Ok(None)` if no active collection with that name exists.
+    pub fn get_collection(&self, name: &str) -> anyhow::Result<Option<CollectionVersion>> {
+        self.schema_ops.get_collection(name)
+    }
+
+    /// Fetch a collection schema by its version ID, including inactive versions.
+    ///
+    /// Searches both the in-memory cache (active versions) and the underlying
+    /// systemstore (all stored versions), so callers can inspect the history
+    /// of a patched collection.
+    pub async fn get_collection_by_version_id(
+        &self,
+        version_id: &str,
+    ) -> anyhow::Result<Option<CollectionVersion>> {
+        self.schema_ops
+            .get_collection_by_version_id(version_id)
+            .await
+    }
+
+    /// Return every collection version known to the node, active and inactive.
+    pub async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>> {
+        self.schema_ops.get_all_collection_versions().await
     }
 
     /// Subscribe to DefraDB events.
