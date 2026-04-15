@@ -56,6 +56,22 @@ pub fn encode_car(roots: &[Cid], blocks: &[(&Cid, &[u8])]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Cheap peek: does this CAR byte stream contain at least one block section?
+///
+/// Reads only the header-length varint and checks whether any bytes remain
+/// after the header. Used by the iroh requester to distinguish a header-only
+/// "no blocks" response from a usable fetch without paying full decode cost.
+/// Malformed input reports `true` so the caller forwards the bytes and lets
+/// the coordinator surface the decode error.
+#[cfg(feature = "iroh-transport")]
+pub(crate) fn car_has_any_block(data: &[u8]) -> bool {
+    let mut cursor = data;
+    let Ok(header_len) = read_varint(&mut cursor) else {
+        return true;
+    };
+    cursor.len() > header_len as usize
+}
+
 /// Decoded CAR contents: root CIDs and blocks (CID + data pairs).
 pub type CarContents = (Vec<Cid>, Vec<(Cid, Vec<u8>)>);
 
@@ -325,6 +341,22 @@ mod tests {
 
     fn encode_ipld(ipld: libipld::Ipld) -> Vec<u8> {
         DagCborCodec.encode(&ipld).unwrap()
+    }
+
+    #[cfg(feature = "iroh-transport")]
+    #[test]
+    fn car_has_any_block_detects_header_only_and_populated_cars() {
+        let cid = make_cid(b"root");
+        let header_only = encode_car(&[cid], &[]).unwrap();
+        assert!(!car_has_any_block(&header_only));
+
+        let data = b"payload";
+        let populated = encode_car(&[cid], &[(&cid, data.as_slice())]).unwrap();
+        assert!(car_has_any_block(&populated));
+
+        // Malformed input: no varint → report `true` so the caller forwards
+        // to the coordinator instead of silently dropping.
+        assert!(car_has_any_block(&[]));
     }
 
     #[test]

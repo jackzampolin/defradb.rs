@@ -213,12 +213,21 @@ pub(super) async fn try_fetch_from_provider(
         return false;
     }
 
+    // Distinguish a header-only CAR (server's "no blocks" signal) from a
+    // usable fetch. The coordinator still needs the bytes so it can count
+    // car_empty_responses, but the aggregation in `handle_block_sync` must
+    // treat a header-only response as a provider miss — otherwise the final
+    // "none returned usable blocks" WARN is suppressed when every provider
+    // replies empty (issue #858 review round 3).
+    let has_blocks = crate::sync::car::car_has_any_block(&car_data);
+
     debug!(
         provider = %provider,
         root = %request.root_cid,
         recursive = request.recursive,
         requested_count = request.wanted_cids.len(),
         car_bytes = car_data.len(),
+        has_blocks,
         "CAR fetch: response received"
     );
 
@@ -234,7 +243,7 @@ pub(super) async fn try_fetch_from_provider(
         warn!("Event channel closed, cannot emit CarFetchResponse");
         return false;
     }
-    true
+    has_blocks
 }
 
 /// CAR-based block sync: fetch blocks from providers concurrently.
