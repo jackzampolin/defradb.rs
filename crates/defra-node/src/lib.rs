@@ -25,6 +25,8 @@ pub mod version;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(feature = "p2p")]
+use std::sync::Mutex;
 
 #[cfg(feature = "p2p")]
 use p2p::P2PTransport;
@@ -258,6 +260,95 @@ pub struct EmbeddedNode {
     embedding_config: db::EmbeddingClientConfig,
     #[cfg(feature = "p2p")]
     p2p_ops: Option<Arc<dyn P2POps>>,
+    #[cfg(feature = "p2p")]
+    p2p_lifecycle: Option<P2PLifecycle>,
+}
+
+#[cfg(feature = "p2p")]
+struct P2PLifecycle {
+    inner: Mutex<Option<P2PLifecycleInner>>,
+}
+
+#[cfg(feature = "p2p")]
+struct P2PLifecycleInner {
+    transport: p2p::iroh::IrohTransport,
+    endpoint_task: tokio::task::JoinHandle<()>,
+    replication_task: tokio::task::JoinHandle<()>,
+    event_handler_task: tokio::task::JoinHandle<()>,
+    failure_recorder_task: tokio::task::JoinHandle<()>,
+    retry_loop_task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "p2p")]
+impl P2PLifecycle {
+    fn new(inner: P2PLifecycleInner) -> Self {
+        Self {
+            inner: Mutex::new(Some(inner)),
+        }
+    }
+
+    async fn shutdown(&self) {
+        let inner = match self.inner.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+
+        if let Some(inner) = inner {
+            inner.shutdown().await;
+        }
+    }
+}
+
+#[cfg(feature = "p2p")]
+impl P2PLifecycleInner {
+    async fn shutdown(self) {
+        abort_background_task("iroh retry loop", self.retry_loop_task).await;
+
+        if let Err(error) = self.transport.shutdown().await {
+            tracing::debug!(%error, "Iroh transport shutdown returned an error");
+        }
+
+        await_endpoint_task(self.endpoint_task).await;
+        abort_background_task("iroh event handler", self.event_handler_task).await;
+        abort_background_task("iroh replication loop", self.replication_task).await;
+        abort_background_task("iroh failure recorder", self.failure_recorder_task).await;
+    }
+}
+
+#[cfg(feature = "p2p")]
+async fn await_endpoint_task(mut task: tokio::task::JoinHandle<()>) {
+    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if error.is_cancelled() => {
+            tracing::debug!("Iroh endpoint task was already cancelled");
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Iroh endpoint task failed during shutdown");
+        }
+        Err(_) => {
+            tracing::warn!("Iroh endpoint task did not stop after graceful shutdown; aborting");
+            task.abort();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
+        }
+    }
+}
+
+#[cfg(feature = "p2p")]
+async fn abort_background_task(task_name: &'static str, task: tokio::task::JoinHandle<()>) {
+    task.abort();
+    match tokio::time::timeout(std::time::Duration::from_secs(1), task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if error.is_cancelled() => {}
+        Ok(Err(error)) => {
+            tracing::debug!(task = task_name, %error, "P2P background task failed during shutdown");
+        }
+        Err(_) => {
+            tracing::debug!(
+                task = task_name,
+                "P2P background task did not stop after abort"
+            );
+        }
+    }
 }
 
 impl EmbeddedNode {
@@ -315,6 +406,14 @@ impl EmbeddedNode {
     #[cfg(feature = "p2p")]
     pub fn p2p_arc(&self) -> Option<Arc<dyn P2POps>> {
         self.p2p_ops.as_ref().map(Arc::clone)
+    }
+
+    /// Gracefully stop background services owned by this embedded node.
+    pub async fn shutdown(&self) {
+        #[cfg(feature = "p2p")]
+        if let Some(lifecycle) = &self.p2p_lifecycle {
+            lifecycle.shutdown().await;
+        }
     }
 }
 
@@ -639,13 +738,21 @@ impl NodeBuilder {
         let runner: Arc<dyn QueryExecutor> = Arc::new(query_runner);
         let schema_ops: Arc<dyn SchemaOps> = Arc::new(database.clone());
 
+        #[cfg(feature = "p2p")]
+        let (p2p_ops, p2p_lifecycle) = match p2p_result {
+            Some(result) => (Some(result.ops), result.lifecycle),
+            None => (None, None),
+        };
+
         Ok(EmbeddedNode {
             runner,
             event_bus,
             schema_ops,
             embedding_config,
             #[cfg(feature = "p2p")]
-            p2p_ops: p2p_result.map(|r| r.ops),
+            p2p_ops,
+            #[cfg(feature = "p2p")]
+            p2p_lifecycle,
         })
     }
 
@@ -667,7 +774,7 @@ impl NodeBuilder {
             bind_port: Some(config.port),
             bind_addr: config.bind_addr,
         };
-        let (command_tx, iroh_events, _task_handle) = p2p::iroh::spawn_endpoint(iroh_config)
+        let (command_tx, iroh_events, endpoint_task) = p2p::iroh::spawn_endpoint(iroh_config)
             .await
             .map_err(|e| anyhow::anyhow!("IROH endpoint spawn failed: {}", e))?;
 
@@ -701,7 +808,7 @@ impl NodeBuilder {
 
         // Failure channel (required by replication loop)
         let failure_rx = db_merge::attach_failure_channel(&mut coordinator, 1024);
-        spawn_failure_recorder(store.clone(), failure_rx);
+        let failure_recorder_task = spawn_failure_recorder(store.clone(), failure_rx);
 
         let coordinator = Arc::new(coordinator);
 
@@ -725,7 +832,7 @@ impl NodeBuilder {
 
         // 9. Replication loop (transport-generic)
         let coord_for_repl = coordinator.clone();
-        tokio::spawn(async move {
+        let replication_task = tokio::spawn(async move {
             p2p::sync::ReplicationLoop::run(
                 coord_for_repl,
                 sync_events,
@@ -737,10 +844,11 @@ impl NodeBuilder {
 
         // 10. IROH event handler (events are already TransportEvent -- no conversion needed)
         let coord_for_events = coordinator.clone();
-        tokio::spawn(async move {
+        let event_handler_task = tokio::spawn(async move {
             Self::run_event_handler(iroh_events, coord_for_events).await;
         });
-        spawn_iroh_retry_loop(store.clone(), database.clone(), transport.clone());
+        let retry_loop_task =
+            spawn_iroh_retry_loop(store.clone(), database.clone(), transport.clone());
 
         // 11. Collection lookup (resolves names -> CIDs for gossip topics)
         let collection_lookup: Arc<dyn CollectionLookup> = database.clone();
@@ -751,14 +859,23 @@ impl NodeBuilder {
 
         let peer_id = transport.local_peer_id().to_string();
         tracing::info!(peer_id = %peer_id, "P2P started (IROH/QUIC)");
+        let ops_transport = transport.clone();
         let ops: Arc<dyn P2POps> = Arc::new(p2p_handle::P2PHandleImpl {
-            transport,
+            transport: ops_transport,
             coordinator,
             collection_lookup,
         });
 
         Ok(P2PSetupResult {
             ops,
+            lifecycle: Some(P2PLifecycle::new(P2PLifecycleInner {
+                transport,
+                endpoint_task,
+                replication_task,
+                event_handler_task,
+                failure_recorder_task,
+                retry_loop_task,
+            })),
             mutator,
             wire_document_acp: Some(Box::new(move |acp, strict| {
                 merge_handler_for_acp.set_document_acp(acp.clone());
@@ -930,6 +1047,7 @@ fn spawn_iroh_retry_loop<S: storage::corekv::Store + 'static>(
 #[cfg(feature = "p2p")]
 struct P2PSetupResult {
     ops: Arc<dyn P2POps>,
+    lifecycle: Option<P2PLifecycle>,
     mutator: Arc<dyn query::DocMutator>,
     wire_document_acp: Option<WireDocumentAcpCallback>,
 }
@@ -1122,5 +1240,8 @@ mod p2p_tests {
         );
 
         wait_for_collection_len(&node1, "User", 1).await;
+
+        node0.shutdown().await;
+        node1.shutdown().await;
     }
 }
