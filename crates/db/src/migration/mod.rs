@@ -46,10 +46,20 @@ impl<S: Store> DB<S> {
         let wasm_bytes = if let Some(ref bytes) = first_lens.module {
             bytes.clone()
         } else if let Some(ref path) = first_lens.path {
-            let clean_path = path.strip_prefix("file://").unwrap_or(path);
-            tokio::fs::read(clean_path)
-                .await
-                .map_err(|e| Error::Lens(format!("failed to read WASM from {}: {}", path, e)))?
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let clean_path = path.strip_prefix("file://").unwrap_or(path);
+                tokio::fs::read(clean_path).await.map_err(|e| {
+                    Error::Lens(format!("failed to read WASM from {}: {}", path, e))
+                })?
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                return Err(Error::Lens(format!(
+                    "path-based lens modules not supported on wasm32 (path: {}); pass bytes instead",
+                    path
+                )));
+            }
         } else {
             return Err(Error::Lens("lens module has neither path nor bytes".into()));
         };
