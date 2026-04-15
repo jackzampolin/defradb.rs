@@ -3778,6 +3778,7 @@ dependencies = [
  "serde_json",
  "sourcehub",
  "storage",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",

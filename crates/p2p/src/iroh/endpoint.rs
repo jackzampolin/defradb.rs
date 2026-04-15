@@ -93,7 +93,6 @@ async fn run_event_loop(
         .is_err()
     {
         warn!("Event channel closed, cannot emit Listening event");
-        return;
     }
 
     loop {
@@ -138,6 +137,9 @@ async fn run_event_loop(
     }
     for (_, sync) in active_syncs.drain() {
         sync.abort_handle.abort();
+    }
+    if let Err(error) = gossip.shutdown().await {
+        debug!(%error, "Iroh gossip shutdown failed");
     }
     endpoint.close().await;
     info!("Iroh endpoint shut down");
