@@ -6,8 +6,8 @@ use blockstore::Blockstore;
 
 use crate::libp2p_doc_pusher::DocPusher;
 use crate::{
-    P2PError, P2POperations, P2PResult, P2pDocumentInfo, P2pDocumentRequest, ReplicatorInfo,
-    ReplicatorPushOptions,
+    ExplicitReplayCapabilityInput, P2PError, P2PErrorExt as _, P2POperations, P2PResult,
+    P2pDocumentInfo, P2pDocumentRequest, ReplicatorInfo, ReplicatorPushOptions,
 };
 
 use p2p::sync::Libp2pSyncCoordinator;
@@ -37,6 +37,7 @@ pub struct P2PAdapter<B: Blockstore + 'static> {
     doc_pusher: Option<Arc<dyn DocPusher>>,
     event_bus: Option<Arc<dyn events::Bus>>,
     version_syncer: Option<Arc<dyn VersionSyncer>>,
+    replicator_push_options: ReplicatorPushOptions,
     peer_addresses: Arc<std::sync::RwLock<HashMap<String, String>>>,
     tracked_documents: Arc<std::sync::RwLock<HashSet<String>>>,
 }
@@ -74,9 +75,15 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
             doc_pusher: Some(doc_pusher),
             event_bus: Some(event_bus),
             version_syncer,
+            replicator_push_options: ReplicatorPushOptions::default(),
             peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
             tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
+    }
+
+    pub fn with_replicator_push_options(mut self, options: ReplicatorPushOptions) -> Self {
+        self.replicator_push_options = options;
+        self
     }
 
     pub fn with_full_context_arc(
@@ -164,10 +171,6 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         Ok(())
     }
 
-    async fn notify_network_change(&self) -> P2PResult<()> {
-        Ok(())
-    }
-
     async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
         let p2p_infos = self
             .handle
@@ -192,7 +195,8 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
-        push_options: ReplicatorPushOptions,
+        explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
+        expected_authorizer_did: Option<&str>,
     ) -> P2PResult<()> {
         let addr_str = addr.ok_or_else(|| P2PError::invalid_input("address is required"))?;
         let parsed = p2p::parse_multiaddr_with_peer_id(addr_str)
@@ -226,6 +230,28 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
         }
 
         let peer_id = parsed.peer_id;
+        for explicit in explicit_replay_capabilities {
+            let authorization = p2p::verify_explicit_replay_capability(
+                &explicit.capability,
+                &self.handle.local_peer_id_cached().to_string(),
+                &peer_id.to_string(),
+                &explicit.collection_id,
+            )
+            .map_err(|error| P2PError::invalid_input(error.to_string()))?;
+            if let Some(expected) = expected_authorizer_did {
+                if authorization.authorizer_did != expected {
+                    return Err(P2PError::invalid_input(format!(
+                        "explicit replay authorizer '{}' does not match expected '{}'",
+                        authorization.authorizer_did, expected
+                    )));
+                }
+            }
+            self.handle.set_explicit_replay_capability(
+                peer_id,
+                &[explicit.collection_id],
+                &explicit.capability,
+            );
+        }
 
         // Check existing replicator state before creating/updating so we can
         // skip the expensive initial replay when the replicator already exists
@@ -302,8 +328,8 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
                 let push_handle = self.handle.clone();
                 let push_pusher = Arc::clone(pusher);
                 let push_event_bus = self.event_bus.clone();
-                let push_se_key = push_options.se_encryption_key;
-                let push_identity = push_options.se_identity_pubkey;
+                let push_se_key = self.replicator_push_options.se_encryption_key.clone();
+                let push_identity = self.replicator_push_options.se_identity_pubkey.clone();
 
                 tracing::info!(
                     peer_id = %peer_id,
@@ -405,55 +431,6 @@ impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
 
         if let Some(ref bus) = self.event_bus {
             bus.publish(events::Message::replicator_completed());
-        }
-
-        Ok(())
-    }
-
-    async fn retry_replicators(&self, push_options: ReplicatorPushOptions) -> P2PResult<()> {
-        let pusher = self
-            .doc_pusher
-            .as_ref()
-            .ok_or_else(|| P2PError::unsupported("no database context to retry replicators"))?;
-        let collections = pusher.list_collections()?;
-        let replicators =
-            self.handle.list_replicators().await.map_err(|error| {
-                P2PError::transport(format!("failed to get replicators: {error}"))
-            })?;
-
-        let mut push_handles = Vec::new();
-        for replicator in replicators {
-            let Some(peer_id) = replicator.peer_id() else {
-                continue;
-            };
-
-            let push_handle = self.handle.clone();
-            let push_pusher = Arc::clone(pusher);
-            let push_collections = collections.clone();
-            let push_se_key = push_options.se_encryption_key.clone();
-            let push_identity = push_options.se_identity_pubkey.clone();
-            push_handles.push(tokio::spawn(async move {
-                if let Err(error) = push_pusher
-                    .push_existing_docs(
-                        &push_handle,
-                        peer_id,
-                        &push_collections,
-                        push_se_key.as_deref(),
-                        push_identity.as_deref(),
-                    )
-                    .await
-                {
-                    tracing::error!(
-                        peer_id = %peer_id,
-                        error = %error,
-                        "Failed to retry push existing docs to replicator"
-                    );
-                }
-            }));
-        }
-
-        for handle in push_handles {
-            let _ = handle.await;
         }
 
         Ok(())

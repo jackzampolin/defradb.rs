@@ -102,13 +102,10 @@ pub unsafe extern "C" fn p2p_notify_network_change(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
-                    p2p.system
-                        .ops()
-                        .notify_network_change()
-                        .await
-                        .map_err(FfiP2PError::from)
-                })
+                let _ = p2p;
+                Err(FfiP2PError::unsupported(
+                    "notify_network_change is not part of the HTTP P2P operations surface",
+                ))
             })
             .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|result| result);

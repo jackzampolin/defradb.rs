@@ -55,6 +55,7 @@ db = { path = "../db" }
 db-backup = { path = "../db-backup" }
 db-merge = { path = "../db-merge" }
 defra-core = { path = "../defra-core" }
+defra-http = { path = "../http" }
 document = { path = "../document" }
 events = { path = "../events" }
 storage = { path = "../storage" }
