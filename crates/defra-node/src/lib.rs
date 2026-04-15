@@ -675,7 +675,7 @@ impl NodeBuilder {
         let transport = p2p::iroh::IrohTransport::new(command_tx, secret_key);
 
         // 5. Blockstore for sync coordinator + merge handler
-        let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), false));
+        let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));
 
         // 6. Collection store (persists subscriptions)
         let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
