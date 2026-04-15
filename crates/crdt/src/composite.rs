@@ -485,11 +485,4 @@ impl ReplicatedData for CompositeDAG {
             Ok(MergeResult::RejectedTieBreak)
         }
     }
-
-    fn headstore_prefix(&self) -> Vec<u8> {
-        let mut prefix = Vec::new();
-        prefix.extend_from_slice(b"/head/");
-        prefix.extend_from_slice(self.doc_id.as_str().as_bytes());
-        prefix
-    }
 }

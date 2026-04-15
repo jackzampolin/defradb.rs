@@ -111,12 +111,6 @@ pub trait ReplicatedData: MaybeSendSync {
         ctx: &Context,
         delta: &dyn Delta,
     ) -> Result<MergeResult>;
-
-    /// Get the headstore key prefix for this CRDT
-    ///
-    /// The headstore tracks the latest CID for each document.
-    /// This method returns the key prefix used to store head information.
-    fn headstore_prefix(&self) -> Vec<u8>;
 }
 
 /// Trait for CRDTs that support value retrieval

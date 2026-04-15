@@ -313,15 +313,6 @@ impl ReplicatedData for Lww {
         self.set_value(rw, &lww_delta.data, lww_delta.priority, ctx.is_create)
             .await
     }
-
-    fn headstore_prefix(&self) -> Vec<u8> {
-        let mut prefix = Vec::new();
-        prefix.extend_from_slice(b"/head/");
-        prefix.extend_from_slice(self.schema_version_id.as_bytes());
-        prefix.push(b'/');
-        prefix.extend_from_slice(self.field_name.as_bytes());
-        prefix
-    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
