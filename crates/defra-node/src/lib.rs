@@ -17,6 +17,8 @@ mod db_impls;
 pub mod dense_search;
 mod node_acp;
 #[cfg(feature = "p2p")]
+mod p2p_error;
+#[cfg(feature = "p2p")]
 mod p2p_handle;
 pub mod search_chunks;
 pub mod version;
@@ -41,6 +43,8 @@ pub use config::P2PConfig;
 pub use config::{DocumentAcpConfig, SourceHubConfig};
 pub use dense_search::{DenseHybridSearchHit, DenseHybridSearchRequest, DenseHybridSearchResponse};
 pub use events::EventName;
+#[cfg(feature = "p2p")]
+pub use p2p_error::{P2PError, P2PResult};
 pub use query::{QueryExecutor, QueryRequest, QueryResponse};
 
 #[cfg(all(feature = "http", feature = "p2p"))]
@@ -54,24 +58,13 @@ impl HttpP2PAdapter {
         "not supported by embedded defra-node HTTP adapter".to_string()
     }
 
-    fn map_embedded_error(error: embedded::P2PError) -> defra_http::router::P2PError {
+    fn map_p2p_error(error: P2PError) -> defra_http::router::P2PError {
         match error {
-            embedded::P2PError::InvalidInput(message) => {
-                defra_http::router::P2PError::InvalidInput(message)
-            }
-            embedded::P2PError::NotFound(message) => {
-                defra_http::router::P2PError::NotFound(message)
-            }
-            embedded::P2PError::Unsupported(message) => {
-                defra_http::router::P2PError::Unsupported(message)
-            }
-            embedded::P2PError::Transport(message) => {
-                defra_http::router::P2PError::Transport(message)
-            }
-            embedded::P2PError::Persistence(message) => {
-                defra_http::router::P2PError::Internal(message)
-            }
-            embedded::P2PError::Internal(message) => {
+            P2PError::InvalidInput(message) => defra_http::router::P2PError::InvalidInput(message),
+            P2PError::NotFound(message) => defra_http::router::P2PError::NotFound(message),
+            P2PError::Unsupported(message) => defra_http::router::P2PError::Unsupported(message),
+            P2PError::Transport(message) => defra_http::router::P2PError::Transport(message),
+            P2PError::Persistence(message) | P2PError::Internal(message) => {
                 defra_http::router::P2PError::Internal(message)
             }
         }
@@ -93,14 +86,14 @@ impl defra_http::P2POperations for HttpP2PAdapter {
         self.inner
             .connected_peers()
             .await
-            .map_err(Self::map_embedded_error)
+            .map_err(Self::map_p2p_error)
     }
 
     async fn connect_peer(&self, addr: &str) -> defra_http::router::P2PResult<()> {
         self.inner
             .connect_peer(addr)
             .await
-            .map_err(Self::map_embedded_error)
+            .map_err(Self::map_p2p_error)
     }
 
     async fn get_replicators(
@@ -124,7 +117,7 @@ impl defra_http::P2POperations for HttpP2PAdapter {
         self.inner
             .set_replicator(addr, collections)
             .await
-            .map_err(Self::map_embedded_error)
+            .map_err(Self::map_p2p_error)
     }
 
     async fn remove_replicator(
@@ -148,7 +141,7 @@ impl defra_http::P2POperations for HttpP2PAdapter {
             self.inner
                 .subscribe_collection(&collection)
                 .await
-                .map_err(Self::map_embedded_error)?;
+                .map_err(Self::map_p2p_error)?;
         }
         Ok(())
     }
@@ -182,6 +175,16 @@ impl defra_http::P2POperations for HttpP2PAdapter {
     async fn remove_documents(
         &self,
         _docs: Vec<defra_http::router::P2pDocumentRequest>,
+    ) -> defra_http::router::P2PResult<()> {
+        Err(defra_http::router::P2PError::Unsupported(
+            Self::unsupported(),
+        ))
+    }
+
+    async fn republish_document(
+        &self,
+        _collection_name: &str,
+        _doc_id: &str,
     ) -> defra_http::router::P2PResult<()> {
         Err(defra_http::router::P2PError::Unsupported(
             Self::unsupported(),
@@ -223,18 +226,14 @@ impl defra_http::P2POperations for HttpP2PAdapter {
 pub trait P2POps: Send + Sync {
     async fn local_peer_id(&self) -> String;
     async fn listen_addresses(&self) -> Vec<String>;
-    async fn connected_peers(&self) -> embedded::P2PResult<Vec<String>>;
-    async fn connect_peer(&self, addr: &str) -> embedded::P2PResult<()>;
-    async fn notify_network_change(&self) -> embedded::P2PResult<()>;
-    async fn subscribe_collection(&self, name: &str) -> embedded::P2PResult<()>;
+    async fn connected_peers(&self) -> P2PResult<Vec<String>>;
+    async fn connect_peer(&self, addr: &str) -> P2PResult<()>;
+    async fn notify_network_change(&self) -> P2PResult<()>;
+    async fn subscribe_collection(&self, name: &str) -> P2PResult<()>;
     /// Set up push replication to a peer for the given collections.
     /// The peer address may be an endpoint ticket, `<node-id>@<ip>:<port>`,
     /// or just `<node-id>`.
-    async fn set_replicator(
-        &self,
-        peer_addr: &str,
-        collections: Vec<String>,
-    ) -> embedded::P2PResult<()>;
+    async fn set_replicator(&self, peer_addr: &str, collections: Vec<String>) -> P2PResult<()>;
 }
 
 /// Type-erased schema operations so we can store DB<S> without leaking the Store generic.
@@ -771,7 +770,9 @@ impl NodeBuilder {
 
     #[cfg(feature = "p2p")]
     async fn run_event_handler<B: blockstore::Blockstore + Send + Sync + 'static>(
-        mut events: tokio::sync::mpsc::Receiver<p2p::TransportEvent>,
+        mut events: tokio::sync::mpsc::Receiver<
+            p2p::TransportEvent<<p2p::iroh::IrohTransport as P2PTransport>::ResponseToken>,
+        >,
         coordinator: Arc<p2p::sync::SyncCoordinator<B, p2p::iroh::IrohTransport>>,
     ) {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));

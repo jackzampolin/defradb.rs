@@ -35,6 +35,7 @@ tracing.workspace = true
 async-trait = "0.1"
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 axum = { workspace = true, optional = true }
 reqwest = { version = "0.12", features = ["json"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
