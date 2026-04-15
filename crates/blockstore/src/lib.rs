@@ -48,6 +48,7 @@ pub use verify::verify_block_cid;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use cid::multihash::Code;
 use cid::Cid;
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -152,28 +153,24 @@ impl<S: Store + 'static> DefraBlockstore<S> {
         let code = mh.code();
 
         // Compute hash based on the multihash code
-        match code {
-            0x12 => {
-                // SHA2-256
-                let mut hasher = Sha256::new();
-                hasher.update(data);
-                let computed_digest = hasher.finalize();
+        if code == u64::from(Code::Sha2_256) {
+            let mut hasher = Sha256::new();
+            hasher.update(data);
+            let computed_digest = hasher.finalize();
 
-                if mh.digest() != computed_digest.as_slice() {
-                    return Err(Error::HashMismatch {
-                        cid: cid.to_string(),
-                    });
-                }
-                Ok(())
+            if mh.digest() != computed_digest.as_slice() {
+                return Err(Error::HashMismatch {
+                    cid: cid.to_string(),
+                });
             }
-            _ => {
-                tracing::warn!(
-                    hash_code = code,
-                    cid = %cid,
-                    "Hash verification skipped: unsupported hash algorithm"
-                );
-                Ok(())
-            }
+            Ok(())
+        } else {
+            tracing::warn!(
+                hash_code = code,
+                cid = %cid,
+                "Hash verification skipped: unsupported hash algorithm"
+            );
+            Ok(())
         }
     }
 }
