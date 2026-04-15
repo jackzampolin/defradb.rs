@@ -3770,6 +3770,7 @@ dependencies = [
  "defra-http",
  "events",
  "identity",
+ "lens",
  "p2p",
  "query",
  "reqwest 0.12.28",

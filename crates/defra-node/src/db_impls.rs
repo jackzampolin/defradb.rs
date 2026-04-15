@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+use lens::{LensConfig, TransformId};
+use schema::CollectionVersion;
+
 use crate::SchemaOps;
 
 #[async_trait::async_trait]
@@ -14,7 +17,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
             .map_err(|e| anyhow::anyhow!("schema validation error: {}", e))?;
 
         for collection in collections {
-            self.create_collection(collection)
+            db::DB::create_collection(self, collection)
                 .await
                 .map_err(|e| anyhow::anyhow!("create collection error: {}", e))?;
         }
@@ -22,8 +25,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
     }
 
     async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()> {
-        let known_types: std::collections::HashSet<String> = self
-            .list_collections()
+        let known_types: std::collections::HashSet<String> = db::DB::list_collections(self)
             .unwrap_or_default()
             .into_iter()
             .collect();
@@ -83,6 +85,54 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
         }
 
         Ok(())
+    }
+
+    async fn patch_collection(
+        &self,
+        collection_name: &str,
+        patch: &str,
+    ) -> anyhow::Result<CollectionVersion> {
+        db::DB::patch_collection(self, collection_name, patch)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()> {
+        db::DB::set_active_collection_version(self, version_id)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId> {
+        db::DB::set_migration(self, config)
+            .await
+            .map_err(anyhow::Error::new)
+    }
+
+    fn list_collections(&self) -> anyhow::Result<Vec<String>> {
+        db::DB::list_collections(self).map_err(anyhow::Error::new)
+    }
+
+    fn get_collection(&self, name: &str) -> anyhow::Result<Option<CollectionVersion>> {
+        Ok(db::DB::get_collection(self, name)
+            .map_err(anyhow::Error::new)?
+            .map(|collection| collection.schema().clone()))
+    }
+
+    async fn get_collection_by_version_id(
+        &self,
+        version_id: &str,
+    ) -> anyhow::Result<Option<CollectionVersion>> {
+        Ok(db::DB::get_collection_by_version_id_full(self, version_id)
+            .await
+            .map_err(anyhow::Error::new)?
+            .map(|collection| collection.schema().clone()))
+    }
+
+    async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>> {
+        db::DB::get_all_collection_versions(self)
+            .await
+            .map_err(anyhow::Error::new)
     }
 }
 
