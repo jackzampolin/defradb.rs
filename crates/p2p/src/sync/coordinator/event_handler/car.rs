@@ -100,7 +100,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let (_roots, blocks) = decode_car(&car_data)?;
 
         if blocks.is_empty() {
-            tracing::warn!(
+            self.manager.diagnostics.record_car_empty_response();
+            // Peer replied with a parseable but block-less CAR (provider
+            // had nothing for this root). Debug: transport layer surfaces
+            // the final "no provider succeeded" outcome via BitswapComplete
+            // (see issue #858).
+            tracing::debug!(
                 root_cid = %root_cid,
                 peer_id = %peer_id,
                 "Received empty CAR response"
