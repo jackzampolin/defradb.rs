@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use query::{DocumentMapping, Filter};
 use serde_json::{json, Value as JsonValue};
+use std::hint::black_box;
 
 fn make_mapping() -> DocumentMapping {
     let mut mapping = DocumentMapping::new();

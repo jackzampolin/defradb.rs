@@ -14,7 +14,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use std::future::Future;
 
 use identity::{from_token, verify_auth_token, Did, Identity, TokenIdentity};
 
@@ -254,28 +253,15 @@ where
 {
     type Rejection = IdentityExtractionError;
 
-    fn from_request_parts<'life0, 'life1, 'async_trait>(
-        parts: &'life0 mut Parts,
-        _state: &'life1 S,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Self, Self::Rejection>> + Send + 'async_trait>>
-    where
-        'life0: 'async_trait,
-        'life1: 'async_trait,
-        Self: 'async_trait,
-    {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         // If the auth middleware already parsed identity, reuse it.
         if let Some(mid) = parts.extensions.get::<MiddlewareIdentity>() {
-            let did = mid.0.clone();
-            return Box::pin(async move { Ok(ExtractIdentity(did)) });
+            return Ok(ExtractIdentity(mid.0.clone()));
         }
 
         // Fallback: parse from headers (for routes/tests without the middleware).
-        let result = parse_identity_from_headers(&parts.headers);
-
-        Box::pin(async move {
-            let did = result?;
-            Ok(ExtractIdentity(did))
-        })
+        let did = parse_identity_from_headers(&parts.headers)?;
+        Ok(ExtractIdentity(did))
     }
 }
 
@@ -375,64 +361,50 @@ where
 {
     type Rejection = IdentityExtractionError;
 
-    fn from_request_parts<'life0, 'life1, 'async_trait>(
-        parts: &'life0 mut Parts,
-        _state: &'life1 S,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<Self, Self::Rejection>> + Send + 'async_trait>>
-    where
-        'life0: 'async_trait,
-        'life1: 'async_trait,
-        Self: 'async_trait,
-    {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         // Get the auth header value, returning error for malformed headers
-        let auth_result: Result<Option<String>, IdentityExtractionError> =
-            match parts.headers.get(AUTHORIZATION) {
-                Some(value) => match value.to_str() {
-                    Ok(s) => Ok(Some(s.to_string())),
-                    Err(_) => Err(IdentityExtractionError::InvalidToken(
+        let auth_value: Option<String> = match parts.headers.get(AUTHORIZATION) {
+            Some(value) => match value.to_str() {
+                Ok(s) => Some(s.to_string()),
+                Err(_) => {
+                    return Err(IdentityExtractionError::InvalidToken(
                         "Authorization header contains invalid characters".to_string(),
-                    )),
-                },
-                None => Ok(None),
-            };
-
-        // Check if request has an Authorization header with a token
-        let has_auth_token = match &auth_result {
-            Ok(Some(auth)) => {
-                let trimmed = auth
-                    .strip_prefix("Bearer ")
-                    .or_else(|| auth.strip_prefix("bearer "));
-                trimmed.map(|t| !t.trim().is_empty()).unwrap_or(false)
-            }
-            _ => false,
+                    ))
+                }
+            },
+            None => None,
         };
 
+        // Check if request has an Authorization header with a token
+        let has_auth_token = auth_value
+            .as_deref()
+            .and_then(|auth| {
+                auth.strip_prefix("Bearer ")
+                    .or_else(|| auth.strip_prefix("bearer "))
+            })
+            .map(|t| !t.trim().is_empty())
+            .unwrap_or(false);
+
         // Get Host header for audience verification (matches Go DefraDB behavior)
-        let host_result = extract_host_header(&parts.headers);
+        // For authenticated requests, require a valid Host header — this prevents
+        // token bypass via missing/malformed Host header.
+        let host = match extract_host_header(&parts.headers) {
+            HostHeaderResult::Valid(h) => h,
+            HostHeaderResult::Missing if has_auth_token => {
+                return Err(IdentityExtractionError::MissingHost(
+                    "Host header required for authenticated requests".to_string(),
+                ));
+            }
+            HostHeaderResult::Invalid if has_auth_token => {
+                return Err(IdentityExtractionError::MissingHost(
+                    "valid Host header required for authenticated requests".to_string(),
+                ));
+            }
+            // Anonymous requests don't need Host header
+            _ => String::new(),
+        };
 
-        Box::pin(async move {
-            let auth_value = auth_result?;
-
-            // For authenticated requests, require a valid Host header
-            // This prevents token bypass via missing/malformed Host header
-            let host = match host_result {
-                HostHeaderResult::Valid(h) => h,
-                HostHeaderResult::Missing if has_auth_token => {
-                    return Err(IdentityExtractionError::MissingHost(
-                        "Host header required for authenticated requests".to_string(),
-                    ));
-                }
-                HostHeaderResult::Invalid if has_auth_token => {
-                    return Err(IdentityExtractionError::MissingHost(
-                        "valid Host header required for authenticated requests".to_string(),
-                    ));
-                }
-                // Anonymous requests don't need Host header
-                _ => String::new(),
-            };
-
-            let result = extract_token_identity_from_auth_header(auth_value.as_deref(), &host)?;
-            Ok(ExtractTokenIdentity(result))
-        })
+        let result = extract_token_identity_from_auth_header(auth_value.as_deref(), &host)?;
+        Ok(ExtractTokenIdentity(result))
     }
 }

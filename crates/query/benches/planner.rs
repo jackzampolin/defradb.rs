@@ -1,9 +1,10 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use query::mapper::Field;
 use query::{Filter, Planner, Select};
 use schema::{
     CollectionVersion, FieldDescription, FieldKind, IndexDescription, IndexedFieldDescription,
 };
+use std::hint::black_box;
 
 fn map<const N: usize>(
     entries: [(String, serde_json::Value); N],

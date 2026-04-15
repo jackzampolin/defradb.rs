@@ -95,14 +95,21 @@ postcard = { version = "1.0", features = ["alloc"] }
 
 # Storage
 redb = "2.4"
-fjall = "3"
-rocksdb = "0.22"
+fjall = "3.1.4"
+rocksdb = "0.24.0"
 
 # Cryptography
 ed25519-dalek = { version = "2.1", features = ["serde", "zeroize"] }
-uuid = { version = "1.0", features = ["v4"] }
+uuid = { version = "1.23.0", features = ["v4"] }
 k256 = { version = "0.13", features = ["ecdsa", "serde"] }
 sha2 = { version = "0.10", features = ["asm"] }
+# Pinned to 0.8: rand 0.9 bumped rand_core to 0.9, but the stable
+# RustCrypto ecosystem (k256 0.13, p256 0.13, ed25519-dalek 2.1,
+# x25519-dalek 2.x, aes-gcm 0.10) still pins rand_core 0.6, so passing
+# rand 0.9's `OsRng` as an RNG argument to any of these crates fails with
+# trait-bound errors. rand_core-0.9-compatible releases exist only as
+# prereleases (ed25519-dalek 3.0-pre, k256 0.14-rc, …). Bump together
+# once those stabilize. Tracked in #652.
 rand = "0.8"
 aes-gcm = "0.10"
 hex = "0.4"
@@ -115,10 +122,15 @@ alloy-consensus = { version = "1", features = ["k256"] }
 alloy-eips = "1"
 alloy-signer = "1"
 alloy-signer-local = { version = "1", default-features = false }
-alloy-rlp = "0.3"
+alloy-rlp = "0.3.15"
 bs58 = "0.5"
 
 # IPLD
+# Pinned together: libipld 0.16 is the last release and internally pins
+# cid 0.10 / multihash 0.18. Bumping cid or multihash here would create
+# duplicate types across the IPLD API boundary, so the whole stack moves
+# together once we either drop libipld or migrate to its successor.
+# Tracked in #652.
 cid = { version = "0.10", features = ["serde"] }
 multihash = "0.18"
 multicodec = "0.1"
@@ -132,19 +144,21 @@ bm25 = "2.3"
 graphql-parser = "0.4"
 
 # HTTP
-axum = { version = "0.7", features = ["ws"] }
-tower = { version = "0.4", features = ["timeout", "limit"] }
-tower-http = { version = "0.5", features = ["cors", "trace"] }
-hyper = "1.0"
+axum = { version = "0.8.9", features = ["ws"] }
+tower = { version = "0.5", features = ["timeout", "limit"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+hyper = "1.9.0"
 
 # Error handling
-thiserror = "1.0"
+thiserror = "2"
 anyhow = "1.0"
 
 # gRPC (Orbis ring integration)
-tonic = "0.12"
-prost = "0.13"
-tonic-build = "0.12"
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+tonic-build = "0.14"
+tonic-prost-build = "0.14"
 
 # Bytes
 bytes = "1.5"
@@ -153,14 +167,14 @@ bytes = "1.5"
 tracing = "0.1"
 
 # Testing
-proptest = "1.4"
-criterion = { version = "0.5", features = ["async_tokio"] }
+proptest = "1.11.0"
+criterion = { version = "0.6", features = ["async_tokio"] }
 
 # Synchronization (non-poisoning locks)
 parking_lot = "0.12"
 
 # Caching
-lru = "0.16.3"
+lru = "0.16.4"
 
 # Async streams
 tokio-stream = "0.1"

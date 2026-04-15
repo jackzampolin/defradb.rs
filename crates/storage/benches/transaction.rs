@@ -1,7 +1,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use std::hint::black_box;
 use storage::backends::RedbStore;
 use storage::corekv::{IterOptions, Reader, Store, Writer};
 use tempfile::TempDir;

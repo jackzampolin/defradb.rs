@@ -47,14 +47,14 @@ pub fn create_router_with_state(state: AppState) -> Router {
     let tx_routes = Router::new()
         .route("/", post(handlers::tx_begin))
         .route("/concurrent", post(handlers::tx_begin_concurrent))
-        .route("/:id", post(handlers::tx_commit))
-        .route("/:id", delete(handlers::tx_discard))
-        .route("/:id/lens", post(handlers::txn_ops::set_migration_in_txn))
+        .route("/{id}", post(handlers::tx_commit))
+        .route("/{id}", delete(handlers::tx_discard))
+        .route("/{id}/lens", post(handlers::txn_ops::set_migration_in_txn))
         .route(
-            "/:id/collections",
+            "/{id}/collections",
             get(handlers::txn_ops::get_collections_in_txn),
         )
-        .route("/:id/schema", post(handlers::txn_ops::add_schema_in_txn));
+        .route("/{id}/schema", post(handlers::txn_ops::add_schema_in_txn));
 
     // Collection routes (REST API)
     // Static routes must come before parametric `:name` routes
@@ -71,41 +71,44 @@ pub fn create_router_with_state(state: AppState) -> Router {
             get(handlers::get_all_collections).delete(handlers::delete_collection_versions),
         )
         .route("/migrations", post(handlers::lens::set_migration))
-        .route("/by-id/:id", get(handlers::find_collection_by_id))
+        .route("/by-id/{id}", get(handlers::find_collection_by_id))
         .route(
-            "/by-version/:id",
+            "/by-version/{id}",
             get(handlers::get_collection_by_version_id),
         )
         // Go-compatible list-all-indexes route (no path param)
         .route("/indexes", get(handlers::index::go_list_all_indexes))
         .route(
-            "/:name",
+            "/{name}",
             post(handlers::create_document).delete(handlers::delete_collection),
         )
-        .route("/:name/describe", get(handlers::describe_collection))
-        .route("/:name/exists", get(handlers::collection_exists))
-        .route("/:name/truncate", delete(handlers::truncate_collection))
-        .route("/:name/document/:docID", get(handlers::get_document))
-        .route("/:name/document/:docID", patch(handlers::update_document))
-        .route("/:name/document/:docID", delete(handlers::delete_document))
-        // Go-compatible index routes (collection in path)
-        .route("/:name/indexes", get(handlers::index::go_list_indexes))
-        .route("/:name/indexes", post(handlers::index::go_create_index))
+        .route("/{name}/describe", get(handlers::describe_collection))
+        .route("/{name}/exists", get(handlers::collection_exists))
+        .route("/{name}/truncate", delete(handlers::truncate_collection))
+        .route("/{name}/document/{docID}", get(handlers::get_document))
+        .route("/{name}/document/{docID}", patch(handlers::update_document))
         .route(
-            "/:name/indexes/:index",
+            "/{name}/document/{docID}",
+            delete(handlers::delete_document),
+        )
+        // Go-compatible index routes (collection in path)
+        .route("/{name}/indexes", get(handlers::index::go_list_indexes))
+        .route("/{name}/indexes", post(handlers::index::go_create_index))
+        .route(
+            "/{name}/indexes/{index}",
             delete(handlers::index::go_delete_index),
         )
         // Go-compatible encrypted index routes
         .route(
-            "/:name/encrypted-indexes",
+            "/{name}/encrypted-indexes",
             get(handlers::encrypted_index::go_list_encrypted_indexes),
         )
         .route(
-            "/:name/encrypted-indexes",
+            "/{name}/encrypted-indexes",
             post(handlers::encrypted_index::go_add_encrypted_index),
         )
         .route(
-            "/:name/encrypted-indexes/:field",
+            "/{name}/encrypted-indexes/{field}",
             delete(handlers::encrypted_index::go_delete_encrypted_index),
         );
 
@@ -143,7 +146,7 @@ pub fn create_router_with_state(state: AppState) -> Router {
         .route("/status", get(handlers::acp::get_status))
         .route("/policy", post(handlers::acp::add_policy))
         .route("/policy", get(handlers::acp::list_policies))
-        .route("/policy/:id", get(handlers::acp::get_policy))
+        .route("/policy/{id}", get(handlers::acp::get_policy))
         .route(
             "/document/relationship",
             post(handlers::acp::add_doc_relationship),
