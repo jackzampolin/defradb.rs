@@ -439,21 +439,3 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     }
 }
 
-// ==================== ProofBlockstore Implementation ====================
-
-/// Implement ProofBlockstore for DefraBlockstore to enable Merkle proof extraction.
-///
-/// This allows the crypto crate's `extract_proof` function to work with
-/// DefraBlockstore instances, enabling Merkle proof generation over the
-/// block DAG.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S: Store + 'static> crypto::ProofBlockstore for DefraBlockstore<S> {
-    async fn get_block(&self, cid: &Cid) -> defra_core::Result<Option<Vec<u8>>> {
-        // Delegate to the Blockstore::get implementation and convert Bytes → Vec<u8>
-        self.get(cid)
-            .await
-            .map(|opt| opt.map(|b| b.to_vec()))
-            .map_err(|e| defra_core::Error::Storage(e.to_string()))
-    }
-}

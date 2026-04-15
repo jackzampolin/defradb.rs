@@ -7,7 +7,6 @@
 //! - Asymmetric encryption (ECIES)
 //! - Searchable encryption (HMAC-based equality tags)
 //! - DID key generation
-//! - Merkle proof generation and verification
 //!
 //! All implementations prioritize security and compatibility with the Go
 //! implementation of DefraDB.
@@ -18,7 +17,6 @@ pub mod encryption;
 pub mod error;
 pub mod hash;
 pub mod keys;
-pub mod merkle_proof;
 pub mod se;
 pub mod signature;
 pub mod types;
@@ -56,12 +54,6 @@ pub use encryption::{
 
 // Re-export hash functions
 pub use hash::{sha256, sha256_hash, Sha256Hash};
-
-// Re-export merkle proof types
-pub use merkle_proof::{
-    extract_proof, verify_proof, verify_signed_proof, MerkleProof, ProofBlockstore, ProofNode,
-    SignedMerkleProof,
-};
 
 // Re-export searchable encryption types
 pub use se::{

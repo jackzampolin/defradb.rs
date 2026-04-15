@@ -3130,7 +3130,6 @@ name = "crypto"
 version = "0.5.0"
 dependencies = [
  "aes-gcm",
- "async-trait",
  "blst",
  "cid 0.10.1",
  "defra-core",
