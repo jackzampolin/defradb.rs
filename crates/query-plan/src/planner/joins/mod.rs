@@ -1317,7 +1317,7 @@ impl Planner {
                         );
                         if select.exhaustive {
                             let shared_ids: crate::plan::SharedYieldedIds = std::sync::Arc::new(
-                                tokio::sync::RwLock::new(std::collections::HashSet::new()),
+                                async_lock::RwLock::new(std::collections::HashSet::new()),
                             );
                             let child_fk_field_name = target_relation_field
                                 .as_ref()
@@ -1429,7 +1429,7 @@ impl Planner {
                                     .map(|c| c.direction)
                                     .unwrap_or(OrderDirection::Asc);
                                 let shared_ids: crate::plan::SharedYieldedIds = std::sync::Arc::new(
-                                    tokio::sync::RwLock::new(std::collections::HashSet::new()),
+                                    async_lock::RwLock::new(std::collections::HashSet::new()),
                                 );
                                 let join = join.with_orphan_config(
                                     orphan,

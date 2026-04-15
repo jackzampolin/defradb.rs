@@ -47,7 +47,9 @@ hex = "0.4"
 parking_lot = "0.12"
 
 [features]
-default = ["rocksdb"]
+# rocksdb is opt-in so wasm builds don't unify librocksdb-sys/bzip2-sys into
+# the graph. Native consumers (cli, defra-node, embedded, ffi) enable it.
+default = []
 redb = ["dep:redb"]
 fjall = ["dep:fjall"]
 rocksdb = ["dep:rocksdb"]

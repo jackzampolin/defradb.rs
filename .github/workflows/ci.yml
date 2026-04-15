@@ -33,6 +33,47 @@ jobs:
         run: |
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
 
+  wasm-check:
+    name: WASM Build Check
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Configure private repo access
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-ci"
+          shared-key: "wasm32"
+
+      - name: Install system dependencies
+        # clang is needed because lz4-sys (transitive C dep) builds
+        # wasm-shim C sources via cc-rs when the target is wasm32.
+        # protoc is needed by prost-build.
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang
+
+      - name: Exclude tools with private deps from workspace
+        run: sed -i '/"tools\/integration-test"/d; /"tools\/ffi-test"/d' Cargo.toml
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+
+      - name: Build WASM
+        run: wasm-pack build crates/wasm --release --target web --out-dir ../../pkg/wasm
+
+      - name: Cleanup
+        if: always()
+        run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
+          git checkout -- Cargo.toml
+
   build:
     name: Build & Test
     runs-on: [self-hosted, macOS, ARM64, studio]
