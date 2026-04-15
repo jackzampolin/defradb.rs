@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use document::NormalValue;
-use tokio::sync::RwLock;
+use async_lock::RwLock;
 
 use crate::fetcher::DocFetcher;
 use crate::planner::{Doc, ExecInfo, PlanNode};
