@@ -2,16 +2,61 @@
 # Some ignored crates live in tools/ (excluded from CI workspace) so may not match
 unused-ignored-advisory = "warn"
 ignore = [
-    # Unmaintained transitive dependencies - acceptable for now
-    "RUSTSEC-2024-0388",  # derivative
-    "RUSTSEC-2025-0057",  # fxhash
-    "RUSTSEC-2024-0384",  # instant
-    "RUSTSEC-2024-0387",  # opentelemetry_api
-    "RUSTSEC-2024-0436",  # paste
-    "RUSTSEC-2024-0370",  # proc-macro-error
-    "RUSTSEC-2025-0134",  # rustls-pemfile
-    "RUSTSEC-2021-0127",  # serde_cbor
-    "RUSTSEC-2024-0320",  # wasmtime related
+    # ------------------------------------------------------------------
+    # Unmaintained crates pulled in via upstream ecosystems we don't
+    # control. Each entry documents the pulling path and the condition
+    # under which it can be removed. Narrowed as part of #705.
+    # ------------------------------------------------------------------
+
+    # derivative — unmaintained. Pulled by iroh-bitswap (beetle repo).
+    # Removable when iroh is dropped per CLAUDE.md strategy (libp2p is
+    # the main transport), at which point beetle can be removed.
+    "RUSTSEC-2024-0388",
+
+    # fxhash — unmaintained. Pulled by bm25 2.3.x (full-text search).
+    # Our direct bm25 dep is already pinned to the latest workspace
+    # version; upstream bm25 would need to switch its internal hasher
+    # (e.g. to ahash) before this can be removed.
+    "RUSTSEC-2025-0057",
+
+    # instant — unmaintained. Pulled by libp2p 0.53. Newer libp2p
+    # releases replaced it with web-time. Removable when we bump libp2p
+    # — currently pinned to 0.53 to match iroh-bitswap's dep pin.
+    "RUSTSEC-2024-0384",
+
+    # opentelemetry_api — unmaintained. Pulled by iroh-metrics
+    # (beetle repo). Removable alongside iroh when we drop the iroh
+    # transport.
+    "RUSTSEC-2024-0387",
+
+    # paste — unmaintained. Pulled by alloy-primitives (backbone repo,
+    # ACP light client). Removable when alloy migrates off paste; our
+    # direct alloy pin is already at the latest workspace version.
+    "RUSTSEC-2024-0436",
+
+    # proc-macro-error — unmaintained. Pulled by multihash-derive 0.8,
+    # which is pinned to multihash 0.18 by libipld 0.16. The whole IPLD
+    # stack moves together; tracked in #652.
+    "RUSTSEC-2024-0370",
+
+    # rustls-pemfile 1.x — unmaintained (2.x is current). Pulled by
+    # reqwest 0.11 inside iroh-metrics (beetle repo). Our direct reqwest
+    # deps (db-search, defra-node) already use reqwest 0.12 and pull
+    # rustls-pemfile 2.x; the 1.x copy is purely from the iroh path and
+    # will disappear when iroh does.
+    "RUSTSEC-2025-0134",
+
+    # serde_cbor — unmaintained. Used directly by db, storage, and p2p
+    # for wire-format CBOR. Replacing with ciborium is a workspace-wide
+    # refactor that touches P2P wire format — out of scope for #705 and
+    # deliberately tracked as future work.
+    "RUSTSEC-2021-0127",
+
+    # wasmtime-related — belt-and-braces ignore after the wasmtime 41
+    # upgrade (which remediated RUSTSEC-2025-0046 / 0118 / 2026-0006).
+    # Retained until the upstream advisory is retracted for recent
+    # wasmtime releases.
+    "RUSTSEC-2024-0320",
 ]
 
 [licenses]
