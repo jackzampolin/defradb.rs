@@ -7,14 +7,13 @@ use blockstore::Blockstore;
 use crate::transport_doc_pusher::TransportDocPusher;
 use crate::transport_version_syncer::TransportVersionSyncer;
 use crate::{
-    P2PError, P2POperations, P2PResult, P2pDocumentInfo, P2pDocumentRequest, ReplicatorInfo,
-    ReplicatorPushOptions,
+    ExplicitReplayCapabilityInput, P2PError, P2PErrorExt as _, P2POperations, P2PResult,
+    P2pDocumentInfo, P2pDocumentRequest, ReplicatorInfo, ReplicatorPushOptions,
 };
 
 use p2p::iroh::{format_public_listen_addrs, parse_public_peer_addr, IrohTransport};
 use p2p::sync::IrohSyncCoordinator;
 use p2p::topics::DefraTopic;
-use p2p::transport::PeerId;
 use p2p::P2PTransport;
 
 /// P2P operations implementation for the iroh transport.
@@ -24,6 +23,7 @@ pub struct IrohP2PAdapter<B: Blockstore + 'static> {
     doc_pusher: Option<Arc<dyn TransportDocPusher>>,
     event_bus: Option<Arc<dyn events::Bus>>,
     version_syncer: Option<Arc<dyn TransportVersionSyncer>>,
+    replicator_push_options: ReplicatorPushOptions,
     peer_addresses: Arc<std::sync::RwLock<HashMap<String, String>>>,
     tracked_documents: Arc<std::sync::RwLock<HashSet<String>>>,
 }
@@ -61,9 +61,15 @@ impl<B: Blockstore + 'static> IrohP2PAdapter<B> {
             doc_pusher: Some(doc_pusher),
             event_bus: Some(event_bus),
             version_syncer,
+            replicator_push_options: ReplicatorPushOptions::default(),
             peer_addresses: Arc::new(std::sync::RwLock::new(HashMap::new())),
             tracked_documents: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
+    }
+
+    pub fn with_replicator_push_options(mut self, options: ReplicatorPushOptions) -> Self {
+        self.replicator_push_options = options;
+        self
     }
 
     pub fn with_full_context_arc(
@@ -152,13 +158,6 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         Ok(())
     }
 
-    async fn notify_network_change(&self) -> P2PResult<()> {
-        self.transport
-            .network_change()
-            .await
-            .map_err(|error| P2PError::transport(error.to_string()))
-    }
-
     async fn get_replicators(&self) -> P2PResult<Vec<ReplicatorInfo>> {
         let p2p_infos = self
             .transport
@@ -183,7 +182,8 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
         &self,
         collections: Vec<String>,
         addr: Option<&str>,
-        push_options: ReplicatorPushOptions,
+        _explicit_replay_capabilities: Vec<ExplicitReplayCapabilityInput>,
+        _expected_authorizer_did: Option<&str>,
     ) -> P2PResult<()> {
         let addr_str = addr.ok_or_else(|| P2PError::invalid_input("address is required"))?;
         let (peer_id, direct_addrs) = parse_public_peer_addr(addr_str)
@@ -191,7 +191,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
 
         let effective_collections = if collections.is_empty() {
             if let Some(ref pusher) = self.doc_pusher {
-                pusher.list_collections().map_err(P2PError::from)?
+                pusher.list_collections()?
             } else {
                 return Err(P2PError::unsupported(
                     "no database context to list collections",
@@ -290,7 +290,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
                 let push_pusher = Arc::clone(pusher);
                 let push_event_bus = self.event_bus.clone();
                 let push_peer = peer_id;
-                let push_se_key = push_options.se_encryption_key;
+                let push_se_key = self.replicator_push_options.se_encryption_key.clone();
 
                 tracing::info!(
                     peer_id = %push_peer,
@@ -385,45 +385,6 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
 
         if let Some(ref bus) = self.event_bus {
             bus.publish(events::Message::replicator_completed());
-        }
-
-        Ok(())
-    }
-
-    async fn retry_replicators(&self, push_options: ReplicatorPushOptions) -> P2PResult<()> {
-        let pusher = self
-            .doc_pusher
-            .as_ref()
-            .ok_or_else(|| P2PError::unsupported("no database context to retry replicators"))?;
-        let collections = pusher.list_collections().map_err(P2PError::from)?;
-        let replicators =
-            self.transport.list_replicators().await.map_err(|error| {
-                P2PError::transport(format!("failed to get replicators: {error}"))
-            })?;
-
-        let mut push_handles = Vec::new();
-        for replicator in replicators {
-            let peer_id = PeerId::new(replicator.peer_id_str().to_string());
-            let push_pusher = Arc::clone(pusher);
-            let push_collections = collections.clone();
-            let push_se_key = push_options.se_encryption_key.clone();
-
-            push_handles.push(tokio::spawn(async move {
-                if let Err(error) = push_pusher
-                    .push_existing_docs(&peer_id, &push_collections, push_se_key.as_deref())
-                    .await
-                {
-                    tracing::error!(
-                        peer_id = %peer_id,
-                        error = %error,
-                        "Failed to retry push existing docs to replicator"
-                    );
-                }
-            }));
-        }
-
-        for handle in push_handles {
-            let _ = handle.await;
         }
 
         Ok(())
@@ -596,16 +557,11 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             .sync_coordinator
             .as_ref()
             .ok_or_else(|| P2PError::unsupported("no sync coordinator for republish"))?;
-        pusher
-            .validate_collection_exists(collection_name)
-            .map_err(P2PError::from)?;
+        pusher.validate_collection_exists(collection_name)?;
         let collection_id = pusher.get_collection_id(collection_name).ok_or_else(|| {
             P2PError::not_found(format!("collection '{collection_name}' not found"))
         })?;
-        let head_blocks = pusher
-            .load_document_head_blocks(doc_id)
-            .await
-            .map_err(P2PError::from)?;
+        let head_blocks = pusher.load_document_head_blocks(doc_id).await?;
         let acp_actor_relationships = pusher
             .load_doc_actor_relationships(collection_name, doc_id)
             .await?;
@@ -634,9 +590,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             .doc_pusher
             .as_ref()
             .ok_or_else(|| P2PError::unsupported("no database context for sync"))?;
-        pusher
-            .validate_collection_exists(collection_name)
-            .map_err(P2PError::from)?;
+        pusher.validate_collection_exists(collection_name)?;
 
         let event_bus = self
             .event_bus
@@ -719,9 +673,7 @@ impl<B: Blockstore + 'static> P2POperations for IrohP2PAdapter<B> {
             .doc_pusher
             .as_ref()
             .ok_or_else(|| P2PError::unsupported("no database context for sync"))?;
-        pusher
-            .validate_branchable_collection(collection_id)
-            .map_err(P2PError::from)?;
+        pusher.validate_branchable_collection(collection_id)?;
 
         let connected_peers = self.transport.connected_peers().await.map_err(|error| {
             P2PError::transport(format!("failed to get connected peers: {error}"))

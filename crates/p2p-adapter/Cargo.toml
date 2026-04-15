@@ -1,35 +1,28 @@
 [package]
-name = "embedded"
+name = "defra-p2p-adapter"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Reusable embedded/mobile DefraDB node assembly"
+description = "DefraDB P2P adapters for HTTP-facing operations"
 
 [dependencies]
 acp = { path = "../acp" }
 blockstore = { path = "../blockstore" }
-crypto = { path = "../crypto" }
 db = { path = "../db" }
 db-merge = { path = "../db-merge" }
 defra-core = { path = "../defra-core" }
 defra-http = { path = "../http" }
-defra-p2p-adapter = { workspace = true, default-features = false, features = ["libp2p"] }
 document = { path = "../document" }
 events = { path = "../events" }
-identity = { path = "../identity" }
 lens = { path = "../lens" }
-p2p = { path = "../p2p" }
-query = { path = "../query" }
-schema = { path = "../schema" }
-sourcehub = { path = "../sourcehub" }
+p2p = { path = "../p2p", default-features = false }
 storage = { path = "../storage" }
 
-anyhow.workspace = true
-bytes.workspace = true
 async-trait.workspace = true
+bytes.workspace = true
 cid.workspace = true
 hex.workspace = true
 libp2p.workspace = true
@@ -37,18 +30,13 @@ serde.workspace = true
 serde_bytes.workspace = true
 serde_ipld_dagcbor.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing.workspace = true
 
 [features]
-default = ["redb"]
-redb = ["storage/redb"]
-iroh = ["p2p/iroh-transport", "defra-p2p-adapter/iroh"]
-
-[dev-dependencies]
-tempfile = "3.17"
-tokio = { workspace = true, features = ["full"] }
+default = ["iroh", "libp2p"]
+iroh = ["p2p/iroh-transport"]
+libp2p = []
 
 [lints]
 workspace = true

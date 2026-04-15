@@ -14,7 +14,7 @@ test = false
 [features]
 default = ["redb"]
 http = ["dep:defra-http", "dep:axum"]
-p2p = ["dep:p2p", "dep:blockstore"]
+p2p = ["dep:p2p", "dep:blockstore", "dep:defra-http", "dep:defra-p2p-adapter"]
 redb = ["storage/redb"]
 rocksdb = ["storage/rocksdb"]
 
@@ -47,6 +47,7 @@ defra-http = { path = "../http", optional = true }
 # Optional — P2P replication (IROH transport)
 p2p = { path = "../p2p", optional = true, features = ["iroh-transport"] }
 blockstore = { path = "../blockstore", optional = true }
+defra-p2p-adapter = { workspace = true, optional = true, default-features = false, features = ["iroh"] }
 
 [dev-dependencies]
 axum.workspace = true

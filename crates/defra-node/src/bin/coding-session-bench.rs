@@ -306,7 +306,7 @@ mod rocksdb_runner {
         Ok(options)
     }
 
-    fn next_value<'a>(args: &mut impl Iterator<Item = String>, flag: &'a str) -> Result<String> {
+    fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
         args.next()
             .with_context(|| format!("missing value for {flag}"))
     }

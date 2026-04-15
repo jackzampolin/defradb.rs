@@ -12,6 +12,8 @@ use crate::{
 };
 use anyhow::{anyhow, Context, Result};
 use p2p::sync::SyncConfig;
+#[cfg(feature = "iroh")]
+use p2p::P2PTransport;
 
 pub(crate) type EmbeddedBlockstore<S> = blockstore::DefraBlockstore<S>;
 pub(crate) type EmbeddedMergeHandler<S> = db_merge::AcpMergeHandler<S, EmbeddedBlockstore<S>>;

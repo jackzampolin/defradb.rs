@@ -135,20 +135,3 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for Arc<db::DB<S>> {
             .map_err(anyhow::Error::new)
     }
 }
-
-#[cfg(feature = "p2p")]
-impl<S: storage::corekv::Store + 'static> crate::CollectionLookup for db::DB<S> {
-    fn get_collection_id(&self, name: &str) -> Option<String> {
-        match self.get_collection(name) {
-            Ok(Some(collection)) => Some(collection.collection_id().to_string()),
-            Ok(None) => {
-                tracing::debug!(collection_name = %name, "collection not found for P2P lookup");
-                None
-            }
-            Err(e) => {
-                tracing::warn!(collection_name = %name, error = %e, "error looking up collection for P2P");
-                None
-            }
-        }
-    }
-}
