@@ -293,11 +293,15 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 }
             }
         } else {
-            // DAG has missing blocks - track as pending and request Bitswap fetch
-            tracing::info!(
+            // DAG has missing blocks - track as pending and request Bitswap fetch.
+            // Debug level: this fires per PushLog with missing links and is
+            // expected during catch-up; the terminal outcome is logged at info
+            // (DagReady) or warn (final failure) — see issue #858.
+            tracing::debug!(
                 ?cid,
                 missing_count = missing.len(),
                 doc_id = %msg.doc_id,
+                collection_id = %msg.collection_id,
                 "DAG has missing links, requesting Bitswap fetch"
             );
 
@@ -321,6 +325,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                                     .clone(),
                                 acp_actor_relationships: msg.acp_actor_relationships.clone(),
                                 inserted_at: now,
+                                attempts: 0,
                             },
                         );
                         true

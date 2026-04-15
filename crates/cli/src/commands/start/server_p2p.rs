@@ -150,8 +150,17 @@ impl Node {
                     max_workers: 32,
                 },
                 |result| match &result {
-                    p2p::sync::ReplicationResult::Merged { cid, doc_id, .. } => {
-                        info!(cid = %cid, doc_id = %doc_id, "Block merged successfully");
+                    p2p::sync::ReplicationResult::Merged {
+                        cid,
+                        doc_id,
+                        collection_id,
+                    } => {
+                        info!(
+                            cid = %cid,
+                            doc_id = %doc_id,
+                            collection_id = %collection_id,
+                            "Block merged successfully"
+                        );
                     }
                     p2p::sync::ReplicationResult::MergedButBroadcastFailed {
                         cid,

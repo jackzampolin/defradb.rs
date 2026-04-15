@@ -37,7 +37,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let blocks = collected.blocks;
 
         if blocks.is_empty() {
-            tracing::warn!(
+            self.manager.diagnostics.record_car_no_blocks_served();
+            // Normal race: peer asked for blocks we have not yet received
+            // ourselves. Noisy at WARN during concurrent replication catch-up;
+            // the requester retries until some peer serves the DAG.
+            tracing::debug!(
                 root_cid = %request.root_cid,
                 peer_id = %peer_id,
                 recursive = request.recursive,

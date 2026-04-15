@@ -543,7 +543,28 @@ pub(super) async fn handle_subscribe(
                                 }
                             }
                             Err(e) => {
-                                warn!("Failed to decode gossip message: {}", e);
+                                // Exponential-backoff sampling: warn on the
+                                // 1st, 2nd, 4th, 8th... occurrence; remainder
+                                // at debug. Prevents per-message spam when a
+                                // peer is sending malformed/version-mismatched
+                                // gossip payloads (issue #858).
+                                use std::sync::atomic::{AtomicU64, Ordering};
+                                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                                let count = COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+                                if count == 1 || count.is_power_of_two() {
+                                    warn!(
+                                        total_failures = count,
+                                        error = %e,
+                                        "Failed to decode gossip message \
+                                         (version skew or malformed sender?)"
+                                    );
+                                } else {
+                                    debug!(
+                                        total_failures = count,
+                                        error = %e,
+                                        "Failed to decode gossip message"
+                                    );
+                                }
                             }
                         }
                     }
