@@ -57,7 +57,7 @@ pub async fn extract_proof<B: ProofBlockstore>(
     // BFS to find path from leaf to root
     // We traverse "forward" through heads references
     let mut visited: HashSet<Cid> = HashSet::new();
-    let mut parent_map: HashMap<Cid, Cid> = HashMap::new(); // child -> parent
+    let mut parent_map: HashMap<Cid, Cid> = HashMap::new(); // parent -> child (who discovered this parent during BFS)
     let mut block_cache: HashMap<Cid, Vec<u8>> = HashMap::new();
     let mut queue: VecDeque<Cid> = VecDeque::new();
 

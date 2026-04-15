@@ -76,7 +76,7 @@ where
     let bytes = serde_cbor::to_vec(&msg).map_err(|e| Error::CborSerialization(e.to_string()))?;
 
     // Debug logging
-    tracing::info!(
+    tracing::debug!(
         bytes_len = bytes.len(),
         message_id = %msg.message_id(),
         sender_id = %msg.sender_id(),
