@@ -61,15 +61,20 @@ pub fn encode_car(roots: &[Cid], blocks: &[(&Cid, &[u8])]) -> Result<Vec<u8>> {
 /// Reads only the header-length varint and checks whether any bytes remain
 /// after the header. Used by the iroh requester to distinguish a header-only
 /// "no blocks" response from a usable fetch without paying full decode cost.
-/// Malformed input reports `true` so the caller forwards the bytes and lets
-/// the coordinator surface the decode error.
+/// Any malformed input — unreadable varint, or declared header length
+/// exceeding the remaining bytes — reports `true` so the caller forwards
+/// the bytes and lets the coordinator surface the decode error.
 #[cfg(feature = "iroh-transport")]
 pub(crate) fn car_has_any_block(data: &[u8]) -> bool {
     let mut cursor = data;
     let Ok(header_len) = read_varint(&mut cursor) else {
         return true;
     };
-    cursor.len() > header_len as usize
+    let header_len = header_len as usize;
+    if header_len > cursor.len() {
+        return true;
+    }
+    cursor.len() > header_len
 }
 
 /// Decoded CAR contents: root CIDs and blocks (CID + data pairs).
@@ -357,6 +362,11 @@ mod tests {
         // Malformed input: no varint → report `true` so the caller forwards
         // to the coordinator instead of silently dropping.
         assert!(car_has_any_block(&[]));
+
+        // Malformed subtype: varint declares a header longer than the
+        // remaining bytes. Also report `true` (fail-safe).
+        // Varint 0x7f = 127, but only 1 byte follows.
+        assert!(car_has_any_block(&[0x7f, 0xaa]));
     }
 
     #[test]
