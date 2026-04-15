@@ -78,6 +78,7 @@ tempfile = "3.8"
 [[bench]]
 name = "transaction"
 harness = false
+required-features = ["redb"]
 
 [lints]
 workspace = true
