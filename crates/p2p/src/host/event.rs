@@ -82,6 +82,12 @@ pub enum HostEvent {
     },
 
     /// Received a PushLog request via two-stream protocol (Go compatibility).
+    ///
+    /// Invariant (#838): `is_explicit_replicator` must only be set to
+    /// `true` by the two-stream transport after verifying the remote peer via
+    /// the signed explicit-replicator handshake. The sync coordinator treats
+    /// this flag as an authenticated claim and skips the `ReplicatorRegistry`
+    /// membership check when it is `true`.
     TwoStreamRequest {
         peer_id: PeerId,
         request: crate::message::PushLogRequest,

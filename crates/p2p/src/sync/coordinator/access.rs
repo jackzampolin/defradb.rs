@@ -23,22 +23,21 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Access rules (implemented in
     /// [`super::authorizer::RuntimeAuthorizer::peer_authorized_for_collection`]):
     /// 1. If mode is Open → allow all
-    /// 2. If peer is a replicator for the collection → allow
-    /// 3. If transport reports peer as a replicator for the collection (cache miss) → allow
-    /// 4. If peer is connected → allow
-    /// 5. If transport reports peer as connected (cache miss) → allow
-    /// 6. Otherwise → deny
+    /// 2. If peer is a replicator for the given collection → allow
+    /// 3. If transport reports peer as a replicator for the collection
+    ///    (registry cache miss) → allow
+    /// 4. Otherwise → deny
     ///
-    /// Rule 4 matches Go DefraDB behavior: replicator registration is
-    /// one-directional (source registers target), but the target accepts
-    /// push-log requests from any connected peer. Connected peers are
-    /// already authenticated via transport-level crypto. Document-level
-    /// ACP still applies independently at merge time.
+    /// Transport-level authentication proves *who* a peer is, not *what* they
+    /// are authorized to sync. Per-collection registry membership is the only
+    /// thing that grants collection-scoped access in Controlled mode, matching
+    /// Go DefraDB's `hasAccess` check (`go-p2p/peer.go`). A previous version
+    /// of this module accepted any connected peer as a fallback — see #838 for
+    /// the divergence that caused.
     ///
-    /// Important: collection access is broader than explicit replicator trust.
-    /// Callers that need to know whether a peer is an actual registered
-    /// replicator must use [`Self::is_registered_replicator`] instead of treating a
-    /// successful access check as equivalent.
+    /// Document-level ACP still applies independently at merge time; this
+    /// gate exists so that unauthorized peers never cause the receiver to
+    /// spend resources validating their blocks in the first place.
     ///
     /// Uses string-based registry lookup, supporting both libp2p and iroh peer IDs.
     pub(super) async fn check_access_str(
@@ -73,9 +72,19 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             .is_replicator(collection_id, peer_id_str)
     }
 
-    /// Check if a peer is authorized as a replicator for any collection.
+    /// Check if a peer is a replicator for *any* collection.
     ///
-    /// Used by handlers (e.g. DocSync) that lack collection context.
+    /// Used by handlers (DocSync, CAR fetch) whose wire protocol does not
+    /// carry a collection id. Strict membership is the best gate we can
+    /// apply without protocol-level collection scoping; it still eliminates
+    /// the "any connected peer" bypass that #838 flagged. In Open mode all
+    /// peers are allowed; in Controlled mode the peer must be registered as a
+    /// replicator for at least one collection, either in the local registry or
+    /// in the transport's replicator state on a registry cache miss.
+    ///
+    /// Per-doc collection filtering (rejecting reads for specific collections
+    /// the peer isn't authorized for) would be a stricter fix but requires a
+    /// collection-aware header on DocSync/CAR requests; out of scope here.
     /// Delegates to
     /// [`super::authorizer::RuntimeAuthorizer::peer_authorized_for_any`].
     pub(super) async fn check_peer_is_replicator(&self, peer_id: &PeerId) -> Result<()> {
@@ -100,5 +109,30 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// Get the current access mode.
     pub fn access_mode(&self) -> AccessMode {
         self.access.access_mode
+    }
+
+    pub(super) async fn peer_is_connected(&self, peer_id: &PeerId) -> bool {
+        let peer_id_str = peer_id.as_str();
+        if self.access.peer_state.is_connected(peer_id_str) {
+            return true;
+        }
+
+        match self.runtime.transport.connected_peers().await {
+            Ok(peers) => {
+                let is_connected = peers.iter().any(|peer| peer.as_str() == peer_id_str);
+                if is_connected {
+                    self.access.peer_state.peer_connected(peer_id_str);
+                }
+                is_connected
+            }
+            Err(error) => {
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    error = %error,
+                    "Failed to read transport-connected peers during access check"
+                );
+                false
+            }
+        }
     }
 }
