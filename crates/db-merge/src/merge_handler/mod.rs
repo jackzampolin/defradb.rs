@@ -474,7 +474,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + Send + Sync + 'static> Merg
                 tracing::debug!(cid = %cid, "CollectionSet delta - skipping");
                 Ok(MergeOutcome::terminal_skip("collection set delta"))
             }
-            _ => unreachable!(),
+            other => Err(MergeError::UnsupportedDelta(format!("{other:?}"))),
         }
     }
 
