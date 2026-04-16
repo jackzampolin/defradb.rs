@@ -20,7 +20,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         match self.runtime.transport.list_replicators().await {
             Ok(replicators) => Some(replicators),
             Err(e) => {
-                tracing::warn!(error = %e, "Failed to get replicators for push");
+                if e.is_connection_like() {
+                    tracing::debug!(
+                        error = %e,
+                        "Skipping replicator push because the transport is unavailable"
+                    );
+                } else {
+                    tracing::warn!(error = %e, "Failed to get replicators for push");
+                }
                 None
             }
         }
@@ -345,16 +352,27 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         "PushLog to replicator was rejected"
                     );
                     any_failed = true;
+                    break;
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    tracing::debug!(
-                        peer_id = %peer_id,
-                        cid = %cid,
-                        error = %e,
-                        "PushLog to replicator failed"
-                    );
+                    if e.is_connection_like() {
+                        tracing::debug!(
+                            peer_id = %peer_id,
+                            cid = %cid,
+                            error = %e,
+                            "PushLog to replicator failed because the connection became unavailable; stopping replay for this peer"
+                        );
+                    } else {
+                        tracing::debug!(
+                            peer_id = %peer_id,
+                            cid = %cid,
+                            error = %e,
+                            "PushLog to replicator failed"
+                        );
+                    }
                     any_failed = true;
+                    break;
                 }
             }
         }

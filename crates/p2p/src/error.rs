@@ -287,6 +287,50 @@ impl Error {
         self.is_txn_conflict()
     }
 
+    /// Returns true if the error looks like a transport/connection teardown signal.
+    ///
+    /// This is intentionally broader than a single enum variant because iroh and
+    /// libp2p surface many disconnect cases through stringified transport errors.
+    pub fn is_connection_like(&self) -> bool {
+        match self {
+            Error::ConnectionClosed
+            | Error::ChannelSend
+            | Error::ChannelReceive
+            | Error::ResponseTimeout
+            | Error::ConnectionTimeout(_) => true,
+            Error::Dial(msg)
+            | Error::Transport(msg)
+            | Error::Codec(msg)
+            | Error::ProtocolNegotiation(msg)
+            | Error::Noise(msg)
+            | Error::Swarm(msg)
+            | Error::ResponseSend(msg) => Self::is_connection_loss_reason(msg),
+            Error::Io(err) => Self::is_connection_loss_reason(&err.to_string()),
+            Error::StreamOpen { reason, .. } | Error::StreamWrite { reason, .. } => {
+                Self::is_connection_loss_reason(reason)
+            }
+            _ => false,
+        }
+    }
+
+    /// Best-effort classifier for common disconnect / teardown reasons surfaced
+    /// as transport strings.
+    pub fn is_connection_loss_reason(reason: &str) -> bool {
+        let lower = reason.to_ascii_lowercase();
+        lower == "closed"
+            || lower.ends_with(": closed")
+            || lower.contains("connection lost")
+            || lower.contains("connection closed")
+            || lower.contains("connection reset")
+            || lower.contains("stream reset")
+            || lower.contains("broken pipe")
+            || lower.contains("peer closed")
+            || lower.contains("aborted by peer")
+            || lower.contains("closed during the handshake")
+            || lower.contains("timed out waiting for peer")
+            || lower.contains("endpoint closed")
+    }
+
     /// Returns true if this is the coordinator's synthetic rate-limit rejection.
     pub fn is_rate_limited(&self) -> bool {
         matches!(
@@ -397,5 +441,20 @@ mod tests {
 
         assert!(rate_limited.is_rate_limited());
         assert!(!ordinary_denial.is_rate_limited());
+    }
+
+    #[test]
+    fn connection_like_detection_matches_common_transport_failures() {
+        assert!(Error::ChannelSend.is_connection_like());
+        assert!(Error::ChannelReceive.is_connection_like());
+        assert!(Error::Dial("closed".into()).is_connection_like());
+        assert!(Error::Codec("failed to read length: connection lost".into()).is_connection_like());
+        assert!(Error::Transport("peer closed stream".into()).is_connection_like());
+        assert!(Error::ResponseSend("broken pipe".into()).is_connection_like());
+        assert!(!Error::AccessDenied {
+            peer_id: "peer-1".into(),
+            collection_id: "users".into(),
+        }
+        .is_connection_like());
     }
 }

@@ -122,13 +122,23 @@ impl<T: P2PTransport> Broadcaster<T> {
                 })
             }
             (Err(doc_err), Err(col_err)) => {
-                tracing::error!(
-                    doc_id = %broadcast.doc_id,
-                    collection_id = %broadcast.collection_id,
-                    doc_error = %doc_err,
-                    collection_error = %col_err,
-                    "Failed to broadcast to both topics"
-                );
+                if doc_err.is_connection_like() && col_err.is_connection_like() {
+                    tracing::warn!(
+                        doc_id = %broadcast.doc_id,
+                        collection_id = %broadcast.collection_id,
+                        doc_error = %doc_err,
+                        collection_error = %col_err,
+                        "Broadcast to both topics failed because the transport was unavailable"
+                    );
+                } else {
+                    tracing::error!(
+                        doc_id = %broadcast.doc_id,
+                        collection_id = %broadcast.collection_id,
+                        doc_error = %doc_err,
+                        collection_error = %col_err,
+                        "Failed to broadcast to both topics"
+                    );
+                }
                 Err(Error::GossipSubPublish(format!(
                     "failed to publish to both topics: doc={}, collection={}",
                     doc_err, col_err

@@ -18,6 +18,49 @@ use super::protocols;
 /// needs time to process the request before replying.
 pub(super) const REQUEST_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+fn endpoint_addr(
+    endpoint_id: iroh::EndpointId,
+    direct_addr: Option<std::net::SocketAddr>,
+) -> EndpointAddr {
+    let mut addr = EndpointAddr::from(endpoint_id);
+    if let Some(sa) = direct_addr {
+        addr = addr.with_ip_addr(sa);
+    }
+    addr
+}
+
+async fn connect_with_direct_addr_fallback(
+    endpoint: &Endpoint,
+    peer_id: &PeerId,
+    alpn: &[u8],
+    direct_addr: Option<std::net::SocketAddr>,
+) -> crate::error::Result<iroh::endpoint::Connection> {
+    let endpoint_id = parse_endpoint_id(peer_id)?;
+
+    if let Some(sa) = direct_addr {
+        match endpoint
+            .connect(endpoint_addr(endpoint_id, Some(sa)), alpn)
+            .await
+        {
+            Ok(connection) => return Ok(connection),
+            Err(error) => {
+                debug!(
+                    peer_id = %peer_id,
+                    direct_addr = %sa,
+                    alpn = %String::from_utf8_lossy(alpn),
+                    error = %error,
+                    "Direct iroh dial failed, retrying without cached direct address"
+                );
+            }
+        }
+    }
+
+    endpoint
+        .connect(endpoint_addr(endpoint_id, None), alpn)
+        .await
+        .map_err(|e| crate::error::Error::Dial(e.to_string()))
+}
+
 /// Send a request and wait for a response (bidirectional stream).
 ///
 /// `direct_addr` is an optional cached socket address for the peer; when provided it is
@@ -33,16 +76,8 @@ where
     Req: serde::Serialize,
     Resp: serde::de::DeserializeOwned,
 {
-    let endpoint_id = parse_endpoint_id(peer_id)?;
-    let mut addr = EndpointAddr::from(endpoint_id);
-    if let Some(sa) = direct_addr {
-        addr = addr.with_ip_addr(sa);
-    }
-
-    let connection = endpoint
-        .connect(addr, alpn)
-        .await
-        .map_err(|e| crate::error::Error::Dial(e.to_string()))?;
+    let connection =
+        connect_with_direct_addr_fallback(endpoint, peer_id, alpn, direct_addr).await?;
 
     let (mut send, mut recv) = connection
         .open_bi()
@@ -82,16 +117,8 @@ pub(super) async fn handle_fire_and_forget<T: serde::Serialize>(
     msg: &T,
     direct_addr: Option<std::net::SocketAddr>,
 ) -> crate::error::Result<()> {
-    let endpoint_id = parse_endpoint_id(peer_id)?;
-    let mut addr = EndpointAddr::from(endpoint_id);
-    if let Some(sa) = direct_addr {
-        addr = addr.with_ip_addr(sa);
-    }
-
-    let connection = endpoint
-        .connect(addr, alpn)
-        .await
-        .map_err(|e| crate::error::Error::Dial(e.to_string()))?;
+    let connection =
+        connect_with_direct_addr_fallback(endpoint, peer_id, alpn, direct_addr).await?;
 
     let (mut send, mut recv) = connection
         .open_bi()
@@ -130,11 +157,14 @@ pub(super) async fn try_fetch_from_provider(
         }
     };
 
-    let mut addr = EndpointAddr::from(endpoint_id);
-    if let Some(sa) = direct_addr {
-        addr = addr.with_ip_addr(sa);
-    }
-    let connection = match endpoint.connect(addr, protocols::ALPN_CAR).await {
+    let connection = match connect_with_direct_addr_fallback(
+        endpoint,
+        provider,
+        protocols::ALPN_CAR,
+        direct_addr,
+    )
+    .await
+    {
         Ok(conn) => conn,
         Err(e) => {
             debug!(
