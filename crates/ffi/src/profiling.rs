@@ -16,6 +16,20 @@ fn guard_slot() -> &'static Mutex<Option<FlushGuard>> {
     PROFILING_GUARD.get_or_init(|| Mutex::new(None))
 }
 
+fn with_default_transport_noise_filters(filter: EnvFilter) -> EnvFilter {
+    filter
+        .add_directive(
+            "iroh_quinn_proto::connection=error"
+                .parse()
+                .expect("valid tracing directive"),
+        )
+        .add_directive(
+            "noq_proto::connection=error"
+                .parse()
+                .expect("valid tracing directive"),
+        )
+}
+
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn defra_profiling_start(output_path: *const c_char) -> FfiResult {
@@ -41,8 +55,9 @@ pub extern "C" fn defra_profiling_start(output_path: *const c_char) -> FfiResult
             }
         };
 
-        let filter =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        let filter = with_default_transport_noise_filters(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        );
         let (chrome_layer, flush_guard) = ChromeLayerBuilder::new()
             .writer(file)
             .include_args(true)

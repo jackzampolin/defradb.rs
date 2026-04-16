@@ -548,8 +548,12 @@ pub(super) async fn handle_subscribe(
                                 // at debug. Counter is process-global and
                                 // surfaced via SyncDiagnostics (issue #858).
                                 let count = crate::sync::record_gossip_decode_failure();
+                                let sender_peer_id = endpoint_id_to_peer_id(&msg.delivered_from);
                                 if count == 1 || count.is_power_of_two() {
                                     warn!(
+                                        peer_id = %sender_peer_id,
+                                        topic = %topic_str_clone,
+                                        message_size = msg.content.len(),
                                         total_failures = count,
                                         error = %e,
                                         "Failed to decode gossip message \
@@ -557,6 +561,9 @@ pub(super) async fn handle_subscribe(
                                     );
                                 } else {
                                     debug!(
+                                        peer_id = %sender_peer_id,
+                                        topic = %topic_str_clone,
+                                        message_size = msg.content.len(),
                                         total_failures = count,
                                         error = %e,
                                         "Failed to decode gossip message"

@@ -799,8 +799,10 @@ impl NodeBuilder {
             let coord = coordinator.clone();
             tokio::spawn(async move {
                 if let Err(e) = coord.handle_transport_event(event).await {
-                    if e.to_string().contains("rate-limited") {
+                    if e.is_rate_limited() {
                         tracing::debug!(error = %e, "P2P rate-limited");
+                    } else if e.is_retriable() {
+                        tracing::warn!(error = %e, "P2P transport event failed after retries");
                     } else {
                         tracing::error!(error = %e, "P2P event handler error");
                     }
@@ -982,11 +984,20 @@ mod p2p_tests {
     fn init_tracing() {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
-            let _ = tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::from_default_env()
-                        .add_directive(tracing::Level::INFO.into()),
+            let filter = tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into())
+                .add_directive(
+                    "iroh_quinn_proto::connection=error"
+                        .parse()
+                        .expect("valid tracing directive"),
                 )
+                .add_directive(
+                    "noq_proto::connection=error"
+                        .parse()
+                        .expect("valid tracing directive"),
+                );
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(filter)
                 .with_test_writer()
                 .try_init();
         });

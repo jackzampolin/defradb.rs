@@ -49,4 +49,9 @@ pub struct PendingDag {
     /// Surfaced in diagnostic logs so the single aggregated WARN on terminal
     /// failure can carry an attempt count without scraping intermediate noise.
     pub attempts: u32,
+    /// Number of Bitswap/CAR fetch rounds that exhausted providers without
+    /// yielding a complete DAG for this root.
+    pub fetch_failures: u32,
+    /// Most recent provider-exhaustion error for this root, if any.
+    pub last_fetch_error: Option<String>,
 }
