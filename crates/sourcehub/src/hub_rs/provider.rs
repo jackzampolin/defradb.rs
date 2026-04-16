@@ -649,6 +649,7 @@ mod tests {
 
     #[test]
     fn resolve_registered_or_passthrough_bearer_token_uses_request_token_for_remote_identity() {
+        let _guard = crate::signing_state_test_guard();
         let did = "did:key:zRemoteHubRsToken";
         let token = "device.jwt.token".to_string();
         defra_core::signing::clear_identity_store();
@@ -668,6 +669,7 @@ mod tests {
 
     #[test]
     fn resolve_registered_or_passthrough_bearer_token_builds_local_secp256k1_token() {
+        let _guard = crate::signing_state_test_guard();
         let private_key = crypto::generate_secp256k1().expect("should generate secp256k1 key");
         let raw_identity =
             identity::RawIdentity::from_secp256k1(private_key).expect("identity should build");
