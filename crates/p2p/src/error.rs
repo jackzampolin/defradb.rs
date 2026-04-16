@@ -150,6 +150,12 @@ pub enum Error {
     #[error("blockstore error: {0}")]
     BlockstoreError(String),
 
+    /// Blockstore operation failed because of a retriable storage-layer
+    /// transaction conflict. Kept distinct from `BlockstoreError` so retry
+    /// logic can match on a typed variant instead of a string suffix.
+    #[error("blockstore transaction conflict")]
+    BlockstoreTxnConflict,
+
     /// Failed to send response.
     #[error("failed to send response: {0}")]
     ResponseSend(String),
@@ -244,11 +250,31 @@ pub enum Error {
 }
 
 impl Error {
+    /// Suffix that storage surfaces in stringified transaction-conflict errors.
+    ///
+    /// Used only as a fallback for legacy call sites that still construct
+    /// `BlockstoreError`/`Storage` from an already-stringified error chain.
+    /// New call sites should flow typed `blockstore::Error` /
+    /// `storage::corekv::Error` values through `Error::from_blockstore`
+    /// instead, which preserves `BlockstoreTxnConflict` without relying on
+    /// wording stability.
     const TXN_CONFLICT_SUFFIX: &str = "transaction conflict. Please retry";
+
+    /// Convert a typed blockstore error into the nearest P2P error,
+    /// preserving the retriable transaction-conflict signal instead of
+    /// stringifying it away.
+    pub fn from_blockstore(err: blockstore::Error) -> Self {
+        if err.is_txn_conflict() {
+            Error::BlockstoreTxnConflict
+        } else {
+            Error::BlockstoreError(err.to_string())
+        }
+    }
 
     /// Returns true if this error represents a storage-layer transaction conflict.
     pub fn is_txn_conflict(&self) -> bool {
         match self {
+            Error::BlockstoreTxnConflict => true,
             Error::BlockstoreError(msg) | Error::Storage(msg) => {
                 msg.ends_with(Self::TXN_CONFLICT_SUFFIX)
             }
@@ -320,6 +346,8 @@ mod tests {
 
     #[test]
     fn txn_conflict_detection_matches_wrapped_storage_messages() {
+        // Legacy stringified variants: retained so any caller that still
+        // builds errors by stringifying stays retriable.
         let blockstore_error =
             Error::BlockstoreError("storage error: transaction conflict. Please retry".into());
         let storage_error = Error::Storage("transaction conflict. Please retry".into());
@@ -328,6 +356,32 @@ mod tests {
         assert!(storage_error.is_txn_conflict());
         assert!(blockstore_error.is_retriable());
         assert!(storage_error.is_retriable());
+    }
+
+    #[test]
+    fn txn_conflict_detection_matches_typed_variant() {
+        let typed = Error::BlockstoreTxnConflict;
+        assert!(typed.is_txn_conflict());
+        assert!(typed.is_retriable());
+    }
+
+    #[test]
+    fn from_blockstore_preserves_typed_txn_conflict() {
+        let conflict = blockstore::Error::Storage(storage::corekv::Error::TxnConflict);
+        assert!(conflict.is_txn_conflict());
+        let p2p_err = Error::from_blockstore(conflict);
+        assert!(matches!(p2p_err, Error::BlockstoreTxnConflict));
+        assert!(p2p_err.is_retriable());
+    }
+
+    #[test]
+    fn from_blockstore_non_conflict_keeps_stringified_message() {
+        let other = blockstore::Error::NotFound("missing".into());
+        let p2p_err = Error::from_blockstore(other);
+        match p2p_err {
+            Error::BlockstoreError(msg) => assert!(msg.contains("missing")),
+            other => panic!("expected BlockstoreError, got {other:?}"),
+        }
     }
 
     #[test]

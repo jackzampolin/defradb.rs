@@ -429,13 +429,11 @@ impl<S: Store> VersionedFetcher<S> {
                         }
                     }
                 }
-                CrdtDelta::Composite(payload) => {
+                CrdtDelta::Composite(payload) if payload.priority >= max_composite_priority => {
                     // Track document status from composite blocks.
                     // The highest-priority composite determines the final status.
-                    if payload.priority >= max_composite_priority {
-                        max_composite_priority = payload.priority;
-                        is_deleted = payload.status == 2;
-                    }
+                    max_composite_priority = payload.priority;
+                    is_deleted = payload.status == 2;
                 }
                 _ => {
                     // Collection and schema definition deltas are not relevant for document reconstruction

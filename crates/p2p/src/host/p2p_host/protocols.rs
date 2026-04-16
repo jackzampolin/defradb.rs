@@ -139,18 +139,19 @@ impl<S: Store> P2PHost<S> {
                     message_id, topic, propagation_source
                 );
 
-                // Decode the message payload.
-                // Rust-to-Rust sends PushLogBroadcast (no MetaData).
-                // Go-to-Rust sends PushLogRequest (with MetaData).
-                // Try PushLogBroadcast first, then fall back to PushLogRequest.
-                let broadcast =
-                    serde_cbor::from_slice::<PushLogBroadcast>(&message.data).or_else(|_| {
-                        serde_cbor::from_slice::<PushLogRequest>(&message.data)
-                            .map(|req| PushLogBroadcast::from_request(&req))
-                    });
-
-                match broadcast {
-                    Ok(broadcast) => {
+                match PushLogBroadcast::decode_gossip_payload(&message.data) {
+                    Ok((broadcast, encoding)) => {
+                        if encoding != crate::message::PushLogGossipPayloadEncoding::CborBroadcast
+                            && encoding != crate::message::PushLogGossipPayloadEncoding::CborRequest
+                        {
+                            debug!(
+                                peer_id = %propagation_source,
+                                topic = %topic,
+                                message_size = message.data.len(),
+                                ?encoding,
+                                "Decoded libp2p gossip payload via compatibility fallback"
+                            );
+                        }
                         if self
                             .event_tx
                             .send(HostEvent::GossipMessage {
@@ -171,11 +172,24 @@ impl<S: Store> P2PHost<S> {
                         }
                     }
                     Err(e) => {
+                        let payload_info =
+                            crate::message::PushLogBroadcast::inspect_gossip_payload(&message.data);
+                        let sample = crate::sync::GossipDecodeFailureSample {
+                            transport: crate::sync::GossipTransport::Libp2p,
+                            peer_id: propagation_source.to_string(),
+                            topic: topic.clone(),
+                            message_size: message.data.len(),
+                            error: e.clone(),
+                            payload_fingerprint: payload_info.payload_fingerprint,
+                            payload_shape_hint: payload_info.payload_shape_hint,
+                            occurrences: 0,
+                        };
                         // Exponential-backoff sampling: warn on the
                         // 1st, 2nd, 4th, 8th... occurrence; remainder at
                         // debug. Shared process-global counter with the
                         // iroh transport (issue #858).
-                        let count = crate::sync::record_gossip_decode_failure();
+                        let count =
+                            crate::sync::record_gossip_decode_failure_sample(sample.clone());
                         if count == 1 || count.is_power_of_two() {
                             warn!(
                                 peer_id = %propagation_source,
@@ -183,6 +197,8 @@ impl<S: Store> P2PHost<S> {
                                 message_size = message.data.len(),
                                 total_failures = count,
                                 error = %e,
+                                payload_fingerprint = %sample.payload_fingerprint,
+                                payload_shape = %sample.payload_shape_hint,
                                 "Failed to decode gossipsub message as PushLogBroadcast or PushLogRequest"
                             );
                         } else {
@@ -192,6 +208,8 @@ impl<S: Store> P2PHost<S> {
                                 message_size = message.data.len(),
                                 total_failures = count,
                                 error = %e,
+                                payload_fingerprint = %sample.payload_fingerprint,
+                                payload_shape = %sample.payload_shape_hint,
                                 "Failed to decode gossipsub message"
                             );
                         }

@@ -32,16 +32,14 @@ pub fn classify_schema_fields(schema: &CollectionVersion) -> Vec<FieldInfo> {
         }
 
         match &field.kind {
-            FieldKind::Scalar(_) | FieldKind::ScalarArray(_) => {
-                if field.relation_name.is_none() {
-                    result.push(FieldInfo {
-                        name: field.name.clone(),
-                        is_relation: false,
-                        is_self_ref: false,
-                        is_array: field.kind.is_array(),
-                        is_primary: false,
-                    });
-                }
+            FieldKind::Scalar(_) | FieldKind::ScalarArray(_) if field.relation_name.is_none() => {
+                result.push(FieldInfo {
+                    name: field.name.clone(),
+                    is_relation: false,
+                    is_self_ref: false,
+                    is_array: field.kind.is_array(),
+                    is_primary: false,
+                });
             }
             FieldKind::SelfRef { is_array, .. } => {
                 result.push(FieldInfo {

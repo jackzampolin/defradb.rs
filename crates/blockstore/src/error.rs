@@ -39,3 +39,12 @@ pub enum Error {
     #[error("internal error: {0}")]
     Internal(String),
 }
+
+impl Error {
+    /// Returns true when this error originates from a storage-layer transaction
+    /// conflict. Callers that want to retry safely should prefer this typed
+    /// check over matching on the stringified error chain.
+    pub fn is_txn_conflict(&self) -> bool {
+        matches!(self, Error::Storage(storage_err) if storage_err.is_txn_conflict())
+    }
+}
