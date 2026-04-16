@@ -1,7 +1,7 @@
 //! PushLog processing and block storage.
 
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cid::Cid;
 
@@ -16,7 +16,64 @@ use crate::ExplicitReplayAuthorization;
 
 use super::SyncManager;
 
+const MAX_RETRIABLE_PUSHLOG_ATTEMPTS: usize = 4;
+
+fn retriable_pushlog_delay(attempt: usize) -> Duration {
+    match attempt {
+        1 => Duration::from_millis(10),
+        2 => Duration::from_millis(25),
+        _ => Duration::from_millis(50),
+    }
+}
+
 impl<B: Blockstore + 'static> SyncManager<B> {
+    async fn retry_retriable_pushlog_op<T, F, Fut>(
+        &self,
+        cid: &Cid,
+        op_name: &'static str,
+        mut op: F,
+    ) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let mut attempt = 1;
+        loop {
+            match op().await {
+                Ok(value) => return Ok(value),
+                Err(error) if error.is_retriable() && attempt < MAX_RETRIABLE_PUSHLOG_ATTEMPTS => {
+                    tracing::debug!(
+                        cid = %cid,
+                        op_name,
+                        attempt,
+                        max_attempts = MAX_RETRIABLE_PUSHLOG_ATTEMPTS,
+                        error = %error,
+                        "Retryable PushLog storage operation failed; backing off and retrying"
+                    );
+                    tokio::time::sleep(retriable_pushlog_delay(attempt)).await;
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn emit_sync_error(&self, cid: &Cid, error: &Error) -> Result<()> {
+        if self
+            .event_tx
+            .send(SyncEvent::SyncError {
+                cid: *cid,
+                error: error.to_string(),
+            })
+            .await
+            .is_err()
+        {
+            tracing::warn!(?cid, "Failed to send SyncError event - receiver dropped");
+            return Err(Error::ChannelSend);
+        }
+        Ok(())
+    }
+
     /// Process an incoming PushLog broadcast.
     ///
     /// This is the main entry point for handling sync messages from the network.
@@ -74,7 +131,15 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 }
 
                 // Now check if block is already merged
-                match self.blockstore.is_merged(&cid).await {
+                match self
+                    .retry_retriable_pushlog_op(&cid, "post_wait_is_merged", || async {
+                        self.blockstore
+                            .is_merged(&cid)
+                            .await
+                            .map_err(|e| Error::BlockstoreError(e.to_string()))
+                    })
+                    .await
+                {
                     Ok(true) => {
                         // Already merged by the other task
                         if self
@@ -109,23 +174,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         .await
                     }
                     Err(e) => {
-                        if self
-                            .event_tx
-                            .send(SyncEvent::SyncError {
-                                cid,
-                                error: e.to_string(),
-                            })
-                            .await
-                            .is_err()
-                        {
-                            tracing::warn!(
-                                ?cid,
-                                "Failed to send SyncError event - receiver dropped"
-                            );
-                            // Return channel error since we can't notify caller of the blockstore error
-                            return Err(Error::ChannelSend);
-                        }
-                        Err(Error::BlockstoreError(e.to_string()))
+                        self.emit_sync_error(&cid, &e).await?;
+                        Err(e)
                     }
                 }
             }
@@ -142,7 +192,15 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
     ) -> Result<()> {
         // Check if already merged
-        match self.blockstore.is_merged(cid).await {
+        match self
+            .retry_retriable_pushlog_op(cid, "is_merged", || async {
+                self.blockstore
+                    .is_merged(cid)
+                    .await
+                    .map_err(|e| Error::BlockstoreError(e.to_string()))
+            })
+            .await
+        {
             Ok(true) => {
                 tracing::debug!(cid = %cid, doc_id = %msg.doc_id, "Block already merged, skipping");
                 if self
@@ -168,19 +226,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 // Not merged, continue processing
             }
             Err(e) => {
-                if self
-                    .event_tx
-                    .send(SyncEvent::SyncError {
-                        cid: *cid,
-                        error: e.to_string(),
-                    })
-                    .await
-                    .is_err()
-                {
-                    tracing::warn!(?cid, "Failed to send SyncError event - receiver dropped");
-                    return Err(Error::ChannelSend);
-                }
-                return Err(Error::BlockstoreError(e.to_string()));
+                self.emit_sync_error(cid, &e).await?;
+                return Err(e);
             }
         }
 
@@ -196,20 +243,17 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         }
 
         // Store the block (marked as unmerged in P2P mode)
-        if let Err(e) = self.blockstore.put(cid, &msg.block).await {
-            if self
-                .event_tx
-                .send(SyncEvent::SyncError {
-                    cid: *cid,
-                    error: e.to_string(),
-                })
-                .await
-                .is_err()
-            {
-                tracing::warn!(?cid, "Failed to send SyncError event - receiver dropped");
-                return Err(Error::ChannelSend);
-            }
-            return Err(Error::BlockstoreError(e.to_string()));
+        if let Err(e) = self
+            .retry_retriable_pushlog_op(cid, "put_block", || async {
+                self.blockstore
+                    .put(cid, &msg.block)
+                    .await
+                    .map_err(|e| Error::BlockstoreError(e.to_string()))
+            })
+            .await
+        {
+            self.emit_sync_error(cid, &e).await?;
+            return Err(e);
         }
 
         tracing::debug!(
@@ -272,7 +316,12 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 return Err(Error::ChannelSend);
             }
 
-            match self.retry_pending_dags_waiting_on(cid).await {
+            match self
+                .retry_retriable_pushlog_op(cid, "retry_pending_dags_waiting_on", || {
+                    self.retry_pending_dags_waiting_on(cid)
+                })
+                .await
+            {
                 Ok(completed_roots) => {
                     if !completed_roots.is_empty() {
                         tracing::info!(
