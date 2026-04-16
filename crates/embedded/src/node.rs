@@ -15,6 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use p2p::sync::SyncConfig;
 #[cfg(feature = "iroh")]
 use p2p::P2PTransport;
+use tokio::sync::Notify;
 
 pub(crate) type EmbeddedBlockstore<S> = blockstore::DefraBlockstore<S>;
 pub(crate) type EmbeddedMergeHandler<S> = db_merge::AcpMergeHandler<S, EmbeddedBlockstore<S>>;
@@ -35,8 +36,12 @@ pub struct EmbeddedNode<S: storage::corekv::Store> {
     pub sourcehub_acp: Option<Arc<sourcehub::SourceHubDocumentACP>>,
     pub p2p: Option<Arc<ManagedP2PSystem>>,
     /// Idempotency guard for [`EmbeddedNode::shutdown`]. Set to `true`
-    /// by the first caller of `shutdown()`; subsequent calls are no-ops.
+    /// by the first caller of `shutdown()`.
     shutdown_started: AtomicBool,
+    /// Marks that shutdown work has finished.
+    shutdown_finished: AtomicBool,
+    /// Wakes concurrent shutdown callers once teardown is complete.
+    shutdown_notify: Notify,
 }
 
 impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
@@ -90,8 +95,8 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
     /// step is needed here.
     ///
     /// This method is **idempotent** — the first caller performs the
-    /// work, subsequent calls return immediately. Safe to call from
-    /// multiple tasks concurrently.
+    /// work, concurrent callers wait for that teardown to finish and
+    /// then return. Safe to call from multiple tasks concurrently.
     ///
     /// Embedded callers should `await` this before dropping the
     /// [`EmbeddedNode`] to ensure clean teardown:
@@ -101,9 +106,12 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
     /// drop(node);
     /// ```
     pub async fn shutdown(&self) {
-        // Idempotency guard. Swap to true and bail if another task
-        // already initiated shutdown.
+        // Idempotency guard. The first task performs shutdown. Any
+        // concurrent caller waits for shutdown to finish before
+        // returning so `shutdown().await` consistently means teardown
+        // has completed.
         if self.shutdown_started.swap(true, Ordering::SeqCst) {
+            self.wait_for_shutdown().await;
             return;
         }
 
@@ -121,6 +129,9 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
         if let Err(error) = self.database.close().await {
             tracing::warn!(error = %error, "EmbeddedNode::shutdown: database close returned an error");
         }
+
+        self.shutdown_finished.store(true, Ordering::SeqCst);
+        self.shutdown_notify.notify_waiters();
     }
 
     /// Returns true if [`EmbeddedNode::shutdown`] has been initiated.
@@ -130,6 +141,16 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
     /// operations when teardown is in progress.
     pub fn is_shutdown(&self) -> bool {
         self.shutdown_started.load(Ordering::SeqCst)
+    }
+
+    async fn wait_for_shutdown(&self) {
+        loop {
+            let notified = self.shutdown_notify.notified();
+            if self.shutdown_finished.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -402,5 +423,101 @@ where
         sourcehub_acp,
         p2p: p2p_setup.map(|setup| setup.system),
         shutdown_started: AtomicBool::new(false),
+        shutdown_finished: AtomicBool::new(false),
+        shutdown_notify: Notify::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    use async_trait::async_trait;
+
+    #[derive(Clone, Default)]
+    struct SlowCloseStore {
+        inner: storage::MemoryStore,
+        close_calls: Arc<AtomicUsize>,
+        close_started: Arc<Notify>,
+        close_finished: Arc<AtomicBool>,
+        allow_close: Arc<Notify>,
+    }
+
+    impl SlowCloseStore {
+        async fn wait_until_close_started(&self) {
+            loop {
+                let notified = self.close_started.notified();
+                if self.close_calls.load(Ordering::SeqCst) > 0 {
+                    return;
+                }
+                notified.await;
+            }
+        }
+    }
+
+    impl storage::corekv::private::Sealed for SlowCloseStore {}
+
+    #[async_trait]
+    impl storage::Store for SlowCloseStore {
+        async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
+            self.inner.new_txn(readonly).await
+        }
+
+        async fn close(&self) -> storage::Result<()> {
+            self.close_calls.fetch_add(1, Ordering::SeqCst);
+            self.close_started.notify_waiters();
+            self.allow_close.notified().await;
+            let result = self.inner.close().await;
+            self.close_finished.store(true, Ordering::SeqCst);
+            result
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_shutdown_callers_wait_for_teardown_completion() -> Result<()> {
+        let store = Arc::new(SlowCloseStore::default());
+        let node = Arc::new(build_with_store(store.clone(), EmbeddedNodeConfig::default()).await?);
+
+        let first = {
+            let node = node.clone();
+            tokio::spawn(async move {
+                node.shutdown().await;
+            })
+        };
+
+        store.wait_until_close_started().await;
+
+        let second = {
+            let node = node.clone();
+            let store = store.clone();
+            tokio::spawn(async move {
+                node.shutdown().await;
+                assert!(
+                    store.close_finished.load(Ordering::SeqCst),
+                    "shutdown() returned before store close completed"
+                );
+            })
+        };
+
+        tokio::task::yield_now().await;
+        assert!(
+            !second.is_finished(),
+            "concurrent shutdown caller returned before teardown completed"
+        );
+
+        store.allow_close.notify_waiters();
+
+        first.await.expect("first shutdown task should not panic");
+        second.await.expect("second shutdown task should not panic");
+
+        assert_eq!(
+            store.close_calls.load(Ordering::SeqCst),
+            1,
+            "shutdown should only close the store once"
+        );
+        assert!(store.close_finished.load(Ordering::SeqCst));
+
+        Ok(())
+    }
 }
