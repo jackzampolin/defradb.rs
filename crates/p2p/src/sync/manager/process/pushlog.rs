@@ -10,7 +10,7 @@ use blockstore::{verify_block_cid, Blockstore};
 use crate::error::{Error, Result};
 use crate::message::PushLogBroadcast;
 use crate::sync::manager::events::SyncEvent;
-use crate::sync::manager::links::find_missing_links;
+use crate::sync::manager::links::find_all_missing_links;
 use crate::sync::manager::pending::{PendingDag, MAX_PENDING_DAGS, PENDING_DAG_TTL};
 use crate::ExplicitReplayAuthorization;
 
@@ -84,7 +84,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// 2. Acquire process queue lock (serialize concurrent syncs for same CID)
     /// 3. Check if already merged
     /// 4. Store block in blockstore (marked as unmerged)
-    /// 5. Emit BlockReceived event for database layer to merge
+    /// 5. Emit BlockReceived only once the full reachable DAG is locally present,
+    ///    otherwise emit DagNeedsFetch for the missing descendants
     ///
     /// # Go Compatibility
     ///
@@ -260,11 +261,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             ?cid,
             doc_id = %msg.doc_id,
             collection_id = %msg.collection_id,
-            "Block stored, checking for missing links"
+            "Block stored, checking DAG for missing links"
         );
 
-        // Check for missing linked blocks
-        let missing = match find_missing_links(self.blockstore.as_ref(), &msg.block).await {
+        // Check for missing linked blocks at every depth of the reachable DAG.
+        // A single-level check can incorrectly declare Collection -> Composite
+        // roots complete while nested field blocks are still missing locally.
+        let missing = match find_all_missing_links(self.blockstore.as_ref(), &msg.block).await {
             Ok(m) => m,
             Err(e) => {
                 // Block parsing failed - emit error event and propagate error
@@ -452,5 +455,140 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         }
 
         providers.into_iter().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use blockstore::DefraBlockstore;
+    use bytes::Bytes;
+    use defra_core::{
+        Block, CollectionDeltaPayload, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload,
+    };
+    use storage::backends::MemoryStore;
+
+    use crate::sync::{PeerStateTracker, SyncConfig};
+
+    fn create_lww_block(field_name: &str) -> (Cid, Vec<u8>) {
+        let block = Block::new(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                doc_id: b"doc123".to_vec(),
+                field_name: field_name.to_string(),
+                priority: 1,
+                schema_version_id: "schema1".to_string(),
+                data: b"value".to_vec(),
+            }),
+            vec![],
+            vec![],
+        );
+        let bytes = block.to_dag_cbor().expect("encode lww block");
+        let cid = block.generate_cid().expect("generate lww cid");
+        (cid, bytes)
+    }
+
+    fn create_composite_block(doc_id: &str, field_name: &str, field_cid: Cid) -> (Cid, Vec<u8>) {
+        let block = Block::new(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                doc_id: doc_id.as_bytes().to_vec(),
+                schema_version_id: "schema1".to_string(),
+                priority: 1,
+                status: 1,
+            }),
+            vec![],
+            vec![DAGLink::new(field_name, field_cid)],
+        );
+        let bytes = block.to_dag_cbor().expect("encode composite block");
+        let cid = block.generate_cid().expect("generate composite cid");
+        (cid, bytes)
+    }
+
+    fn create_collection_block(
+        schema_version_id: &str,
+        doc_id: &str,
+        composite_cid: Cid,
+    ) -> (Cid, Vec<u8>) {
+        let block = Block::new(
+            CrdtDelta::Collection(CollectionDeltaPayload {
+                schema_version_id: schema_version_id.to_string(),
+                priority: 1,
+            }),
+            vec![],
+            vec![DAGLink::new(doc_id, composite_cid)],
+        );
+        let bytes = block.to_dag_cbor().expect("encode collection block");
+        let cid = block.generate_cid().expect("generate collection cid");
+        (cid, bytes)
+    }
+
+    fn make_broadcast(
+        doc_id: &str,
+        cid: Cid,
+        block: Vec<u8>,
+        collection_id: &str,
+    ) -> PushLogBroadcast {
+        PushLogBroadcast::new(
+            doc_id.to_string(),
+            Bytes::from(cid.to_bytes()),
+            collection_id.to_string(),
+            "creator1".to_string(),
+            Bytes::from(block),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn process_pushlog_tracks_nested_missing_links_before_merge() {
+        let store = Arc::new(MemoryStore::new());
+        let blockstore = Arc::new(DefraBlockstore::new(store, true));
+        let peer_state = Arc::new(PeerStateTracker::new());
+        let (manager, mut events) =
+            SyncManager::new(blockstore.clone(), peer_state, SyncConfig::default());
+
+        let (field_cid, _field_block) = create_lww_block("name");
+        let (composite_cid, composite_block) = create_composite_block("doc123", "name", field_cid);
+        blockstore
+            .put(&composite_cid, &composite_block)
+            .await
+            .expect("store composite block");
+
+        let (collection_cid, collection_block) =
+            create_collection_block("schema1", "doc123", composite_cid);
+
+        manager
+            .process_pushlog(
+                &make_broadcast("doc123", collection_cid, collection_block, "collection1"),
+                Some("peer-1"),
+                false,
+                None,
+            )
+            .await
+            .expect("process pushlog");
+
+        match events.try_recv().expect("DagNeedsFetch event") {
+            SyncEvent::DagNeedsFetch {
+                root_cid,
+                missing,
+                doc_id,
+                collection_id,
+                sender_peer,
+                ..
+            } => {
+                assert_eq!(root_cid, collection_cid);
+                assert_eq!(missing, vec![field_cid]);
+                assert_eq!(doc_id, "doc123");
+                assert_eq!(collection_id, "collection1");
+                assert_eq!(sender_peer.as_deref(), Some("peer-1"));
+            }
+            other => panic!("expected DagNeedsFetch, got {:?}", other),
+        }
+
+        assert_eq!(manager.pending_dag_count(), 1);
+        assert_eq!(
+            manager.pending_dag_missing(&collection_cid),
+            vec![field_cid]
+        );
     }
 }
