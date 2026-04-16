@@ -326,6 +326,8 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                                 acp_actor_relationships: msg.acp_actor_relationships.clone(),
                                 inserted_at: now,
                                 attempts: 0,
+                                fetch_failures: 0,
+                                last_fetch_error: None,
                             },
                         );
                         true
@@ -336,6 +338,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 if !inserted {
                     tracing::warn!(
                         cid = %cid,
+                        doc_id = %msg.doc_id,
+                        collection_id = %msg.collection_id,
+                        source_peer = ?sender_peer,
+                        missing_count = missing.len(),
                         max = MAX_PENDING_DAGS,
                         "Pending DAGs at capacity, dropping PushLog DAG registration"
                     );

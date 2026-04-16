@@ -243,6 +243,36 @@ pub enum Error {
     HeadProvider(String),
 }
 
+impl Error {
+    const TXN_CONFLICT_SUFFIX: &str = "transaction conflict. Please retry";
+
+    /// Returns true if this error represents a storage-layer transaction conflict.
+    pub fn is_txn_conflict(&self) -> bool {
+        match self {
+            Error::BlockstoreError(msg) | Error::Storage(msg) => {
+                msg.ends_with(Self::TXN_CONFLICT_SUFFIX)
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns true if retrying the operation may succeed without changing inputs.
+    pub fn is_retriable(&self) -> bool {
+        self.is_txn_conflict()
+    }
+
+    /// Returns true if this is the coordinator's synthetic rate-limit rejection.
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(
+            self,
+            Error::AccessDenied {
+                collection_id,
+                ..
+            } if collection_id == "rate-limited"
+        )
+    }
+}
+
 /// Convert a blockstore CID verification error into its P2P counterpart.
 ///
 /// Called at each P2P block ingestion boundary so callers get typed errors
@@ -281,5 +311,37 @@ impl From<libp2p::TransportError<io::Error>> for Error {
 impl From<libp2p::multiaddr::Error> for Error {
     fn from(e: libp2p::multiaddr::Error) -> Self {
         Error::InvalidMultiaddr(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    #[test]
+    fn txn_conflict_detection_matches_wrapped_storage_messages() {
+        let blockstore_error =
+            Error::BlockstoreError("storage error: transaction conflict. Please retry".into());
+        let storage_error = Error::Storage("transaction conflict. Please retry".into());
+
+        assert!(blockstore_error.is_txn_conflict());
+        assert!(storage_error.is_txn_conflict());
+        assert!(blockstore_error.is_retriable());
+        assert!(storage_error.is_retriable());
+    }
+
+    #[test]
+    fn rate_limited_detection_is_typed() {
+        let rate_limited = Error::AccessDenied {
+            peer_id: "peer-1".into(),
+            collection_id: "rate-limited".into(),
+        };
+        let ordinary_denial = Error::AccessDenied {
+            peer_id: "peer-1".into(),
+            collection_id: "users".into(),
+        };
+
+        assert!(rate_limited.is_rate_limited());
+        assert!(!ordinary_denial.is_rate_limited());
     }
 }
