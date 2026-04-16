@@ -206,7 +206,10 @@ mod tests {
 
     #[test]
     fn extract_public_peer_id_accepts_libp2p_multiaddr() {
-        let peer_id = "12D3KooWM111111111111111111111111111111111111111111111";
+        // Use a real libp2p PeerID — the multiaddr parser validates the
+        // multihash component, so the placeholder string used previously
+        // ("12D3KooWM1111...") fails before reaching extract_public_peer_id.
+        let peer_id = libp2p::PeerId::random().to_string();
         let addr = format!("/ip4/127.0.0.1/tcp/9000/p2p/{peer_id}");
 
         assert_eq!(extract_public_peer_id(&addr).unwrap(), peer_id);
