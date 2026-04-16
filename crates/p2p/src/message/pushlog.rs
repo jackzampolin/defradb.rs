@@ -274,11 +274,16 @@ pub struct PushLogBroadcast {
     pub block: Bytes,
 
     /// Optional local-ACP actor relationship snapshot for this document.
-    #[serde(
-        rename = "ACPActorRelationships",
-        skip_serializing_if = "Option::is_none",
-        default
-    )]
+    ///
+    /// Unlike `PushLogRequest`, this field is NOT tagged with
+    /// `skip_serializing_if = "Option::is_none"`. Iroh gossip publishes this
+    /// struct via `postcard::to_allocvec`, and postcard is a non-self-describing
+    /// format: a trailing Option that the serializer skips leaves the
+    /// deserializer reading past end-of-input. Always emitting the Option
+    /// discriminator keeps postcard round-trips intact; CBOR consumers remain
+    /// compatible because a `None` is encoded as CBOR null and the `default`
+    /// attribute makes the field still optional on decode.
+    #[serde(rename = "ACPActorRelationships", default)]
     pub acp_actor_relationships: Option<ReplicatedDocActorRelationships>,
 }
 
@@ -485,5 +490,33 @@ mod tests {
         let info = PushLogBroadcast::inspect_gossip_payload(&[0xff, 0x00, 0x01, 0x02]);
         assert_eq!(info.payload_shape_hint, "opaque_binary(first_byte=0xff)");
         assert_eq!(info.payload_fingerprint, "0c252d844a815f83");
+    }
+
+    #[test]
+    fn postcard_round_trip_without_acp_relationships() {
+        // Regression: iroh gossip publishes PushLogBroadcast via postcard. If
+        // the acp_actor_relationships field is `skip_serializing_if`d when
+        // `None`, postcard runs off the end of the buffer on decode because
+        // postcard is a non-self-describing format. Non-ACP updates were
+        // silently dropped on the receiver before this check.
+        let broadcast = PushLogBroadcast::new(
+            "bae-eabce396-ddf9-5a76-85ac-ade4e4205de9".to_string(),
+            Bytes::from_static(&[0xaa; 38]),
+            "bafyreiabcdefghijklmnopqrstuvwxyz123456789012345678".to_string(),
+            "12D3KooWExamplePeerIdForTestingOnly0000000000000".to_string(),
+            Bytes::from_static(&[0xbb; 128]),
+            None,
+        );
+
+        let encoded = postcard::to_allocvec(&broadcast).expect("postcard encode");
+        let decoded: PushLogBroadcast =
+            postcard::from_bytes(&encoded).expect("postcard round trip");
+        assert_eq!(decoded, broadcast);
+        assert!(decoded.acp_actor_relationships.is_none());
+
+        let (via_decode_gossip, encoding) =
+            PushLogBroadcast::decode_gossip_payload(&encoded).expect("decode via gossip path");
+        assert_eq!(encoding, PushLogGossipPayloadEncoding::PostcardBroadcast);
+        assert_eq!(via_decode_gossip, broadcast);
     }
 }
